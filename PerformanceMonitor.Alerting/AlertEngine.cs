@@ -377,6 +377,10 @@ public sealed class AlertEngine
        re-fire once for an observation still in the window — which is exactly what the cooldown clock,
        also emptied, already did before #3579, so the guard never makes a restart noisier than it was. */
     private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanActivePlan>> _activeForcePlanAlerts = new();
+
+    /// <summary>#8884: per server, the last <c>server_properties</c> sample the Instance Restarted and Memory Dumps checks judged, and the dump
+    /// arrivals of the last <see cref="MemoryDumpBurstMinutes"/> minutes. In memory only: the first read after a process start seeds it and fires nothing.</summary>
+    private readonly ConcurrentDictionary<string, InstanceEventState> _instanceEventState = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastForcePlanAlert = new();
 
     /// <summary>#7086: how long after a plan's FIRST failure a second failure of the same plan counts as a repeat and pages.</summary>
@@ -722,6 +726,7 @@ public sealed class AlertEngine
         bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckDatabaseStateAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckForcePlanFailuresAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckInstanceEventsAsync(snapshot, key, serverName, snapshot.ServerId, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -4562,6 +4567,213 @@ public sealed class AlertEngine
                 }
             }
         }
+    }
+
+    /// <summary>The metric name of the Instance Restarted alert (#8884). A webhook automation key like every metric name.</summary>
+    public const string InstanceRestartedMetric = "Instance Restarted";
+
+    /// <summary>The metric name of the Memory Dumps alert (#8884).</summary>
+    public const string MemoryDumpsMetric = "Memory Dumps";
+
+    /// <summary>How far back, in minutes, the instance-event read reaches (#8884). It covers the 10-minute dump window at the 5-minute cadence
+    /// with room for a late collection, and the read always includes the newest sample whatever its age.</summary>
+    public const int InstanceEventLookbackMinutes = 15;
+
+    /// <summary>New dumps that make the Memory Dumps alert Critical when they arrive inside <see cref="MemoryDumpBurstMinutes"/> (#8884).</summary>
+    public const int MemoryDumpBurstCount = 3;
+
+    /// <summary>The window, in minutes, in which <see cref="MemoryDumpBurstCount"/> new dumps make the alert Critical (#8884).</summary>
+    public const int MemoryDumpBurstMinutes = 10;
+
+    /// <summary>Per-server memory of the instance-event checks (#8884).</summary>
+    private sealed class InstanceEventState
+    {
+        public bool Seeded;
+        public DateTime LastSampleUtc;
+        public DateTime? LastStartTime;
+        public int? LastDumpCount;
+        public DateTime? LastNewestDump;
+        public readonly List<(DateTime AtUtc, int NewDumps)> Arrivals = new();
+    }
+
+    /// <summary>
+    /// The Instance Restarted and Memory Dumps alerts (#8884). Both are EVENTS judged between two neighbouring collected
+    /// <c>server_properties</c> samples, never a level: a restart is a start time LATER than the previous sample's, and a dump is a count that ROSE or a
+    /// newest dump time that is NEWER. A count that drops (an operator deleted old dumps) never fires. The first sample this process sees for a server
+    /// only seeds the memory, so a service start or a first collection fires nothing.
+    ///
+    /// <para>Each event fires once, because the check advances the server's memory past the sample it judged. There is no standing condition, so no
+    /// resolution and no cooldown: two restarts ten minutes apart are two alerts. A muted event is still recorded as muted, like every other family.</para>
+    ///
+    /// <para>Azure SQL Database is skipped: there is no restart to report, and the engine has no dump view. A failed read logs and skips the pass without
+    /// moving the memory, so the next pass judges the same samples.</para>
+    /// </summary>
+    private async Task CheckInstanceEventsAsync(
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, bool suppressed, CancellationToken ct)
+    {
+        bool restartOn = _settings.InstanceRestartedEnabled;
+        bool dumpsOn = _settings.MemoryDumpsEnabled;
+        if ((!restartOn && !dumpsOn) || snapshot.IsAzureSqlDb)
+        {
+            return;
+        }
+
+        List<InstanceEventSample> samples;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            samples = await _readAdapter.GetInstanceEventSamplesAsync(key, ct);
+            _checkFailures.Succeeded((key, "instance events"));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogCheckFailure(key, "instance events", ex, "Failed to check instance restart and memory dumps for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "instance events", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        if (samples.Count == 0)
+        {
+            return;
+        }
+
+        var state = _instanceEventState.GetOrAdd(key, _ => new InstanceEventState());
+        var ordered = samples.OrderBy(s => s.CollectionTimeUtc).ToList();
+        if (!state.Seeded)
+        {
+            var newest = ordered[^1];
+            state.Seeded = true;
+            state.LastSampleUtc = newest.CollectionTimeUtc;
+            state.LastStartTime = newest.SqlServerStartTime;
+            state.LastDumpCount = newest.MemoryDumpCount;
+            state.LastNewestDump = newest.NewestMemoryDumpTime;
+            return;
+        }
+
+        foreach (var sample in ordered)
+        {
+            if (sample.CollectionTimeUtc <= state.LastSampleUtc)
+            {
+                continue;
+            }
+
+            if (restartOn
+                && sample.SqlServerStartTime is { } newStart
+                && state.LastStartTime is { } oldStart
+                && newStart > oldStart)
+            {
+                await FireInstanceRestartedAsync(key, serverName, serverId, suppressed, oldStart, newStart, sample, ct);
+            }
+
+            /* A rise in the count is new dumps. A newer newest time with no rise is a new dump that arrived beside a deletion, counted as one.
+               The time is compared only when both samples have one: a row stored before the column existed has none, and an upgrade must not read as a dump. */
+            int newDumps = 0;
+            if (sample.MemoryDumpCount is { } count && state.LastDumpCount is { } oldCount && count > oldCount)
+            {
+                newDumps = count - oldCount;
+            }
+
+            if (sample.NewestMemoryDumpTime is { } newestDump && state.LastNewestDump is { } oldNewest && newestDump > oldNewest)
+            {
+                newDumps = Math.Max(newDumps, 1);
+            }
+
+            if (newDumps > 0)
+            {
+                state.Arrivals.Add((sample.CollectionTimeUtc, newDumps));
+            }
+
+            state.Arrivals.RemoveAll(a => a.AtUtc <= sample.CollectionTimeUtc.AddMinutes(-MemoryDumpBurstMinutes));
+            if (dumpsOn && newDumps > 0)
+            {
+                int inWindow = state.Arrivals.Sum(a => a.NewDumps);
+                await FireMemoryDumpsAsync(key, serverName, serverId, suppressed, sample, newDumps, inWindow, ct);
+            }
+
+            state.LastSampleUtc = sample.CollectionTimeUtc;
+            state.LastStartTime = sample.SqlServerStartTime ?? state.LastStartTime;
+            state.LastDumpCount = sample.MemoryDumpCount ?? state.LastDumpCount;
+            state.LastNewestDump = sample.NewestMemoryDumpTime ?? state.LastNewestDump;
+        }
+    }
+
+    private async Task FireInstanceRestartedAsync(
+        string key, string serverName, int? serverId, bool suppressed, DateTime oldStart, DateTime newStart,
+        InstanceEventSample sample, CancellationToken ct)
+    {
+        if (suppressed)
+        {
+            return;
+        }
+
+        const string format = "yyyy-MM-dd HH:mm:ss";
+        string unreachable = sample.FailedCollectionsSincePrevious > 0
+            ? $"Yes: {sample.FailedCollectionsSincePrevious} collector run(s) failed between the two collections."
+            : "No: no collector run failed between the two collections.";
+        var context = new AlertContext { SeverityOverride = AlertSeverityLevel.Warning };
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Instance restarted",
+            Fields = new()
+            {
+                ("Previous Start Time", oldStart.ToString(format, CultureInfo.InvariantCulture)),
+                ("New Start Time", newStart.ToString(format, CultureInfo.InvariantCulture)),
+                ("Server Unreachable In Between", unreachable),
+            }
+        });
+        AlertSampleAge.Stamp(context, "server properties", sample.CollectionTimeUtc, _utcNow());
+        var mute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = InstanceRestartedMetric });
+        await FireAsync(new AlertOutcome(
+            key, serverName, InstanceRestartedMetric,
+            $"Restarted at {newStart.ToString(format, CultureInfo.InvariantCulture)} (was up since {oldStart.ToString(format, CultureInfo.InvariantCulture)})",
+            "Start time later than the last collection",
+            context, AlertContextBuilders.ContextToDetailText(context),
+            NumericCurrentValue: null, NumericThresholdValue: null,
+            Muted: mute.Muted, Severity: AlertSeverityLevel.Warning,
+            ShortMessage: $"Instance restarted at {newStart.ToString(format, CultureInfo.InvariantCulture)}",
+            Hold: mute.Hold), ct);
+    }
+
+    private async Task FireMemoryDumpsAsync(
+        string key, string serverName, int? serverId, bool suppressed, InstanceEventSample sample, int newDumps, int inWindow,
+        CancellationToken ct)
+    {
+        if (suppressed)
+        {
+            return;
+        }
+
+        const string format = "yyyy-MM-dd HH:mm:ss";
+        var severity = inWindow >= MemoryDumpBurstCount ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+        string newest = sample.NewestMemoryDumpTime is { } t ? t.ToString(format, CultureInfo.InvariantCulture) : "unknown";
+        string count = sample.MemoryDumpCount is { } c ? c.ToString(CultureInfo.InvariantCulture) : "unknown";
+        var context = new AlertContext { SeverityOverride = severity };
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Memory dumps",
+            Fields = new()
+            {
+                ("Dump Count", count),
+                ("Newest Dump Time", newest),
+                ("New Dumps This Collection", newDumps.ToString(CultureInfo.InvariantCulture)),
+                ("New Dumps In The Last 10 Minutes", inWindow.ToString(CultureInfo.InvariantCulture)),
+            }
+        });
+        AlertSampleAge.Stamp(context, "server properties", sample.CollectionTimeUtc, _utcNow());
+        var mute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = MemoryDumpsMetric });
+        await FireAsync(new AlertOutcome(
+            key, serverName, MemoryDumpsMetric,
+            $"{count} dumps, newest {newest}, {inWindow} new in the last {MemoryDumpBurstMinutes} minutes",
+            $"{MemoryDumpBurstCount} new dumps in {MemoryDumpBurstMinutes} minutes is Critical",
+            context, AlertContextBuilders.ContextToDetailText(context),
+            NumericCurrentValue: inWindow, NumericThresholdValue: MemoryDumpBurstCount,
+            Muted: mute.Muted, Severity: severity,
+            ShortMessage: $"{newDumps} new memory dump(s), {count} in total, newest {newest}",
+            Hold: mute.Hold), ct);
     }
 
     /// <summary>

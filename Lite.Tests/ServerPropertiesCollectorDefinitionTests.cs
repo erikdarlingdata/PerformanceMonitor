@@ -69,10 +69,10 @@ public sealed class ServerPropertiesCollectorDefinitionTests
                 "enterprise_features", "service_objective", "vcore_count",
                 "lock_pages_in_memory", "instant_file_initialization_enabled", "memory_dump_count",
                 "sqlserver_start_time", "host_os_version", "ag_replica_role", "utc_offset_minutes",
-                "time_zone_id",
+                "time_zone_id", "newest_memory_dump_time",
             },
             ServerPropertiesCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
-        Assert.Equal(CollectorColumnType.Varchar, ServerPropertiesCollector.Instance.PayloadColumns[^1].Type);
+        Assert.Equal(CollectorColumnType.Timestamp, ServerPropertiesCollector.Instance.PayloadColumns[^1].Type);
     }
 
     /* ── #3653 item 13 (Q8): the zone id beside the offset ── */
@@ -145,12 +145,13 @@ public sealed class ServerPropertiesCollectorDefinitionTests
         using var mainReader = new FakeCollectorDataReader(AzureRow(null));
         var rows = await ServerPropertiesCollector.Instance.ReadAsync(mainReader, context, CancellationToken.None);
 
-        using var healthReader = new FakeCollectorDataReader(new object[] { true, false, 3 });
+        using var healthReader = new FakeCollectorDataReader(new object[] { true, false, 3, new DateTime(2026, 11, 16, 11, 57, 0) });
         await ServerPropertiesCollector.Instance.ApplySupplementalAsync(rows, healthReader, context, CancellationToken.None);
 
         Assert.True(rows[0].LockPagesInMemory);
         Assert.False(rows[0].InstantFileInitializationEnabled);
         Assert.Equal(3, rows[0].MemoryDumpCount);
+        Assert.Equal(new DateTime(2026, 11, 16, 11, 57, 0), rows[0].NewestMemoryDumpTime);
 
         /* Empty supplemental reader: values stay as-is; empty rows: no-op. */
         using var emptyReader = new FakeCollectorDataReader();
@@ -160,7 +161,7 @@ public sealed class ServerPropertiesCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task WritePayload_Emits23Columns_WithNullEnterpriseFeatures()
+    public async Task WritePayload_Emits24Columns_WithNullEnterpriseFeatures()
     {
         using var reader = new FakeCollectorDataReader(AzureRow("HS_Gen5_14"));
         var rows = await ServerPropertiesCollector.Instance.ReadAsync(
@@ -169,7 +170,7 @@ public sealed class ServerPropertiesCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         ServerPropertiesCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(s_deltas));
 
-        Assert.Equal(23, writer.Values.Count);
+        Assert.Equal(24, writer.Values.Count);
         Assert.Equal(ServerPropertiesCollector.Instance.PayloadColumns.Count, writer.Values.Count);
         Assert.Equal("Azure SQL Database (General Purpose)", writer.Values[0]);
         Assert.Null(writer.Values[12]);           /* enterprise_features — never collected in Lite */
@@ -199,8 +200,9 @@ public sealed class ServerPropertiesCollectorDefinitionTests
 
         var writer = new RecordingCollectorRowWriter();
         ServerPropertiesCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(s_deltas));
-        Assert.Equal(23, writer.Values.Count);
+        Assert.Equal(24, writer.Values.Count);
         Assert.Null(writer.Values[22]);
+        Assert.Null(writer.Values[23]);   /* newest_memory_dump_time (#8884): NULL until the supplemental read lands */
         Assert.Equal(-300, writer.Values[21]);
     }
 

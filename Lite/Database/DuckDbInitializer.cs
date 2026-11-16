@@ -577,7 +577,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 82;
+    internal const int CurrentSchemaVersion = 83;
 
     private readonly string _archivePath;
 
@@ -3402,6 +3402,16 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v82: adding index_object_stats.answering_server_name and is_memory_optimized");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(82));
         }
+
+        if (fromVersion < 83)
+        {
+            /* v83 (#8884, twinning Darling's next rung): server_properties.newest_memory_dump_time, MAX(creation_time) of sys.dm_server_memory_dumps on the
+               server's local clock, beside memory_dump_count, so the Memory Dumps alert sees a new dump even when an old one was deleted. TIMESTAMP,
+               nullable, the LAST column (the shared added-columns list). NULL on a row stored before v83 and where the engine has no such view; the archive
+               views union parquet by name, so a parquet file written before v83 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v83: adding server_properties.newest_memory_dump_time");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(83));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3492,6 +3502,7 @@ public partial class DuckDbInitializer : IDisposable
         (82, "index_object_stats", "answering_server_name", "VARCHAR"),
         /* #8784: a memory-optimized table, whose usage counters are always zero (the same V268 rung). NULL on a row stored before v82. */
         (82, "index_object_stats", "is_memory_optimized", "BOOLEAN"),
+        (83, "server_properties", "newest_memory_dump_time", "TIMESTAMP"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

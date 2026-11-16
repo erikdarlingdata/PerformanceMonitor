@@ -2381,6 +2381,68 @@ AND   qs.collection_time > $2";
         IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
         rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
 
+    /// <summary>The Instance Restarted and Memory Dumps read (#8884): the server's recent server_properties samples, oldest first. $1 server_id, $2 the window
+    /// start (a bound timestamp, as every windowed read here binds it). Each sample's failed-collection count is the collection_log ERROR rows between it and the
+    /// previous sample, in one statement.</summary>
+    public const string InstanceEventSamplesSql = @"
+WITH samples AS (
+    SELECT
+        sp.collection_time,
+        sp.sqlserver_start_time,
+        sp.memory_dump_count,
+        sp.newest_memory_dump_time,
+        LAG(sp.collection_time) OVER (ORDER BY sp.collection_time) AS prior_time
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.collection_time >= $2
+)
+SELECT
+    s.collection_time,
+    s.sqlserver_start_time,
+    s.memory_dump_count,
+    s.newest_memory_dump_time,
+    CASE WHEN s.prior_time IS NULL THEN 0 ELSE
+        (SELECT COUNT(*) FROM collection_log AS cl
+         WHERE cl.server_id = $1 AND cl.status = 'ERROR'
+         AND   cl.collection_time > s.prior_time AND cl.collection_time <= s.collection_time)
+    END AS failed_since_previous
+FROM samples AS s
+ORDER BY s.collection_time";
+
+    public Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(
+        string serverKey, CancellationToken cancellationToken = default) =>
+        ExecuteWithOneRetryAsync(
+            ct => GetInstanceEventSamplesCoreAsync(serverKey, ct),
+            serverKey,
+            "instance events",
+            cancellationToken);
+
+    private async Task<List<InstanceEventSample>> GetInstanceEventSamplesCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+        var since = DateTime.UtcNow.AddMinutes(-AlertEngine.InstanceEventLookbackMinutes);
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(InstanceEventSamplesSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = since });
+        var samples = new List<InstanceEventSample>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            samples.Add(new InstanceEventSample
+            {
+                CollectionTimeUtc = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                SqlServerStartTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+                MemoryDumpCount = reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                NewestMemoryDumpTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                FailedCollectionsSincePrevious = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+            });
+        }
+
+        return samples;
+    }
+
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {

@@ -84,7 +84,8 @@ public sealed class TimeHonestyRungTests
     /// and each collector declares it last, which is what makes the appender's positional write land in it.</summary>
     [Theory]
     [InlineData("cpu_utilization", "cpu_utilization_stats", "sample_time_utc", "TIMESTAMP", "other_process_cpu_utilization INTEGER")]
-    [InlineData("server_properties", "server_properties", "time_zone_id", "VARCHAR", "utc_offset_minutes INTEGER")]
+    /* #8884: v83 appends newest_memory_dump_time after time_zone_id, so the trailing column is the newer one. */
+    [InlineData("server_properties", "server_properties", "newest_memory_dump_time", "TIMESTAMP", "time_zone_id VARCHAR")]
     public void TheDuckDbGenerator_EmitsTheColumnAsTheTrailingNullableColumn(string collector, string table, string column, string type, string expectedBefore)
     {
         var definition = CollectorCatalog.Find(collector);
@@ -917,8 +918,15 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
                     rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
                 }
 
-                Assert.Equal((column, type, "YES"), rows[^1]);
-                Assert.Equal(before, rows[^2].Name);
+                /* #8884: a file climbing from v62 also gains server_properties.newest_memory_dump_time (v83), so for that table the
+                   rung's column is one of the last two. */
+                var tail = rows.Skip(rows.Count - 2).ToList();
+                Assert.Contains((column, type, "YES"), tail);
+                if (table != "server_properties")
+                {
+                    Assert.Equal((column, type, "YES"), rows[^1]);
+                    Assert.Equal(before, rows[^2].Name);
+                }
             }
 
             /* The pre-rung rows read NULL through the re-expanded views; post-rung rows land with their values. */

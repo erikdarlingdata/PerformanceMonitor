@@ -128,6 +128,8 @@ public static class AlertThresholdKeys
         [nameof(IAlertEngineSettings.FileGrowthEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.DatabaseStateEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.ForcePlanFailureEnabled)] = "An enable flag, not a threshold.",
+        [nameof(IAlertEngineSettings.InstanceRestartedEnabled)] = "An enable flag, not a threshold.",
+        [nameof(IAlertEngineSettings.MemoryDumpsEnabled)] = "An enable flag, not a threshold.",
 
         /* Non-integer members. */
         [nameof(IAlertEngineSettings.LongRunningQueryExcludeSpServerDiagnostics)] = "Not an integer: a long-running query read filter.",

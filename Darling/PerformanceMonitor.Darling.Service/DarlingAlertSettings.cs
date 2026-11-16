@@ -151,6 +151,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
        darling.json-only flag would not survive a store reload (ApplyToConfig swaps Alerts wholesale). */
     public bool ForcePlanFailureEnabled => true;
 
+    /* #8884: both events are ON with no store setting, like the forced-plan alert above: each fires only when a value moved between two
+       collections, so a quiet server is silent by construction. */
+    public bool InstanceRestartedEnabled => true;
+    public bool MemoryDumpsEnabled => true;
+
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
 
     /// <summary>#3528: floored at the same named constant as its PostgreSQL twin below, for the identical

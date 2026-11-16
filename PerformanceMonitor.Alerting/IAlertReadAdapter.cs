@@ -306,4 +306,20 @@ public interface IAlertReadAdapter
     /// </summary>
     Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The server's recent <c>server_properties</c> samples (start time, memory dump count, newest dump time) for the Instance
+    /// Restarted and Memory Dumps alerts (#8884), OLDEST first, covering at least the last
+    /// <see cref="AlertEngine.InstanceEventLookbackMinutes"/> minutes and always the newest sample the store holds.
+    ///
+    /// <para>Both alerts are events judged between neighbouring samples, so the read returns samples rather than a verdict, the one
+    /// difference from <see cref="GetForcePlanFailuresAsync"/>. Each sample carries how many collector runs failed since the previous one,
+    /// from the collection log, so the engine can say the server was unreachable in between.</para>
+    ///
+    /// <para>Empty when the server has no sample yet, and always empty on Azure SQL Database, where there is no restart to report and no
+    /// dump view: the engine skips such a server without reading.</para>
+    /// </summary>
+    Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(
+        string serverKey, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new List<InstanceEventSample>());
 }

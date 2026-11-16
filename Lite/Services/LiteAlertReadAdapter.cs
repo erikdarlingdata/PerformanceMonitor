@@ -242,6 +242,16 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     /// <summary>
     /// #2157. Off the WPF dispatcher via Task.Run for the same reason as its siblings here (#1202).
     /// </summary>
+    /// <summary>#8884: the recent server_properties samples for the Instance Restarted and Memory Dumps alerts. The window starts one cadence
+    /// before the lookback so the oldest sample in it has a neighbour; the store keeps the newest sample whatever its age by also reading the last row.</summary>
+    public async Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        var since = DateTime.UtcNow.AddMinutes(-AlertEngine.InstanceEventLookbackMinutes);
+        return await Task.Run(() => _dataService.GetInstanceEventSamplesAsync(serverId, since), cancellationToken);
+    }
+
     public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {

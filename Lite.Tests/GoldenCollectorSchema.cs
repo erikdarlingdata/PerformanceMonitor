@@ -261,7 +261,8 @@ internal static class GoldenCollectorSchema
     host_os_version VARCHAR,
     ag_replica_role VARCHAR,
     utc_offset_minutes INTEGER,
-    time_zone_id VARCHAR
+    time_zone_id VARCHAR,
+    newest_memory_dump_time TIMESTAMP
 )",
         ["server_config"] = @"CREATE TABLE IF NOT EXISTS server_config (
     config_id BIGINT PRIMARY KEY,

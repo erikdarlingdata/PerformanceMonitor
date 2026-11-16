@@ -119,6 +119,9 @@ internal static class AlertSeverity
             // replay; default it to WARNING-amber rather than the INFO-blue fall-through (#1136 gap).
             "Database State" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Volume Free Space" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #8884: both fire with an explicit severity (Memory Dumps goes Critical on 3 dumps in 10 minutes); this arm styles a replay. */
+            "Instance Restarted" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "Memory Dumps" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Server Unreachable" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Server Restored" => ("#16A34A", "RESOLVED", "\U0001F7E2"),
             // Availability Group family (#991). "AG Replica Reconnected" fires with severity null on purpose,

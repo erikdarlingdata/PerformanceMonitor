@@ -55,6 +55,11 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
        in the store, with the migration ladder that implies. */
     public bool ForcePlanFailureEnabled => true;
 
+    /* #8884: both events are ON with no user setting, like the forced-plan alert above: each fires only when a value moved between two
+       collections, so a quiet server is silent by construction. */
+    public bool InstanceRestartedEnabled => true;
+    public bool MemoryDumpsEnabled => true;
+
     public int CpuThresholdPercent => App.AlertCpuThreshold;
     public int BlockingCountThreshold => App.AlertBlockingThreshold;
 

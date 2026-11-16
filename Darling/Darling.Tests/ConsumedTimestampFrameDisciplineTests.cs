@@ -128,6 +128,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             ["last_user_seek", "last_user_scan", "last_user_lookup", "last_user_update"],
             ClockFrame.ServerLocal, "a DMV shipped verbatim"),
         ("sys.dm_os_sys_info", ["sqlserver_start_time"], ClockFrame.ServerLocal, "a DMV shipped verbatim"),
+        ("sys.dm_server_memory_dumps", ["creation_time"], ClockFrame.ServerLocal, "a datetimeoffset converted to datetime2, which keeps the server's local wall clock (#8884)"),
         ("sys.objects", ["create_date", "modify_date"], ClockFrame.ServerLocal,
             "a catalog view shipped verbatim: sys.objects stamps the server's local clock (#8784, object_inventory)"),
         ("sys.dm_exec_query_stats", ["creation_time", "last_execution_time"], ClockFrame.ServerLocal,

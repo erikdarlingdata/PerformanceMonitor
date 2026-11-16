@@ -113,6 +113,9 @@ public static class AlertFamily
         ["CHECKDB Overdue"] = Performance,
         ["Identity Capacity"] = Performance,
         ["Forced Plan Failing"] = Performance,
+        /* #8884: both are events about the monitored instance itself, so the on-call hears them. */
+        ["Instance Restarted"] = Performance,
+        ["Memory Dumps"] = Performance,
 
         /* ---- performance: the PostgreSQL-only alerts ---- */
         ["PostgreSQL Wraparound Risk"] = Performance,
