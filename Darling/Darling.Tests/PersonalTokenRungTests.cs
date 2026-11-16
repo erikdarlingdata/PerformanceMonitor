@@ -30,22 +30,6 @@ public sealed class PersonalTokenRungTests
         return connectionString!;
     }
 
-    private static async Task<int> ProbedVersionAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var sentinels = new object[method.GetParameters().Length];
-
-        await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, connection);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        Assert.True(await reader.ReadAsync(ct));
-        for (var i = 0; i < sentinels.Length; i++)
-        {
-            sentinels[i] = reader.GetBoolean(i);
-        }
-
-        return (int)method.Invoke(null, sentinels)!;
-    }
-
     private static NpgsqlCommand InsertCommand(NpgsqlConnection connection, string id, byte[] hash, string role, DateTimeOffset created, DateTimeOffset expires)
     {
         var command = new NpgsqlCommand(InsertSql, connection);
@@ -116,7 +100,26 @@ public sealed class PersonalTokenRungTests
         await owner.OpenAsync(ct);
         await PgMigrations.MigrateAsync(owner, ct);
 
-        Assert.Equal(269, await ProbedVersionAsync(owner, ct));
-        Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(owner, ct));
+        /* The store's own sentinel, not the ladder's top: a later rung's sentinel may be on too, so this maps the probed row with every
+           sentinel after hasPersonalTokens forced off, and asserts the rung 269 and, with its own sentinel off, 268. */
+        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var parameters = method.GetParameters();
+        var ordinal = Array.FindIndex(parameters, p => p.Name == "hasPersonalTokens");
+        Assert.True(ordinal >= 0);
+
+        await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, owner);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        var sentinels = new object[parameters.Length];
+        for (var i = 0; i < sentinels.Length; i++)
+        {
+            sentinels[i] = i > ordinal ? false : reader.GetBoolean(i);
+        }
+
+        Assert.True((bool)sentinels[ordinal]);
+        Assert.Equal(PersonalTokenSchema.Version, (int)method.Invoke(null, sentinels)!);
+        sentinels[ordinal] = false;
+        Assert.Equal(PersonalTokenSchema.Version - 1, (int)method.Invoke(null, sentinels)!);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
     }
 }
