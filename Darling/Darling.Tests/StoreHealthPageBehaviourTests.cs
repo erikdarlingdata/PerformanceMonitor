@@ -64,6 +64,17 @@ public sealed class StoreHealthPageBehaviourTests
         asks.EnumerateArray().Select(a => a.GetProperty("section").ValueKind == JsonValueKind.Null ? noSection : a.GetProperty("section").GetString()!).ToArray();
 
     [Fact]
+    public void WhenTheStatisticsWereNeverReset_ThePageSaysWhyThePerDayColumnsAreEmpty_AndCountedSinceReadsBefore()
+    {
+        var never = Result.Value.GetProperty("neverReset");
+        var notes = never.GetProperty("note").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        Assert.Contains(notes, n => n.Contains("per-day columns are empty", StringComparison.Ordinal) && n.Contains("never reset", StringComparison.Ordinal));
+        Assert.DoesNotContain(never.GetProperty("noteAfterReset").EnumerateArray().Select(n => n.GetString()!), n => n.Contains("per-day columns", StringComparison.Ordinal));
+        Assert.StartsWith("before ", never.GetProperty("postmasterCell").GetString()!, StringComparison.Ordinal);
+        Assert.DoesNotContain("before", never.GetProperty("resetCell").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ThePage_ReadsTablesAndIndexesAsTwoReads_AndNeverAsksForAll()
     {
         var r = Result.Value;
@@ -124,6 +135,16 @@ public sealed class StoreHealthPageBehaviourTests
         var clean = Result.Value.GetProperty("cleanCoverage");
         Assert.Equal(0, clean.GetProperty("headings").GetInt32());
         Assert.Contains("Every partition", clean.GetProperty("text").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WhenOnlyTheCoverageReadRanPastItsLimit_TheIndexRowsStay_AndTheCoverageSectionSaysItWasLeftOut()
+    {
+        var left = Result.Value.GetProperty("coverageLeftOut");
+        Assert.True(left.GetProperty("indexGridRows").GetInt32() > 0, "the index rows are still drawn");
+        var text = left.GetProperty("text").GetString()!;
+        Assert.Contains("coverage was left out", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Every partition", text, StringComparison.Ordinal);
     }
 
     [Fact]

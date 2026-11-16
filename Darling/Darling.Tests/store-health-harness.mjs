@@ -82,7 +82,9 @@ const TABLES = [
   table({ table_name: "query_stats", kind: "hypertable", chunk_count: 441, estimate_relations: 441, estimate_relations_usable: 400, estimated_empty_bytes: 5 * MB, estimated_empty_share: 0.05 }),
   table({ table_name: "emptied", estimated_empty_bytes: 300 * MB, estimated_empty_share: 0.8, estimate_relations_usable: 1, past_rewrite_floors: true, tail_occupied: false }),
 ];
+let neverReset = false;
 const tablesAnswer = () => ({
+  ...(neverReset ? { rates_known: false, rates_note: "x" } : { rates_known: true, rates_note: null }),
   section: "tables", header: "x", estimate_note: "x", store_tables: 4, store_total_bytes: 1000 * MB, rewrite_candidates: 1, tables_without_estimate: 1,
   without_estimate_by_reason: { never_analyzed: 1 }, without_estimate_reason_text: { never_analyzed: NEVER }, truncated: false, tables_returned: 4, tables: TABLES,
 });
@@ -98,10 +100,13 @@ const INDEXES = [
   index({ index_name: "ix_unanalyzed", estimate_skipped_reason: "The table has never been analyzed, so no estimate is made." }),
 ];
 const coverage = (o) => ({ schema_name: "collect", table_name: "parts", index_name: "ix_parts", parent_index_valid: true, leaf_count: 3, leaves_with_index: 3, leaves_missing_index: 0, missing_leaves: [], leaves_invalid_index: 0, invalid_leaves: [], ...o });
-const indexesAnswer = (cov) => ({
-  section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
-  partition_index_coverage_total: cov.length, partition_index_coverage_returned: cov.length, partition_index_coverage_truncated: false, partition_index_coverage: cov,
-});
+const indexesAnswer = (cov) => cov === null
+  ? { section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
+      coverage_left_out_note: "The store table health read ran past its 30-second limit and was stopped." }
+  : {
+      section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
+      partition_index_coverage_total: cov.length, partition_index_coverage_returned: cov.length, partition_index_coverage_truncated: false, partition_index_coverage: cov,
+    };
 const MEASURE = {
   verdict: "Mostly empty and only a rewrite returns the space.", verdict_kind: "rewrite_needed", table: "collect.store_metrics", total_pages: 1000, pages_with_rows: 300, empty_pages: 700,
   empty_share: 0.7, live_bytes: 2000000, free_bytes: 6000000, free_share: 0.75, fillfactor: 100, rows: 3000, rows_per_used_page: 10, last_used_block: 998, last_file_block: 999, trailing_empty_pages: 0, vacuum_shrink_disabled: false,
@@ -228,6 +233,18 @@ function gridRowsOfPlain(root) {
   out.cleanCoverage = { text: sections[8].textContent, headings: byClass(sections[8], "section-title").length };
 }
 
+/* 3b. The coverage read ran past its limit: the index rows are drawn and the coverage section says it was left out. */
+{
+  coverageRows = null;
+  const main3 = new FakeNode("main");
+  main3.isRoot = true;
+  page.renderStoreHealth(main3);
+  await flush();
+  const sections = main3.children[0].children;
+  out.coverageLeftOut = { text: sections[8].textContent, indexGridRows: gridRows(sections[7]).length };
+  coverageRows = [coverage({})];
+}
+
 /* 4. Refresh runs the tables and the indexes again, as two reads and never as section "all". */
 {
   const before = asks.length;
@@ -235,6 +252,26 @@ function gridRowsOfPlain(root) {
   refresh.fire("click");
   await flush();
   out.refresh = { asks: asks.slice(before).map((a) => ({ name: a.name, section: a.q.section ?? null })) };
+}
+/* 5. #8823: with the statistics never reset the page says why the per-day columns are empty, and Counted since reads "before". */
+{
+  neverReset = true;
+  const main3 = new FakeNode("main");
+  main3.isRoot = true;
+  page.renderStoreHealth(main3);
+  await flush();
+  const noted = byClass(main3, "store-health-note").map((n) => n.textContent);
+  neverReset = false;
+  const main4 = new FakeNode("main");
+  main4.isRoot = true;
+  page.renderStoreHealth(main4);
+  await flush();
+  out.neverReset = {
+    note: noted,
+    noteAfterReset: byClass(main4, "store-health-note").map((n) => n.textContent),
+    postmasterCell: page.countedSinceText({ stats_since: "2026-11-01T00:00:00Z", stats_since_source: "postmaster_start" }),
+    resetCell: page.countedSinceText({ stats_since: "2026-11-01T00:00:00Z", stats_since_source: "stats_reset" }),
+  };
 }
 out.neverAll = asks.filter((a) => a.q.section === "all").length;
 console.log(JSON.stringify(out));

@@ -173,9 +173,9 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         var single = JsonDocument.Parse(
             await McpQueryTools.GetQueryTrend(service, _serverManager, "0xEMPTYTRENDHASH", "AppDb", ServerName, 4)).RootElement;
         Assert.Equal("raw", single.GetProperty("source").GetString());
-        /* #7907: bucketed like its siblings (two minutes over four hours); effective_start is the collection the store
+        /* #7907, #8812: bucketed like its siblings (five minutes over four hours, the width that keeps a reply inside the response budget); effective_start is the collection the store
            held, and the point is stamped at its bucket's start, at or before it. */
-        Assert.Equal("2 minutes", single.GetProperty("bucket").GetString());
+        Assert.Equal("5 minutes", single.GetProperty("bucket").GetString());
         Assert.StartsWith(seededAt.ToString("yyyy-MM-ddTHH:mm:ss"), single.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         Assert.True(
             string.CompareOrdinal(single.GetProperty("trend")[0].GetProperty("collection_time").GetString(), single.GetProperty("effective_start").GetString()) <= 0,

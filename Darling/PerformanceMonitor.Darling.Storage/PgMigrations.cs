@@ -3476,6 +3476,8 @@ $rung$;";
            update can be HOT. It applies to pages written from now on: an existing page keeps its fill until the table is rewritten, and this rung
            rewrites nothing. A metadata-only change, so the upgrade stays fast. Re-running it is a no-op. */
         new Migration(266, "query-tag-sightings-fillfactor", "ALTER TABLE collect.query_tag_sightings SET (fillfactor = 80);"),
+        /* V267 (#8570): the (server_id, day) index on the per-day plan totals. One read of the table builds it: no row moves. */
+        new Migration(267, "plan-regression-daily-server-day-index", V267Sql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
@@ -3684,6 +3686,18 @@ CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_collector_bytes ON collect
     private const string V258Sql = @"
 CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_dropped ON collect.oversized_plan_backlog (server_id, expired_at)
 WHERE captured_at IS NULL AND last_attempt_at IS NULL AND expired_at IS NOT NULL;";
+
+    /* V267 (#8570): ix_plan_regression_daily_server_day, a B-tree on collect.plan_regression_daily (server_id, day). The regression read's
+       baseline arm, the builder's day delete and its built-day probe each name one server and a set of days and no query. The unique key leads
+       with the same two columns, but its entries carry all seven key columns, the plan hash among them, so a day-driven read through it walks
+       an index about 25 times the size of this one. Measured on 3,072,000 rows over eight servers and fifteen days: the regression read's
+       buffers fall from 34,800 to 26,800 when a server's rows are scattered through the table and from 18,100 to 10,000 when they are
+       clustered, the day delete's from 26,600 to 26,100, and a read that names a database and a query keeps its nested loop into the unique
+       key. The totals are written by delete and insert and never updated, so the index adds one entry per inserted row and nothing else. The
+       build reads the table once: 0.4 s for a 462 MB heap, a 20 MB index. Not CONCURRENTLY: the rung runs inside the ladder's own
+       transaction. Idempotent. */
+    private const string V267Sql = @"
+CREATE INDEX IF NOT EXISTS ix_plan_regression_daily_server_day ON collect.plan_regression_daily (server_id, day);";
 
 
     /// <summary>

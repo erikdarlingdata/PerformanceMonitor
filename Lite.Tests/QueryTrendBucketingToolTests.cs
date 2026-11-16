@@ -166,6 +166,73 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
     }
 
     /// <summary>
+    /// #8812: a week at the default width stays inside the 32,768-byte response budget (the shared 200-point target put 169 hourly
+    /// points, about 56 KB, on the wire), and a width the caller names that is still over it is cut to the newest whole points that fit (the
+    /// oldest are left off, the rest stay oldest first), with <c>budget_truncated</c> and a <c>budget_note</c> that names the width that reads the whole window.
+    /// </summary>
+    [Fact]
+    public async Task AWeekAtTheDefaultWidth_FitsTheResponseBudget_AndANamedWidthOverItIsCutAndSaysSo()
+    {
+        var service = new LocalDataService(_duckDb);
+        var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+        var first = asOf.AddHours(-168).AddSeconds(30);
+        await SeedQueriesAsync(first, count: 168 * 12, stepMinutes: 5, executions: 10, cpuUs: 10_000);
+
+        var whole = await McpQueryTools.GetQueryTrend(service, _serverManager, Hash, Database, ServerName, 168, asOf.ToString("o"));
+        var wholeRoot = JsonDocument.Parse(whole).RootElement;
+        Assert.False(wholeRoot.TryGetProperty("status", out _), whole);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(whole) <= PerformanceMonitor.Common.McpResponseBudget.DefaultBytes,
+            $"a week at the default width answered {System.Text.Encoding.UTF8.GetByteCount(whole):N0} bytes");
+        Assert.False(wholeRoot.TryGetProperty("budget_truncated", out var wholeCut) && wholeCut.ValueKind == JsonValueKind.True, whole);
+        Assert.Equal(168 * 12, wholeRoot.GetProperty("trend").EnumerateArray().Sum(p => p.GetProperty("collection_count").GetInt64()));
+
+        /* Hourly points over a week are 169, inside the 750-point cap and over the byte budget. */
+        var cut = await McpQueryTools.GetQueryTrend(service, _serverManager, Hash, Database, ServerName, 168, asOf.ToString("o"), bucket_minutes: 60);
+        var cutRoot = JsonDocument.Parse(cut).RootElement;
+        Assert.False(cutRoot.TryGetProperty("status", out _), cut);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(cut) <= PerformanceMonitor.Common.McpResponseBudget.DefaultBytes,
+            $"a named hourly width over a week answered {System.Text.Encoding.UTF8.GetByteCount(cut):N0} bytes");
+        Assert.True(cutRoot.GetProperty("budget_truncated").GetBoolean(), cut);
+        var points = cutRoot.GetProperty("trend").EnumerateArray().ToList();
+        Assert.InRange(points.Count, 20, 168);
+        Assert.Equal(points.Count, cutRoot.GetProperty("data_points").GetInt32());
+
+        /* The newest point of the window (its last hour) is in the reply, and the window's oldest (its start) is the one left off. */
+        var oldestStamp = DateTime.SpecifyKind(asOf.AddHours(-168), DateTimeKind.Unspecified).ToString("o");
+        Assert.Equal(DateTime.SpecifyKind(asOf.AddHours(-1), DateTimeKind.Unspecified).ToString("o"), points[^1].GetProperty("collection_time").GetString());
+        Assert.NotEqual(oldestStamp, points[0].GetProperty("collection_time").GetString());
+
+        var note = cutRoot.GetProperty("budget_note").GetString()!;
+        Assert.Contains("response budget", note, StringComparison.Ordinal);
+        Assert.Contains($"only {points.Count:N0} fit", note, StringComparison.Ordinal);
+        var firstStamp = DateTime.Parse(points[0].GetProperty("collection_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Contains($"first point returned is at {firstStamp:yyyy-MM-dd'T'HH:mm:ss}Z", note, StringComparison.Ordinal);
+        var named = int.Parse(System.Text.RegularExpressions.Regex.Match(note, @"bucket_minutes (\d+)").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.True(PerformanceMonitor.Common.TrendBuckets.PointsFor(168 * 60, named, 1) <= points.Count, note);
+
+        /* Following the note's as_of reads the points before the first one returned, and repeating it reaches the window's oldest point. */
+        var reachedOldest = false;
+        var asOfToRead = asOf.ToString("o");
+        for (var page = 0; page < 12 && !reachedOldest; page++)
+        {
+            var pageRoot = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
+                service, _serverManager, Hash, Database, ServerName, 168, asOfToRead, bucket_minutes: 60)).RootElement;
+            var pageStamps = pageRoot.GetProperty("trend").EnumerateArray().Select(p => p.GetProperty("collection_time").GetString()!).ToList();
+            if (pageStamps.Contains(oldestStamp, StringComparer.Ordinal))
+            {
+                reachedOldest = true;
+                break;
+            }
+
+            var next = System.Text.RegularExpressions.Regex.Match(pageRoot.GetProperty("budget_note").GetString()!, @"set as_of to (\S+Z) to read the points before it");
+            Assert.True(next.Success, pageRoot.GetRawText());
+            asOfToRead = next.Groups[1].Value;
+        }
+
+        Assert.True(reachedOldest, "following the note's as_of never reached the window's oldest point");
+    }
+
+    /// <summary>
     /// The buckets are cut on the shared grid from <see cref="PerformanceMonitor.Common.TrendBuckets.OriginSql"/>, and
     /// only the first point is moved: an <c>as_of</c> off a boundary puts the window's start inside a grid bucket, and
     /// that bucket is stamped at the window's start, as every bucketed trend stamps its first point, while the rest

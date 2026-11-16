@@ -26,7 +26,7 @@
       "name": "fleet",
       "layoutExempt": [{ "check": "width-unused", "reason": "the fleet server cards are capped at 460 px and start at the left on purpose (#2772, #7402), and the summary strip is a compact block, so a fleet of a few servers cannot fill a 2560 px row" }],
       "hash": "#/fleet",
-      "screenshot": { "mask": [".meta"] },
+      "screenshot": { "mask": [".meta", ".row:has-text(\"ui-down-sql\") .reason"] },
       "nav": "fleet",
       "heading": "Fleet Overview"
     },
@@ -91,7 +91,7 @@
     {
       "name": "ui-sql-queries",
       "hash": "#/server/ui-sql/queries",
-      "screenshot": { "mask": [] },
+      "screenshot": { "mask": ["[data-title=\"Query Duration Trend\"] :is(svg, canvas)"] },
       "server": "ui-sql",
       "expect": {
         "panels": [
@@ -427,6 +427,7 @@
     { "name": "proposals", "hash": "#/proposals", "nav": "proposals", "expect": {} },
     { "name": "known-patterns", "hash": "#/known-patterns", "nav": "known-patterns", "expect": {} },
     { "name": "manage-query-tags", "hash": "#/manage-query-tags", "nav": "manage-query-tags", "expect": {} },
-    { "name": "query-tag-usage", "hash": "#/query-tag-usage", "nav": "query-tag-usage", "expect": {} }
+    { "name": "query-tag-usage", "hash": "#/query-tag-usage", "nav": "query-tag-usage", "expect": {} },
+    { "name": "store-health", "hash": "#/store-health", "nav": "store-health", "expect": {} }
   ]
 }

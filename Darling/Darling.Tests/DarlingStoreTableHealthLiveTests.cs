@@ -172,6 +172,8 @@ INSERT INTO collect.zz_part SELECT date '2026-01-01' + (g % 85), repeat('p', 100
         await connection.OpenAsync(ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* Per-day rates need a counters' start the store knows (#8823): a reset of this test database's own statistics gives one. */
+        await ExecAsync(connection, "SELECT pg_stat_reset()", ct);
         await ExecAsync(connection, @"
 CREATE TABLE collect.zz_vis (id integer, payload text) WITH (autovacuum_enabled = false);
 INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60000) AS g;", ct);
@@ -195,9 +197,92 @@ INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60
         Assert.True(afterUpdate.TuplesInserted >= 60000);
         Assert.NotNull(afterUpdate.HotUpdateShare);
         Assert.NotNull(afterUpdate.StatsSince);
-        Assert.Contains(afterUpdate.StatsSinceSource, new[] { DarlingStoreTableHealthReader.StatsSourceReset, DarlingStoreTableHealthReader.StatsSourcePostmasterStart });
+        Assert.Equal(DarlingStoreTableHealthReader.StatsSourceReset, afterUpdate.StatsSinceSource);
         Assert.True(afterUpdate.StatsHours > 0);
         Assert.NotNull(afterUpdate.UpdatesPerDay);
+    }
+
+    /* #8823: PostgreSQL keeps table statistics across a restart, so with no statistics reset the counters are older than the postmaster start by an unknown
+       amount. Dividing them by the time since that start gave per-day rates too high by the ratio of the two ages. A fresh test database has stats_reset NULL,
+       which is the field's "never reset" case. */
+    [Fact]
+    public async Task WhenTheStatisticsWereNeverReset_TheRatesAreNull_TheCountersStay_AndTheReplySaysWhy()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8823 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_rates (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_rates SELECT g, repeat('x', 50) FROM generate_series(1, 2000) AS g;
+DELETE FROM collect.zz_rates WHERE id <= 1000;", ct);
+        await FlushThenAsync(connection, new[] { "ANALYZE collect.zz_rates" }, ct);
+
+        var row = Assert.Single(await DarlingStoreTableHealthReader.GetAsync(dataSource, ct), r => r.TableName == "zz_rates");
+        Assert.Equal(DarlingStoreTableHealthReader.StatsSourcePostmasterStart, row.StatsSinceSource);
+        Assert.False(row.RatesKnown);
+        Assert.Null(row.InsertsPerDay);
+        Assert.Null(row.UpdatesPerDay);
+        Assert.Null(row.DeletesPerDay);
+        Assert.Null(row.TurnoverPerDay);
+        Assert.Equal(2000, row.TuplesInserted);
+        Assert.Equal(1000, row.TuplesDeleted);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, section: "tables", cancellationToken: ct));
+        var root = doc.RootElement;
+        Assert.False(root.GetProperty("rates_known").GetBoolean());
+        var note = root.GetProperty("rates_note").GetString()!;
+        Assert.Contains("never reset", note, StringComparison.Ordinal);
+        Assert.Contains("older than the last start", note, StringComparison.Ordinal);
+        var tableJson = root.GetProperty("tables").EnumerateArray().Single(t => t.GetProperty("table_name").GetString() == "zz_rates");
+        Assert.Equal("postmaster_start", tableJson.GetProperty("stats_since_source").GetString());
+        Assert.Equal(JsonValueKind.Null, tableJson.GetProperty("inserts_per_day").ValueKind);
+        Assert.Equal(JsonValueKind.Null, tableJson.GetProperty("deletes_per_day").ValueKind);
+        Assert.Equal(JsonValueKind.Null, tableJson.GetProperty("turnover_per_day").ValueKind);
+        Assert.Equal(2000, tableJson.GetProperty("tuples_inserted").GetInt64());
+        Assert.Equal(1000, tableJson.GetProperty("tuples_deleted").GetInt64());
+    }
+
+    [Fact]
+    public async Task AfterAStatisticsReset_TheRatesAreWorkedOut_AndTheReplyHasNoNote()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8823 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* pg_stat_reset() resets only the database the connection is on: this test's own database. */
+        await ExecAsync(connection, "SELECT pg_stat_reset()", ct);
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_rates (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_rates SELECT g, repeat('x', 50) FROM generate_series(1, 2000) AS g;
+DELETE FROM collect.zz_rates WHERE id <= 1000;", ct);
+        await FlushThenAsync(connection, new[] { "ANALYZE collect.zz_rates" }, ct);
+
+        var row = Assert.Single(await DarlingStoreTableHealthReader.GetAsync(dataSource, ct), r => r.TableName == "zz_rates");
+        Assert.Equal(DarlingStoreTableHealthReader.StatsSourceReset, row.StatsSinceSource);
+        Assert.True(row.RatesKnown);
+        Assert.NotNull(row.InsertsPerDay);
+        Assert.NotNull(row.DeletesPerDay);
+        Assert.NotNull(row.TurnoverPerDay);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, section: "tables", cancellationToken: ct));
+        var root = doc.RootElement;
+        Assert.True(root.GetProperty("rates_known").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("rates_note").ValueKind);
+        var tableJson = root.GetProperty("tables").EnumerateArray().Single(t => t.GetProperty("table_name").GetString() == "zz_rates");
+        Assert.Equal("stats_reset", tableJson.GetProperty("stats_since_source").GetString());
+        Assert.Equal(JsonValueKind.Number, tableJson.GetProperty("inserts_per_day").ValueKind);
+        Assert.Equal(JsonValueKind.Number, tableJson.GetProperty("turnover_per_day").ValueKind);
     }
 
     [Fact]
@@ -212,6 +297,8 @@ INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60
         await connection.OpenAsync(ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* Per-day rates need a counters' start the store knows (#8823): a reset of this test database's own statistics gives one. */
+        await ExecAsync(connection, "SELECT pg_stat_reset()", ct);
         await ExecAsync(connection, @"
 CREATE TABLE collect.zz_trig (id integer) WITH (autovacuum_enabled = false, autovacuum_vacuum_threshold = 10, autovacuum_vacuum_scale_factor = 0);
 INSERT INTO collect.zz_trig SELECT g FROM generate_series(1, 100) AS g;
@@ -437,11 +524,106 @@ CREATE INDEX zz_part_d_idx ON collect.zz_part (d);", ct);
         Assert.Contains("Invalid offset", await DarlingMcpStoreTableHealthTools.GetStoreTableHealth(dataSource, offset: -1, cancellationToken: ct), StringComparison.Ordinal);
     }
 
-    private static async Task<System.Collections.Generic.HashSet<string>> ChunkNamesAsync(NpgsqlConnection connection, CancellationToken ct)
+    [Fact]
+    public async Task ManySmallChunks_AndAFewLargeOnes_ReadTheSameAsTheCollectorAndTheSizeFunctions()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8806 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        /* 200 one-row chunks under the 1 MB floor (one compressed), two chunks over it (one emptied by deletes), a plain
+           table over the floor that is emptied the same way, and a small plain table. */
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_many (collection_time timestamp NOT NULL, v integer, payload text);
+SELECT create_hypertable('collect.zz_many', 'collection_time', chunk_time_interval => interval '1 day');
+ALTER TABLE collect.zz_many SET (timescaledb.compress);
+INSERT INTO collect.zz_many SELECT timestamp '2010-01-01' + (d || ' days')::interval, d, 'x' FROM generate_series(0, 199) AS d;
+INSERT INTO collect.zz_many SELECT timestamp '2030-01-01' + (g || ' seconds')::interval, g, repeat('y', 100) FROM generate_series(1, 30000) AS g;
+INSERT INTO collect.zz_many SELECT timestamp '2031-01-01' + (g || ' seconds')::interval, g, repeat('y', 100) FROM generate_series(1, 30000) AS g;
+DELETE FROM collect.zz_many WHERE collection_time >= timestamp '2031-01-01' AND v % 10 <> 0;
+SELECT compress_chunk(c) FROM show_chunks('collect.zz_many', older_than => timestamp '2010-01-02') AS c;
+CREATE TABLE collect.zz_plain_big (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_plain_big SELECT g, repeat('x', 200) FROM generate_series(1, 45000) AS g;
+DELETE FROM collect.zz_plain_big WHERE id % 10 <> 0;
+CREATE TABLE collect.zz_plain_small (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_plain_small SELECT g, 'x' FROM generate_series(1, 10) AS g;", ct);
+        var chunkNames = await ChunkNamesAsync(connection, "zz_many", ct);
+        var maintenance = new System.Collections.Generic.List<string> { "ANALYZE collect.zz_plain_big", "ANALYZE collect.zz_plain_small" };
+        maintenance.AddRange(chunkNames.Select(n => "ANALYZE _timescaledb_internal." + n));
+        await FlushThenAsync(connection, maintenance.ToArray(), ct);
+
+        /* What the collector reports for the same database, with no help from the read. */
+        var collector = new System.Collections.Generic.Dictionary<string, (long Empty, bool Unavailable)>(StringComparer.Ordinal);
+        await using (var command = new NpgsqlCommand(PerformanceMonitor.Collectors.PgTableBloatStatsCollector.QueryText, connection))
+        await using (var collected = await command.ExecuteReaderAsync(ct))
+        {
+            while (await collected.ReadAsync(ct))
+            {
+                collector[collected.GetString(0) + "." + collected.GetString(1)] =
+                    (collected.GetInt64(collected.GetOrdinal("bloat_bytes_estimate")), collected.GetBoolean(collected.GetOrdinal("estimate_unavailable")));
+            }
+        }
+
+        var estimatedChunks = chunkNames.Where(n => collector.TryGetValue("_timescaledb_internal." + n, out var e) && !e.Unavailable).ToList();
+        Assert.Equal(2, estimatedChunks.Count);
+        Assert.True(collector["collect.zz_plain_big"].Empty > 0);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var rows = await DarlingStoreTableHealthReader.GetAsync(dataSource, ct);
+
+        var many = Assert.Single(rows, r => r.TableName == "zz_many");
+        Assert.Equal(DarlingStoreTableHealthReader.KindHypertable, many.Kind);
+        Assert.Equal(202, many.ChunkCount);
+        Assert.Equal(202, many.EstimateRelations);
+        Assert.Equal(2, many.EstimateRelationsUsable);
+        Assert.Equal(estimatedChunks.Sum(n => collector["_timescaledb_internal." + n].Empty), many.EstimatedEmptyBytes);
+        Assert.DoesNotContain(rows, r => chunkNames.Contains(r.TableName));
+
+        var big = Assert.Single(rows, r => r.TableName == "zz_plain_big");
+        Assert.Equal(1, big.EstimateRelationsUsable);
+        Assert.Equal(collector["collect.zz_plain_big"].Empty, big.EstimatedEmptyBytes);
+
+        var small = Assert.Single(rows, r => r.TableName == "zz_plain_small");
+        Assert.Equal(0, small.EstimateRelationsUsable);
+        Assert.Null(small.EstimatedEmptyBytes);
+        Assert.Equal(DarlingStoreTableHealthReader.ReasonBelowSizeFloor, small.EstimateUnavailableReason);
+
+        /* The sizes: the hypertable, every chunk and every compressed chunk table, summed straight from the size functions. */
+        await using var sizes = new NpgsqlCommand(@"
+WITH rels AS (
+    SELECT 'collect.zz_many'::regclass::oid AS oid
+    UNION ALL
+    SELECT pg_catalog.format('%I.%I', chunk_schema, chunk_name)::regclass::oid
+    FROM timescaledb_information.chunks WHERE hypertable_name = 'zz_many'
+    UNION ALL
+    SELECT cs.compress_relid::oid
+    FROM _timescaledb_catalog.compression_settings AS cs
+    WHERE cs.compress_relid IS NOT NULL AND cs.relid::oid <> 'collect.zz_many'::regclass::oid
+)
+SELECT sum(pg_relation_size(r.oid))::bigint, sum(pg_indexes_size(r.oid))::bigint,
+       sum(COALESCE(pg_total_relation_size(NULLIF(c.reltoastrelid, 0)), 0))::bigint
+FROM rels AS r JOIN pg_class AS c ON c.oid = r.oid", connection);
+        await using var sizeReader = await sizes.ExecuteReaderAsync(ct);
+        Assert.True(await sizeReader.ReadAsync(ct));
+        Assert.Equal(sizeReader.GetInt64(0), many.HeapBytes);
+        Assert.Equal(sizeReader.GetInt64(1), many.IndexBytes);
+        Assert.Equal(sizeReader.GetInt64(2), many.ToastBytes);
+    }
+
+    private static Task<System.Collections.Generic.HashSet<string>> ChunkNamesAsync(NpgsqlConnection connection, CancellationToken ct)
+        => ChunkNamesAsync(connection, "zz_ht", ct);
+
+    private static async Task<System.Collections.Generic.HashSet<string>> ChunkNamesAsync(NpgsqlConnection connection, string hypertable, CancellationToken ct)
     {
         var names = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         await using var command = new NpgsqlCommand(
-            "SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_name = 'zz_ht'", connection);
+            "SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_name = @h", connection);
+        command.Parameters.AddWithValue("h", hypertable);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

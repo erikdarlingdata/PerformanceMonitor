@@ -39,6 +39,12 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "PostgreSQL target table bloat collector uses), not measurements. A measured figure needs the pgstattuple extension, "
         + "which this read never installs. A table with no usable statistics has a null estimate and a reason, never zero.";
 
+    /// <summary>The sentence a tables answer carries when the statistics were never reset, so the per-day rates are null (#8823).</summary>
+    internal const string RatesNote =
+        "The statistics were never reset, so the counters are older than the last start (stats_since) and their age is not known. "
+        + "The per-day rates (inserts_per_day, updates_per_day, deletes_per_day, turnover_per_day) are null instead of a figure that "
+        + "would be too high. The counters themselves are real. A statistics reset gives rates from the next read after it.";
+
     /// <summary>The sections the tool can return.</summary>
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
@@ -68,14 +74,17 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "unknown, rewrite_candidate is false, and past_rewrite_floors stays true. vacuum_trigger_rows is "
         + "threshold + scale_factor x rows from the table's own settings or the server's (capped by the max threshold on PostgreSQL 18): "
         + "compare it with dead_rows, because many dead rows below the trigger are not yet due; relations_past_vacuum_trigger counts "
-        + "the relations of a roll-up that are. The churn counters and rates are since stats_since (the statistics reset, or the "
-        + "postmaster start when they were never reset, as stats_since_source says) and nothing is recorded; turnover_per_day is "
-        + "deletes per day over live rows. rarely_used is only set when the statistics window is at least 7 days old, never for a "
+        + "the relations of a roll-up that are. The churn counters are since the last statistics reset. stats_since_source is stats_reset "
+        + "when stats_since is that reset: the per-day rates (inserts, updates, deletes, turnover_per_day = deletes per day over live rows) are "
+        + "worked out from it. When the statistics were never reset it is postmaster_start: the counters then began BEFORE stats_since, "
+        + "because statistics survive a restart, so their age is unknown, the rates are null and rates_note says why; the raw counters "
+        + "stay. Nothing is recorded. rarely_used is only set when the statistics window is at least 7 days old, never for a "
         + "primary key or unique index. Index bloat is the extension-free estimate the target index bloat collector uses. "
         + "growth_bytes_7d is null for objects store_metrics does not record. The reply is also held to the 32,768-byte response budget, whole rows only, "
         + "the same number of rows from each section: budget_truncated = true says rows were left off the end for the budget, budget_note says how many "
         + "fit, and has_more and next_offset read on (pass next_offset as offset). A live read of the catalogs: allow a second or two on a "
-        + "store with many chunks.")]
+        + "store with many chunks. A part that runs past its read limit is left out and named in tables_left_out_note or indexes_left_out_note, "
+        + "and the other part is still returned. When only the partition index coverage read runs past it, the index rows are still returned and coverage_left_out_note names the coverage that was left out. When every part asked for ran past the limit, status is timed_out.")]
     public static Task<string> GetStoreTableHealth(
         NpgsqlDataSource postgres,
         [Description("How many rows to return per section, in the answer's order. Default 50, max 1000. The reply is also held to a byte budget: when rows were left off for it, budget_truncated is true and next_offset reads on.")] int top = DefaultTop,
@@ -87,10 +96,13 @@ public sealed class DarlingMcpStoreTableHealthTools
 
     /// <summary>
     /// The read with its response budget. The MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>. The web route passes null:
-    /// the Store Health page asks for one section at a time and draws every row it asked for.
+    /// the Store Health page asks for one section at a time and draws every row it asked for. <paramref name="indexSource"/> is the store
+    /// the index reads use (the tool's own store when null): a test gives it a store whose statements trip the deadline. <paramref name="coverageSource"/> is
+    /// the same for the partition index coverage read alone (the index source when null).
     /// </summary>
     internal static async Task<string> GetStoreTableHealth(
-        NpgsqlDataSource postgres, int top, bool candidates_only, string? section, int offset, int? responseByteBudget, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int top, bool candidates_only, string? section, int offset, int? responseByteBudget, CancellationToken cancellationToken,
+        NpgsqlDataSource? indexSource = null, NpgsqlDataSource? coverageSource = null)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
@@ -126,46 +138,116 @@ public sealed class DarlingMcpStoreTableHealthTools
             IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexHealthRow> indexRows = Array.Empty<DarlingStoreTableHealthReader.StoreIndexHealthRow>();
             IReadOnlyList<DarlingStoreTableHealthReader.StoreIndexCoverageRow> coverageRows = Array.Empty<DarlingStoreTableHealthReader.StoreIndexCoverageRow>();
 
+            string? tablesTimeout = null;
+            string? indexesTimeout = null;
+            string? coverageTimeout = null;
+
             if (wantTables)
             {
-                var all = await DarlingStoreTableHealthReader.GetAsync(postgres, cancellationToken);
-                var summary = DarlingStoreTableHealthReader.Summarize(all);
-                tableRows = candidates_only ? all.Where(r => r.RewriteCandidate).ToList() : all;
+                List<DarlingStoreTableHealthReader.StoreTableHealthRow> all;
+                try
+                {
+                    all = await DarlingStoreTableHealthReader.GetAsync(postgres, cancellationToken);
+                }
+                catch (StoreTableHealthTimeoutException ex)
+                {
+                    /* The tables read ran past its limit. The index part may still answer, so the reply says the table part was left out. */
+                    tablesTimeout = ex.Message;
+                    all = new List<DarlingStoreTableHealthReader.StoreTableHealthRow>();
+                }
 
-                var noEstimate = summary.WithoutEstimateByReason.Count == 0
-                    ? "every table has a usable estimate"
-                    : string.Join(", ", summary.WithoutEstimateByReason.Select(p =>
-                        $"{p.Value} {DarlingStoreTableHealthReader.DescribeReason(p.Key)}"));
-                var pastFloorsUnread = all.Count(r => r.PastRewriteFloors && r.TailOccupied is null);
-                var header = string.Create(CultureInfo.InvariantCulture,
-                    $"{CountText.Plural(summary.TableCount, "store table")}, {CountText.Grouped(summary.TotalBytes)} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
-                    + $"{CountText.Grouped(summary.WithoutEstimate)} without a usable empty-space estimate ({noEstimate}).")
-                    + (pastFloorsUnread > 0
-                        ? string.Create(CultureInfo.InvariantCulture, $" {CountText.Grouped(pastFloorsUnread)} past the empty-space floors with the end of the file not checked.")
-                        : string.Empty);
+                if (tablesTimeout is not null)
+                {
+                    result["header"] = "The table part was left out: " + tablesTimeout;
+                    result["tables_left_out_note"] = tablesTimeout;
+                }
+                else
+                {
+                    var summary = DarlingStoreTableHealthReader.Summarize(all);
+                    tableRows = candidates_only ? all.Where(r => r.RewriteCandidate).ToList() : all;
 
-                result["header"] = header;
-                result["estimate_note"] = EstimateNote;
-                result["store_tables"] = summary.TableCount;
-                result["store_total_bytes"] = summary.TotalBytes;
-                result["rewrite_candidates"] = summary.RewriteCandidates;
-                result["tables_without_estimate"] = summary.WithoutEstimate;
-                result["without_estimate_by_reason"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => p.Value);
-                result["without_estimate_reason_text"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => DarlingStoreTableHealthReader.DescribeReason(p.Key));
-                result["candidates_only"] = candidates_only;
+                    var noEstimate = summary.WithoutEstimateByReason.Count == 0
+                        ? "every table has a usable estimate"
+                        : string.Join(", ", summary.WithoutEstimateByReason.Select(p =>
+                            $"{p.Value} {DarlingStoreTableHealthReader.DescribeReason(p.Key)}"));
+                    var pastFloorsUnread = all.Count(r => r.PastRewriteFloors && r.TailOccupied is null);
+                    var header = string.Create(CultureInfo.InvariantCulture,
+                        $"{CountText.Plural(summary.TableCount, "store table")}, {CountText.Grouped(summary.TotalBytes)} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
+                        + $"{CountText.Grouped(summary.WithoutEstimate)} without a usable empty-space estimate ({noEstimate}).")
+                        + (pastFloorsUnread > 0
+                            ? string.Create(CultureInfo.InvariantCulture, $" {CountText.Grouped(pastFloorsUnread)} past the empty-space floors with the end of the file not checked.")
+                            : string.Empty);
+
+                    result["header"] = header;
+                    result["estimate_note"] = EstimateNote;
+                    var ratesKnown = all.Count == 0 || all.All(r => r.RatesKnown);
+                    result["rates_known"] = ratesKnown;
+                    result["rates_note"] = ratesKnown ? null : RatesNote;
+                    result["store_tables"] = summary.TableCount;
+                    result["store_total_bytes"] = summary.TotalBytes;
+                    result["rewrite_candidates"] = summary.RewriteCandidates;
+                    result["tables_without_estimate"] = summary.WithoutEstimate;
+                    result["without_estimate_by_reason"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => p.Value);
+                    result["without_estimate_reason_text"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => DarlingStoreTableHealthReader.DescribeReason(p.Key));
+                    result["candidates_only"] = candidates_only;
+                }
             }
 
             if (wantIndexes)
             {
-                indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(postgres, cancellationToken);
-                coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(postgres, cancellationToken);
+                try
+                {
+                    indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(indexSource ?? postgres, cancellationToken);
+                }
+                catch (StoreTableHealthTimeoutException ex)
+                {
+                    indexesTimeout = ex.Message;
+                }
+
+                if (indexesTimeout is null)
+                {
+                    /* The index rows are in hand. A coverage read that runs past its limit leaves out only the coverage part. */
+                    try
+                    {
+                        coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(coverageSource ?? indexSource ?? postgres, cancellationToken);
+                    }
+                    catch (StoreTableHealthTimeoutException ex)
+                    {
+                        coverageTimeout = ex.Message;
+                    }
+                }
+
                 var incomplete = coverageRows.Count(c => c.LeavesMissingIndex > 0 || c.LeavesInvalidIndex > 0);
 
-                result["index_header"] = string.Create(CultureInfo.InvariantCulture,
-                    $"{CountText.Plural(indexRows.Count, "store index", "store indexes")}, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, "
-                    + $"{indexRows.Count(r => !r.Valid)} invalid, and {CountText.Plural(incomplete, "partitioned-parent index", "partitioned-parent indexes")} with a leaf missing or invalid.");
-                result["indexes_total"] = indexRows.Count;
-                result["partition_index_coverage_total"] = coverageRows.Count;
+                if (indexesTimeout is not null)
+                {
+                    result["index_header"] = "The index part was left out: " + indexesTimeout;
+                    result["indexes_left_out_note"] = indexesTimeout;
+                }
+                else
+                {
+                    var indexCounts = string.Create(CultureInfo.InvariantCulture,
+                        $"{CountText.Plural(indexRows.Count, "store index", "store indexes")}, {indexRows.Count(r => r.LargerThanHeap)} larger than their heap, {indexRows.Count(r => r.RarelyUsed)} rarely used, ");
+                    result["index_header"] = coverageTimeout is null
+                        ? indexCounts + string.Create(CultureInfo.InvariantCulture,
+                            $"{indexRows.Count(r => !r.Valid)} invalid, and {CountText.Plural(incomplete, "partitioned-parent index", "partitioned-parent indexes")} with a leaf missing or invalid.")
+                        : indexCounts + string.Create(CultureInfo.InvariantCulture, $"and {indexRows.Count(r => !r.Valid)} invalid. The partition index coverage was left out: ") + coverageTimeout;
+                    result["indexes_total"] = indexRows.Count;
+                    if (coverageTimeout is null)
+                    {
+                        result["partition_index_coverage_total"] = coverageRows.Count;
+                    }
+                    else
+                    {
+                        result["coverage_left_out_note"] = coverageTimeout;
+                    }
+                }
+            }
+
+            if ((tablesTimeout is not null || !wantTables) && (indexesTimeout is not null || !wantIndexes))
+            {
+                /* Every part that was asked for ran past its limit: there is nothing to return but the timeout. */
+                return McpHelpers.Status("timed_out", tablesTimeout ?? indexesTimeout!, new { timeout_seconds = StorageCommandDeadlines.McpReadSeconds });
             }
 
             /* A page is the same number of rows from every section, so one offset reads on in all of them. */
@@ -194,9 +276,12 @@ public sealed class DarlingMcpStoreTableHealthTools
                     result["indexes_returned"] = indexPage.Count;
                     result["indexes_truncated"] = indexRows.Count > offset + indexPage.Count;
                     result["indexes"] = indexPage.Select(Index).ToList();
-                    result["partition_index_coverage_returned"] = coveragePage.Count;
-                    result["partition_index_coverage_truncated"] = coverageRows.Count > offset + coveragePage.Count;
-                    result["partition_index_coverage"] = coveragePage.Select(Coverage).ToList();
+                    if (coverageTimeout is null)
+                    {
+                        result["partition_index_coverage_returned"] = coveragePage.Count;
+                        result["partition_index_coverage_truncated"] = coverageRows.Count > offset + coveragePage.Count;
+                        result["partition_index_coverage"] = coveragePage.Select(Coverage).ToList();
+                    }
                 }
 
                 result["budget_truncated"] = budgetCut;

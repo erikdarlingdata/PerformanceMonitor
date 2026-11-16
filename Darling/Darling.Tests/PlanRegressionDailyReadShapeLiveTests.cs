@@ -55,7 +55,7 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task OnTheHeap_TheLiveHalfReadsOnlyFromTheLiveFloorUp_AndTheDayHalfUsesItsUniqueIndex()
+    public async Task OnTheHeap_TheLiveHalfReadsOnlyFromTheLiveFloorUp_AndTheDayHalfUsesAServerDayIndex()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 read-shape test.");
@@ -106,11 +106,12 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
         /* The day half. With three servers' totals the planner may well prefer a sequential scan of the small daily table
            (a third of it is this server's), which the report above records; what must hold is that the unique index
            serves the branch, so that on a store with many servers the read touches this server's built days only. With
-           sequential scans off the plan has to use ux_plan_regression_daily and read no more than one server's share. */
+           sequential scans off the plan has to use an index led by (server_id, day), the unique index or
+           ix_plan_regression_daily_server_day, and read no more than one server's share. */
         var indexed = ScansOf(await ExplainAsync(connection, today, floor, builtDays, ct, noSeqScan: true), "plan_regression_daily").ToList();
         Assert.NotEmpty(indexed);
         Assert.DoesNotContain(indexed, s => s.NodeType == "Seq Scan");
-        Assert.All(indexed, s => Assert.Equal("ux_plan_regression_daily", s.IndexName));
+        Assert.All(indexed, s => Assert.Contains(s.IndexName, new[] { "ux_plan_regression_daily", "ix_plan_regression_daily_server_day" }));
         var indexedRead = indexed.Sum(s => s.RowsRead);
         Assert.True(indexedRead <= dailyTotal / Servers.Length,
             $"the day half read {indexedRead} of {dailyTotal} daily rows through the index, which is more than one server's share");

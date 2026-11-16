@@ -251,14 +251,14 @@ public sealed class StoreSelfMetricsTests
            test below, with an uncompressed aggregate in it. */    }
 
     /// <summary>
-    /// #3582, extended #4609: the seven product-owned plain tables the walk used to lump are named,
+    /// #3582, extended #4609 and #8817: the eight product-owned plain tables the walk used to lump are named,
     /// schema-qualified, sized with <c>pg_total_relation_size</c> and row-counted from the planner's
-    /// estimate — and the census predicate that keeps them OUT of the catch-all names the same seven by
+    /// estimate — and the census predicate that keeps them OUT of the catch-all names the same eight by
     /// <c>(schema, relation)</c>. The two halves are pinned against each other: a table named here and
     /// not there would be counted twice, one named there and not here would vanish from both.
     /// </summary>
     [Fact]
-    public void TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose()
+    public void TableInsertSql_NamesTheEightProductTables_AndTheCensusExcludesExactlyThose()
     {
         var sql = StoreSelfMetrics.TableInsertSql;
         Assert.Equal("table", StoreSelfMetrics.TableObjectKind);
@@ -273,6 +273,7 @@ public sealed class StoreSelfMetricsTests
             "collect." + QueryStoreIntervalLatest.PendingTableName,
             "collect." + QueryStoreIntervalWide.TableName,
             "collect." + QueryStoreIntervalWide.PendingTableName,
+            OversizedPlanBacklog.TableName,
         };
         Assert.Equal(
             new[]
@@ -284,6 +285,7 @@ public sealed class StoreSelfMetricsTests
                 "collect.query_store_interval_latest_pending",
                 "collect.query_store_interval_wide",
                 "collect.query_store_interval_wide_pending",
+                "collect.oversized_plan_backlog",
             },
             qualified);
 
@@ -313,14 +315,14 @@ public sealed class StoreSelfMetricsTests
         /* The two payload dimensions are in the same predicate, so they leave the catch-all too. */
         Assert.Contains($"'collect.{PayloadDimensions.QueryTextDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
         Assert.Contains($"'collect.{PayloadDimensions.QueryPlanDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
-        /* Exactly nine names, and none of them typed by hand: every quoted name in the predicate is one of
-           the nine constants. */
+        /* Exactly ten names, and none of them typed by hand: every quoted name in the predicate is one of
+           the ten constants. */
         var quoted = System.Text.RegularExpressions.Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(10, quoted.Length); /* nine names plus the '.' separator literal */
+        Assert.Equal(11, quoted.Length); /* ten names plus the '.' separator literal */
         Assert.Equal(
             new[] { $"collect.{PayloadDimensions.QueryTextDimTable}", $"collect.{PayloadDimensions.QueryPlanDimTable}" }.Concat(qualified).OrderBy(x => x, StringComparer.Ordinal),
             quoted.Where(q => q != ".").OrderBy(x => x, StringComparer.Ordinal));
-        Assert.Equal(7, sql.Split("UNION ALL").Length);
+        Assert.Equal(8, sql.Split("UNION ALL").Length);
         Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
     }
 
@@ -863,7 +865,7 @@ public sealed class StoreSelfMetricsTests
         Assert.True(written > 0, "the sweep wrote nothing");
 
         /* One table row per name TableInsertSql carries — the same source the census test
-           (TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose) pins, so this
+           (TableInsertSql_NamesTheEightProductTables_AndTheCensusExcludesExactlyThose) pins, so this
            count cannot drift from the product's own named-table list. */
         var expectedTableRows = StoreSelfMetrics.TableInsertSql.Split("UNION ALL").Length;
 

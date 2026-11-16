@@ -759,6 +759,9 @@
           "xunit.v3.runner.common": "[4.0.3]"
         }
       },
+      "darling.tests.standin": {
+        "type": "Project"
+      },
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {

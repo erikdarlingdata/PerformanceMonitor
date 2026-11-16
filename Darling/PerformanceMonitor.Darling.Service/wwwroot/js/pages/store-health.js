@@ -25,7 +25,7 @@
  * and the Refresh button on this page is the way to run it again.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, onPageLeave, fmtInt, fmtBytes, fmtPct, rollupTextId } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, onPageLeave, fmtInt, fmtBytes, fmtPct, rollupTextId, localTime } from "../util.js";
 import { gridTable } from "../panels.js";
 import { detailColumn, firstSentence } from "../pg-grid-text.js";
 import { countWord, plainText } from "../plain-text.js";
@@ -41,6 +41,9 @@ const KIND_LABELS = {
 };
 
 /** The sentence under the tables grid. */
+/** Under the grid when the statistics were never reset: why the per-day columns are empty (#8823). */
+export const RATES_NOTE = "The per-day columns are empty because the statistics were never reset. The counters are older than the last start, so their age is not known. A statistics reset gives rates.";
+
 export const ESTIMATE_NOTE = "Empty space is an estimate worked out from table statistics. Measure reads one table and gives a measured figure.";
 
 /** The one line that replaces the coverage section when every partition has every index. */
@@ -103,6 +106,13 @@ export function emptyShareText(r) {
 
 const dash = (v) => (v == null ? "—" : v);
 
+/** The Counted since cell. A statistics reset dates the counters. With none, the read says the counters began before the last start (#8823). */
+export function countedSinceText(r) {
+  if (!r.stats_since) return "—";
+  const at = localTime(r.stats_since);
+  return r.stats_since_source === "postmaster_start" ? "before " + at : at;
+}
+
 export const TABLE_COLUMNS = [
   { key: "table_name", label: "Table", name: true, display: named, sortValue: named },
   { key: "kind", label: "Kind", display: kindText, sortValue: kindText },
@@ -146,8 +156,8 @@ export const TABLE_COLUMNS = [
   { key: "turnover_per_day", label: "Deleted per day, % of rows", group: "Churn", display: (r) => (r.turnover_per_day == null ? "—" : fmtPct(Number(r.turnover_per_day) * 100)),
     sortValue: (r) => (r.turnover_per_day == null ? null : Number(r.turnover_per_day)),
     hint: "Deletes per day as a share of the live rows. 100% means the whole table is deleted and refilled each day." },
-  { key: "stats_since", label: "Counted since", format: "time", group: "Churn",
-    hint: "The counters above start here: the last statistics reset, or the last server start." },
+  { key: "stats_since", label: "Counted since", group: "Churn", display: countedSinceText, sortValue: (r) => (r.stats_since ? Date.parse(r.stats_since) : null),
+    hint: "The counters above start at the last statistics reset. With no reset, statistics outlive a server restart, so they started before the last start and their age is not known. The per-day columns are then empty." },
 ];
 
 /* ─────────────────────────── the indexes ─────────────────────────── */
@@ -414,6 +424,7 @@ function drawTables(res, headerBox, tablesBox) {
     emptyText: "The store has no tables to show.",
   }));
   parts.push(el("div", { class: "meta store-health-note", text: ESTIMATE_NOTE }));
+  if (d.rates_known === false) parts.push(el("div", { class: "meta store-health-note", text: RATES_NOTE }));
   mount(tablesBox, parts);
   applyMeasureLock();
   return d;
@@ -450,6 +461,14 @@ function drawIndexes(res, indexesBox, coverageBox) {
   }));
   mount(indexesBox, parts);
 
+  /* The coverage read ran past its limit: the index rows above stand, and the coverage section says it was left out, never that every partition is fine. */
+  if (typeof d.coverage_left_out_note === "string" && d.coverage_left_out_note) {
+    mount(coverageBox, [
+      el("h3", { class: "section-title", text: "Partition index coverage" }),
+      noticeStrip("The partition index coverage was left out. " + d.coverage_left_out_note),
+    ]);
+    return;
+  }
   const incomplete = incompleteCoverage(d.partition_index_coverage);
   if (!incomplete.length) {
     mount(coverageBox, el("div", { class: "meta", text: COVERAGE_CLEAN_LINE }));
