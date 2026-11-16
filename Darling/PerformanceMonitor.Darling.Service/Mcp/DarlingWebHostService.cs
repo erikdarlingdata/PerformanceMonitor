@@ -3199,7 +3199,10 @@ public sealed class DarlingWebHostService : BackgroundService
     private static readonly string s_loginPolicyPlain = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlPlain);
     private static readonly string s_loginPolicySso = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSso);
     private static readonly string s_loginPageHtmlSsoOnly = ComposeLoginPage(oidcEnabled: true, tokenField: false);
-    private static readonly string s_loginPolicySsoOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSsoOnly);
+    /* The SSO-only page has no form to submit (#8735), so its policy allows no form-action at all, and a form that someone injects
+       cannot post to /auth/login. The two existing pages keep the default 'self'. */
+    private static readonly string s_loginPolicySsoOnly = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSsoOnly)
+        .Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal);
 
     /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not, token
     /// form or not). The SSO-only page (<paramref name="tokenField"/> false) needs OIDC.</summary>

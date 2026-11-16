@@ -52,8 +52,13 @@ public sealed class DarlingTokenSignInLoginPageTests
     public void SsoOnly_PolicyIsComputedFromItsOwnText()
     {
         var policy = DarlingWebHostService.LoginPagePolicy(true, false);
-        Assert.Equal(DarlingWebSecurityHeaders.PolicyForInlinePage(DarlingWebHostService.BuildLoginPageHtml(true, false)), policy);
+        var hashed = DarlingWebSecurityHeaders.PolicyForInlinePage(DarlingWebHostService.BuildLoginPageHtml(true, false));
+        Assert.Equal(hashed.Replace("form-action 'self'", "form-action 'none'", StringComparison.Ordinal), policy);
+        Assert.Contains("form-action 'none'", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("form-action 'self'", policy, StringComparison.Ordinal);
         Assert.Contains("frame-ancestors 'none'", policy, StringComparison.Ordinal);
+        Assert.Contains("form-action 'self'", DarlingWebHostService.LoginPagePolicy(true), StringComparison.Ordinal);
+        Assert.Contains("form-action 'self'", DarlingWebHostService.LoginPagePolicy(false), StringComparison.Ordinal);
     }
 
     [Fact]
