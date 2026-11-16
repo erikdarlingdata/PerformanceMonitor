@@ -816,6 +816,7 @@
     "Darling.Tests.DarlingTokenSignInLoginPageTests": 0.2,
     "Darling.Tests.DarlingTokenSignInPipelineTests": 3.77,
     "Darling.Tests.DarlingTokenSignInStartTests": 0.2,
+    "Darling.Tests.DarlingTokenSignInStartLiveTests": 6.3,
     "Darling.Tests.DarlingTokenSignInTests": 0.2,
     "Darling.Tests.DarlingToolExitCodeTests": 0.01,
     "Darling.Tests.DarlingTrendEmptyTests": 0.23,
