@@ -120,10 +120,11 @@
 --   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the four roles to set a
 --     password or take back an attribute, and it holds that option only on a role it created itself. A role a
 --     superuser made needs GRANT <role> TO <owner> WITH ADMIN OPTION from a superuser first. The guard in step 1
---     checks this before any password is sent, and stops the run when the owner cannot change one of the four
---     roles that already exist: it has no CREATEROLE, the role is a superuser, from PostgreSQL 16 it lacks ADMIN
---     OPTION on the role, or before 16 the role has REPLICATION (only a superuser can change such a role). The
---     stop names the role and the remedy: a superuser runs GRANT <role> TO <owner> WITH ADMIN OPTION, or runs
+--     checks this before any password is sent. It first stops an owner that has no CREATEROLE, before any role is
+--     created, so a fresh store gets the guard's message and not PostgreSQL's own refusal of CREATE ROLE. It then stops
+--     the run when the owner cannot change one of the four roles that already exist: the role is a superuser, from
+--     PostgreSQL 16 the owner lacks ADMIN OPTION on the role, or before 16 the role has REPLICATION (only a superuser
+--     can change such a role). The stop names the role and the remedy: a superuser runs GRANT <role> TO <owner> WITH ADMIN OPTION, or runs
 --     this script. The guard also stops the run when one of the four roles is a member of a role that would
 --     outrank the grants below (the owner, a superuser or BYPASSRLS role, pg_read_all_data, pg_write_all_data,
 --     pg_read_server_files, pg_write_server_files or pg_execute_server_program) and the owner cannot revoke that
@@ -133,17 +134,17 @@
 --     could turn off log_min_error_statement for the session.
 --   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 cannot switch it off for this
 --     owner (the refusal is caught and noted), and the guard in step 1 then stops the run before any password is sent.
---     Either GRANT SET ON PARAMETER
---     pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0 can turn it off for this
---     session, or turn it off for the cluster (step 1b).
+--     Either GRANT SET ON PARAMETER pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0
+--     can turn it off for this session, or turn it off for the cluster (step 1b).
 --   * The superuser-only settings (temp_file_limit, log_min_duration_statement, log_parameter_max_length) are applied
 --     where the owner may set them, and an owner that may not does not stop the run: each statement catches
 --     insufficient_privilege and nothing else, so the run goes on under psql -v ON_ERROR_STOP=1 and exits 0. One
 --     WARNING after step 1b then names each role that still lacks a setting and the exact ALTER ROLE ... SET
---     statements a superuser runs once. A setting a superuser already applied is not reported. SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner
---     holds that attribute itself (PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or
---     BYPASSRLS), and a role membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for
---     each of those, so read psql's output.
+--     statements a superuser runs once. A setting a superuser already applied is not reported.
+--     SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner holds that attribute
+--     itself (PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or BYPASSRLS), and a role
+--     membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for each of those, so read psql's
+--     output.
 --   * Step 0 cannot turn off log_statement, log_min_duration_statement or log_min_error_statement for this session
 --     unless the owner was granted SET on them (PostgreSQL 15 and later). Where log_statement is ddl, mod or all,
 --     log_min_duration_statement is 0 or more, log_transaction_sample_rate is above 0, log_min_duration_sample is 0 or
@@ -272,6 +273,13 @@ BEGIN
    IF current_setting('pg_stat_monitor.pgsm_track_utility', true) IN ('on', 'yes', 'true', '1') THEN
       RAISE EXCEPTION 'pg_stat_monitor.pgsm_track_utility is on for this session. pg_stat_monitor tracks the password statements of this script. The script created and changed nothing. Set pg_stat_monitor.pgsm_track_utility = off in postgresql.conf and reload, which turns it off for the whole cluster, then run the script again.';
    END IF;
+   -- A role that is not a superuser needs CREATEROLE to create or change any role. This needs no role to exist, so it is
+   -- checked before step 1 creates one: a fresh store then gets this message, not PostgreSQL's own refusal of CREATE ROLE,
+   -- which on PostgreSQL 15 and earlier names no remedy. The checks below need the four roles to exist.
+   IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+      AND NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
+      RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer, web and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
+   END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
       CREATE ROLE admin LOGIN NOSUPERUSER;
       COMMENT ON ROLE admin IS 'darling-managed';
@@ -318,13 +326,10 @@ BEGIN
    -- A role that is not a superuser must also be able to change the four roles. If it cannot, each ALTER ROLE ... PASSWORD
    -- below fails, the server writes the failed statement to its log WITH the password, and psql exits 0 unless the caller
    -- set ON_ERROR_STOP. So a run by such a role stops here, before any password is sent. The ALTER ROLE lines need:
-   -- the CREATEROLE attribute; roles that are not superusers; from PostgreSQL 16, ADMIN OPTION on each role (pg_has_role
+   -- roles that are not superusers (the CREATEROLE attribute is checked above, before step 1); from PostgreSQL 16, ADMIN OPTION on each role (pg_has_role
    -- tests the same thing ALTER ROLE does, and a role this run just created passes because its creator holds the option);
    -- before 16, roles without REPLICATION. Every role exists at this point, and a superuser is never stopped here.
    IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
-      IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
-         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer, web and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
-      END IF;
       SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
       FROM pg_roles
       WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND rolsuper;

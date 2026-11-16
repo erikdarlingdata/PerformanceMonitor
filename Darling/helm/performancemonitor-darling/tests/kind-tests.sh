@@ -374,8 +374,8 @@ case_provision_roles_fails_the_release() {
   k -n "${NS}" logs "job/${JOB}" --all-containers --prefix >"${log}" || fail "could not read the Job log"
   tail -n 4 "${log}" | cut -c1-220 | sed 's/^/  /'
   grep -F "provision-roles.sql exit code: 3" "${log}" >/dev/null || fail "no exit code 3 in the Job log"
-  grep -E "Only roles with the CREATEROLE attribute may create roles|permission denied to create role" "${log}" >/dev/null     || fail "no CREATE ROLE refusal in the Job log"
-  echo "  no CREATEROLE: install failed, exit 3, CREATE ROLE refused"
+  grep -F "does not have CREATEROLE" "${log}" >/dev/null || fail "no CREATEROLE guard text in the Job log"
+  echo "  no CREATEROLE: install failed, exit 3, the guard named the missing attribute"
 
   store_sql "ALTER ROLE app CREATEROLE" >/dev/null
   h uninstall "${RELEASE}" -n "${NS}" >/dev/null || fail "uninstall failed"

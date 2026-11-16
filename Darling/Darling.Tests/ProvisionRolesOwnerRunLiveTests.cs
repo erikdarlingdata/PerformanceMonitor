@@ -81,16 +81,12 @@ public sealed class ProvisionRolesOwnerRunLiveTests
     {
         await RunInOwnStoreAsync(createRole: false, async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
         {
-            /* The guard names the owner's missing CREATEROLE only for roles that already exist; with none, CREATE ROLE itself is refused. */
-            foreach (var role in new[] { "admin", "viewer", "web", "mcp" })
-            {
-                await ComposeStoreRolesLiveTests.ExecAsync(superuser, $"CREATE ROLE {role} LOGIN NOSUPERUSER; COMMENT ON ROLE {role} IS 'darling-managed'", ct);
-            }
-
+            /* No role exists yet (a fresh store): the guard names the missing CREATEROLE before step 1's CREATE ROLE, not PostgreSQL's own refusal. */
             var run = await RunOwnerScriptAsync(runtimeRoot, directory, ownerLogin, ct);
 
             Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
             Assert.True(run.Error.Contains("does not have CREATEROLE", StringComparison.Ordinal), run.Error);
+            Assert.False(await ComposeStoreRolesLiveTests.RoleExistsAsync(superuser, "admin", ct), "the stop still created a role.");
         });
     }
 

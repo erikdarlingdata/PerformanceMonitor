@@ -123,6 +123,8 @@ On the first install the dashboard and the MCP endpoint start before the Job has
 
   The script's guard checks this before it sends a password, and stops the run (exit code 3) with the roles and the statements to run.
 
+An owner without `CREATEROLE` stops the run at once, before any role is created, with the guard's message (exit code 3).
+
 With CloudNativePG, declare the owner with `CREATEROLE` in the Cluster:
 
 ```yaml

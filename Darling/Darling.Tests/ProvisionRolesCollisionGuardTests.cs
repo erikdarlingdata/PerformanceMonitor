@@ -400,29 +400,36 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("as a superuser", line, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>A role that is not a superuser and has no <c>CREATEROLE</c> cannot change another role at all, so each
-    /// <c>ALTER ROLE ... LOGIN PASSWORD</c> line would fail, and the server would write the statement, password included,
-    /// to its log. The guard stops such a run first. The branch is one that a superuser never enters, it comes after the
-    /// marker and ADMIN OPTION checks, and it looks at the running role's own attribute, as PostgreSQL does.</summary>
+    /// <summary>A role that is not a superuser and has no <c>CREATEROLE</c> cannot create or change a role at all. Its
+    /// attribute check needs no role to exist, so it is the first thing after the two tracking checks, before step 1's
+    /// <c>CREATE ROLE</c>: a fresh store would otherwise stop at PostgreSQL's own refusal, which on PostgreSQL 15 and
+    /// earlier offers no remedy. It looks at the running role's own attribute, as PostgreSQL does, and a superuser never
+    /// enters it. This stop offers no GRANT, so it needs no marker check before it.</summary>
     [Fact]
-    public void TheGuard_StopsARunnerWithoutCreaterole_BeforeAnyPasswordIsSent()
+    public void TheGuard_StopsARunnerWithoutCreaterole_BeforeAnyRoleIsCreatedOrPasswordSent()
     {
         var sql = Script();
         var guard = GuardBlock(sql);
-        var checks = NonSuperuserChecks(sql);
 
-        Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.IndexOf("membership.admin_option", StringComparison.Ordinal),
-            "the checks for a role that is not a superuser must come after the check for another login that administers a role.");
-        Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.LastIndexOf("IS DISTINCT FROM 'darling-managed'", StringComparison.Ordinal),
-            "the checks for a role that is not a superuser must come after the marker checks, so an unrelated role is never offered a GRANT.");
+        var early = Regex.Match(guard, @"IF NOT \(SELECT rolsuper FROM pg_roles WHERE rolname = current_user\)\s+AND NOT \(SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user\) THEN");
+        Assert.True(early.Success, "the guard has no attribute check for a runner that is not a superuser and lacks CREATEROLE.");
+        Assert.Single(Regex.Matches(guard, @"SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user"));
+        Assert.True(early.Index > guard.IndexOf("current_setting('pg_stat_monitor.pgsm_track_utility', true)", StringComparison.Ordinal),
+            "the CREATEROLE check must come after both tracking checks.");
+        Assert.True(early.Index < guard.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER;", StringComparison.Ordinal),
+            "the CREATEROLE check must come before step 1 creates a role, so a fresh store gets this message and not PostgreSQL's.");
 
-        Assert.StartsWith("IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN", checks[(NonSuperuserBranch.Length)..].TrimStart(), StringComparison.Ordinal);
-
-        var line = RaiseLine(checks, "The role running this script, %, is not a superuser and does not have CREATEROLE");
+        var line = RaiseLine(guard[early.Index..], "The role running this script, %, is not a superuser and does not have CREATEROLE");
         AssertStopExplainsItself(line);
         Assert.Contains("Run this script again as a superuser, or as a role that has CREATEROLE.", line, StringComparison.Ordinal);
-        Assert.True(sql.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index,
+        Assert.True(sql.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER;", StringComparison.Ordinal) > early.Index + sql.IndexOf(guard, StringComparison.Ordinal),
+            "the stop must come before the first CREATE ROLE.");
+        Assert.True(early.Index + sql.IndexOf(guard, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index,
             "the stop must come before the first ALTER ROLE ... PASSWORD.");
+        Assert.DoesNotContain("GRANT", line, StringComparison.Ordinal);
+
+        /* What stays after the roles exist: the branch for a runner that is not a superuser starts with the superuser-role check. */
+        Assert.StartsWith("SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable", NonSuperuserChecks(sql)[NonSuperuserBranch.Length..].TrimStart(), StringComparison.Ordinal);
     }
 
     /// <summary>Only a superuser can change a superuser role, on every version, so a marked role that has
