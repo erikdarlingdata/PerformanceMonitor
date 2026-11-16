@@ -100,6 +100,20 @@ public sealed class StoreImageCurrencyCheckTests
     }
 
     [Fact]
+    public void On_GitHub_Actions_the_older_TimescaleDB_finding_is_an_error_annotation_that_names_the_file()
+    {
+        var tags = new[] { "2.32.1-pg17", "2.32.1-pg17", "2.32.1-pg17", "2.32.1-pg17" };
+        tags[1] = "2.32.0-pg17";
+        using var tree = ScratchTree.Create(tags);
+        var run = RunCheck(tree.Root, "2.32.1", githubActions: true);
+        if (run is null) { return; }
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Contains($"::error title=Bundled store runtime is behind::{PinFiles[1]} pins the store image to TimescaleDB 2.32.0 and 2.32.1 is out.", run.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("BEHIND:", run.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_file_that_no_longer_names_the_image_fails_loudly_instead_of_passing_unread()
     {
         using var tree = ScratchTree.Create("2.32.0-pg17", "2.32.0-pg17", "2.32.0-pg17", "2.32.0-pg17");
@@ -111,8 +125,10 @@ public sealed class StoreImageCurrencyCheckTests
         Assert.Contains(PinFiles[1] + " no longer names a timescale/timescaledb image", run.Output, StringComparison.Ordinal);
     }
 
-    /* Runs the script under pwsh with the image check only. Null when pwsh is missing. */
-    private static ScriptRun? RunCheck(string repoRoot, string newestTimescale)
+    /* Runs the script under pwsh with the image check only. Null when pwsh is missing. The script prints GitHub
+       annotations instead of BEHIND/KNOWN lines when GITHUB_ACTIONS is true, so the child gets that variable
+       removed (the local format) unless a case asks for the annotation format. */
+    private static ScriptRun? RunCheck(string repoRoot, string newestTimescale, bool githubActions = false)
     {
         var startInfo = new System.Diagnostics.ProcessStartInfo("pwsh")
         {
@@ -121,6 +137,8 @@ public sealed class StoreImageCurrencyCheckTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        if (githubActions) { startInfo.Environment["GITHUB_ACTIONS"] = "true"; }
+        else { startInfo.Environment.Remove("GITHUB_ACTIONS"); }
         foreach (var argument in new[]
         {
             "-NoProfile", "-File", Path.Combine(RepoRoot(), "Darling/tools/check-runtime-currency.ps1"),
