@@ -9,6 +9,7 @@
 using System;
 using System.Text.Json;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -23,14 +24,15 @@ public sealed class ClientTimeoutsJudgedCountTests
     [Fact]
     public void TheJudgedCountAndRate_MatchWhatTheEvaluatorJudges_AndTheTwoNewEventCountsAreRight()
     {
-        /* 160 sampled events: 100 from etl (10 under the floor), 40 from azdata (3 under the floor, 12 metadata statements, the two disjoint)
-           and 20 from SSMS IntelliSense (its 4 short ones are already left out by name, so they are not counted twice). */
+        /* 190 sampled events: 100 from etl (10 under the floor), 40 from azdata (3 under the floor, 12 metadata statements, the two disjoint),
+           30 from dbatools (2 under the floor, 10 SMO metadata reads, the two disjoint, #8877) and 20 from SSMS IntelliSense (its 4 short ones are already left out by name, so they are not counted twice). */
         var reading = new AttentionReading(
             TotalCount: 1600, CoveredMinutes: 5, RunCount: 6, NewestRunTime: new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc),
             Groups: new[]
             {
                 new AttentionGroup("sales", "etl", 100, ShortSamples: 10),
                 new AttentionGroup("sales", "azdata", 40, ShortSamples: 3, AzdataMetadataSamples: 12),
+                new AttentionGroup("sales", AttentionWindowSql.DbatoolsClientApp, 30, ShortSamples: 2, DbatoolsMetadataSamples: 10),
                 new AttentionGroup("sales", "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense", 20, ShortSamples: 4),
             });
 
@@ -42,6 +44,7 @@ public sealed class ClientTimeoutsJudgedCountTests
         {
             new ClientTimeoutSample(created, created, "sales", "etl", "ws-1", 51, 400, "fp-a", "SELECT 1", BelowDurationFloor: true),
             new ClientTimeoutSample(created, created, "sales", "azdata", "ws-2", 52, 90_000, "fp-b", "create table #sver", AzdataMetadata: true),
+            new ClientTimeoutSample(created, created, "sales", AttentionWindowSql.DbatoolsClientApp, "ws-4", 54, 90_000, "fp-d", "SELECT name FROM sys.schemas WHERE name = @_msparam_0", DbatoolsMetadata: true),
             new ClientTimeoutSample(created, created, "sales", "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense", "ws-3", 53, 90_000, "fp-c", "SELECT 3"),
         };
 
@@ -51,12 +54,13 @@ public sealed class ClientTimeoutsJudgedCountTests
 
         Assert.Equal(Math.Round(finding.JudgedCount, 1, MidpointRounding.AwayFromZero), excluded.GetProperty("count_judged").GetDouble());
         Assert.Equal(finding.RatePerMinute, excluded.GetProperty("rate_per_minute_judged").GetDouble());
-        /* Guard the expectation itself: (100 - 10) + (40 - 3 - 12) = 115 of 160 sampled events pass, so 1150 of 1600 in 5 minutes. */
-        Assert.Equal(1150.0, excluded.GetProperty("count_judged").GetDouble());
-        Assert.Equal(230.0, excluded.GetProperty("rate_per_minute_judged").GetDouble());
+        /* Guard the expectation itself: (100 - 10) + (40 - 3 - 12) + (30 - 2 - 10) = 133 of 190 sampled events pass, so 1120 of 1600 in 5 minutes. */
+        Assert.Equal(1120.0, excluded.GetProperty("count_judged").GetDouble());
+        Assert.Equal(224.0, excluded.GetProperty("rate_per_minute_judged").GetDouble());
         Assert.Equal(20, excluded.GetProperty("sampled_events").GetInt64());
-        Assert.Equal(13, excluded.GetProperty("below_duration_floor_events").GetInt64());
+        Assert.Equal(15, excluded.GetProperty("below_duration_floor_events").GetInt64());
         Assert.Equal(12, excluded.GetProperty("azdata_metadata_events").GetInt64());
+        Assert.Equal(10, excluded.GetProperty("dbatools_metadata_events").GetInt64());
 
         /* The per-event excluded flag is the name rule only: a short or azdata metadata event carries its own flag instead. */
         var events = payload.GetProperty("sampled_events");
@@ -64,6 +68,9 @@ public sealed class ClientTimeoutsJudgedCountTests
         Assert.True(events[0].GetProperty("below_duration_floor").GetBoolean());
         Assert.False(events[1].GetProperty("excluded").GetBoolean());
         Assert.True(events[1].GetProperty("azdata_metadata").GetBoolean());
-        Assert.True(events[2].GetProperty("excluded").GetBoolean());
+        Assert.False(events[2].GetProperty("excluded").GetBoolean());
+        Assert.True(events[2].GetProperty("dbatools_metadata").GetBoolean());
+        Assert.False(events[1].GetProperty("dbatools_metadata").GetBoolean());
+        Assert.True(events[3].GetProperty("excluded").GetBoolean());
     }
 }
