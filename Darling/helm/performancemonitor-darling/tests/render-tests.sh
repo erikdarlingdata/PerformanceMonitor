@@ -217,7 +217,7 @@ t bundled_default
 render
 assert_eq "$(ssq '.spec.replicas')" "1" "store replicas"
 assert_eq "$(ssq '.spec.serviceName')" "\"${SS}-headless\"" "store serviceName"
-assert_eq "$(ssq '.spec.template.spec.containers[0].image')" '"timescale/timescaledb:2.31.0-pg17"' "store image"
+assert_eq "$(ssq '.spec.template.spec.containers[0].image')" '"timescale/timescaledb:2.32.0-pg17"' "store image"
 assert_eq "$(ssq '.spec.template.spec.containers[0].env[] | select(.name == "PGDATA") | .value')" '"/var/lib/postgresql/data/pgdata"' "PGDATA"
 assert_eq "$(ssq '.spec.template.spec.containers[0].volumeMounts[] | select(.name == "data") | .mountPath')" '"/var/lib/postgresql/data"' "data mount"
 assert_eq "$(ssq '.spec.template.spec.containers[0].env[] | select(.name == "POSTGRES_USER") | .value')" '"darling"' "POSTGRES_USER"
@@ -228,7 +228,7 @@ assert_eq "$(ssq '.spec.template.spec.volumes[] | select(.name == "store-passwor
 assert_eq "$(ssq '.spec.template.spec.containers[0].readinessProbe.exec.command | join(" ")')" '"pg_isready -U darling -d darling"' "store readiness"
 assert_eq "$(ssq '.spec.template.spec.containers[0].resources')" '{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}' "store resources"
 assert_eq "$(ssq '.spec.volumeClaimTemplates[0].spec.resources.requests.storage')" '"10Gi"' "store pvc size"
-# 70:70 is the postgres user of the store image: docker run --rm --entrypoint id timescale/timescaledb:2.31.0-pg17 postgres
+# 70:70 is the postgres user of the store image: docker run --rm --entrypoint id timescale/timescaledb:2.32.0-pg17 postgres
 assert_eq "$(ssq '.spec.template.spec.securityContext')" \
   '{"runAsNonRoot":true,"runAsUser":70,"runAsGroup":70,"fsGroup":70,"fsGroupChangePolicy":"OnRootMismatch","seccompProfile":{"type":"RuntimeDefault"}}' "store pod securityContext"
 assert_eq "$(ssq '.spec.template.spec.containers[0].securityContext')" \

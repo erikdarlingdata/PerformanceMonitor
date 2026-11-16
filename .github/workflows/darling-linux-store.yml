@@ -60,7 +60,7 @@ permissions:
 # The store the service talks to: the same image family and the same worker and preload settings as
 # Darling/compose/docker-compose.yml, pinned to a tag so a new TimescaleDB release cannot turn this red on its own.
 env:
-  STORE_IMAGE: timescale/timescaledb:2.31.0-pg17
+  STORE_IMAGE: timescale/timescaledb:2.32.0-pg17
   DARLING_IMAGE: performancemonitor-darling:pr
 
 concurrency:
