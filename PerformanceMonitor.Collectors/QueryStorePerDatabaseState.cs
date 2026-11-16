@@ -49,6 +49,10 @@ public static class QueryStorePerDatabaseState
         /* #2312: the open-interval refresh stamp, per database like the pair above, under its own owner
            because a prefix pruned under the wrong collector name silently deletes nothing. */
         (QueryStoreOpenIntervalState.StateCollectorName, QueryStoreOpenIntervalState.WatermarkKeyPrefix),
+        /* #8865: the newest CHECKDB remembered per database, keyed checkdb:<database>. The owner is the
+           definition's name, read off it rather than retyped, because a prefix pruned under the wrong
+           collector name silently deletes nothing. */
+        (DatabaseProtectionCollector.Instance.Name, DatabaseProtectionErrorLogState.CheckKeyPrefix),
     };
 
     /// <summary>
