@@ -11,9 +11,10 @@ name: Darling Helm release
 #
 # Triggers. `workflow_run` after `Build` completes: only a successful run of a `release` event publishes; any other
 # completion (a failed build, a non-release event) skips the job. `workflow_dispatch` with the release tag publishes a
-# release by hand (a first publish, or a redo after a failed run); `dry_run: true` stamps, checks and packages without
-# logging in, pushing, signing or uploading, and keeps the package as a workflow artifact. GitHub runs both triggers from
-# the default branch's copy of this file, so it does nothing until the release that brings it to `main`.
+# release by hand (a redo after a failed run, or a release published before this workflow existed); `dry_run: true`
+# stamps, checks and packages without logging in, pushing, signing or uploading, and keeps the package as a workflow
+# artifact. GitHub runs both triggers from the default branch's copy of this file: it reaches `main` with the dev to main
+# merge, before that release is published, so that release's own `Build` triggers the first automatic publish.
 #
 # Re-runs: a second run for the same tag pushes the same version again, signs the new digest, and replaces both release
 # assets (--clobber), so a release always carries one matching package and checksum.
@@ -206,6 +207,9 @@ jobs:
           PACKAGE: ${{ steps.package.outputs.package }}
         run: |
           set -euo pipefail
+          # Docker's config as well as Helm's: cosign reads registry credentials from Docker's config only, and
+          # `helm registry login` writes Helm's own file (build.yml logs Docker in before it signs the image, too).
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
           echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${ACTOR}" --password-stdin
           pushed="$(helm push "${PACKAGE}" "oci://ghcr.io/${OWNER}/charts" 2>&1)" || { echo "${pushed}"; exit 1; }
           echo "${pushed}"

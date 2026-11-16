@@ -43,3 +43,18 @@ built="$(grep -E '^\s*image="ghcr\.io/.*/performancemonitor-darling"' "${REPO_RO
   | sed -E 's/^[^"]*"//; s/"[^"]*$//; s/\$\{\{ github\.repository_owner \}\}/erikdarlingdata/')"
 assert_eq "${built}" "ghcr.io/erikdarlingdata/performancemonitor-darling" "build.yml image name"
 assert_eq "$(yq '.image.repository' "${CHART_DIR}/values.yaml")" "${built}" "chart image.repository vs build.yml"
+
+t release_workflow_logs_docker_in_before_signing
+# cosign reads registry credentials from Docker's config only; helm registry login writes Helm's own file. build.yml logs
+# Docker in before it signs the image, and the chart release must do the same before it pushes and signs the chart.
+release_wf="${REPO_ROOT}/.github/workflows/darling-helm-release.yml"
+step_index() { # index of the first publish step whose run block contains the fixed string $1, or -1
+  yq ".jobs.publish.steps | to_entries | map(select(.value.run // \"\" | contains(\"$1\"))) | .[0].key // -1" "${release_wf}"
+}
+login_at="$(step_index 'docker login ghcr.io')"
+sign_at="$(step_index 'cosign sign')"
+push_at="$(step_index 'helm push')"
+[ "${login_at}" -ge 0 ] || { echo "the release workflow never runs docker login ghcr.io" >&2; exit 1; }
+[ "${sign_at}" -ge 0 ] || { echo "the release workflow has no cosign sign step" >&2; exit 1; }
+[ "${login_at}" -le "${push_at}" ] || { echo "docker login ghcr.io comes after helm push" >&2; exit 1; }
+[ "${login_at}" -lt "${sign_at}" ] || { echo "docker login ghcr.io comes after cosign sign" >&2; exit 1; }
