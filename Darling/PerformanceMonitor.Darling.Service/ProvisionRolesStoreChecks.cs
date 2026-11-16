@@ -49,10 +49,21 @@ internal static class ProvisionRolesStoreChecks
 
     internal static bool SchemaReached(int? stored, int required) => stored >= required;
 
-    internal static string DescribeSchemaTimeout(int? lastSeen, int required, int waitedSeconds) =>
-        string.Create(CultureInfo.InvariantCulture,
-            $"The store is at schema version {(lastSeen is { } seen ? seen.ToString(CultureInfo.InvariantCulture) : "none")}; this build needs {required}. "
+    /// <summary>The timeout message. When no version was ever read and a connection error was seen, the error replaces the claim that
+    /// the new pod has not finished migrating, which nothing then supports. The error never holds the connection string.</summary>
+    internal static string DescribeSchemaTimeout(int? lastSeen, int required, int waitedSeconds, string? lastError = null)
+    {
+        var stored = lastSeen is { } seen ? seen.ToString(CultureInfo.InvariantCulture) : "none";
+        if (lastSeen is null && lastError is not null)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"The store is at schema version {stored}; this build needs {required}. Waited {waitedSeconds} seconds and never read the schema version. The last error was {lastError}");
+        }
+
+        return string.Create(CultureInfo.InvariantCulture,
+            $"The store is at schema version {stored}; this build needs {required}. "
             + $"Waited {waitedSeconds} seconds: the new Darling pod has not finished migrating the store.");
+    }
 
     internal static async Task<IReadOnlyList<ForeignOwnedObject>> ReadForeignOwnedObjectsAsync(NpgsqlConnection c, CancellationToken ct)
     {
@@ -107,40 +118,45 @@ ORDER BY 2, 1, 3";
         return text.ToString();
     }
 
-    internal static async Task<(bool Reached, int? LastSeen)> WaitForSchemaAsync(
+    /// <summary>Polls until the stored schema version reaches <paramref name="required"/> or the budget is gone. An unreachable store counts as
+    /// not migrated yet; the last connection error (type and message, which carry no password) is returned and shown in the per-minute line
+    /// until a read succeeds, so "unreachable" and "not migrated" can be told apart.</summary>
+    internal static async Task<(bool Reached, int? LastSeen, string? LastError)> WaitForSchemaAsync(
         Func<CancellationToken, Task<int?>> readVersion, int required, TimeSpan budget, TimeSpan poll,
         TextWriter log, TimeProvider time, CancellationToken ct)
     {
         var start = time.GetUtcNow();
         var lastLogged = start - LogInterval;
         int? lastSeen = null;
+        string? lastError = null;
         while (true)
         {
             try
             {
                 lastSeen = await readVersion(ct);
+                lastError = null;
                 if (SchemaReached(lastSeen, required))
                 {
-                    return (true, lastSeen);
+                    return (true, lastSeen, null);
                 }
             }
             catch (Exception ex) when (ex is NpgsqlException or SocketException)
             {
-                // The store is not reachable yet: the same as not migrated, so keep waiting until the budget is gone.
+                lastError = $"{ex.GetType().Name}: {ex.Message}";
             }
 
             var now = time.GetUtcNow();
             var remaining = budget - (now - start);
             if (remaining <= TimeSpan.Zero)
             {
-                return (false, lastSeen);
+                return (false, lastSeen, lastError);
             }
 
             if (now - lastLogged >= LogInterval)
             {
                 lastLogged = now;
                 await log.WriteLineAsync(string.Create(CultureInfo.InvariantCulture,
-                    $"Waiting for the store schema: stored {(lastSeen is { } seen ? seen.ToString(CultureInfo.InvariantCulture) : "none")}, required {required}."));
+                    $"Waiting for the store schema: stored {(lastSeen is { } seen ? seen.ToString(CultureInfo.InvariantCulture) : "none")}, required {required}.{(lastError is null ? string.Empty : " Last error: " + lastError)}"));
             }
 
             await Task.Delay(remaining < poll ? remaining : poll, time, ct);

@@ -155,6 +155,12 @@ public static partial class DarlingCliCommands
             }
         }
 
+        if (values["--host"].Contains(',', StringComparison.Ordinal))
+        {
+            error = "--host must be one host: a comma-separated list is refused, because the pgpass line matches one host.";
+            return false;
+        }
+
         if (!int.TryParse(values["--port"], NumberStyles.None, CultureInfo.InvariantCulture, out var port) || port is < 1 or > 65535)
         {
             error = "--port must be a number from 1 to 65535.";
@@ -204,6 +210,12 @@ public static partial class DarlingCliCommands
             || !string.IsNullOrEmpty(builder.SslCertificate) || !string.IsNullOrEmpty(builder.SslKey) || !string.IsNullOrEmpty(builder.SslPassword))
         {
             error = $"The connection string may carry no Root Certificate other than {ChartStoreCaPath}, and no SSL Certificate, SSL Key or SSL Password.";
+            return null;
+        }
+
+        if ((builder.SslMode is SslMode.VerifyCA or SslMode.VerifyFull) && string.IsNullOrEmpty(builder.RootCertificate))
+        {
+            error = $"The connection string has SSL Mode {builder.SslMode} and no Root Certificate. psql (libpq) needs a root certificate file to verify the server: add Root Certificate={ChartStoreCaPath} and set store.external.caSecret, or use another SSL Mode.";
             return null;
         }
 
@@ -336,11 +348,11 @@ public static partial class DarlingCliCommands
                 }
             }
 
-            var (reached, lastSeen) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
+            var (reached, lastSeen, lastError) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
                 ReadVersionAsync, required, TimeSpan.FromSeconds(args.WaitSeconds), schemaPoll, stdout, time, ct);
             if (!reached)
             {
-                stderr.WriteLine(ProvisionRolesStoreChecks.DescribeSchemaTimeout(lastSeen, required, args.WaitSeconds));
+                stderr.WriteLine(ProvisionRolesStoreChecks.DescribeSchemaTimeout(lastSeen, required, args.WaitSeconds, lastError));
                 return ProvisionRolesExitCodes.SchemaWaitTimedOut;
             }
 

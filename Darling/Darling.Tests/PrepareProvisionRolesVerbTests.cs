@@ -68,6 +68,16 @@ public sealed class PrepareProvisionRolesVerbTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData("a,b")]
+    [InlineData("a.example,b.example")]
+    public void Parse_PasswordKind_RefusesAHostList(string host)
+    {
+        Assert.False(DarlingCliCommands.TryParsePrepareProvisionRolesArgs(With(PasswordKindArgs(), "--host", host), out _, out var error));
+        Assert.Contains("--host", error, StringComparison.Ordinal);
+        Assert.Contains("one host", error, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Parse_ConnectionStringKind_RefusesHostOptions()
     {
@@ -134,6 +144,33 @@ public sealed class PrepareProvisionRolesVerbTests : IDisposable
         Assert.Null(login);
         Assert.NotNull(error);
         Assert.DoesNotContain("p-0123456789abcdef", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("VerifyFull")]
+    [InlineData("VerifyCA")]
+    public void ConnectionStringFile_Refuses_VerifyModesWithoutARootCertificate(string mode)
+    {
+        /* Npgsql would check the OS trust store, but libpq's verify-ca and verify-full read sslrootcert and psql exits 2 without it. */
+        var login = DarlingCliCommands.TryReadProvisionRolesLogin(
+            ConnectionStringArgs(), $"Host=h;Database=d;Username=u;Password=p-0123456789abcdef;SSL Mode={mode}\n", out var error);
+
+        Assert.Null(login);
+        Assert.Contains("Root Certificate", error, StringComparison.Ordinal);
+        Assert.Contains("/etc/darling/store-ca/ca.crt", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("p-0123456789abcdef", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("Host=h", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Require")]
+    [InlineData("Prefer")]
+    public void ConnectionStringFile_AcceptsOtherModesWithoutARootCertificate(string mode)
+    {
+        var login = DarlingCliCommands.TryReadProvisionRolesLogin(
+            ConnectionStringArgs(), $"Host=h;Database=d;Username=u;Password=p-0123456789abcdef;SSL Mode={mode}\n", out var error);
+
+        Assert.True(login is not null, error);
     }
 
     [Fact]

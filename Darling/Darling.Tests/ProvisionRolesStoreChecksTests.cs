@@ -43,6 +43,18 @@ public sealed class ProvisionRolesStoreChecksTests
     }
 
     [Fact]
+    public void DescribeSchemaTimeout_WithNoVersionEverRead_NamesTheConnectionError()
+    {
+        var text = ProvisionRolesStoreChecks.DescribeSchemaTimeout(null, 266, 900, "NpgsqlException: Failed to connect to 10.0.0.1:5432");
+
+        Assert.Contains("Failed to connect to 10.0.0.1:5432", text, StringComparison.Ordinal);
+        Assert.Contains("NpgsqlException", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("has not finished migrating", text, StringComparison.Ordinal);
+        Assert.Contains("266", text, StringComparison.Ordinal);
+        Assert.Contains("has not finished migrating the store", ProvisionRolesStoreChecks.DescribeSchemaTimeout(250, 266, 900, "NpgsqlException: down"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DescribeOwnership_NullWhenNothingIsForeign() =>
         Assert.Null(ProvisionRolesStoreChecks.DescribeOwnership("app", Array.Empty<ProvisionRolesStoreChecks.ForeignOwnedObject>()));
 
@@ -79,7 +91,7 @@ public sealed class ProvisionRolesStoreChecksTests
     {
         var reads = Script(null, null, 266);
         var time = new SteppingTimeProvider();
-        var (reached, lastSeen) = await Wait(reads, time, new StringWriter());
+        var (reached, lastSeen, _) = await Wait(reads, time, new StringWriter());
 
         Assert.True(reached);
         Assert.Equal(266, lastSeen);
@@ -91,7 +103,7 @@ public sealed class ProvisionRolesStoreChecksTests
     public async Task WaitForSchemaAsync_ThrowThen266_Reached()
     {
         var reads = Script(new NpgsqlException("down"), 266);
-        var (reached, lastSeen) = await Wait(reads, new SteppingTimeProvider(), new StringWriter());
+        var (reached, lastSeen, _) = await Wait(reads, new SteppingTimeProvider(), new StringWriter());
 
         Assert.True(reached);
         Assert.Equal(266, lastSeen);
@@ -101,7 +113,7 @@ public sealed class ProvisionRolesStoreChecksTests
     public async Task WaitForSchemaAsync_SocketExceptionCountsAsNotYet()
     {
         var reads = Script(new System.Net.Sockets.SocketException(), 266);
-        var (reached, _) = await Wait(reads, new SteppingTimeProvider(), new StringWriter());
+        var (reached, _, _) = await Wait(reads, new SteppingTimeProvider(), new StringWriter());
 
         Assert.True(reached);
     }
@@ -115,7 +127,7 @@ public sealed class ProvisionRolesStoreChecksTests
     {
         var log = new StringWriter();
         var time = new SteppingTimeProvider();
-        var (reached, lastSeen) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
+        var (reached, lastSeen, _) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
             _ => Task.FromResult<int?>(265), 266, TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(10), log, time, CancellationToken.None);
 
         Assert.False(reached);
@@ -131,17 +143,41 @@ public sealed class ProvisionRolesStoreChecksTests
     }
 
     [Fact]
+    public async Task WaitForSchemaAsync_ReportsTheConnectionError_InTheMinuteLineAndTheResult()
+    {
+        var log = new StringWriter();
+        var (reached, lastSeen, lastError) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
+            _ => throw new NpgsqlException("Failed to connect to 10.0.0.1:5432"), 266, TimeSpan.FromMinutes(2), TimeSpan.FromSeconds(10), log, new SteppingTimeProvider(), CancellationToken.None);
+
+        Assert.False(reached);
+        Assert.Null(lastSeen);
+        Assert.Equal("NpgsqlException: Failed to connect to 10.0.0.1:5432", lastError);
+        var lines = log.ToString().Split(Newlines, StringSplitOptions.RemoveEmptyEntries);
+        Assert.NotEmpty(lines);
+        Assert.All(lines, line => Assert.Contains("NpgsqlException: Failed to connect to 10.0.0.1:5432", line, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task WaitForSchemaAsync_ForgetsTheErrorOnceAReadSucceeds()
+    {
+        var (_, lastSeen, lastError) = await Wait(Script(new NpgsqlException("down"), 265), new SteppingTimeProvider(), new StringWriter());
+
+        Assert.Equal(265, lastSeen);
+        Assert.Null(lastError);
+    }
+
+    [Fact]
     public async Task WaitForSchemaAsync_KeepsLastSeenAcrossAFailedRead()
     {
         var reads = Script(265, new NpgsqlException("down"));
-        var (reached, lastSeen) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
+        var (reached, lastSeen, _) = await ProvisionRolesStoreChecks.WaitForSchemaAsync(
             reads.ReadAsync, 266, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(10), new StringWriter(), new SteppingTimeProvider(), CancellationToken.None);
 
         Assert.False(reached);
         Assert.Equal(265, lastSeen);
     }
 
-    private static Task<(bool Reached, int? LastSeen)> Wait(ScriptedReader reads, TimeProvider time, TextWriter log) =>
+    private static Task<(bool Reached, int? LastSeen, string? LastError)> Wait(ScriptedReader reads, TimeProvider time, TextWriter log) =>
         ProvisionRolesStoreChecks.WaitForSchemaAsync(reads.ReadAsync, 266, TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(10), log, time, CancellationToken.None);
 
     private static ScriptedReader Script(params object?[] steps) => new(steps);
