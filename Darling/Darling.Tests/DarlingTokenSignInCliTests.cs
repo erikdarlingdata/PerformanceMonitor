@@ -24,8 +24,8 @@ public sealed class DarlingTokenSignInCliTests
 {
     private const string Oidc = "\"authority\":\"https://login.example.com\",\"clientId\":\"cid\",\"clientSecret\":\"secret\"";
 
-    private static DarlingConfig WebConfig(string networkBody, bool managed = true) =>
-        DarlingConfig.Parse("{\"postgres\":{\"managed\":" + (managed ? "true" : "false") + "},\"web\":{\"network\":{" + networkBody + "}}}");
+    private static DarlingConfig WebConfig(string networkBody, bool managed = true, bool enabled = true) =>
+        DarlingConfig.Parse("{\"postgres\":{\"managed\":" + (managed ? "true" : "false") + "},\"web\":{\"enabled\":" + (enabled ? "true" : "false") + ",\"network\":{" + networkBody + "}}}");
 
     private static DarlingConfig WithOidc(string listen, string signIn, string extra = "") =>
         WebConfig(
@@ -122,6 +122,48 @@ public sealed class DarlingTokenSignInCliTests
 
         /* The same configuration in a container is exposure-capable, as the service sees it. */
         Assert.StartsWith("INFO:", Assert.Single(DarlingCliCommands.TokenSignInFindings(config, inContainer: true)), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("bogus")]
+    [InlineData("loopback")]
+    public void Findings_DashboardDisabled_IsOneInfoLine_WhateverTheSetting(string signIn)
+    {
+        var findings = DarlingCliCommands.TokenSignInFindings(
+            WebConfig($"\"oidc\":{{{Oidc},\"tokenSignIn\":\"{signIn}\"}}", enabled: false));
+
+        var line = Assert.Single(findings);
+        Assert.StartsWith("INFO:", line, StringComparison.Ordinal);
+        Assert.Contains("disabled", line, StringComparison.Ordinal);
+        Assert.Contains("not evaluated", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateConfig_DashboardDisabledWithALeftoverOffAndNoListen_ExitsZero()
+    {
+        var dir = Directory.CreateTempSubdirectory("token-sign-in-validate-").FullName;
+        try
+        {
+            var path = Path.Combine(dir, "darling.json");
+            File.WriteAllText(
+                path,
+                "{\"postgres\":{\"managed\":true,\"dataDirectory\":" + JsonSerializer.Serialize(Path.Combine(dir, "pgdata")) + "},"
+                + "\"web\":{\"enabled\":false,\"network\":{\"oidc\":{" + Oidc + ",\"tokenSignIn\":\"off\"}}}}");
+
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            var exit = await DarlingCliCommands.ValidateConfigAsync(path, output, error, _ => null, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("INFO: web.enabled is false", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("ERROR:", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("NOTE: web.network.oidc.tokenSignIn", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -286,7 +328,7 @@ public sealed class DarlingTokenSignInCliTests
             path,
             "{\"postgres\":{\"managed\":true,\"dataDirectory\":" + JsonSerializer.Serialize(Path.Combine(dir, "pgdata")) + "},"
             + (mcpToken is null ? "" : "\"mcp\":{\"network\":{\"token\":\"" + mcpToken + "\"}},")
-            + "\"web\":{\"network\":{\"listen\":\"0.0.0.0\"," + (allowFrom ? "\"allowFrom\":\"10.0.0.0/8\"," : "") + tokenMember
+            + "\"web\":{\"enabled\":true,\"network\":{\"listen\":\"0.0.0.0\"," + (allowFrom ? "\"allowFrom\":\"10.0.0.0/8\"," : "") + tokenMember
             + "\"oidc\":{" + Oidc + ",\"tokenSignIn\":\"" + signIn + "\"}}}}");
         return path;
     }

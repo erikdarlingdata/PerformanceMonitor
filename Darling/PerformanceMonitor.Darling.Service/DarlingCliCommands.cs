@@ -887,7 +887,8 @@ public static partial class DarlingCliCommands
     /// say the same thing. "Exposed" is the service's own verdict, <see cref="DarlingWebHostService.ResolveWebBind"/> (listen, allowFrom, a
     /// token or the <c>off</c> + OIDC widening, and a managed store or a container), so a configuration the start would degrade to
     /// loopback-only is not called exposed here. <paramref name="inContainer"/> is the ambient container marker unless a test passes it. The OIDC client the start refuses (a bad authority, say) needs a live start, so it is not judged here. Empty under <c>on</c> or with no
-    /// <c>web.network.oidc</c> block. Never holds a token.
+    /// <c>web.network.oidc</c> block. With <c>web.enabled</c> false it is one <c>INFO:</c> line and nothing else, because the service never
+    /// evaluates the setting for a dashboard that is not started. Never holds a token.
     /// </summary>
     internal static IReadOnlyList<string> TokenSignInFindings(DarlingConfig config, bool? inContainer = null)
     {
@@ -895,6 +896,16 @@ public static partial class DarlingCliCommands
         var network = config.Web.Network;
         if (network?.Oidc is not { } oidc)
         {
+            return findings;
+        }
+
+        /* The service evaluates tokenSignIn only for a dashboard it starts, so a leftover setting under a disabled dashboard is not a problem.
+           web.enabled here is the file's seed: after the first run the store decides, so the line names that. */
+        if (!config.Web.Enabled)
+        {
+            findings.Add(
+                "INFO: web.enabled is false in darling.json, so the web dashboard is disabled and web.network.oidc.tokenSignIn is not evaluated. "
+                + "If the dashboard is enabled in the store (--enable-web), set web.enabled to true to check it here.");
             return findings;
         }
 
