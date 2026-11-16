@@ -291,6 +291,36 @@ public sealed class AttentionAlertTests
     }
 
     [Fact]
+    public void DbatoolsSmoMetadataReads_AreLeftOut_AndNamedApartFromAzureDataStudio_ButItsOwnQueriesStillCount()
+    {
+        /* 540 over 3 minutes. 90 dbatools SMO reads and 30 Azure Data Studio metadata statements are left out, 60 sampled events stay: 540 x 60/180 = 180 judged = 60 per minute. */
+        var window = GroupsWindow(540,
+            new AttentionSampleGroup(T0, "master", AttentionWindowSql.DbatoolsClientApp, 120, DbatoolsMetadataSamples: 90),
+            new AttentionSampleGroup(T0, "master", "azdata", 30, AzdataMetadataSamples: 30),
+            new AttentionSampleGroup(T0, "sales", AttentionWindowSql.DbatoolsClientApp, 30));
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.Equal(90, finding.DbatoolsMetadataSamples);
+        Assert.Equal(30, finding.AzdataMetadataSamples);
+        Assert.Equal(540 * 60d / 180, finding.JudgedCount, 3);
+        Assert.Contains("90 of the 180 sampled events were dbatools SMO metadata reads", finding.Summary, StringComparison.Ordinal);
+        Assert.Contains("30 of the 180 sampled events were Azure Data Studio metadata queries", finding.Summary, StringComparison.Ordinal);
+
+        var line = AlertContextBuilders.BuildClientTimeoutItems(finding, window)
+            .SelectMany(i => i.Fields)
+            .Single(f => f.Label == "dbatools").Value;
+        Assert.Contains("90 of 180 sampled events were dbatools SMO metadata reads", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DbatoolsItself_IsNotAnExcludedApp_BecauseItRunsPeoplesOwnQueriesToo()
+    {
+        Assert.False(AttentionEvaluator.IsExcludedApp(AttentionWindowSql.DbatoolsClientApp));
+    }
+
+    [Fact]
     public void AzdataItself_IsNotAnExcludedApp_BecauseItsQueryEditorUsesTheSameName()
     {
         Assert.False(AttentionEvaluator.IsExcludedApp("azdata"));

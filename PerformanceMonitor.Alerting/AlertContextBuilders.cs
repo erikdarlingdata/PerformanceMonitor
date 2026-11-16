@@ -799,6 +799,12 @@ public static class AlertContextBuilders
                 $"{finding.AzdataMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were Azure Data Studio metadata queries; they are left out of the rate judged")));
         }
 
+        if (finding.DbatoolsMetadataSamples > 0)
+        {
+            reading.Fields.Add(("dbatools", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.DbatoolsMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were dbatools SMO metadata reads; they are left out of the rate judged")));
+        }
+
         if (finding.Bars is not null)
         {
             reading.Fields.Add(("Bar", AttentionEvaluator.BarSentence(finding)));
