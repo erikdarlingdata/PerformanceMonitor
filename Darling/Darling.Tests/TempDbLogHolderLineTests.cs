@@ -118,21 +118,33 @@ public sealed class TempDbLogHolderLineTests
     }
 
     [Fact]
-    public void TheTrendPayload_CarriesPeakLogUsedMb_AndTheHolderSentence()
+    public void TheTrendPayload_CarriesPeakLogUsedMbPerPoint_AndTheRestOfTheLogOncePerWindow()
     {
         var points = new List<TempDbBucketPoint>
         {
-            new(AsOf.AddMinutes(-10), 1, 2, 3, 6, 100, 7, 4, 5, 51, 1.5, 70, 1000, "ACTIVE_TRANSACTION", "ACTIVE_TRANSACTION", 87, "app_user", 700.04),
+            new(AsOf.AddMinutes(-10), 1, 2, 3, 6, 100, 7, 4, 5, 51, 1.5, 70, 700.04),
             new(AsOf.AddMinutes(-5), 1, 2, 3, 6, 100, 7, 4, 5, 51, 1.5),
         };
-        var holder = Holder(open: TimeSpan.FromMinutes(14), reason: "ACTIVE_TRANSACTION");
+        var holder = Holder(open: TimeSpan.FromMinutes(14), reason: "ACTIVE_TRANSACTION") with { LogTotalMb = 1000.04, LogReuseWaitDesc = "ACTIVE_TRANSACTION" };
 
         using var doc = JsonDocument.Parse(TrendPayloads.TempDbTrend("server-a", 24, points, 5, requested: false, autoBudget: 100, newestHolder: holder));
         var root = doc.RootElement;
 
         Assert.Equal(TempDbLogHolderLine.Build(holder), root.GetProperty("log_holder_note").GetString());
+        Assert.Equal(1000.0, root.GetProperty("log_total_mb").GetDouble());
+        Assert.Equal("ACTIVE_TRANSACTION", root.GetProperty("log_reuse_wait_desc").GetString());
+        Assert.Equal("ACTIVE_TRANSACTION", root.GetProperty("log_truncation_holdup_reason").GetString());
+        Assert.Equal(87, root.GetProperty("log_holder_session_id").GetInt32());
+        Assert.Equal("app_user", root.GetProperty("log_holder_login_name").GetString());
         var trend = root.GetProperty("trend");
         Assert.Equal(700.0, trend[0].GetProperty("peak_log_used_mb").GetDouble());
+        Assert.Equal(70.0, trend[0].GetProperty("peak_log_used_percent").GetDouble());
+        /* The size, reuse wait and holder repeat on nearly every point, so they ride once on the window and never on a point. */
+        Assert.False(trend[0].TryGetProperty("log_total_mb", out _));
+        Assert.False(trend[0].TryGetProperty("log_reuse_wait_desc", out _));
+        Assert.False(trend[0].TryGetProperty("log_truncation_holdup_reason", out _));
+        Assert.False(trend[0].TryGetProperty("log_holder_session_id", out _));
+        Assert.False(trend[0].TryGetProperty("log_holder_login_name", out _));
         /* A bucket with no reading leaves the field out, so a server with no log reading pays nothing for it against the response budget. */
         Assert.False(trend[1].TryGetProperty("peak_log_used_mb", out _));
         Assert.False(trend[1].TryGetProperty("peak_log_used_percent", out _));
@@ -148,5 +160,7 @@ public sealed class TempDbLogHolderLineTests
 
         Assert.Equal(JsonValueKind.Null, noHolder.RootElement.GetProperty("log_holder_note").ValueKind);
         Assert.Equal(JsonValueKind.Null, neverRead.RootElement.GetProperty("log_holder_note").ValueKind);
+        Assert.Equal(JsonValueKind.Null, neverRead.RootElement.GetProperty("log_holder_session_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, neverRead.RootElement.GetProperty("log_total_mb").ValueKind);
     }
 }

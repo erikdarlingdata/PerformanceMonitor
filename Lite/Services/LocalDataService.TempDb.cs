@@ -146,7 +146,9 @@ SELECT
     holder_program_name,
     holder_begin_time,
     holder_log_bytes_used,
-    log_truncation_holdup_reason
+    log_truncation_holdup_reason,
+    log_total_mb,
+    log_reuse_wait_desc
 FROM v_tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -179,7 +181,9 @@ LIMIT 1";
             reader.IsDBNull(3) ? null : reader.GetString(3),
             reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
             reader.IsDBNull(5) ? null : reader.GetInt64(5),
-            reader.IsDBNull(6) ? null : reader.GetString(6));
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+            reader.IsDBNull(8) ? null : reader.GetString(8));
     }
 
     /// <summary>

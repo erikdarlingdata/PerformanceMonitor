@@ -59,13 +59,13 @@ internal sealed record CpuBucketPoint(
     int PeakSqlServerCpu, int? PeakTotalCpu, long Samples);
 
 /// <summary>One bucket of tempdb samples (#3960): each space figure averaged, the fullest collection's reserved and
-/// version-store space, and the most sessions and the single largest consumer any collection in it saw.</summary>
+/// version-store space, and the most sessions and the single largest consumer any collection in it saw. The two log figures are
+/// the fullest the tempdb log was in the bucket (#8881); the log's total size, reuse wait and holder are stated once for the window.</summary>
 internal sealed record TempDbBucketPoint(
     DateTime BucketStart, double UserObjectsMb, double InternalObjectsMb, double VersionStoreMb, double TotalReservedMb,
     double UnallocatedMb, double PeakTotalReservedMb, double PeakVersionStoreMb, long SessionsUsingTempDb,
     int TopConsumerSessionId, double TopConsumerMb,
-    double? PeakLogUsedPercent = null, double? LogTotalMb = null, string? LogReuseWaitDesc = null, string? LogTruncationHoldupReason = null,
-    int? LogHolderSessionId = null, string? LogHolderLoginName = null, double? PeakLogUsedMb = null);
+    double? PeakLogUsedPercent = null, double? PeakLogUsedMb = null);
 
 /// <summary>One bucket of memory samples (#3960): each level averaged over the samples in the bucket.</summary>
 internal sealed record MemoryBucketPoint(DateTime BucketStart, double TotalServerMemoryMb, double TargetServerMemoryMb, double BufferPoolMb, double PlanCacheMb);
@@ -421,12 +421,13 @@ internal static class TrendPayloads
     /// say for them, because they are the bucket's busiest collection, not averages.</summary>
     public const string TempDbFiguresNote =
         "sessions_using_tempdb is the most sessions any collection in the bucket saw, and top_consumer_* the single largest consumer. "
-        + "peak_log_used_percent and peak_log_used_mb are the fullest the tempdb LOG was in the bucket, and log_total_mb, log_reuse_wait_desc, log_truncation_holdup_reason and the log_holder_* fields describe that fullest collection. "
-        + "The log fields are left out of a point where the engine could not report them or the row predates them, and the holder is captured only while the log is 50 percent used or more. "
-        + "log_holder_note is one sentence on the oldest open tempdb log transaction as of the newest collection in the window, and null when that collection has no holder.";
+        + "peak_log_used_percent and peak_log_used_mb are the fullest the tempdb LOG was in the bucket, and are left out of a point where the engine could not report them or the row predates them. "
+        + "The rest of the log picture is stated once for the window, as of the newest collection in it, not on every point: log_total_mb is the log's size, log_reuse_wait_desc what the log is waiting on before it can reuse space, "
+        + "log_truncation_holdup_reason the engine's truncation holdup, and log_holder_session_id and log_holder_login_name the oldest open tempdb log transaction (captured only while the log is 50 percent used or more). "
+        + "log_holder_note is that holder as one sentence. These window fields are null when the newest collection has no reading or no holder.";
 
-    /// <summary>One tempdb point. The log fields (#8881) are written only where the bucket has a value: a store with no log reading, or rows stored before the log
-    /// columns, would otherwise spend about 190 bytes of nulls on every point against the response budget.</summary>
+    /// <summary>One tempdb point. The two log peaks (#8881) are written only where the bucket has a value: a store with no log reading, or rows stored before the log
+    /// columns, spends nothing on them. The log's size, reuse wait and holder repeat on nearly every point, so they are stated once for the window instead.</summary>
     private static Dictionary<string, object?> TempDbPoint(TempDbBucketPoint p)
     {
         var point = new Dictionary<string, object?>
@@ -445,11 +446,6 @@ internal static class TrendPayloads
         };
         if (p.PeakLogUsedPercent is { } lp) point["peak_log_used_percent"] = Math.Round(lp, 1);
         if (p.PeakLogUsedMb is { } lm) point["peak_log_used_mb"] = Math.Round(lm, 1);
-        if (p.LogTotalMb is { } lt) point["log_total_mb"] = Math.Round(lt, 1);
-        if (p.LogReuseWaitDesc is { } reuse) point["log_reuse_wait_desc"] = reuse;
-        if (p.LogTruncationHoldupReason is { } holdup) point["log_truncation_holdup_reason"] = holdup;
-        if (p.LogHolderSessionId is { } session) point["log_holder_session_id"] = session;
-        if (p.LogHolderLoginName is { } login) point["log_holder_login_name"] = login;
         return point;
     }
 
@@ -466,7 +462,12 @@ internal static class TrendPayloads
             ["bucket_minutes"] = bucketMinutes,
             ["aggregate_note"] = TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget),
             ["note"] = TempDbFiguresNote,
-            /* #8881: the one line the web page draws under the tempdb chart, null (so the page draws nothing) when the newest collection in the window has no holder. */
+            /* #8881: the log's size, reuse wait and holder as of the newest collection in the window, stated once. log_holder_note is the one line the web page draws under the tempdb chart, null (so the page draws nothing) when that collection has no holder. */
+            ["log_total_mb"] = newestHolder?.LogTotalMb is { } total ? Math.Round(total, 1) : null,
+            ["log_reuse_wait_desc"] = newestHolder?.LogReuseWaitDesc,
+            ["log_truncation_holdup_reason"] = newestHolder?.HoldupReason,
+            ["log_holder_session_id"] = newestHolder?.SessionId,
+            ["log_holder_login_name"] = newestHolder?.LoginName,
             ["log_holder_note"] = TempDbLogHolderLine.Build(newestHolder),
             ["trend"] = points.Select(TempDbPoint),
         };

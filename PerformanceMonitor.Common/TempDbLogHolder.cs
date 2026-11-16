@@ -19,6 +19,7 @@ namespace PerformanceMonitor.Common;
 /// tempdb transaction and why the log cannot clear. Lite, the Darling viewer and the web page's read each fill one from their own
 /// store, so all three screens say the same thing through <see cref="TempDbLogHolderLine.Build"/>. <see cref="SessionId"/> is null
 /// when the collector captured no holder, which it does below 50 percent of the log used and on an engine that cannot report one.
+/// <see cref="LogTotalMb"/> and <see cref="LogReuseWaitDesc"/> are read only by <c>get_tempdb_trend</c>, which states them once for the window instead of on every point.
 /// </summary>
 internal sealed record TempDbLogHolder(
     DateTime AsOfUtc,
@@ -27,7 +28,9 @@ internal sealed record TempDbLogHolder(
     string? ProgramName,
     DateTime? BeginTimeUtc,
     long? LogBytesUsed,
-    string? HoldupReason);
+    string? HoldupReason,
+    double? LogTotalMb = null,
+    string? LogReuseWaitDesc = null);
 
 /// <summary>The one plain line the three tempdb screens show beside the chart when the newest point has a holder (#8881).</summary>
 internal static class TempDbLogHolderLine
