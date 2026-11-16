@@ -187,9 +187,15 @@ public static class DatabaseProtectionErrorLogState
 
         var before = loaded;
         var archives = enumerated.Where(a => a.Archive > 0).ToList();
-        if (before.Markers.NewestArchive is null && archives.Count > 0)
+        if (before.Markers.NewestArchive is null)
         {
-            before = before with { Markers = before.Markers with { NewestArchive = archives.Max(a => a.LogDate) } };
+            /* #8865: with no archives yet the marker is the minimum date, not null: a null marker would make the
+               first archive that later appears look like a first run and be taken as already read, losing every
+               CHECKDB line written between the last current-log read and that roll. */
+            before = before with
+            {
+                Markers = before.Markers with { NewestArchive = archives.Count > 0 ? archives.Max(a => a.LogDate) : DateTime.MinValue },
+            };
         }
 
         var read = new List<ArchiveInfo> { current };

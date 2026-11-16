@@ -138,6 +138,33 @@ public sealed class DatabaseProtectionErrorLogStateTests
     }
 
     [Fact]
+    public void FirstRunWithNoArchives_StillReadsTheFirstArchiveThatAppearsLater()
+    {
+        var onlyCurrent = Logs(1);
+        var plan1 = S.PlanArchives(Empty(), onlyCurrent, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0 }, Numbers(plan1));
+        var after1 = S.MarkersAfter(plan1, plan1.Read.Select(a => a.LogDate).ToArray(), onlyCurrent);
+        Assert.Equal(DateTime.MinValue, after1.NewestArchive);
+        Assert.True(after1.BackfillDone);
+
+        /* Through the real state round trip: the minimum date must survive Format and Load. */
+        var state = new Dictionary<string, string>
+        {
+            [S.InstanceKey] = "instance-a",
+            [S.NewestArchiveKey] = S.FormatDates(new[] { after1.NewestArchive!.Value }),
+            [S.BackfillDoneKey] = bool.TrueString,
+        };
+        var loaded = S.Load(state, "instance-a");
+        Assert.Equal(DateTime.MinValue, loaded.Markers.NewestArchive);
+
+        var rolled = Logs(2);
+        var plan2 = S.PlanArchives(loaded, rolled, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0, 1 }, Numbers(plan2));
+        var after2 = S.MarkersAfter(plan2, plan2.Read.Select(a => a.LogDate).ToArray(), rolled);
+        Assert.Equal(LogDate(1), after2.NewestArchive);
+    }
+
+    [Fact]
     public void Steady_ReadsNewArchivesOldestFirst_AndABurstContinuesNextCycle()
     {
         /* Everything older than archive 6 is already read; five archives are new since the marker. */
