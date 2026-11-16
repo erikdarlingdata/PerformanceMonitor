@@ -82,6 +82,9 @@ public interface IAlertEngineSettings
     bool ClientTimeoutsEnabled { get; }
     bool LongRunningQueryEnabled { get; }
     bool TempDbSpaceEnabled { get; }
+
+    /// <summary>The TempDB Growth Won't Fit alert (#8882): ON by default. A default member, so a host that predates it keeps the default.</summary>
+    bool TempDbGrowthFitEnabled => true;
     bool LowDiskEnabled { get; }
     bool LongRunningJobEnabled { get; }
     bool FailedJobEnabled { get; }

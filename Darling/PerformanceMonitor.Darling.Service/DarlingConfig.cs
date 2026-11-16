@@ -1038,6 +1038,9 @@ public sealed class AlertsConfig
     [JsonPropertyName("tempDbSpaceThresholdPercent")]
     public int TempDbSpaceThresholdPercent { get; set; } = 80;
 
+    /// <summary>The TempDB Growth Won't Fit alert (#8882): on by default.</summary>
+    public bool TempDbGrowthFitEnabled { get; set; } = true;
+
     [JsonPropertyName("lowDiskEnabled")]
     public bool LowDiskEnabled { get; set; } = true;
 

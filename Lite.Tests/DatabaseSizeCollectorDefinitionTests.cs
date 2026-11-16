@@ -148,12 +148,13 @@ public sealed class DatabaseSizeCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_19Columns()
+    public void PayloadColumns_MatchSchemaOrder_20Columns()
     {
         var names = DatabaseSizeStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(19, names.Length);
+        Assert.Equal(20, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("vlf_count", names[18]);
+        Assert.Equal("is_autogrow_all_files", names[19]);
     }
 
     [Fact]
@@ -164,7 +165,7 @@ public sealed class DatabaseSizeCollectorDefinitionTests
             {
                 "SO", 7, 2, "LOG", "SO_log", @"D:\so_log.ldf", 8192.00m, 512.25m,
                 DBNull.Value, -1m, "FULL", 160, "ONLINE", @"D:\", 476837.12m, 100000.50m,
-                1, 10, 42,
+                1, 10, 42, DBNull.Value,
             });
 
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
@@ -176,9 +177,10 @@ public sealed class DatabaseSizeCollectorDefinitionTests
 
         var writer = new RecordingCollectorRowWriter();
         DatabaseSizeStatsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(s_deltas));
-        Assert.Equal(19, writer.Values.Count);
+        Assert.Equal(20, writer.Values.Count);
         Assert.Equal("SO", writer.Values[0]);
         Assert.Equal(true, writer.Values[16]);
         Assert.Equal(42, writer.Values[18]);
+        Assert.Null(writer.Values[19]);
     }
 }

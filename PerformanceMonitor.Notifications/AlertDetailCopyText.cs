@@ -206,7 +206,7 @@ public static class AlertChainLink
             "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" => AlertServerTab.Blocking,
             "Poison Wait" => AlertServerTab.WaitStats,
             "Long-Running Query" or "Client Timeouts" or "Forced Plan Failing" => AlertServerTab.Queries,
-            "tempdb Space" or "Version Store (PVS)" => AlertServerTab.TempDb,
+            "tempdb Space" or "tempdb Growth Fit" or "Version Store (PVS)" => AlertServerTab.TempDb,
             "Volume Free Space" => AlertServerTab.FileIo,
             "Database File Growth" => AlertServerTab.SystemEvents,
             "Database State" or "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" or "Identity Capacity" or "Agent Alert Gaps" => AlertServerTab.Configuration,

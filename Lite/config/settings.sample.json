@@ -128,6 +128,7 @@
   // ---- tempdb ---------------------------------------------------------------------------
   "alert_tempdb_space_enabled": true,
   "alert_tempdb_space_threshold_percent": 80,
+  "alert_tempdb_growth_fit_enabled": true,
 
   // ---- Disk: WARNING tier, then the CRITICAL floors (#2107) ----------------------------
   // Both tiers are OR'd within themselves: whichever of percent/GB trips first wins, which

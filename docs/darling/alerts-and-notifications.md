@@ -38,6 +38,7 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `longRunningQueryThresholdMinutes` | `30` | |
 | `tempDbSpaceEnabled` | `true` | |
 | `tempDbSpaceThresholdPercent` | `80` | |
+| `tempDbGrowthFitEnabled` | `true` | The TempDB Growth Fit alert (`tempdb Growth Fit`): fires when a tempdb file's next autogrowth is larger than the free space on its volume, on the first hourly collection. A file that cannot grow does not fire it, and the count of such files is in this alert's detail and in the TempDB Space alert's detail. |
 | `lowDiskEnabled` | `true` | Volume free space; graded CRITICAL when critically low |
 | `lowDiskThresholdPercent` | `10` | Fire below X% free; `0` disables this dimension (clamped 0–100) |
 | `lowDiskThresholdGb` | `5` | Fire below X GB free; `0` disables this dimension |

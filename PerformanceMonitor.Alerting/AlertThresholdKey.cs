@@ -121,6 +121,7 @@ public static class AlertThresholdKeys
         [nameof(IAlertEngineSettings.ClientTimeoutsEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.LongRunningQueryEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.TempDbSpaceEnabled)] = "An enable flag, not a threshold.",
+        [nameof(IAlertEngineSettings.TempDbGrowthFitEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.LowDiskEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.LongRunningJobEnabled)] = "An enable flag, not a threshold.",
         [nameof(IAlertEngineSettings.FailedJobEnabled)] = "An enable flag, not a threshold.",

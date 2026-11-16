@@ -54,6 +54,7 @@ public sealed class AlertEngineTests
         public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
+        public bool TempDbGrowthFitEnabled { get; set; } = true;
         public bool LowDiskEnabled { get; set; }
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }
@@ -127,6 +128,7 @@ public sealed class AlertEngineTests
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public List<PvsPressureInfo> PvsDatabases { get; } = new();
         public TempDbSpaceInfo? TempDb { get; set; }
+        public List<TempDbFileInfo> TempDbFiles { get; set; } = new();
         public List<AnomalousJobInfo> AnomalousJobs { get; } = new();
 
         /* #3653 (A5, Q5): the knob the engine handed the last LRQ read, so a pin can assert it travelled. The
@@ -283,6 +285,9 @@ public sealed class AlertEngineTests
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
+
+        public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<TempDbFileInfo>(TempDbFiles));
 
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PvsPressureInfo>(PvsDatabases));

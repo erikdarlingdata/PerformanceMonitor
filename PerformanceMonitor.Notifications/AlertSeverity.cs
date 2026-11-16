@@ -110,6 +110,7 @@ internal static class AlertSeverity
             /* #3653 (A8e): fires with an explicit WARNING override now (and only Warning — the engine's fire
                site says why no Critical tier exists), so this arm styles pre-#3653 replays, which were amber. */
             "tempdb Space" => ("#D97706", "WARNING", "\U0001F7E0"),
+            "tempdb Growth Fit" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Long-Running Job" => ("#D97706", "WARNING", "\U0001F7E0"),
             // Emailed/webhooked and fired as a Warning toast — was falling through to INFO-blue.
             "Failed Agent Job" => ("#D97706", "WARNING", "\U0001F7E0"),
