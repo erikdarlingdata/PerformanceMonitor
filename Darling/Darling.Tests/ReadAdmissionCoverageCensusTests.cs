@@ -208,6 +208,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",
         [WebFile + "GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
         [WebFile + "GET \"/api/session\""] = "the seat's capability probe: reads no store",
+        [WebFile + "GET \"/api/me\""] = "the calling session's own identity: reads no store",
         [WebFile + "GET \"/api/alert-templates\""] = "static: the starter templates, built in memory",
         [WebFile + "GET \"/api/views\""] = "definition read: the saved views' summaries (config rows, light)",
         [WebFile + "GET \"/api/views/{id:long}\""] = "definition read: one saved view (one config row)",
