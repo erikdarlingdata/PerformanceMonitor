@@ -15,4 +15,10 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
   </PropertyGroup>
+  <!-- #8850: StandinProcess copies Darling.Tests.Standin.exe, so the launcher must be a Windows one. A build on macOS or Linux
+       would write a launcher with no .exe, and the tests then fail when that build is run on Windows. Build the Windows launcher
+       there unless a runtime identifier is given. A Windows build is unchanged. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == '' and !$([MSBuild]::IsOSPlatform('Windows'))">
+    <DefaultAppHostRuntimeIdentifier>win-$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())</DefaultAppHostRuntimeIdentifier>
+  </PropertyGroup>
 </Project>
