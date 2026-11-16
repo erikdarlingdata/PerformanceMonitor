@@ -298,9 +298,12 @@ public sealed class PgFactCollectorTests
             /* Block comments are the same case as the `--` ones: prose that says "join to" is not a relation. */
             scanSql = Regex.Replace(scanSql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
             scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
+            /* JOIN LATERAL (subquery) names no relation; the subquery's own FROM is scanned in its place (as the
+               drill-down guard does, #5794). */
+            scanSql = Regex.Replace(scanSql, @"\bLATERAL\b", " ", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
-            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
+            var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(", RegexOptions.Singleline)
                 .Select(m => m.Groups[1].Value)
                 .ToHashSet(StringComparer.Ordinal);
 
