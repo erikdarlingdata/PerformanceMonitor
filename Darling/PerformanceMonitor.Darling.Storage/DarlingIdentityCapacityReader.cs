@@ -56,8 +56,17 @@ public sealed record IdentityColumnFact(
     /// <summary>Inserts left before the engine raises an arithmetic overflow: null when the value was not stored.</summary>
     public BigInteger? ValuesRemaining => Capacity?.Remaining;
 
-    /// <summary>ok, warning (70 percent) or critical (90 percent); null when no percent is known.</summary>
-    public string? Band => PercentUsed is double percent ? IdentityCapacityMath.Band(percent) : null;
+    /// <summary>
+    /// The percent and days-left grades together, the worse winning (#8818): ok, warning (70 percent used or under 30 days left) or critical (90 percent
+    /// or under 7 days). Null when no percent is known. With no <see cref="Exhaustion"/> the percent grades alone.
+    /// </summary>
+    public IdentityBand? Graded => PercentUsed is double percent ? IdentityCapacityMath.Grade(percent, Exhaustion?.DaysLeft) : null;
+
+    /// <summary>ok, warning or critical from <see cref="Graded"/>; null when no percent is known.</summary>
+    public string? Band => Graded?.Band;
+
+    /// <summary>"percent" or "days": the grade that set <see cref="Band"/>. Null when the band is ok or unknown.</summary>
+    public string? BandReason => Graded?.Reason;
 
     /// <summary>The rate and the days left, null with one sample or a value that did not move toward the end (see <see cref="IdentityCapacityMath.EstimateExhaustion"/>).</summary>
     public IdentityExhaustion? Exhaustion =>

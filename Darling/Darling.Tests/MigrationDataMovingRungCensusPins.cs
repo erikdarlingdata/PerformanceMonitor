@@ -469,6 +469,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "rung itself executes none of them, so it reads and rewrites no row at migration time. What it does run is catalog work: three empty "
             + "tables, their owner-guard triggers and functions, one trigger on config.server_tags, and the hardening function's grant and revoke "
             + "statements, all under the lock_timeout the rung opens with. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            267,
+            SetsTheFloor: false,
+            "#8570: one CREATE INDEX IF NOT EXISTS over the populated collect.plan_regression_daily (created V168), a plain table: "
+            + "ix_plan_regression_daily_server_day (server_id, day), the two narrow columns the day-driven reads of the per-day plan totals "
+            + "filter on. The build reads the heap once. Measured on a 3,072,000-row table (462 MB heap, 529 MB unique key): 0.4 s, 20 MB of "
+            + "index. Not CONCURRENTLY, inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

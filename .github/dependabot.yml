@@ -79,6 +79,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # The Darling MSI stays on WiX 5 (decided 2026-11-16, #8859): WiX 6 and 7 bring nothing this MSI needs.
+    # The WixToolset.Sdk version lives in the wixproj Sdk attribute, which Dependabot does not read.
+    ignore:
+      - dependency-name: "WixToolset.*"
+        update-types: ["version-update:semver-major"]
   # The .NET SDK that global.json pins (#3906). This is the .NET RUNTIME for everything published
   # self-contained (Lite and the Viewer's Setup/Portable builds pack the runtime of whichever SDK built
   # them), so a runtime security release reaches users only through this pin. The NuGet group above

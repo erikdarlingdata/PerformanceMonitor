@@ -160,7 +160,8 @@ function panelFor(kind, key, state, hours, onMetric) {
   }
   /* #6359: the facts only. The read's own `aggregate_note` is written for an MCP caller ("pass bucket_minutes (1-1440) for
      another width, or narrow hours_back"), advice a browser reader cannot act on, so the panel says what a point covers itself (util.js chartNoteText). */
-  const width = chartNoteText(d, "summed");
+  /* #8801: a query's history reads the hours the hourly rollup has not built from the raw rows, so only a procedure's owes the trailing-edge sentence. */
+  const width = chartNoteText(d, "summed", kind === "queries");
   if (width) notes.push(width);
   const parts = [notes.length ? strip("notice", notes.join(" ")) : null];
   if (kind === "procedures") {

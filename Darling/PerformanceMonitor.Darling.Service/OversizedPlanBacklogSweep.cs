@@ -725,6 +725,25 @@ WHERE tqp.query_plan IS NOT NULL;";
                 await purgeCounts.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            /* #8789: the new rows the collectors' sightings left out since the last pass, which the trim would have dropped and
+               counted here. Taken once per pass, so a plan left out on every collection cycle between two passes counts once, as
+               it did when the trim deleted it. They are over-cap drops. */
+            int leftOut;
+            await using (var take = new NpgsqlCommand(OversizedPlanBacklog.TakeLeftOutSql, connection)
+            {
+                CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,
+            })
+            {
+                take.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                take.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });
+                leftOut = Convert.ToInt32(await take.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+            }
+
+            if (tally is not null)
+            {
+                tally.RowsOverCap += leftOut;
+            }
+
             int superseded;
             await using (var supersede = new NpgsqlCommand(OversizedPlanBacklog.SupersedeSql, connection)
             {
@@ -767,11 +786,11 @@ WHERE tqp.query_plan IS NOT NULL;";
                 tally.RowsOverCap += overCap;
             }
 
-            if (superseded > 0 || overCap > 0)
+            if (superseded > 0 || overCap > 0 || leftOut > 0)
             {
                 logger?.LogInformation(
                     "Oversized-plan backlog: dropped {Superseded} pending row(s) on server {ServerId} unfetched for a newer sighting of the same query and {OverCap} past the {Cap}-row pending cap (#8567)",
-                    superseded, serverId, overCap, PendingRowsPerServerCap);
+                    superseded, serverId, overCap + leftOut, PendingRowsPerServerCap);
             }
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)

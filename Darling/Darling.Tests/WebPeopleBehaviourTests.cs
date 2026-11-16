@@ -18,8 +18,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The Admin "People" tab (#7107), run under Node (<c>web-people-harness.mjs</c>) on a fake DOM and a scripted fetch: the session's own sign-in
-/// key with its copy button, "Add my own sign-in", the shared web token's missing key, a viewer's own key with no list, and the args each form
-/// sends. Node is skipped when it is not installed.
+/// key with its copy button, "Add my own sign-in", the shared web token's missing key, a viewer's own key with no list, the args each form
+/// sends, and Delete in a person's details (#8777). Node is skipped when it is not installed.
 /// </summary>
 public sealed class WebPeopleBehaviourTests
 {
@@ -122,5 +122,40 @@ public sealed class WebPeopleBehaviourTests
             """/api/people/add_person_grant {"person_id":5,"capability":"approve","scope_tag_id":7,"kinds":["evict_plan"]}""",
             """/api/people/set_person_enabled {"person_id":5,"enabled":false}""",
         }, puts);
+    }
+
+    private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    /// <summary>
+    /// #8777. Ann has a sign-in and a grant, Cy has history, Bo has neither, and the list does not say whether Di has history. Bo's Delete
+    /// is pressed three times: answered no, refused by the service, then accepted.
+    /// </summary>
+    [Fact]
+    public void Delete_ShowsOnlyForAPersonWithNothingAttached_AsksFirst_KeepsARefusalOnTheDetails_AndTakesThePersonOffTheList()
+    {
+        var r = Run("deleting");
+
+        Assert.Equal(["Bo", "Di"], Strings(r.GetProperty("offered")));
+
+        const string Question = "Delete Bo? This removes them from the list and cannot be undone.";
+        Assert.Equal([Question], Strings(r.GetProperty("askedOnNo")));
+        Assert.Equal(0, r.GetProperty("putsOnNo").GetInt32());
+        Assert.Equal(["Details of Bo"], Strings(r.GetProperty("detailsOnNo")));
+
+        Assert.Equal(["This person has history, so disable them instead."], Strings(r.GetProperty("refusalSaid")));
+        Assert.Equal(["Details of Bo"], Strings(r.GetProperty("detailsOnRefusal")));
+        Assert.Equal(["Ann", "Bo", "Cy", "Di"], Strings(r.GetProperty("listedOnRefusal")));
+
+        Assert.Equal(3, r.GetProperty("asked").GetInt32());
+        var puts = r.GetProperty("puts").EnumerateArray().Select(p => p.GetProperty("path").GetString() + " " + p.GetProperty("body").GetRawText()).ToArray();
+        Assert.Equal(new[]
+        {
+            """/api/people/delete_person {"person_id":6}""",
+            """/api/people/delete_person {"person_id":6}""",
+        }, puts);
+        Assert.Equal(["Deleted Bo."], Strings(r.GetProperty("deletedSaid")));
+        Assert.Empty(Strings(r.GetProperty("errorsAfterDelete")));
+        Assert.Empty(Strings(r.GetProperty("detailsAfterDelete")));
+        Assert.Equal(["Ann", "Cy", "Di"], Strings(r.GetProperty("listedAfterDelete")));
     }
 }

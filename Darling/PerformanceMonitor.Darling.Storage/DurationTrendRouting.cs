@@ -213,7 +213,7 @@ public static class DurationTrendRouting
     /// spread over the full 3,600 seconds.</para>
     ///
     /// <para><b>Materialized-only</b>, like every rollup here (#1759): the current hour is never materialized
-    /// and the previous one lands on the next refresh, so this series trails the clock by up to two hours.</para>
+    /// and an hour is added one to two hours after it ends, so this series trails the clock by up to three hours.</para>
     ///
     /// <para>With <paramref name="withDatabaseFilter"/>, $4 is the viewer's guarded <c>text[]</c> database
     /// filter (#1319) — both hourly rollups group by <c>database_name</c>, so the filter survives the routing.
@@ -921,6 +921,70 @@ stored AS
             AND   query_hash = $3
             AND   bucket >= $4
             AND   bucket < $5
+        ) AS h
+        GROUP BY bucket_start
+        ORDER BY bucket_start
+        """;
+    }
+
+    /// <summary>
+    /// #8801: <see cref="BuildQueryHistoryHourlySql"/> with the hours the rollup has not built read from the raw rows. The
+    /// rollup side stops below <c>$7</c>, the rollup's measured end (<see cref="RollupCoverage.HourlyEndCeiling"/>), and the
+    /// raw side sums <c>query_stats</c> from <c>$7</c> to the window's end into the same buckets, so each hour comes from one
+    /// side and the window's totals are the raw totals. A raw row's first collection is its hour's start, the stamp the rollup
+    /// keeps for an hour, and the columns the rollup does not carry stay typed NULLs on every point. $1 to $6 as
+    /// <see cref="BuildQueryHistoryHourlySql"/> (the window's end is inclusive on the raw side), $7 the rollup's end (naive UTC).
+    /// </summary>
+    public static string BuildQueryHistoryHourlyWithRawTailSql(string hourlyRelation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
+
+        return $"""
+        SELECT
+            bucket_start AS collection_time,
+            CAST(SUM(execution_count_sum) AS bigint) AS delta_execution_count,
+            CAST(SUM(worker_time_sum) AS bigint) AS delta_worker_time,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS delta_elapsed_time,
+            CAST(NULL AS bigint) AS delta_logical_reads,
+            CAST(NULL AS bigint) AS delta_logical_writes,
+            CAST(NULL AS bigint) AS delta_physical_reads,
+            CAST(NULL AS bigint) AS delta_rows,
+            CAST(NULL AS bigint) AS delta_spills,
+            CAST(NULL AS int) AS min_dop,
+            CAST(NULL AS int) AS max_dop,
+            CAST(NULL AS text) AS query_plan_hash,
+            CAST(NULL AS int) AS plan_count,
+            MIN(bucket) AS first_collection_time,
+            CAST(NULL AS int) AS collection_count
+        FROM
+        (
+            SELECT
+                bucket,
+                execution_count_sum,
+                worker_time_sum,
+                elapsed_time_sum,
+                GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', bucket, {TrendBucketSql.OriginSql}), $4) AS bucket_start
+            FROM {hourlyRelation}
+            WHERE server_id = $1
+            AND   database_name = $2
+            AND   query_hash = $3
+            AND   bucket >= $4
+            AND   bucket < $5
+            AND   bucket < $7
+            UNION ALL
+            SELECT
+                GREATEST(date_trunc('hour', qs.collection_time), $4) AS bucket,
+                COALESCE(qs.delta_execution_count, 0) AS execution_count_sum,
+                COALESCE(qs.delta_worker_time, 0) AS worker_time_sum,
+                COALESCE(qs.delta_elapsed_time, 0) AS elapsed_time_sum,
+                GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', qs.collection_time, {TrendBucketSql.OriginSql}), $4) AS bucket_start
+            FROM query_stats AS qs
+            WHERE qs.server_id = $1
+            AND   qs.database_name = $2
+            AND   qs.query_hash = $3
+            AND   qs.collection_time >= $7
+            AND   qs.collection_time >= $4
+            AND   qs.collection_time <= $5
         ) AS h
         GROUP BY bucket_start
         ORDER BY bucket_start

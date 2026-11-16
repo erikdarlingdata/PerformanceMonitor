@@ -1,0 +1,126 @@
+<Window x:Class="PerformanceMonitorLite.Windows.StoreHealthWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Store Health"
+        Height="760" Width="980"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        Icon="pack://application:,,,/PerformanceMonitorLite;component/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <!-- #8788: the health of the local DuckDB store. Four sections (Store, Archives, Housekeeping history, Tables), the same ones
+         get_store_health returns. Read only: every read runs off the UI thread and takes only the store's read lock. -->
+    <Window.Resources>
+        <!-- A message longer than its cell ends in an ellipsis on one line and shows the whole text in a tooltip. -->
+        <Style x:Key="MessageCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+            <Setter Property="ToolTip" Value="{Binding Message}"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="245"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="120"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="Store Health" FontSize="18" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock x:Name="StatusText" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,2,0,0"/>
+            </StackPanel>
+            <Button Grid.Column="1" x:Name="RefreshButton" Content="Refresh" Click="Refresh_Click" Padding="12,2" VerticalAlignment="Top"/>
+        </Grid>
+
+        <!-- Store -->
+        <TextBlock Grid.Row="1" Text="Store" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,2"/>
+        <Border Grid.Row="2" Background="{DynamicResource BackgroundLightBrush}" Padding="10" CornerRadius="4" Margin="0,0,0,8">
+            <StackPanel>
+                <TextBlock x:Name="StoreSentenceText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock x:Name="StoreFactsText" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock x:Name="StoreNoteText" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed" FontWeight="Bold"
+                           Foreground="{DynamicResource WarningBrush}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Archives -->
+        <StackPanel Grid.Row="3" Margin="0,0,0,8">
+            <TextBlock Text="Archives" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,2"/>
+            <Border Background="{DynamicResource BackgroundLightBrush}" Padding="10" CornerRadius="4">
+                <StackPanel>
+                    <TextBlock x:Name="ArchiveFactsText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBlock x:Name="ArchiveSentenceText" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <!-- Housekeeping history -->
+        <Grid Grid.Row="4" Margin="0,0,0,8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Text="Housekeeping history (newest first)" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,2"/>
+            <Grid Grid.Row="1">
+                <DataGrid x:Name="HistoryGrid"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          SelectionMode="Single"
+                          CanUserAddRows="False"
+                          CanUserDeleteRows="False"
+                          HeadersVisibility="Column"
+                          GridLinesVisibility="Horizontal">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsFailed}" Value="True">
+                                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Time (UTC)" Binding="{Binding Time}" SortMemberPath="TimeUtc" Width="140"/>
+                        <DataGridTextColumn Header="What" Binding="{Binding Kind}" Width="130"/>
+                        <DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="90"/>
+                        <DataGridTextColumn Header="Moved" Binding="{Binding Work}" Width="Auto"/>
+                        <DataGridTextColumn Header="In store (MB)" Binding="{Binding UsedMb}" ElementStyle="{StaticResource NumericCell}" Width="95"/>
+                        <DataGridTextColumn Header="Times" Binding="{Binding Count}" ElementStyle="{StaticResource NumericCell}" Width="55"/>
+                        <DataGridTextColumn Header="Message" Binding="{Binding MessageLine}" ElementStyle="{StaticResource MessageCell}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock x:Name="NoHistoryMessage" Text="Nothing recorded yet. The first timed archive runs within an hour of Lite starting."
+                           Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundDimBrush}"/>
+            </Grid>
+        </Grid>
+
+        <!-- Tables -->
+        <TextBlock Grid.Row="5" Text="Tables (estimated rows, largest first)" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,2"/>
+        <Grid Grid.Row="6">
+            <DataGrid x:Name="TablesGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      SelectionMode="Single"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      HeadersVisibility="Column"
+                      GridLinesVisibility="Horizontal">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Table" Binding="{Binding Name}" Width="*"/>
+                    <DataGridTextColumn Header="Rows (estimated)" Binding="{Binding Rows}" SortMemberPath="EstimatedRows" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="NoTablesMessage" Text="Table sizes are not shown."
+                       Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundDimBrush}"/>
+        </Grid>
+    </Grid>
+</Window>

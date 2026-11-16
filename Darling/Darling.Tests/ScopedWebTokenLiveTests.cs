@@ -47,6 +47,7 @@ public sealed class ScopedWebTokenLiveTests
         ["/api/read/get_block_chain"] = "requires event_time",
         ["/api/read/get_query_store_query_history"] = "requires database_name",
         ["/api/read/get_plan_force_precheck"] = "requires database_name",
+        ["/api/read/get_object_usage"] = "requires database_name",
         ["/api/read/get_server_trend"] = "requires metric",
         ["/api/read/get_perfmon_trend"] = "requires counter_name",
         ["/api/read/get_query_trend"] = "requires query_hash",

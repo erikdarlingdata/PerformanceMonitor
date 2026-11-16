@@ -40,7 +40,7 @@
  */
 
 import { el, makeActivatable, captionStrip, daysText } from "../util.js";
-import { worstFirst } from "../panels.js";
+import { worstFirst, emptyShare } from "../panels.js";
 import { evictionNoteShort } from "../pg-grid-text.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { statsHistoryColumn } from "./stats-history.js";
@@ -1916,7 +1916,11 @@ export const POSTGRES_TABS = [
   {
     id: "storage",
     label: "Storage",
-    build: (server, ctx) => [
+    build: (server, ctx) => {
+      /* #8840: the two Index Bloat panels are two reads, so the shared-empty pointer the fanout panels use cannot see across them. This is
+         what lets the second say "Empty for the same reason as Index Bloat (estimated)." when both reads come back with one message. */
+      const bloatEmpty = emptyShare();
+      return [
       ...fanout("get_pg_table_bloat", { server, hours: ctx.hours, limit: 25 }, [
         {
           title: "Bloat Estimates",
@@ -1983,7 +1987,7 @@ export const POSTGRES_TABS = [
         "Nothing recorded for this server yet. It is collected once a day, so a short window or a new install is empty here.",
         2,
         "note", null, null, null, null, null, false, null,
-        false, INDEX_BLOAT_PLAIN
+        false, { ...INDEX_BLOAT_PLAIN, emptyShare: { holder: bloatEmpty, leads: true } }
       ),
       /* THE ANSWERS, REACHED (#3434). The panel above keeps #3278's answerless-first order, and on a census
          whose answerless population outnumbers 25 that page is 100% of them - structurally rather than by
@@ -2010,9 +2014,10 @@ export const POSTGRES_TABS = [
         "Nothing recorded for this server in this window. It is collected once a day.",
         2,
         "note", null, null, null, null, null, false, null,
-        false, INDEX_BLOAT_PLAIN
+        false, { ...INDEX_BLOAT_PLAIN, emptyShare: { holder: bloatEmpty, leads: false } }
       ),
-    ],
+      ];
+    },
   },
 
   /* #2658. The eighth tab, and the header's argument for seven admits it: what that argument rejects is

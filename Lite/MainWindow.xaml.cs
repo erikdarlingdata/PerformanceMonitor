@@ -454,8 +454,16 @@ public partial class MainWindow : Window
                    first ask, so parallel first sweeps share one resolve. */
                 InstallIdStore.ForCurrentUser(App.DataDirectory));
 
-            var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
-            var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
+            /* #8788: the housekeeping history is a file beside the store, so the size reset that replaces the store leaves it alone. */
+            var housekeepingHistory = new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(App.DatabasePath));
+            var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>())
+            {
+                History = housekeepingHistory
+            };
+            var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>())
+            {
+                History = housekeepingHistory
+            };
 
             /* #1912 one-time Query Store repair: collapse the split slices stored by pre-#1907 builds, in the
                hot table and in the parquet archive. Runs ONCE per store, records a marker, and never throws —
@@ -2181,6 +2189,12 @@ public partial class MainWindow : Window
     {
         var window = new Windows.AboutWindow { Owner = this };
         window.ShowDialog();
+    }
+
+    private void StoreHealthButton_Click(object sender, RoutedEventArgs e)
+    {
+        var reader = new StoreHealthReader(_databaseInitializer, new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(App.DatabasePath)));
+        new Windows.StoreHealthWindow(reader) { Owner = this }.Show();
     }
 
     private void ViewLogButton_Click(object sender, RoutedEventArgs e)

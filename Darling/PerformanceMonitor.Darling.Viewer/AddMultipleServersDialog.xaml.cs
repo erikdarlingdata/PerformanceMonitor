@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -91,6 +92,10 @@ public partial class AddMultipleServersDialog : Window
     public AddMultipleServersDialog(ViewerDataService? dataService, ViewerServerStore serverStore, ViewerProfileStore profileStore)
     {
         InitializeComponent();
+        /* Opens taller than a 768 screen's work area, so cap it to the work area of the monitor it is on the way the Add Server
+           dialog does, once there is an HWND to ask which monitor, and again when the window is dragged to another. */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        LocationChanged += (_, _) => WindowWorkArea.Clamp(this);
         _dataService = dataService;
         _profileStore = profileStore;
         PreviewGrid.ItemsSource = _rows;

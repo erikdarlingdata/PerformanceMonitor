@@ -20,8 +20,8 @@
     <PackageVersion Include="DuckDB.NET.Data" Version="1.5.6.1" />
     <PackageVersion Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
-    <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.1" />
-    <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.1" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.1.2" />
+    <PackageVersion Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.2" />
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.15" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.15" />
@@ -48,7 +48,7 @@
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.15" />
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.15" />
     <PackageVersion Include="Velopack" Version="1.2.161" />
-    <!-- #6480: the Darling MSI (Darling/msi). The WixToolset.Sdk version is in the wixproj's Sdk attribute and moves with this one. -->
+    <!-- #6480: the Darling MSI (Darling/msi). The WixToolset.Sdk version is in the wixproj's Sdk attribute and moves with this one. The MSI stays on WiX 5 (2026-11-16, #8859), so Dependabot ignores WiX majors. -->
     <PackageVersion Include="WixToolset.Util.wixext" Version="5.0.2" />
     <PackageVersion Include="WixToolset.UI.wixext" Version="5.0.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />

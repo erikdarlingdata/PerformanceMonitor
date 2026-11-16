@@ -133,6 +133,10 @@ public static class CollectorScheduleDefaults
         /* #6875 identity column capacity. A column fills over months, so a read every six hours is plenty and costs little: catalog views only,
            at most 21 rows per database. 90 days keeps enough samples for the time-to-exhaustion estimate. */
         ["identity_capacity"] = new(360, 90),
+        /* #8784 the list of procedures, functions and views per database, so get_object_usage can name the modules Query Store never saw run.
+           Objects are created and dropped by deployments, so daily is plenty; one catalog read per database. Only the newest capture is read,
+           so 30 days is generous. */
+        ["object_inventory"] = new(1440, 30),
         /* #7643 schema tracking: table and view definitions kept as versions. Off until switched on, because the change-tracking session needs
            ALTER ANY EVENT SESSION. A pass reads the session and only the databases it names, so 15 minutes is cheap. Closed versions are kept 30 days. */
         ["schema_objects"] = new(15, 30, DefaultEnabled: false),

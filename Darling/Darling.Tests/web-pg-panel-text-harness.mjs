@@ -152,6 +152,10 @@ try {
   });
   const storage = await draw("storage", { get_pg_index_bloat: bloatReply("ColumnWidthsNotVisible") });
   const storageOther = await draw("storage", { get_pg_index_bloat: bloatReply("Partial") });
+  /* #8840: a server with no index bloat run in the window. Both Index Bloat panels read the same empty reply. */
+  const storageEmpty = await draw("storage", {
+    get_pg_index_bloat: { status: "empty", message: "No index bloat rows for pg-a in the last 24 hours. Index coverage was not measured in this window." },
+  });
   const storageGrantFirst = await draw("storage", { get_pg_index_bloat: bloatBuckets(GRANT_BUCKET, PARTIAL_BUCKET) });
   const storageGrantSecond = await draw("storage", { get_pg_index_bloat: bloatBuckets({ ...PARTIAL_BUCKET, index_count: 2, index_bytes: 5000000000 }, { ...GRANT_BUCKET, index_count: 38, index_bytes: 1000000000 }) });
 
@@ -220,6 +224,8 @@ try {
     columnsFloor: strip(panelTitled(columnFloor, "Column Statistics")),
     bloat: strip(panelTitled(storage, "Index Bloat (answered ranking)")),
     bloatOther: strip(panelTitled(storageOther, "Index Bloat (answered ranking)")),
+    bloatEmptyFirst: strip(panelTitled(storageEmpty, "Index Bloat (estimated)")),
+    bloatEmptySecond: strip(panelTitled(storageEmpty, "Index Bloat (answered ranking)")),
     bloatGrantFirst: strip(panelTitled(storageGrantFirst, "Index Bloat (answered ranking)")),
     bloatGrantSecond: strip(panelTitled(storageGrantSecond, "Index Bloat (answered ranking)")),
     /* A parenthesized issue reference in a service sentence is dropped from any text the page shows. */

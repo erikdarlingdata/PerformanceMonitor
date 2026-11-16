@@ -38,7 +38,7 @@ public sealed class ViewerFleetTabStatusLinesTests
 
     /// <summary>The fleet tabs the window refreshes when they are selected, with the prefix of the failure line each raises when its
     /// read fails. Fleet Sweeps runs three reads and the last to fail writes the line, so its prefix is the stem the three share; Job
-    /// History's best-effort choices reads can land after its grid read, so its prefix is the stem the two share.</summary>
+    /// History's best-effort choices reads can land after its grid read, so its prefix is the stem the two share. Store Health runs three reads (tables, indexes, maintenance check) and the last to fail writes the line.</summary>
     public static IEnumerable<object[]> FleetTabs()
     {
         yield return new object[] { "AlertsTab", "AlertsHistoryContent", "failed to load alert history: " };
@@ -46,6 +46,7 @@ public sealed class ViewerFleetTabStatusLinesTests
         yield return new object[] { "DatabaseProtectionTabItem", "DatabaseProtectionContent", "failed to load the server list for database protection: " };
         yield return new object[] { "AgentAlertsTabItem", "AgentAlertsContent", "failed to load the server list for agent alerts: " };
         yield return new object[] { "FleetSweepsTabItem", "FleetSweepsContent", "failed to load the fleet sweep" };
+        yield return new object[] { "StoreHealthTabItem", "StoreHealthContent", "failed to " };
         yield return new object[] { "IdentityCapacityTabItem", "IdentityCapacityContent", "failed to load the server list for identity capacity: " };
         yield return new object[] { "AvailabilityGroupsTabItem", "AvailabilityGroupsContent", "Availability Groups failed to load: " };
         yield return new object[] { "FinOpsTab", "FinOpsContent", "refresh failed: " };
@@ -117,6 +118,9 @@ public sealed class ViewerFleetTabStatusLinesTests
                 t.Initialize(service);
                 break;
             case FleetSweepsTab t:
+                t.Initialize(service);
+                break;
+            case StoreHealthTab t:
                 t.Initialize(service);
                 break;
             case IdentityCapacityTab t:

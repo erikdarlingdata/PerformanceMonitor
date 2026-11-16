@@ -59,6 +59,9 @@ public sealed class CrossAppMcpToolInventoryPinTests
            or admin action there. Lite has no roles and no such viewer action, its only writer of that registry is
            the MCP mute tool, and the mcp_allow_writes setting that serves the mute serves its undo with it. */
         "unmute_analysis_finding",
+        /* #8788: the health of Lite's own DuckDB store (size against the 512 MB reset, parquet archives, housekeeping history).
+           Darling's store is PostgreSQL, and its own store-health page is its own issue (#8787), so there is no twin tool. */
+        "get_store_health",
     };
 
     [Fact]

@@ -57,7 +57,7 @@
         </Button>
 
         <Button x:Name="MoreButton" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="More_Click"
-                AutomationProperties.Name="More" ToolTip="Tags, import, logs, plan viewer and about">
+                AutomationProperties.Name="More" ToolTip="Tags, import, logs, store health, plan viewer and about">
             <Button.ContextMenu>
                 <ContextMenu x:Name="MoreMenu" Placement="Custom">
                     <MenuItem x:Name="AddMultipleServersItem" AutomationProperties.Name="Add Multiple Servers…" Header="Add Multiple Servers…" Click="AddMultipleServers_Click"
@@ -77,6 +77,8 @@
                               ToolTip="Open the current application log file"/>
                     <MenuItem x:Name="OpenLogFolderItem" AutomationProperties.Name="Open Log Folder" Header="Open Log Folder" Click="OpenLogFolder_Click"
                               ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)"/>
+                    <MenuItem x:Name="StoreHealthItem" AutomationProperties.Name="Store Health" Header="Store Health" Click="StoreHealth_Click"
+                              ToolTip="Size of the local store against its 512 MB reset point, the archive folder, housekeeping history and rows per table"/>
                     <MenuItem x:Name="AboutItem" AutomationProperties.Name="About" Header="About" Click="About_Click"/>
                 </ContextMenu>
             </Button.ContextMenu>

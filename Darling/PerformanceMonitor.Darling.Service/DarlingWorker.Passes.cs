@@ -1215,6 +1215,17 @@ public sealed partial class DarlingWorker
         {
             _logger.LogWarning("Query Store top daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+
+        /* #8784: the per-day module execution summary is copied from the days the pass above just built, so it runs straight after it, on the
+           same tick. Its own catch, so a failure here leaves the Query Store summary's work standing. */
+        try
+        {
+            await ObjectExecutionsDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Object executions daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
     }
 
     /// <summary>

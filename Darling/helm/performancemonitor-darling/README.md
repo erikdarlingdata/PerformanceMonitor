@@ -28,7 +28,7 @@ kubectl port-forward deployment/<fullname> 5153:5153
 
 `store.mode` is `bundled` (the default) or `external`.
 
-**Bundled** runs one TimescaleDB pod (a StatefulSet) with the release. It suits evaluation and small installs: one replica, no backups, no failover. The image is `timescale/timescaledb:2.31.0-pg17`, the image CI tests Darling against, with the same server settings as the compose file's store. Darling's connection string carries no password. The password reaches the Darling pod as `PGPASSWORD` from the `password` key of the store Secret, the same key the store pod reads. The chart generates that Secret (`<fullname>-store`) unless you name your own in `store.bundled.auth.existingSecret`.
+**Bundled** runs one TimescaleDB pod (a StatefulSet) with the release. It suits evaluation and small installs: one replica, no backups, no failover. The image is `timescale/timescaledb:2.32.0-pg17`, the image CI tests Darling against, with the same server settings as the compose file's store. Darling's connection string carries no password. The password reaches the Darling pod as `PGPASSWORD` from the `password` key of the store Secret, the same key the store pod reads. The chart generates that Secret (`<fullname>-store`) unless you name your own in `store.bundled.auth.existingSecret`.
 
 **External** connects to a PostgreSQL or TimescaleDB server you run, and the chart renders no store resources. `host`, `database` and `username` are required (they may not contain `;` or `=`). Pick one way to give the password:
 

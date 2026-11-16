@@ -88,6 +88,7 @@ public sealed class DarlingPgRuntimeVersionPinTests
         var carried = CarriedTimescaleBuilds(script);
         Assert.NotEmpty(carried);
         Assert.Contains(carried, c => c.Version == "2.28.1");
+        Assert.Contains(carried, c => c.Version == "2.30.1");
         foreach (var (version, url, sha256) in carried)
         {
             Assert.NotEqual(tsVersion, version);
