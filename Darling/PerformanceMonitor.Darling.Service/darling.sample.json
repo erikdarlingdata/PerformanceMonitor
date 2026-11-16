@@ -451,6 +451,18 @@
     // cover all servers. Set false to refuse those calls. The claim-based Level 2 and 3 tools are not affected.
     // "allowAgentMuteRules": false,
 
+    // Personal MCP tokens (#8737): a person signed in to the web dashboard (web.network.oidc) mints their own short-lived MCP token.
+    // Default off. Served only with the web dashboard on, web.network.oidc configured, no front door and "allowTokenlessLoopback" off;
+    // otherwise the start logs one warning and the feature stays off. A number outside its range is clamped (1-365 days, 1-50 tokens)
+    // and an "adminRole" other than "operator" or "reader" is served as "reader", each with a warning. "dataDetail" (full, maskLiterals
+    // or metadataOnly) can only narrow "dataDetail" above; an unrecognized value leaves personal tokens off.
+    "personalTokens": {
+      "enabled": false,
+      "maxLifetimeDays": 30,
+      "maxTokensPerPerson": 5,
+      "adminRole": "operator"
+    },
+
     // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
     // Each token has a name (1-64 of A-Za-z0-9._:-) and a role: "operator" (the reads and the write tools, with
     // "allowWrites" off too), "agent" (the reads, the investigation tools and the Level 2 action tools, with

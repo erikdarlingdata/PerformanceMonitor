@@ -827,6 +827,12 @@ public static partial class DarlingCliCommands
             tokenSignInFailed |= finding.StartsWith("ERROR:", StringComparison.Ordinal);
         }
 
+        /* #8737: a warning, not an error: personal tokens stay off or are served narrower, and the rest of the service starts as before. */
+        foreach (var problem in DarlingPersonalTokenSettings.Problems(config))
+        {
+            output.WriteLine("WARNING: " + problem);
+        }
+
         /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
         foreach (var warning in SqlServerPortAdvice.Warnings(targets))
         {
