@@ -87,7 +87,7 @@ exit 0
 STUB
 run_script
 [ "${STATUS}" = 0 ] || fail "exit status ${STATUS}, expected 0"
-printf '%s\n' -X -v ON_ERROR_STOP=1 -f "${WORK}/provision-roles.sql" > "${ROOT}/want.txt"
+printf '%s\n' -X -v ON_ERROR_STOP=1 -c "SET lock_timeout = '120s'" -f "${WORK}/provision-roles.sql" > "${ROOT}/want.txt"
 cmp -s "${ROOT}/argv.txt" "${ROOT}/want.txt" || fail "argv is: $(tr '\n' ' ' < "${ROOT}/argv.txt")"
 
 begin env
@@ -100,5 +100,28 @@ run_script
 [ "${STATUS}" = 0 ] || fail "exit status ${STATUS}, expected 0"
 want="db.example.internal|${WORK}/pgpass|darling-provision-roles|unset"
 [ "$(cat "${ROOT}/env.txt")" = "${want}" ] || fail "env is: $(cat "${ROOT}/env.txt"), expected ${want}"
+
+begin inherited_libpq_variables_are_dropped
+stub_psql <<STUB
+#!/bin/sh
+echo "\${PGPASSWORD-unset}|\${PGSERVICE-unset}|\${PGUSER-unset}|\${PGOPTIONS-unset}|\${PGHOST}|\${PGPASSFILE}" > "${ROOT}/env.txt"
+exit 0
+STUB
+STATUS=0
+PGPASSWORD=root PGSERVICE=other PGUSER=postgres PGOPTIONS='-c statement_timeout=1' \
+  PATH="${STUBS}:${PATH}" WORK_DIR="${WORK}" sh "${SCRIPT}" > "${OUT}" 2>&1 || STATUS=$?
+[ "${STATUS}" = 0 ] || fail "exit status ${STATUS}, expected 0"
+want="unset|unset|unset|unset|db.example.internal|${WORK}/pgpass"
+[ "$(cat "${ROOT}/env.txt")" = "${want}" ] || fail "env is: $(cat "${ROOT}/env.txt"), expected ${want}"
+
+begin lock_timeout_error_reaches_the_log
+stub_psql <<'STUB'
+#!/bin/sh
+echo 'psql:/work/provision-roles.sql:120: ERROR:  canceling statement due to lock timeout' >&2
+exit 3
+STUB
+run_script
+[ "${STATUS}" = 3 ] || fail "exit status ${STATUS}, expected 3"
+grep -qF "canceling statement due to lock timeout" "${OUT}" || fail "the lock timeout error is missing from the log"
 
 echo "PASS ${CURRENT}"

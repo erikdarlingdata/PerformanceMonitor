@@ -64,6 +64,12 @@ internal static class ProvisionRolesRenderer
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(rolePasswords);
 
+        var nameRefusal = CheckName("owner", owner) ?? CheckName("database", database);
+        if (nameRefusal is not null)
+        {
+            throw new ProvisionRolesRenderException(nameRefusal);
+        }
+
         var mismatches = new List<string>();
         foreach (var (text, expected) in Sites)
         {
@@ -102,6 +108,25 @@ internal static class ProvisionRolesRenderer
         }
 
         return rendered;
+    }
+
+    /// <summary>Null when the owner or database name is fit to put into the script, otherwise the refusal sentence. A name with any
+    /// control character (a line feed or carriage return, a tab, NUL) is refused: one site is a <c>--</c> comment, which a line
+    /// break ends, and the rest of the name would run as script lines under the owner login, psql meta-commands included. The
+    /// sentence names the kind of name, the character's code point and its position, and never the value.</summary>
+    internal static string? CheckName(string kind, string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        for (var i = 0; i < name.Length; i++)
+        {
+            if (char.IsControl(name[i]))
+            {
+                return string.Create(CultureInfo.InvariantCulture,
+                    $"The {kind} name contains a control character (U+{(int)name[i]:X4} at position {i}); it is refused, because the script would run what follows it as statements under the owner login.");
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Null when the password is accepted, otherwise the refusal sentence (which names the role and never the

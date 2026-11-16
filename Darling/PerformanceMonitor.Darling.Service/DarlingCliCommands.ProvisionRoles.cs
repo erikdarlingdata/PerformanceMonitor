@@ -368,6 +368,13 @@ public static partial class DarlingCliCommands
                 currentDatabase = reader.GetString(1);
             }
 
+            var nameRefusal = ProvisionRolesRenderer.CheckName("owner", currentUser) ?? ProvisionRolesRenderer.CheckName("database", currentDatabase);
+            if (nameRefusal is not null)
+            {
+                stderr.WriteLine(nameRefusal);
+                return ProvisionRolesExitCodes.Usage;
+            }
+
             var ownership = ProvisionRolesStoreChecks.DescribeOwnership(currentUser, foreign);
             if (ownership is not null)
             {

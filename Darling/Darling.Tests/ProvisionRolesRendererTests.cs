@@ -116,6 +116,37 @@ public sealed class ProvisionRolesRendererTests
     }
 
     [Theory]
+    [InlineData("owner", "\n")]
+    [InlineData("owner", "\r")]
+    [InlineData("owner", "\t")]
+    [InlineData("owner", "\0")]
+    [InlineData("database", "\n")]
+    [InlineData("database", "\r")]
+    [InlineData("database", "\t")]
+    [InlineData("database", "\0")]
+    public void Render_RefusesAControlCharacterInTheOwnerOrDatabase_NamingWhichAndNeverTheValue(string which, string control)
+    {
+        var bad = "app" + control + "\\! echo run";
+        var owner = which == "owner" ? bad : "app";
+        var database = which == "database" ? bad : "app";
+
+        var ex = Assert.Throws<ProvisionRolesRenderException>(() => ProvisionRolesRenderer.Render(Shipped, owner, database, Passwords));
+
+        Assert.Contains($"The {which} name contains a control character (U+{(int)control[0]:X4} at position 3)", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("echo run", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(control, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Render_StillAcceptsUnusualButPrintableNames()
+    {
+        var rendered = ProvisionRolesRenderer.Render(Shipped, "o wn;er-e", "d\"b -- x", Passwords);
+
+        Assert.Contains("FOR ROLE \"o wn;er-e\" IN SCHEMA", rendered, StringComparison.Ordinal);
+        Assert.Contains("ON DATABASE \"d\"\"b -- x\"", rendered, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void Render_Refuses_WhenASiteIsMissingOrDuplicated(bool duplicate)

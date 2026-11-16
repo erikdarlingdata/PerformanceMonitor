@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -81,6 +82,25 @@ public sealed class PrepareProvisionRolesLiveTests
             Assert.True(exit == ProvisionRolesExitCodes.Prepared, $"exit {exit}{Environment.NewLine}{stderr}");
             var psql = await RunPsqlAsync(runtimeRoot, Path.Combine(directory, "out"), ct);
             Assert.True(psql.ExitCode == 0, $"psql exited {psql.ExitCode}.{Environment.NewLine}{psql.Error}");
+        });
+    }
+
+    [Fact]
+    public async Task Prepare_OwnerNameWithAControlCharacter_RefusesNamingTheOwner_AndWritesNothing()
+    {
+        await RunAsync(async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
+        {
+            const string password = "TabOwner8779R1";
+            await ComposeStoreRolesLiveTests.ExecAsync(superuser, $"CREATE ROLE \"tab	x\" LOGIN NOSUPERUSER CREATEROLE PASSWORD '{password}'; GRANT app TO \"tab	x\"", ct);
+            var (args, stdout, stderr) = Prepare(directory, ComposeStoreRolesLiveTests.Login(superuser, "tab	x", password), waitSeconds: 20);
+
+            var exit = await DarlingCliCommands.PrepareProvisionRolesAsync(args, stdout, stderr, ct);
+
+            Assert.Equal(ProvisionRolesExitCodes.Usage, exit);
+            Assert.Contains("The owner name contains a control character (U+0009 at position 3)", stderr.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain('	', stderr.ToString());
+            Assert.False(File.Exists(Path.Combine(directory, "out", "provision-roles.sql")));
+            AssertNoSecrets(directory, stdout.ToString(), stderr.ToString());
         });
     }
 
@@ -164,7 +184,7 @@ public sealed class PrepareProvisionRolesLiveTests
     }
 
     /// <summary>psql as the Job runs it: the libpq environment from <c>libpq.env</c>, <c>PGPASSFILE</c> for the password, and
-    /// <c>-X -v ON_ERROR_STOP=1 -f provision-roles.sql</c>.</summary>
+    /// <c>-X -v ON_ERROR_STOP=1 -c "SET lock_timeout = '120s'" -f provision-roles.sql</c>.</summary>
     private static async Task<(int ExitCode, string Error)> RunPsqlAsync(string runtimeRoot, string outDirectory, CancellationToken ct)
     {
         var psql = Path.Combine(runtimeRoot, "pgsql", "bin", "psql.exe");
@@ -175,6 +195,13 @@ public sealed class PrepareProvisionRolesLiveTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        // The Job's script drops every inherited PG* variable first (a hosted Windows runner has PGUSER and PGPASSWORD set, and
+        // PGPASSWORD outranks the pgpass file); the same here, so the connection comes from libpq.env and the pgpass file only.
+        foreach (var name in start.Environment.Keys.Where(key => key.StartsWith("PG", StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            start.Environment.Remove(name);
+        }
+
         foreach (var line in File.ReadAllLines(Path.Combine(outDirectory, "libpq.env")))
         {
             var equals = line.IndexOf('=', StringComparison.Ordinal);
@@ -183,7 +210,7 @@ public sealed class PrepareProvisionRolesLiveTests
         }
 
         start.Environment["PGPASSFILE"] = Path.Combine(outDirectory, "pgpass");
-        foreach (var argument in new[] { "-X", "-w", "-v", "ON_ERROR_STOP=1", "-f", Path.Combine(outDirectory, "provision-roles.sql") })
+        foreach (var argument in new[] { "-X", "-w", "-v", "ON_ERROR_STOP=1", "-c", "SET lock_timeout = '120s'", "-f", Path.Combine(outDirectory, "provision-roles.sql") })
         {
             start.ArgumentList.Add(argument);
         }
