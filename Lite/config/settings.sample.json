@@ -129,6 +129,10 @@
   "alert_tempdb_space_enabled": true,
   "alert_tempdb_space_threshold_percent": 80,
 
+  // ---- instance events (#8884): on by default, no threshold --------------------------
+  "alert_instance_restarted_enabled": true,
+  "alert_memory_dumps_enabled": true,
+
   // ---- Disk: WARNING tier, then the CRITICAL floors (#2107) ----------------------------
   // Both tiers are OR'd within themselves: whichever of percent/GB trips first wins, which
   // is what keeps the thresholds sane across a 200 GB volume and a 20 TB one.

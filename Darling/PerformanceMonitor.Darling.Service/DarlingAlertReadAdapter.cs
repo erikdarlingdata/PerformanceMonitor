@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -2381,66 +2382,49 @@ AND   qs.collection_time > $2";
         IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
         rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
 
-    /// <summary>The Instance Restarted and Memory Dumps read (#8884): the server's recent server_properties samples, oldest first. $1 server_id, $2 the window
-    /// start (a bound timestamp, as every windowed read here binds it). Each sample's failed-collection count is the collection_log ERROR rows between it and the
-    /// previous sample, in one statement.</summary>
-    public const string InstanceEventSamplesSql = @"
-WITH samples AS (
-    SELECT
-        sp.collection_time,
-        sp.sqlserver_start_time,
-        sp.memory_dump_count,
-        sp.newest_memory_dump_time,
-        LAG(sp.collection_time) OVER (ORDER BY sp.collection_time) AS prior_time
-    FROM server_properties AS sp
-    WHERE sp.server_id = $1
-    AND   sp.collection_time >= $2
-)
-SELECT
-    s.collection_time,
-    s.sqlserver_start_time,
-    s.memory_dump_count,
-    s.newest_memory_dump_time,
-    CASE WHEN s.prior_time IS NULL THEN 0 ELSE
-        (SELECT COUNT(*) FROM collection_log AS cl
-         WHERE cl.server_id = $1 AND cl.status = 'ERROR'
-         AND   cl.collection_time > s.prior_time AND cl.collection_time <= s.collection_time)
-    END AS failed_since_previous
-FROM samples AS s
-ORDER BY s.collection_time";
-
-    public Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(
+    /// <summary>The restart and memory dump rise the store holds (#8884): the shared <see cref="InstanceEvents.StateSql"/> over this server's
+    /// <c>collector_state</c> rows, judged by the shared <see cref="InstanceEvents"/> functions. Lite's twin is
+    /// <c>LocalDataService.GetInstanceEventsAsync</c>.</summary>
+    public Task<InstanceEventInfo> GetInstanceEventsAsync(
         string serverKey, CancellationToken cancellationToken = default) =>
         ExecuteWithOneRetryAsync(
-            ct => GetInstanceEventSamplesCoreAsync(serverKey, ct),
+            ct => GetInstanceEventsCoreAsync(serverKey, ct),
             serverKey,
             "instance events",
             cancellationToken);
 
-    private async Task<List<InstanceEventSample>> GetInstanceEventSamplesCoreAsync(
+    private async Task<InstanceEventInfo> GetInstanceEventsCoreAsync(
         string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
-        var since = DateTime.UtcNow.AddMinutes(-AlertEngine.InstanceEventLookbackMinutes);
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(InstanceEventSamplesSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        using var command = new NpgsqlCommand(InstanceEvents.StateSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = since });
-        var samples = new List<InstanceEventSample>();
+        var state = new List<BaselineDiscontinuities.StateRow>();
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            samples.Add(new InstanceEventSample
-            {
-                CollectionTimeUtc = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-                SqlServerStartTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
-                MemoryDumpCount = reader.IsDBNull(2) ? null : reader.GetInt32(2),
-                NewestMemoryDumpTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                FailedCollectionsSincePrevious = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
-            });
+            state.Add(new BaselineDiscontinuities.StateRow(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetDateTime(3)));
         }
 
-        return samples;
+        return ToInstanceEventInfo(state);
+    }
+
+    /// <summary>The shared judges' answer as the engine's types. Internal so a test can plant rows without a store.</summary>
+    internal static InstanceEventInfo ToInstanceEventInfo(IReadOnlyList<BaselineDiscontinuities.StateRow> state)
+    {
+        var restart = InstanceEvents.JudgeRestart(state);
+        var dumps = InstanceEvents.JudgeMemoryDumps(state);
+        return new InstanceEventInfo(
+            restart is { } r ? new InstanceRestartInfo(r.PreviousStartTime, r.NewStartTime, r.ObservedAtUtc) : null,
+            dumps is { } d && d.Current.NewestUtc is { } newest
+                ? new MemoryDumpInfo(
+                    newest, d.Current.Count, d.Current.RecentCount, Math.Max(1, d.Current.Count - d.Previous.Count), d.ObservedAtUtc)
+                : null);
     }
 
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(

@@ -808,8 +808,6 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
-        // V269 (#8884): the newest memory dump time on server_properties. The probe's sentinel is the column; the rewind drops it and a re-run of V269 adds it again.
-        new(269, "hasServerPropertiesDumpTime", "ALTER TABLE IF EXISTS collect.server_properties DROP COLUMN IF EXISTS newest_memory_dump_time;"),
     ];
 
     /// <summary>

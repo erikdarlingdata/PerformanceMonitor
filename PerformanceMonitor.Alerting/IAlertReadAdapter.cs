@@ -308,18 +308,15 @@ public interface IAlertReadAdapter
         string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// The server's recent <c>server_properties</c> samples (start time, memory dump count, newest dump time) for the Instance
-    /// Restarted and Memory Dumps alerts (#8884), OLDEST first, covering at least the last
-    /// <see cref="AlertEngine.InstanceEventLookbackMinutes"/> minutes and always the newest sample the store holds.
+    /// The restart and the memory dump rise the store holds for the Instance Restarted and Memory Dumps alerts (#8884). One read of the server's
+    /// <c>collector_state</c> rows the identity carriers and <c>cpu_utilization</c> persisted: nothing new is collected for the restart, and the dump stamp
+    /// rides the CPU collector's existing round trip. A restart is a start time that moved later while the server name did not (a failover or a
+    /// rename is not one). A memory dump rise is a newest dump time later than the previous stamp's. Both are events, so a member is null when the store holds
+    /// none. The adapter does not judge age or repeats: the engine does, so the two hosts cannot disagree on them.
     ///
-    /// <para>Both alerts are events judged between neighbouring samples, so the read returns samples rather than a verdict, the one
-    /// difference from <see cref="GetForcePlanFailuresAsync"/>. Each sample carries how many collector runs failed since the previous one,
-    /// from the collection log, so the engine can say the server was unreachable in between.</para>
-    ///
-    /// <para>Empty when the server has no sample yet, and always empty on Azure SQL Database, where there is no restart to report and no
-    /// dump view: the engine skips such a server without reading.</para>
+    /// <para>Never throws for an absent row. An engine without the dump view leaves no stamp, and the engine skips Azure SQL Database without reading.</para>
     /// </summary>
-    Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(
+    Task<InstanceEventInfo> GetInstanceEventsAsync(
         string serverKey, CancellationToken cancellationToken = default) =>
-        Task.FromResult(new List<InstanceEventSample>());
+        Task.FromResult(new InstanceEventInfo(null, null));
 }

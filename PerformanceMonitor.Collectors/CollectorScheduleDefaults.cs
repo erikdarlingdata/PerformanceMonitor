@@ -92,10 +92,7 @@ public static class CollectorScheduleDefaults
         ["running_jobs"] = new(5, 7),
         ["database_size_stats"] = new(60, 90),
         ["index_object_stats"] = new(1440, 90),
-        /* #8884: every 5 minutes, no longer on-load only, so the Instance Restarted and Memory Dumps alerts hear a new dump within 5 minutes (a restart is
-           also seen on reconnect, which always captured it). One row of fixed-size columns per cycle from in-memory DMVs and one count over the dump
-           folder listing; 288 rows a day per server. */
-        ["server_properties"] = new(5, 365),
+        ["server_properties"] = new(0, 365),
         ["session_stats"] = new(5, 30),
         ["session_summary_stats"] = new(5, 30),
         ["system_health_events"] = new(5, 30),

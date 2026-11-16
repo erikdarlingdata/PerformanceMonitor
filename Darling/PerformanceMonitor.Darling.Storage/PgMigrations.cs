@@ -3482,23 +3482,7 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
-        /* V269 (#8884): the newest memory dump's time on server_properties, for the Memory Dumps alert. A catalog-only nullable column: nothing is backfilled. */
-        new Migration(269, "server-properties-newest-memory-dump-time", V269Sql),
     };
-
-    /// <summary>
-    /// V269 (#8884): <c>collect.server_properties.newest_memory_dump_time</c>, <c>MAX(creation_time)</c> of <c>sys.dm_server_memory_dumps</c> on the
-    /// server's local clock, beside <c>memory_dump_count</c>. The Memory Dumps alert compares it between collections, so a new dump is seen even when an
-    /// old one was deleted in the same interval and the count did not rise. One nullable <c>timestamp</c>, no DEFAULT, no backfill, no scan: a row stored
-    /// before this rung never read it, so NULL is the honest value. Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after
-    /// <c>time_zone_id</c>, because the writer is a positional binary COPY with an explicit column list: a fresh store (the generated V1 table carries the
-    /// column from the collector's payload, and this ALTER no-ops there) and an upgraded one share one physical column order. server_properties has no
-    /// v_ passthrough (V16), so the ALTER stands alone. An older build writes its own column list, so the column stays NULL for the rows it writes, and its
-    /// reads name their columns, so the extra one changes nothing for it.
-    /// </summary>
-    private const string V269Sql = @"
-ALTER TABLE collect.server_properties
-    ADD COLUMN IF NOT EXISTS newest_memory_dump_time timestamp;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

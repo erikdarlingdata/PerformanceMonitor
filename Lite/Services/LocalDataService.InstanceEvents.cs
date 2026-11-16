@@ -11,71 +11,51 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Services;
 
-/// <summary>The DuckDB read behind the Instance Restarted and Memory Dumps alerts (#8884).</summary>
+/// <summary>
+/// The DuckDB execution of <see cref="InstanceEvents"/> for the Instance Restarted and Memory Dumps alerts (#8884): the shared SQL text runs unchanged
+/// against Lite's <c>collector_state</c>, and the rows go to the shared judges, which hold the whole read-side rule. Darling's twin is
+/// <c>DarlingAlertReadAdapter.GetInstanceEventsAsync</c>.
+/// </summary>
 public sealed partial class LocalDataService
 {
-    /// <summary>
-    /// The server's recent <c>server_properties</c> samples, oldest first: every sample in the lookback window plus the one just before it, so the
-    /// oldest returned sample has a neighbour to be compared with. $1 server_id, $2 the window start (bound, never written as now() - INTERVAL: collection_time is a
-    /// naive-UTC TIMESTAMP). Reads the hot table only: the window is minutes, and archival moves rows out after days.
-    /// Each sample's failed-collection count is the collection_log rows with status ERROR for the server between the previous sample and this one.
-    /// </summary>
-    public const string InstanceEventSamplesSql = @"
-SELECT
-    sp.collection_time,
-    sp.sqlserver_start_time,
-    sp.memory_dump_count,
-    sp.newest_memory_dump_time
-FROM server_properties AS sp
-WHERE sp.server_id = $1
-AND   sp.collection_time >= $2
-ORDER BY sp.collection_time";
-
-    public const string InstanceEventFailuresSql = @"
-SELECT COUNT(*)
-FROM collection_log
-WHERE server_id = $1
-AND   status = 'ERROR'
-AND   collection_time > $2
-AND   collection_time <= $3";
-
-    public async Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(int serverId, DateTime sinceUtc)
+    public async Task<InstanceEventInfo> GetInstanceEventsAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
-        var samples = new List<InstanceEventSample>();
 
+        var state = new List<BaselineDiscontinuities.StateRow>();
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = InstanceEventSamplesSql;
+            command.CommandText = InstanceEvents.StateSql;
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = sinceUtc });
+
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
-                samples.Add(new InstanceEventSample
-                {
-                    CollectionTimeUtc = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-                    SqlServerStartTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
-                    MemoryDumpCount = reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
-                    NewestMemoryDumpTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                });
+                state.Add(new BaselineDiscontinuities.StateRow(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetDateTime(3)));
             }
         }
 
-        for (int i = 1; i < samples.Count; i++)
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText = InstanceEventFailuresSql;
-            command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = samples[i - 1].CollectionTimeUtc });
-            command.Parameters.Add(new DuckDBParameter { Value = samples[i].CollectionTimeUtc });
-            var scalar = await command.ExecuteScalarAsync();
-            samples[i].FailedCollectionsSincePrevious = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
-        }
+        return ToInstanceEventInfo(state);
+    }
 
-        return samples;
+    /// <summary>The shared judges' answer as the engine's types. Public so a test can plant rows without a store.</summary>
+    public static InstanceEventInfo ToInstanceEventInfo(IReadOnlyList<BaselineDiscontinuities.StateRow> state)
+    {
+        var restart = InstanceEvents.JudgeRestart(state);
+        var dumps = InstanceEvents.JudgeMemoryDumps(state);
+        return new InstanceEventInfo(
+            restart is { } r ? new InstanceRestartInfo(r.PreviousStartTime, r.NewStartTime, r.ObservedAtUtc) : null,
+            dumps is { } d && d.Current.NewestUtc is { } newest
+                ? new MemoryDumpInfo(
+                    newest, d.Current.Count, d.Current.RecentCount, Math.Max(1, d.Current.Count - d.Previous.Count), d.ObservedAtUtc)
+                : null);
     }
 }

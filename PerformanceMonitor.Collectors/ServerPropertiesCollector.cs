@@ -76,10 +76,7 @@ public sealed class ServerPropertiesCollector : CollectorDefinitionBase<ServerPr
         int? UtcOffsetMinutes,
         /* #3653 item 13 (Q8): CURRENT_TIMEZONE_ID() on SQL Server 2022+ / Azure SQL DB / Managed Instance;
            NULL on every older engine, where only the offset is known. */
-        string? TimeZoneId,
-        /* #8884: MAX(creation_time) of sys.dm_server_memory_dumps on the server's local clock; NULL when the
-           view is absent (Azure SQL Database) or holds no dump. */
-        DateTime? NewestMemoryDumpTime = null);
+        string? TimeZoneId);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -256,8 +253,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE
     @lpim bit = NULL,
     @ifi bit = NULL,
-    @dumps integer = NULL,
-    @newest_dump datetime2(3) = NULL;
+    @dumps integer = NULL;
 
 BEGIN TRY
     SELECT
@@ -312,25 +308,19 @@ END;
 IF OBJECT_ID(N'sys.dm_server_memory_dumps', N'V') IS NOT NULL
 BEGIN
     BEGIN TRY
-        /* #8884: the newest dump's time rides on the same read as the count, so the Memory Dumps alert can tell a new
-           dump from a deleted old one. creation_time is a datetimeoffset; converting it to datetime2 keeps the server's
-           local wall clock, the same clock sqlserver_start_time is stored in. */
         SELECT
-            @dumps = COUNT_BIG(*),
-            @newest_dump = CONVERT(datetime2(3), MAX(smd.creation_time))
+            @dumps = COUNT_BIG(*)
         FROM sys.dm_server_memory_dumps AS smd;
     END TRY
     BEGIN CATCH
         SET @dumps = NULL;
-        SET @newest_dump = NULL;
     END CATCH;
 END;
 
 SELECT /* PerformanceMonitorLite */
     lock_pages_in_memory = @lpim,
     instant_file_initialization_enabled = @ifi,
-    memory_dump_count = @dumps,
-    newest_memory_dump_time = @newest_dump;";
+    memory_dump_count = @dumps;";
 
     public override string Name => "server_properties";
 
@@ -377,9 +367,6 @@ SELECT /* PerformanceMonitorLite */
            id from CURRENT_TIMEZONE_ID(), beside the offset it disambiguates across DST; NULL on a pre-2022
            engine, where only the offset is known. */
         new CollectorColumn("time_zone_id", CollectorColumnType.Varchar),
-        /* Appended (never inserted), Darling V? / Lite v83 (#8884): MAX(creation_time) of sys.dm_server_memory_dumps, beside
-           memory_dump_count, so the Memory Dumps alert sees a new dump even when an old one was deleted the same hour. */
-        new CollectorColumn("newest_memory_dump_time", CollectorColumnType.Timestamp),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -452,7 +439,6 @@ SELECT /* PerformanceMonitorLite */
             LockPagesInMemory = reader.IsDBNull(0) ? null : reader.GetBoolean(0),
             InstantFileInitializationEnabled = reader.IsDBNull(1) ? null : reader.GetBoolean(1),
             MemoryDumpCount = reader.IsDBNull(2) ? null : reader.GetInt32(2),
-            NewestMemoryDumpTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
         };
     }
 
@@ -481,8 +467,7 @@ SELECT /* PerformanceMonitorLite */
             .Value(row.HostOsVersion)
             .Value(row.AgReplicaRole)
             .Value(row.UtcOffsetMinutes)
-            .Value(row.TimeZoneId)      /* time_zone_id — NULL pre-2022, where only the offset is known (#3653 item 13) */
-            .Value(row.NewestMemoryDumpTime);   /* newest_memory_dump_time (#8884) */
+            .Value(row.TimeZoneId);      /* time_zone_id — NULL pre-2022, where only the offset is known (#3653 item 13) */
     }
 
     /// <summary>

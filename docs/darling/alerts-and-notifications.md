@@ -38,6 +38,8 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `longRunningQueryThresholdMinutes` | `30` | |
 | `tempDbSpaceEnabled` | `true` | |
 | `tempDbSpaceThresholdPercent` | `80` | |
+| `instanceRestartedEnabled` | `true` | The Instance Restarted alert: fires once when the instance start time moves later with the same server name. A failover or rename does not fire it. It reads the identity pair the wait stats and CPU collectors already keep in `collector_state`, and ignores a restart recorded more than 15 minutes ago. |
+| `memoryDumpsEnabled` | `true` | The Memory Dumps alert: fires once per new memory dump, WARNING, or CRITICAL when 3 or more dumps were created in the last 10 minutes. The CPU collector reads `sys.dm_server_memory_dumps` in its existing round trip. |
 | `lowDiskEnabled` | `true` | Volume free space; graded CRITICAL when critically low |
 | `lowDiskThresholdPercent` | `10` | Fire below X% free; `0` disables this dimension (clamped 0–100) |
 | `lowDiskThresholdGb` | `5` | Fire below X GB free; `0` disables this dimension |

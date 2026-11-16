@@ -593,6 +593,8 @@ public class CollectorMeasurementSeamTests
                 CollectorContext.StatementScrubTimeoutsMeasurement,
                 CollectorContext.StatementScrubUnjudgedMeasurement,
                 CollectorContext.StatementScrubMsMeasurement,
+                /* #8884: dumps that arrived since the previous stamp, measured by InstanceEvents.ObserveMemoryDumps on behalf of cpu_utilization. */
+                InstanceEvents.MemoryDumpsNewMeasurement,
                 /* #6441: SQL Server truncated the ring buffer's XML. Measured through RingBufferXml.MeasureTruncation on
                    behalf of system_health_events, long_query_completions, deadlocks and blocked_process_report, which
                    is why the consts live in RingBufferXml.cs. Written only on a truncated read. */

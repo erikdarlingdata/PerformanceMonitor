@@ -60,6 +60,8 @@ public sealed class AlertEngineTests
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
         public bool ForcePlanFailureEnabled { get; set; } = true;
+        public bool InstanceRestartedEnabled { get; set; } = true;
+        public bool MemoryDumpsEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
@@ -316,11 +318,11 @@ public sealed class AlertEngineTests
 
         public int ForcePlanFetches { get; private set; }
 
-        /* #8884: the samples the Instance Restarted and Memory Dumps checks judge, as the store would return them (any order). */
-        public List<InstanceEventSample> InstanceEventSamples { get; } = new();
+        /* #8884: what the store holds about a restart and a memory dump rise, as the adapter reads it. */
+        public InstanceEventInfo InstanceEvents { get; set; } = new(null, null);
 
-        public Task<List<InstanceEventSample>> GetInstanceEventSamplesAsync(string serverKey, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new List<InstanceEventSample>(InstanceEventSamples));
+        public Task<InstanceEventInfo> GetInstanceEventsAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(InstanceEvents);
 
         public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default)
         {
@@ -5675,32 +5677,38 @@ public sealed class AlertEngineTests
 
     /* ---------------- instance restart and memory dumps (#8884) ---------------- */
 
-    private static readonly DateTime EventT0 = new(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime EventStart = new(2026, 11, 1, 6, 0, 0);
+    private static readonly DateTime EventRestart = new(2026, 7, 1, 11, 58, 0);
+    private static readonly DateTime EventDump = new(2026, 7, 1, 11, 57, 0, DateTimeKind.Utc);
 
-    private static InstanceEventSample EventSample(int minute, DateTime? start = null, int? dumps = 0, DateTime? newest = null, int failed = 0) =>
-        new()
-        {
-            CollectionTimeUtc = EventT0.AddMinutes(minute),
-            SqlServerStartTime = start ?? EventStart,
-            MemoryDumpCount = dumps,
-            NewestMemoryDumpTime = newest,
-            FailedCollectionsSincePrevious = failed,
-        };
+    private static InstanceRestartInfo Restart(Harness h, int ageMinutes = 1, DateTime? newStart = null) =>
+        new(EventStart, newStart ?? EventRestart, h.Now.AddMinutes(-ageMinutes));
 
-    private static async Task<Harness> SeededEventHarnessAsync(InstanceEventSample first)
+    private static MemoryDumpInfo Dumps(Harness h, long total = 3, long recent = 1, int ageMinutes = 1, DateTime? newest = null) =>
+        new(newest ?? EventDump, total, recent, 1, h.Now.AddMinutes(-ageMinutes));
+
+    [Fact]
+    public async Task InstanceRestarted_RestartRecord_FiresOnce_NamingBothStartTimes()
     {
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(first);
-        await h.Build().EvaluateServerAsync(Harness.Snapshot());
-        return h;
+        h.Adapter.InstanceEvents = new InstanceEventInfo(Restart(h), null);
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Instance Restarted");
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Contains("2026-11-01 06:00:00", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-07-01 11:58:00", fired.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task InstanceEvents_FirstCollection_FiresNothing_EvenWithDumpsAndAStartTime()
+    public async Task InstanceRestarted_NoRestartRecord_FiresNothing()
     {
+        /* The first observation, a failover, a rename and a steady server all reach the engine as "the store holds no restart". */
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0, dumps: 7, newest: new DateTime(2026, 11, 15, 1, 0, 0)));
+        h.Adapter.InstanceEvents = new InstanceEventInfo(null, null);
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
@@ -5708,101 +5716,118 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
-    public async Task InstanceRestarted_LaterStartTime_FiresOnce_NamingBothStartTimesAndTheGap()
+    public async Task InstanceRestarted_OldRecord_FiresNothing()
     {
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0));
-        var engine = h.Build();
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Adapter.InstanceEvents = new InstanceEventInfo(Restart(h, ageMinutes: AlertEngine.InstanceEventFreshMinutes + 1), null);
 
-        var restart = new DateTime(2026, 11, 16, 11, 58, 0);
-        h.Adapter.InstanceEventSamples.Add(EventSample(5, start: restart, failed: 2));
-        await engine.EvaluateServerAsync(Harness.Snapshot());
-        await engine.EvaluateServerAsync(Harness.Snapshot());
-
-        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Instance Restarted");
-        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
-        Assert.Contains("2026-11-01 06:00:00", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("2026-11-16 11:58:00", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("Yes", fired.DetailText, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task InstanceRestarted_SameStartTime_FiresNothing_AndAnEarlierOneNeverFires()
-    {
-        var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0));
-        var engine = h.Build();
-        await engine.EvaluateServerAsync(Harness.Snapshot());
-
-        h.Adapter.InstanceEventSamples.Add(EventSample(5));
-        h.Adapter.InstanceEventSamples.Add(EventSample(10, start: EventStart.AddDays(-1)));
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Instance Restarted");
     }
 
     [Fact]
-    public async Task MemoryDumps_CountRises_FiresWarning_NamingCountAndNewestDump()
+    public async Task InstanceRestarted_AfterAHostRestart_DoesNotFireTheSameStartTimeAgain()
     {
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0, dumps: 2, newest: new DateTime(2026, 11, 10, 3, 0, 0)));
+        h.Adapter.InstanceEvents = new InstanceEventInfo(Restart(h), null);
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Instance Restarted");
+
+        /* A new engine, the same state store: what a host restart leaves. */
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Instance Restarted");
+    }
+
+    [Fact]
+    public async Task InstanceRestarted_ALaterRestart_FiresAgain()
+    {
+        var h = new Harness();
+        h.Adapter.InstanceEvents = new InstanceEventInfo(Restart(h), null);
         var engine = h.Build();
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
-        h.Adapter.InstanceEventSamples.Add(EventSample(5, dumps: 3, newest: new DateTime(2026, 11, 16, 11, 57, 0)));
+        h.Now = h.Now.AddMinutes(10);
+        h.Adapter.InstanceEvents = new InstanceEventInfo(Restart(h, newStart: EventRestart.AddMinutes(9)), null);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Instance Restarted"));
+    }
+
+    [Fact]
+    public async Task MemoryDumps_Rise_FiresWarning_NamingCountNewestAndRecent()
+    {
+        var h = new Harness();
+        h.Adapter.InstanceEvents = new InstanceEventInfo(null, Dumps(h, total: 3, recent: 1));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Memory Dumps");
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
-        Assert.Contains("2026-11-16 11:57:00", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("3", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("2026-07-01 11:57:00", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("3 dumps", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 in the last 10 minutes", fired.CurrentValue, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task MemoryDumps_ThreeNewDumpsInTenMinutes_FiresCritical()
+    public async Task MemoryDumps_ThreeInTenMinutes_FiresCritical()
     {
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0, dumps: 0));
-        var engine = h.Build();
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Adapter.InstanceEvents = new InstanceEventInfo(null, Dumps(h, total: 5, recent: AlertEngine.MemoryDumpBurstCount));
 
-        h.Adapter.InstanceEventSamples.Add(EventSample(5, dumps: 1, newest: new DateTime(2026, 11, 16, 11, 56, 0)));
-        h.Adapter.InstanceEventSamples.Add(EventSample(10, dumps: 3, newest: new DateTime(2026, 11, 16, 12, 1, 0)));
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
-        var fires = h.Deliverer.Outcomes.Where(o => o.MetricName == "Memory Dumps").ToList();
-        Assert.Equal(2, fires.Count);
-        Assert.Equal(AlertSeverityLevel.Warning, fires[0].Severity);
-        Assert.Equal(AlertSeverityLevel.Critical, fires[1].Severity);
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Memory Dumps");
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
     }
 
     [Fact]
-    public async Task MemoryDumps_CountDrops_FiresNothing()
+    public async Task MemoryDumps_OldRecord_FiresNothing()
     {
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0, dumps: 5, newest: new DateTime(2026, 11, 10, 3, 0, 0)));
-        var engine = h.Build();
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Adapter.InstanceEvents = new InstanceEventInfo(null, Dumps(h, ageMinutes: AlertEngine.InstanceEventFreshMinutes + 1));
 
-        h.Adapter.InstanceEventSamples.Add(EventSample(5, dumps: 2, newest: new DateTime(2026, 11, 10, 3, 0, 0)));
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Memory Dumps");
     }
 
     [Fact]
-    public async Task MemoryDumps_EngineWithoutTheView_FiresNothing()
+    public async Task MemoryDumps_AfterAHostRestart_DoesNotFireTheSameDumpAgain_ButANewerOneFires()
     {
         var h = new Harness();
-        h.Adapter.InstanceEventSamples.Add(EventSample(0, dumps: null));
-        var engine = h.Build();
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Adapter.InstanceEvents = new InstanceEventInfo(null, Dumps(h));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
-        h.Adapter.InstanceEventSamples.Add(EventSample(5, dumps: null));
-        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var restarted = h.Build();
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Memory Dumps");
 
-        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Memory Dumps");
+        h.Adapter.InstanceEvents = new InstanceEventInfo(null, Dumps(h, newest: EventDump.AddMinutes(1)));
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Memory Dumps"));
+    }
+
+    [Fact]
+    public async Task InstanceEvents_SwitchedOff_FireNothing()
+    {
+        var h = new Harness();
+        h.Settings.InstanceRestartedEnabled = false;
+        h.Settings.MemoryDumpsEnabled = false;
+        h.Adapter.InstanceEvents = new InstanceEventInfo(Restart(h), Dumps(h));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName is "Instance Restarted" or "Memory Dumps");
+    }
+
+    [Fact]
+    public void MemoryDumpBurstWindow_IsTheCollectorsRecentWindow()
+    {
+        Assert.Equal(PerformanceMonitor.Collectors.InstanceEvents.RecentWindowMinutes, AlertEngine.MemoryDumpBurstMinutes);
     }
 
     [Fact]

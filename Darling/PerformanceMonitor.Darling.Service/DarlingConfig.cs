@@ -1038,6 +1038,12 @@ public sealed class AlertsConfig
     [JsonPropertyName("tempDbSpaceThresholdPercent")]
     public int TempDbSpaceThresholdPercent { get; set; } = 80;
 
+    /// <summary>The Instance Restarted alert (#8884): on by default.</summary>
+    public bool InstanceRestartedEnabled { get; set; } = true;
+
+    /// <summary>The Memory Dumps alert (#8884): on by default.</summary>
+    public bool MemoryDumpsEnabled { get; set; } = true;
+
     [JsonPropertyName("lowDiskEnabled")]
     public bool LowDiskEnabled { get; set; } = true;
 
