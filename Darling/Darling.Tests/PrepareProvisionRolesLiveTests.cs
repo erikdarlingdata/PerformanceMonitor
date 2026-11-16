@@ -66,6 +66,25 @@ public sealed class PrepareProvisionRolesLiveTests
     }
 
     [Fact]
+    public async Task PrepareThenPsql_StoreWithoutDatabaseSearchPath_StillPrepares()
+    {
+        await RunAsync(async (runtimeRoot, directory, superuser, ownerLogin, ct) =>
+        {
+            await ComposeStoreRolesLiveTests.ExecAsync(superuser, "ALTER DATABASE app RESET search_path; ALTER ROLE app RESET search_path", ct);
+            var bare = new NpgsqlConnectionStringBuilder(ownerLogin) { SearchPath = null, Pooling = false }.ConnectionString;
+            var seen = await ComposeStoreRolesLiveTests.OwnerScalarAsync<string>(bare, "SHOW search_path", ct);
+            Assert.DoesNotContain("collect", seen, StringComparison.Ordinal);
+            var (args, stdout, stderr) = Prepare(directory, ownerLogin, waitSeconds: 20);
+
+            var exit = await DarlingCliCommands.PrepareProvisionRolesAsync(args, stdout, stderr, ct);
+
+            Assert.True(exit == ProvisionRolesExitCodes.Prepared, $"exit {exit}{Environment.NewLine}{stderr}");
+            var psql = await RunPsqlAsync(runtimeRoot, Path.Combine(directory, "out"), ct);
+            Assert.True(psql.ExitCode == 0, $"psql exited {psql.ExitCode}.{Environment.NewLine}{psql.Error}");
+        });
+    }
+
+    [Fact]
     public async Task Prepare_UnmigratedStore_TimesOut()
     {
         await RunAsync(async (runtimeRoot, directory, superuser, ownerLogin, ct) =>

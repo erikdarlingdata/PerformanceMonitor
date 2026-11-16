@@ -206,6 +206,32 @@ public sealed class PrepareProvisionRolesVerbTests : IDisposable
         Assert.Contains("login file", stderr.ToString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void StoreConnectionString_CarriesTheStoreSearchPath_ForBothLoginKinds()
+    {
+        Assert.True(DarlingCliCommands.TryParsePrepareProvisionRolesArgs(PasswordKindArgs(), out var passwordArgs, out var error), error);
+        var passwordLogin = DarlingCliCommands.TryReadProvisionRolesLogin(passwordArgs!, "OwnerPw-0123456789\n", out error);
+        var stringLogin = DarlingCliCommands.TryReadProvisionRolesLogin(ConnectionStringArgs(), "Host=h;Database=d;Username=u;Password=p-0123456789abcdef\n", out error);
+
+        foreach (var login in new[] { passwordLogin, stringLogin })
+        {
+            var built = new NpgsqlConnectionStringBuilder(DarlingCliCommands.BuildProvisionRolesConnectionString(login!));
+            Assert.Equal("collect,config,public", built.SearchPath);
+            Assert.Equal(10, built.Timeout);
+        }
+    }
+
+    [Fact]
+    public void StoreConnectionString_KeepsAnOperatorSuppliedSearchPath()
+    {
+        var login = DarlingCliCommands.TryReadProvisionRolesLogin(
+            ConnectionStringArgs(), "Host=h;Database=d;Username=u;Password=p-0123456789abcdef;Search Path=mine,public\n", out var error);
+
+        Assert.True(login is not null, error);
+        var built = new NpgsqlConnectionStringBuilder(DarlingCliCommands.BuildProvisionRolesConnectionString(login!));
+        Assert.Equal("mine,public", built.SearchPath);
+    }
+
     private static DarlingCliCommands.PrepareProvisionRolesArgs ConnectionStringArgs() =>
         new("/run/login", DarlingCliCommands.ProvisionRolesLoginKind.ConnectionString, "/run/roles", "/work", 0, null, null, null, null, null, null);
 }

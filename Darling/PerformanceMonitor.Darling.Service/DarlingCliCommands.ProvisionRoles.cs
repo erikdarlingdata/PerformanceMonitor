@@ -58,7 +58,7 @@ public static partial class DarlingCliCommands
 
     /// <summary>The login the verb connects with and writes into pgpass and the libpq env file.</summary>
     internal sealed record ProvisionRolesLogin(
-        string Host, int Port, string Database, string Username, string Password, SslMode SslMode, string? RootCertificate);
+        string Host, int Port, string Database, string Username, string Password, SslMode SslMode, string? RootCertificate, string? SearchPath = null);
 
     /// <summary>The grammar the verb prints when its arguments are wrong. Pure ASCII.</summary>
     public static string PrepareProvisionRolesUsageText() =>
@@ -225,7 +225,8 @@ public static partial class DarlingCliCommands
         }
 
         return new ProvisionRolesLogin(builder.Host, builder.Port, builder.Database, builder.Username, builder.Password!, builder.SslMode,
-            string.IsNullOrEmpty(builder.RootCertificate) ? null : builder.RootCertificate);
+            string.IsNullOrEmpty(builder.RootCertificate) ? null : builder.RootCertificate,
+            string.IsNullOrWhiteSpace(builder.SearchPath) ? null : builder.SearchPath);
     }
 
     private static bool PasswordIsUsable(string password, out string? error)
@@ -315,19 +316,7 @@ public static partial class DarlingCliCommands
             return ProvisionRolesExitCodes.Usage;
         }
 
-        var connectionString = new NpgsqlConnectionStringBuilder
-        {
-            Host = login.Host,
-            Port = login.Port,
-            Database = login.Database,
-            Username = login.Username,
-            Password = login.Password,
-            SslMode = login.SslMode,
-            RootCertificate = login.RootCertificate,
-            Timeout = 10,
-            CommandTimeout = 30,
-            ApplicationName = "darling-provision-roles",
-        }.ConnectionString;
+        var connectionString = BuildProvisionRolesConnectionString(login);
 
         try
         {
@@ -421,6 +410,32 @@ public static partial class DarlingCliCommands
             stderr.WriteLine($"{ex.GetType().Name}: {ex.Message}");
             return ProvisionRolesExitCodes.Failed;
         }
+    }
+
+    /// <summary>The verb's store connection string. It carries the store search path (the version table lives in <c>collect</c>, or
+    /// <c>public</c> on older stores) unless the login set its own, and the caller pins the UTC session time zone outside that, as
+    /// the service builds its own.</summary>
+    internal static string BuildProvisionRolesConnectionString(ProvisionRolesLogin login)
+    {
+        var builder = new NpgsqlConnectionStringBuilder
+        {
+            Host = login.Host,
+            Port = login.Port,
+            Database = login.Database,
+            Username = login.Username,
+            Password = login.Password,
+            SslMode = login.SslMode,
+            RootCertificate = login.RootCertificate,
+            Timeout = 10,
+            CommandTimeout = 30,
+            ApplicationName = "darling-provision-roles",
+        };
+        if (!string.IsNullOrWhiteSpace(login.SearchPath))
+        {
+            builder.SearchPath = login.SearchPath;
+        }
+
+        return DarlingStoreConnection.EnsureStoreSearchPath(builder.ConnectionString);
     }
 
     private static void WriteOwnerOnlyFile(string path, string content)
