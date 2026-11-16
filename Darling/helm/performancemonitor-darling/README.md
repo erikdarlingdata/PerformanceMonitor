@@ -238,6 +238,29 @@ There is no liveness probe on the dashboard or MCP port, and no probe reads the 
 
 What readiness does not cover: it follows a startup verdict. The service publishes that it is collecting once, when startup finishes, and does not change it back, so a store that becomes unreachable after collection started is not shown as not Ready. Watch collection itself (the dashboard's state, or the service log) for that. See [the health port](../../../docs/darling/network-endpoints.md#the-health-port) for what the port answers.
 
+## Moving from your own manifests
+
+Two things catch a deployment that ran Darling from manifests of its own before it moves to this chart.
+
+**A Deployment with the chart's name must be deleted once.** When the old Deployment has the name the chart renders (for example with `fullnameOverride` set to the old name), the first install or sync fails: Helm will not take over a Deployment it did not create, and a sync cannot change the old Deployment's selector to the chart's (`app.kubernetes.io/name` and `app.kubernetes.io/instance`). Delete the old Deployment once (`kubectl delete deployment <name>`) and the chart's takes its place. That touches neither the state volume nor the Secrets, and with the `Recreate` strategy the gap is the same as any restart. A Service or ConfigMap of your own is only in the way when its name collides with one the chart renders; otherwise delete the old ones after the switch.
+
+**Servers seeded before the chart keep their `file:` password paths.** `servers` in `darling.json` is a first-start seed (see [Which values the store overrides after the first start](#which-values-the-store-overrides-after-the-first-start)), and the store keeps each server's password reference as it was seeded. The chart mounts the Secret at `/run/secrets/darling/`, so a server seeded with a password under another path finds no file there. Mount the old path as well, with `extraVolumes` and `extraVolumeMounts`, and keep it for as long as those servers should read their passwords from the Secret. The Admin page and the MCP tool `edit_server` take only the password itself, not a `file:` reference, so a server edited there stops reading the Secret:
+
+```yaml
+extraVolumes:
+  - name: old-secret-paths
+    secret:
+      secretName: <your-secret>
+      defaultMode: 0440
+      items:
+        - key: sql-password-prod
+          path: sql-password-prod
+extraVolumeMounts:
+  - name: old-secret-paths
+    mountPath: /run/secrets/<old-path>
+    readOnly: true
+```
+
 ## Upgrades
 
 1. **Back up the store first.** The bundled store has no backups of its own. Take a `pg_dump` (or a volume snapshot) before changing the chart or the image. An external store follows your own backup plan.
