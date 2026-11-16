@@ -470,13 +470,14 @@ plan_agg AS
         plan_id,
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
-        SUM(execution_count) AS execs,
-        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
-        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #8570: every sum in double precision, as the daily read takes them (PlanRegressionDailySql's plan_agg says why).
+        SUM(execution_count::DOUBLE PRECISION) AS execs,
+        SUM(avg_cpu_time_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS cpu_per_exec,
+        SUM(avg_duration_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS dur_per_exec,
         -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
         -- interval has no avg_rowcount, so a missing count can never read as a small one.
         CASE WHEN COUNT(*) = COUNT(avg_rowcount)
-             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+             THEN SUM(avg_rowcount::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0)
         END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
@@ -515,13 +516,14 @@ WITH plan_agg AS
         plan_id,
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
-        SUM(execution_count) AS execs,
-        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
-        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #8570: every sum in double precision, as the daily read takes them (PlanRegressionDailySql's plan_agg says why).
+        SUM(execution_count::DOUBLE PRECISION) AS execs,
+        SUM(avg_cpu_time_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS cpu_per_exec,
+        SUM(avg_duration_us::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0) AS dur_per_exec,
         -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
         -- interval has no avg_rowcount, so a missing count can never read as a small one.
         CASE WHEN COUNT(*) = COUNT(avg_rowcount)
-             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+             THEN SUM(avg_rowcount::DOUBLE PRECISION * execution_count) / NULLIF(SUM(execution_count::DOUBLE PRECISION), 0)
         END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
