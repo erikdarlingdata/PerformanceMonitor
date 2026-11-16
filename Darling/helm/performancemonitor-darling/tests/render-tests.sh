@@ -596,6 +596,11 @@ render -f "${CI_EXTERNAL}" --set store.provisionRoles.waitSeconds=60
 assert_eq "$(jq_job '.spec.activeDeadlineSeconds')" "360" "activeDeadlineSeconds follows waitSeconds"
 assert_eq "$(jq_job '.spec.template.spec.initContainers[0].args | join(" ") | contains("--out /work --wait-seconds 60 --host")')" "true" "wait seconds argument"
 
+t provision_roles_pull_policy
+render -f "${CI_EXTERNAL}" --set image.pullPolicy=Never
+assert_eq "$(jq_job '.spec.template.spec.containers[] | select(.name == "provision-roles") | .imagePullPolicy')" '"IfNotPresent"' "psql container pulls IfNotPresent whatever image.pullPolicy says"
+assert_eq "$(jq_job '.spec.template.spec.initContainers[] | select(.name == "prepare") | .imagePullPolicy')" '"Never"' "prepare container follows image.pullPolicy"
+
 t provision_roles_images
 render -f "${CI_EXTERNAL}"
 assert_eq "$(jq_job '.spec.template.spec.initContainers[0].image')" "$(dq '.spec.template.spec.containers[0].image')" "init container image equals the Deployment's"

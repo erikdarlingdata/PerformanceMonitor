@@ -153,7 +153,7 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 
 **Timing.** Helm waits for a hook Job inside `--timeout` (5 minutes by default), and the Job's `activeDeadlineSeconds` is `waitSeconds + 300`. A release that migrates for a long time needs `helm upgrade --timeout` to cover `waitSeconds` (default 900). Without `--wait`, the Job starts as soon as the manifests are applied and waits for the new pod to migrate the store.
 
-**Tested versions.** PostgreSQL 18.6 (the live tests). <!-- #8779 task 7 adds the kind runs on PostgreSQL 17 and 15 to this line. -->
+**Tested versions.** PostgreSQL 18.6 (the live tests); PostgreSQL 17 and 15 (the kind cases `external_provision_roles` and `provision_roles_fails_the_release`).
 
 ## Values
 
