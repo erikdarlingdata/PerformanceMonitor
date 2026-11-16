@@ -42,7 +42,8 @@ export function accountDetails(me) {
   if (oidc && me.display_name) rows.push(["Name", me.display_name]);
   if (oidc) rows.push(["Signed in as", me.subject || ""]);
   const seat = seatWord(me);
-  if (oidc) rows.push(["Seat", seat + (me.granted_by ? " (granted by " + me.granted_by + ")" : " (no role mapping set)")]);
+  /* A null granted_by is not "no mapping": a sign-in with no owner key carries no grant at all. The server says it with role_mapping. */
+  if (oidc) rows.push(["Seat", seat + (me.granted_by ? " (granted by " + me.granted_by + ")" : me.role_mapping === false ? " (no role mapping set)" : "")]);
   else rows.push(["Seat", seat]);
   if (METHOD_WORDS[me.method]) rows.push(["Signed in with", METHOD_WORDS[me.method]]);
   if (me.expires_at) rows.push(["Session ends", localTime(me.expires_at)]);

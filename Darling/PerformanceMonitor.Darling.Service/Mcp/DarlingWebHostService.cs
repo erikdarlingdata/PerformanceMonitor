@@ -126,6 +126,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// listener's, exactly like the certificate above.</summary>
     private DarlingWebOidcClient? _oidcClient;
 
+    /// <summary>#8737: for <c>/api/me</c>, whether the configured OIDC sign-in has a role mapping; null when OIDC is not configured.</summary>
+    private static bool? OidcRoleMapping(DarlingWebOidcClient? client)
+        => client is null ? null : DarlingWebOidc.HasRoleMapping(client.Options.AdminRoles, client.Options.ViewerRoles);
+
     private int _runningPort;
 
     /// <summary>True while the running app uses the read-only viewer login because the managed web credential had not appeared by the end of
@@ -889,7 +893,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     return false;
                 }
 
-                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read);
+                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read, oidcRoleMapping: OidcRoleMapping(oidcClient));
 
                 /* Every user who signs in with no role mapping holds the edit seat, and through the front door a change they make runs on
                    whichever store it is sent to. */
@@ -1865,7 +1869,7 @@ public sealed class DarlingWebHostService : BackgroundService
         }
         else
         {
-            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres);
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient));
         }
 
         app.UseDefaultFiles();

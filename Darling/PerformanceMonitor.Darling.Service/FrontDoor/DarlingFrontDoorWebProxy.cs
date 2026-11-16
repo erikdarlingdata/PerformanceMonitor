@@ -76,6 +76,7 @@ internal sealed class DarlingFrontDoorWebProxy
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
     private readonly Func<CollectorRuntimeState.Snapshot?>? _collector;
+    private readonly bool? _oidcRoleMapping;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastLogged = new();
 
     /* Each store's own admin_writes_off and managed_store, as its /api/session last said (null: it did not say), and when. */
@@ -89,8 +90,9 @@ internal sealed class DarlingFrontDoorWebProxy
 
     internal DarlingFrontDoorWebProxy(
         IFrontDoorDirectory directory, DarlingFrontDoorWebSession session, TimeSpan peerTimeout, ILogger logger, TimeProvider? time = null,
-        Func<CollectorRuntimeState.Snapshot?>? collector = null)
+        Func<CollectorRuntimeState.Snapshot?>? collector = null, bool? oidcRoleMapping = null)
     {
+        _oidcRoleMapping = oidcRoleMapping;
         _collector = collector;
         _directory = directory;
         _session = session;
@@ -102,13 +104,14 @@ internal sealed class DarlingFrontDoorWebProxy
     /// <summary>The proxy the service builds when it starts as a front door: <c>frontDoor.peerTimeoutSeconds</c> bounds each call.</summary>
     internal static DarlingFrontDoorWebProxy Create(
         IFrontDoorDirectory directory, IFrontDoorSecrets secrets, FrontDoorConfig config, ILogger logger,
-        Func<CollectorRuntimeState.Snapshot?>? collector = null)
+        Func<CollectorRuntimeState.Snapshot?>? collector = null, bool? oidcRoleMapping = null)
         => new(
             directory,
             new DarlingFrontDoorWebSession(secrets),
             config.EffectivePeerTimeout(),
             logger,
-            collector: collector);
+            collector: collector,
+            oidcRoleMapping: oidcRoleMapping);
 
     /// <summary>Maps every <c>/api/*</c> route. It runs where the dashboard's own endpoints would, after the sign-in and role gates.</summary>
     internal void AddRoutes(WebApplication app)
@@ -222,8 +225,8 @@ internal sealed class DarlingFrontDoorWebProxy
     }
 
     /// <summary>#8737: the calling session's own identity, from the seat the front door's gate gave this request. No store is asked.</summary>
-    private static Task MeAsync(HttpContext context) =>
-        WriteJsonAsync(context, StatusCodes.Status200OK, DarlingWebMe.Describe(DarlingWebSeat.FromContext(context)));
+    private Task MeAsync(HttpContext context) =>
+        WriteJsonAsync(context, StatusCodes.Status200OK, DarlingWebMe.Describe(DarlingWebSeat.FromContext(context), _oidcRoleMapping));
 
     /// <summary>The store list with each store's health, and, where the store said so, its <c>admin_writes_off</c> and <c>managed_store</c>: the
     /// page takes both from the store in use, as it does from the store's own <c>/api/session</c> when it is not behind a front door, so a

@@ -457,6 +457,11 @@ internal static class DarlingWebOidc
         IReadOnlyList<string> claimValues, IReadOnlyList<string>? adminRoles, IReadOnlyList<string>? viewerRoles)
         => MapRoleWithGrant(claimValues, adminRoles, viewerRoles).Role;
 
+    /// <summary>Whether a role mapping is configured at all (<c>adminRoles</c> or <c>viewerRoles</c> non-empty): the test
+    /// <see cref="MapRole"/> uses for "no mapping, everyone is an admin".</summary>
+    internal static bool HasRoleMapping(IReadOnlyList<string>? adminRoles, IReadOnlyList<string>? viewerRoles)
+        => adminRoles is { Count: > 0 } || viewerRoles is { Count: > 0 };
+
     /// <summary>
     /// <see cref="MapRole"/>'s decision plus the configured role value that granted the seat: the first entry
     /// of the matching list (in configured order) that the claim set carries. Null when no mapping is
@@ -468,7 +473,7 @@ internal static class DarlingWebOidc
     {
         var hasAdmin = adminRoles is { Count: > 0 };
         var hasViewer = viewerRoles is { Count: > 0 };
-        if (!hasAdmin && !hasViewer)
+        if (!HasRoleMapping(adminRoles, viewerRoles))
         {
             return (WebOidcRole.Admin, null);
         }

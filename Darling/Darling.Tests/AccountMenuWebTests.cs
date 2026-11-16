@@ -76,12 +76,23 @@ public sealed class AccountMenuWebTests
     [Fact]
     public void Details_OidcWithoutMapping_SaysNoRoleMappingSet()
     {
-        var r = Run("details", """{"method":"oidc","seat":"admin","subject":"erik@example.com","display_name":null,"granted_by":null,"expires_at":null}""");
+        var r = Run("details", """{"method":"oidc","seat":"admin","subject":"erik@example.com","display_name":null,"granted_by":null,"role_mapping":false,"expires_at":null}""");
 
         var rows = Rows(r);
         Assert.Equal(new[] { "Signed in as", "Seat", "Signed in with" }, rows.Select(x => x[0]).ToArray());
         Assert.Equal("admin (no role mapping set)", rows.Single(x => x[0] == "Seat")[1]);
         Assert.Equal("OpenID Connect", rows.Single(x => x[0] == "Signed in with")[1]);
+    }
+
+    [Theory]
+    [InlineData("""{"method":"oidc","seat":"read_only","subject":"s","granted_by":null,"role_mapping":true}""", "read-only")]
+    [InlineData("""{"method":"oidc","seat":"admin","subject":"s","granted_by":null,"role_mapping":null}""", "admin")]
+    [InlineData("""{"method":"oidc","seat":"read_only","subject":"s","granted_by":"readers","role_mapping":false}""", "read-only (granted by readers)")]
+    public void Details_OidcSeatRow_SaysNoRoleMappingOnlyWhenTheHostHasNone(string me, string expected)
+    {
+        var rows = Rows(Run("details", me));
+
+        Assert.Equal(expected, rows.Single(x => x[0] == "Seat")[1]);
     }
 
     [Fact]

@@ -32,13 +32,13 @@ namespace Darling.Tests;
 /// <summary>#8737: <c>GET /api/me</c> describes only the calling session: its sign-in method, seat, identity and expiry.</summary>
 public sealed class DarlingWebMeTests
 {
-    private static readonly string[] Keys = ["method", "seat", "subject", "display_name", "granted_by", "token_name", "group_name", "expires_at"];
+    private static readonly string[] Keys = ["method", "seat", "subject", "display_name", "granted_by", "role_mapping", "token_name", "group_name", "expires_at"];
     private static readonly byte[] Key = Enumerable.Range(0, 32).Select(i => (byte)(i * 5 + 1)).ToArray();
     private const string ScopedName = "finance";
     private static readonly string OwnerKey = new('k', DarlingWebSeat.OwnerKeyLength);
 
     private static void AssertShape(JsonObject me, string method, string seat, string? subject = null, string? displayName = null,
-        string? grantedBy = null, string? tokenName = null, string? groupName = null, string? expiresAt = null)
+        string? grantedBy = null, string? tokenName = null, string? groupName = null, string? expiresAt = null, bool? roleMapping = null)
     {
         Assert.Equal(Keys.OrderBy(k => k, StringComparer.Ordinal), me.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal));
         Assert.Equal(method, (string?)me["method"]);
@@ -46,6 +46,7 @@ public sealed class DarlingWebMeTests
         Assert.Equal(subject, (string?)me["subject"]);
         Assert.Equal(displayName, (string?)me["display_name"]);
         Assert.Equal(grantedBy, (string?)me["granted_by"]);
+        Assert.Equal(roleMapping, (bool?)me["role_mapping"]);
         Assert.Equal(tokenName, (string?)me["token_name"]);
         Assert.Equal(groupName, (string?)me["group_name"]);
         Assert.Equal(expiresAt, (string?)me["expires_at"]);
@@ -55,7 +56,7 @@ public sealed class DarlingWebMeTests
     public void AnOidcAdmin_CarriesSubjectNameGrantAndExpiry()
     {
         var expiry = new DateTimeOffset(2026, 11, 14, 10, 30, 15, TimeSpan.FromHours(2));
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("alice@example.test", true, OwnerKey: "k", DisplayName: "Alice A", GrantedBy: "Admins", SessionExpiresAt: expiry));
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("alice@example.test", true, OwnerKey: "k", DisplayName: "Alice A", GrantedBy: "Admins", SessionExpiresAt: expiry), null);
 
         AssertShape(me, "oidc", "admin", "alice@example.test", "Alice A", "Admins", expiresAt: "2026-11-14T08:30:15.0000000Z");
     }
@@ -63,7 +64,7 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AnOidcViewer_IsReadOnly()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false, DisplayName: "Bob", GrantedBy: "Viewers"));
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false, DisplayName: "Bob", GrantedBy: "Viewers"), null);
 
         AssertShape(me, "oidc", "read_only", "bob@example.test", "Bob", "Viewers");
     }
@@ -71,27 +72,50 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AnOidcAdmin_WithNoGrant_HasNullNameAndGrant()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("carol@example.test", true));
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("carol@example.test", true), null);
 
         AssertShape(me, "oidc", "admin", "carol@example.test");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnOidcSession_ReportsWhetherTheHostHasARoleMapping(bool mapped)
+    {
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false), mapped);
+
+        AssertShape(me, "oidc", "read_only", "bob@example.test", roleMapping: mapped);
+    }
+
+    [Fact]
+    public void AnOidcSession_OnAHostWithNoOidc_HasANullRoleMapping()
+    {
+        AssertShape(DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false), null), "oidc", "read_only", "bob@example.test");
+    }
+
+    [Fact]
+    public void ANonOidcSession_HasANullRoleMapping_WhateverTheHostHas()
+    {
+        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken, true), "shared_token", "admin");
+        AssertShape(DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), false), "named_token", "read_only", tokenName: ScopedName);
     }
 
     [Fact]
     public void TheSharedToken_IsAnAdminWithNoIdentity()
     {
-        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken), "shared_token", "admin");
+        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken, null), "shared_token", "admin");
     }
 
     [Fact]
     public void ReadsOnly_IsReadOnlyWithNoIdentity()
     {
-        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly), "reads_only", "read_only");
+        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly, null), "reads_only", "read_only");
     }
 
     [Fact]
     public void ANamedTokenScopedReader_NamesTheToken_AndNoSubject()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]));
+        var me = DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), null);
 
         AssertShape(me, "named_token", "read_only", tokenName: ScopedName);
     }
@@ -99,12 +123,12 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AManagedGroupSeat_NamesTheGroup_AndNoSubjectOrTokenName()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("Ops", false, TokenName: "Ops", AllowedTagIds: [7], GroupId: Guid.NewGuid(), GroupGeneration: Guid.NewGuid()));
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("Ops", false, TokenName: "Ops", AllowedTagIds: [7], GroupId: Guid.NewGuid(), GroupGeneration: Guid.NewGuid()), null);
 
         AssertShape(me, "managed_group", "read_only", groupName: "Ops");
     }
 
-    private static async Task<(TestServer Server, WebApplication App, NpgsqlDataSource Postgres)> StartAsync(DarlingWebTokenSet? webTokens = null)
+    private static async Task<(TestServer Server, WebApplication App, NpgsqlDataSource Postgres)> StartAsync(DarlingWebTokenSet? webTokens = null, DarlingWebOidcClient? oidcClient = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -116,7 +140,7 @@ public sealed class DarlingWebMeTests
         var host = new DarlingWebHostService(
             NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
         host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
-            accessToken: new string('t', 40), oidcClient: null, requireTokenWhenLoopbackOnly: true,
+            accessToken: new string('t', 40), oidcClient: oidcClient, requireTokenWhenLoopbackOnly: true,
             sessionSigningKeyForTests: Key, webTokens: webTokens);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return (app.GetTestServer(), app, postgres);
@@ -155,6 +179,30 @@ public sealed class DarlingWebMeTests
         var seatExpiry = DateTimeOffset.FromUnixTimeSeconds(expiry.ToUnixTimeSeconds());
         AssertShape(JsonNode.Parse(body)!.AsObject(), "oidc", "read_only", "viewer@example.test", "Vera Viewer", "Analysts",
             expiresAt: seatExpiry.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+    }
+
+    private static DarlingWebOidcClient OidcClient(string[] adminRoles, string[] viewerRoles) => new(new DarlingWebOidcClient.ResolvedOptions(
+        "https://idp.example.test", "client-id", null, "openid", null, "groups", adminRoles, viewerRoles));
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OnTheStore_AViewerWithNoOwnerKey_IsToldWhetherThisHostHasARoleMapping(bool mapped)
+    {
+        var client = OidcClient([], mapped ? ["Viewers"] : []);
+        var (server, app, postgres) = await StartAsync(oidcClient: client);
+        await using var _app = app;
+        await using var _pg = postgres;
+        var o1 = DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer);
+
+        var (status, body) = await GetAsync(server, "/api/me", o1);
+
+        Assert.Equal(StatusCodes.Status200OK, status);
+        var me = JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("oidc", (string?)me["method"]);
+        Assert.Equal("read_only", (string?)me["seat"]);
+        Assert.Null(me["granted_by"]);
+        Assert.Equal(mapped, (bool?)me["role_mapping"]);
     }
 
     [Fact]

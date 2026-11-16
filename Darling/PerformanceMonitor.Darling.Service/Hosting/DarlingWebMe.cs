@@ -16,7 +16,11 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// it ends. The identity fields are display-only (nothing authorizes on them), and <c>/api/session</c> still carries no name.</summary>
 internal static class DarlingWebMe
 {
-    internal static JsonObject Describe(DarlingWebSeat seat)
+    /// <param name="seat">The calling session's seat.</param>
+    /// <param name="oidcRoleMapping">Whether the OIDC sign-in configured on this host has a role mapping; null when none is configured.
+    /// Reported as <c>role_mapping</c> for an OIDC session only: a null <c>granted_by</c> alone cannot say "no mapping", because a sign-in
+    /// without an owner key carries no grant.</param>
+    internal static JsonObject Describe(DarlingWebSeat seat, bool? oidcRoleMapping)
     {
         var method = seat.GroupId is not null ? "managed_group"
             : seat.TokenName is not null ? "named_token"
@@ -31,6 +35,7 @@ internal static class DarlingWebMe
             ["subject"] = oidc ? seat.Subject : null,
             ["display_name"] = oidc ? seat.DisplayName : null,
             ["granted_by"] = oidc ? seat.GrantedBy : null,
+            ["role_mapping"] = oidc ? oidcRoleMapping : null,
             ["token_name"] = method == "named_token" ? seat.TokenName : null,
             ["group_name"] = method == "managed_group" ? seat.TokenName : null,
             ["expires_at"] = seat.SessionExpiresAt?.UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
