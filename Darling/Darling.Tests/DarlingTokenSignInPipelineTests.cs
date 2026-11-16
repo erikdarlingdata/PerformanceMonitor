@@ -46,7 +46,8 @@ public sealed class DarlingTokenSignInPipelineTests
 
     private static async Task<TestServer> Build(
         string mode, IReadOnlyList<IPNetwork>? trustedProxies = null, bool oidc = false, string allowFrom = AllowedCidr,
-        IReadOnlyList<string>? mcpTokens = null, ILogger<DarlingWebHostService>? logger = null)
+        IReadOnlyList<string>? mcpTokens = null, ILogger<DarlingWebHostService>? logger = null,
+        DarlingWebGroupTokens? managedGroups = null)
     {
         Assert.True(DarlingTokenSignIn.TryParse(mode, out var parsed));
 
@@ -83,6 +84,7 @@ public sealed class DarlingTokenSignInPipelineTests
             utcNow: () => now,
             webTokens: DarlingWebNamedTokenTests.SetFor(DarlingWebNamedTokenTests.Entry("operator", NamedToken, "operator")),
             mcpTokens: mcpTokens,
+            managedGroups: managedGroups,
             tokenSignIn: parsed);
 
         await app.StartAsync();
@@ -405,6 +407,32 @@ public sealed class DarlingTokenSignInPipelineTests
 
         Assert.Equal(StatusCodes.Status404NotFound, (await Get(server, IPAddress.Loopback, UnmappedPath, cookie)).Ctx.Response.StatusCode);
         AssertSignedOut(await Get(server, Lan, UnmappedPath, cookie));
+    }
+
+    private static string GroupCookie(DarlingWebGroupTokens.Match match)
+        => DarlingWebHostService.SessionCookieName + "=" + DarlingWebHostService.BuildSessionCookieValue(
+            SigningKey, DateTimeOffset.UtcNow.AddHours(1), DarlingWebSeat.EncodeGroupCookieSubject(match.GroupId, match.Generation));
+
+    [Fact]
+    public async Task Loopback_GroupCookieFromLan_IsSignedOut_WithNoGroupLookup_WhileLoopbackReachesTheLookup()
+    {
+        /* The group lookup is observed through the metadata fake the group tokens read from: a refused cookie must not cost a store trip,
+           and the loopback control proves the counter does see a lookup (a null managedGroups would also sign the cookie out, and would
+           prove nothing). */
+        using var rig = new ManagedWebGroupGuardTests.Rig();
+        var cookie = GroupCookie(await rig.RefreshedMatchAsync());
+        using var server = await Build("loopback", oidc: true, managedGroups: rig.Groups);
+        var baseline = rig.Metadata.Reads;
+
+        AssertSignedOut(await Get(server, Lan, UnmappedPath, cookie));
+        var api = await Get(server, Lan, "/api/session", cookie);
+        Assert.Equal(StatusCodes.Status401Unauthorized, api.Ctx.Response.StatusCode);
+        Assert.StartsWith("application/json", api.Ctx.Response.ContentType, StringComparison.Ordinal);
+        Assert.Equal(baseline, rig.Metadata.Reads);
+
+        var control = await Get(server, IPAddress.Loopback, UnmappedPath, cookie);
+        Assert.Equal(StatusCodes.Status404NotFound, control.Ctx.Response.StatusCode);
+        Assert.Equal(baseline + 1, rig.Metadata.Reads);
     }
 
     [Fact]
