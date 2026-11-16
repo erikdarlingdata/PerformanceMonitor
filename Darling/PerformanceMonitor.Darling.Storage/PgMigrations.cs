@@ -3482,7 +3482,41 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
+        /* V269 (#8881): the tempdb log on tempdb_stats, and what holds it. Eleven nullable columns, no DEFAULT, no backfill. */
+        new Migration(269, "tempdb-log-space", V269Sql),
     };
+
+    /// <summary>
+    /// V269 (#8881): the tempdb LOG's space and what holds it, on <c>collect.tempdb_stats</c>, for the TempDB Log Space alert and
+    /// <c>get_tempdb_trend</c>. Nothing read the log before this: the TempDB Space alert and the tempdb finding cover the data files only, and a
+    /// tempdb log that fills stops every session that writes to tempdb, so the first sign was error 9002.
+    ///
+    /// <para>The same row carries the log, not a new table. Both reads that need it (the alert's latest-row read and the trend) already read one
+    /// <c>tempdb_stats</c> row per collection, so one table keeps a collection's data files and log on one clock and costs no join.
+    /// <c>log_total_mb</c>, <c>log_used_mb</c> and <c>log_used_percent</c> come from <c>tempdb.sys.dm_db_log_space_usage</c>,
+    /// <c>log_reuse_wait_desc</c> from <c>sys.databases</c> for database 2, <c>log_truncation_holdup_reason</c> from <c>sys.dm_db_log_stats(2)</c>.
+    /// The six <c>holder_*</c> columns name the oldest active tempdb transaction and its session, filled only while the log is at or above 50
+    /// percent used.</para>
+    ///
+    /// <para>Every column is nullable with no DEFAULT and no backfill, V80 and V81's shape: a catalog-only change that stays instant on a
+    /// compressed hypertable. NULL is the honest value for a row stored before this rung, for an engine that lacks the function, and for a
+    /// holder below the bar. <b>Appended LAST</b> after <c>max_size_mb</c>, in the collector's payload order, because the writer is positional: a
+    /// fresh store (the generated table carries the columns, and this ALTER no-ops there) and an upgraded one share one physical column order.
+    /// The <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_tempdb_stats</c>' pinned <c>SELECT *</c>, the V81 lesson.</para>
+    /// </summary>
+    private const string V269Sql = @"
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_total_mb numeric(18,2);
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_used_mb numeric(18,2);
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_used_percent numeric(5,2);
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_reuse_wait_desc text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_truncation_holdup_reason text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_session_id integer;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_login_name text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_program_name text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_begin_time timestamp;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_used bigint;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_reserved bigint;
+CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

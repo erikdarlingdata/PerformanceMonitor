@@ -1668,6 +1668,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string Key, string[] Files, string WhatItActuallyIs)[] CutHomonyms =
     [
         ("is_partial", ["DarlingMcpPgIndexUsageTools.cs"], "a PARTIAL INDEX (CREATE INDEX … WHERE) — an index property the collector reads off pg_index, not a cut"),
+        ("log_truncation_holdup_reason", ["DarlingDataReader.cs"], "#8881: the SQL Server transaction-log truncation holdup reason read off sys.dm_db_log_stats (why the tempdb log cannot clear), a tempdb column name, not a cut"),
         ("partial_count", ["DarlingMcpPgLoggingAuditTools.cs"], "the number of logging-audit facets whose verdict is `partial` (DarlingPgLoggingAudit.Partial) — a verdict tally, not a cut"),
         ("window_truncated_servers", ["DarlingMcpFleetTools.cs"], "#7010: get_fleet_overview's sorted names (at most 20) of the cards whose own window_truncated is true — a roster of which servers were cut, not a cut flag; the flag keeps its window_truncated spelling on each card and at the top level"),
         ("window_truncated_servers_more", ["DarlingMcpFleetTools.cs"], "#7010: the count of window-truncated servers beyond the 20 named in window_truncated_servers, written only when there are more — a tally of the roster's overflow, not a cut flag"),

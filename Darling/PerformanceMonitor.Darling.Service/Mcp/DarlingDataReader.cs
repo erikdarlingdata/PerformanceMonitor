@@ -931,7 +931,13 @@ internal static class DarlingDataReader
             CAST(unallocated_mb AS double precision),
             total_sessions_using_tempdb,
             top_session_id,
-            CAST(top_session_tempdb_mb AS double precision)
+            CAST(top_session_tempdb_mb AS double precision),
+            CAST(log_total_mb AS double precision) AS log_total_mb,
+            CAST(log_used_percent AS double precision) AS log_used_percent,
+            log_reuse_wait_desc,
+            log_truncation_holdup_reason,
+            holder_session_id,
+            holder_login_name
         FROM v_tempdb_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -985,7 +991,13 @@ internal static class DarlingDataReader
             MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
             MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
             (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
-            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb,
+            MAX(log_used_percent) AS peak_log_used_percent,
+            (array_agg(log_total_mb ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_total_mb,
+            (array_agg(log_reuse_wait_desc ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_reuse_wait_desc,
+            (array_agg(log_truncation_holdup_reason ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_log_holdup_reason,
+            (array_agg(holder_session_id ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_session_id,
+            (array_agg(holder_login_name ORDER BY log_used_percent DESC NULLS LAST, collection_time))[1] AS bucket_holder_login_name
         FROM (
         {TempDbTrendSql}
         ) AS samples
@@ -1018,7 +1030,13 @@ internal static class DarlingDataReader
                 Convert.ToDouble(reader.GetValue(7)),
                 Convert.ToInt64(reader.GetValue(8)),
                 Convert.ToInt32(reader.GetValue(9)),
-                Convert.ToDouble(reader.GetValue(10))));
+                Convert.ToDouble(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12)),
+                reader.IsDBNull(13) ? null : reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetString(14),
+                reader.IsDBNull(15) ? null : Convert.ToInt32(reader.GetValue(15)),
+                reader.IsDBNull(16) ? null : reader.GetString(16)));
         }
 
         return items;

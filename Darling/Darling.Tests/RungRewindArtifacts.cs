@@ -808,6 +808,22 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
+        // V269 (#8881): the tempdb log columns on collect.tempdb_stats. The sentinel is log_used_percent; the rewind drops the view, drops all
+        // eleven columns and creates the view again over the older shape, and a re-run of V269 adds them back. Safe on a store that never had them.
+        new(269, "hasTempDbLogSpace",
+            @"DROP VIEW IF EXISTS collect.v_tempdb_stats;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_log_bytes_reserved;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_log_bytes_used;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_begin_time;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_program_name;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_login_name;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_session_id;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_truncation_holdup_reason;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_reuse_wait_desc;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_used_percent;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_used_mb;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_total_mb;
+CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;"),
     ];
 
     /// <summary>

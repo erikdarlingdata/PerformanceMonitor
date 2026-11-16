@@ -1038,6 +1038,12 @@ public sealed class AlertsConfig
     [JsonPropertyName("tempDbSpaceThresholdPercent")]
     public int TempDbSpaceThresholdPercent { get; set; } = 80;
 
+    /// <summary>The TempDB Log Space alert (#8881): on by default.</summary>
+    public bool TempDbLogSpaceEnabled { get; set; } = true;
+
+    /// <summary>Fire when the tempdb log is at or above this percent used (#8881).</summary>
+    public int TempDbLogSpaceThresholdPercent { get; set; } = 80;
+
     [JsonPropertyName("lowDiskEnabled")]
     public bool LowDiskEnabled { get; set; } = true;
 

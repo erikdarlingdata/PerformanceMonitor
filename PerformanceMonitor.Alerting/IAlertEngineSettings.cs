@@ -82,6 +82,9 @@ public interface IAlertEngineSettings
     bool ClientTimeoutsEnabled { get; }
     bool LongRunningQueryEnabled { get; }
     bool TempDbSpaceEnabled { get; }
+
+    /// <summary>The TempDB Log Space alert (#8881): ON by default. A default member, so a host that predates it keeps the default.</summary>
+    bool TempDbLogSpaceEnabled => true;
     bool LowDiskEnabled { get; }
     bool LongRunningJobEnabled { get; }
     bool FailedJobEnabled { get; }
@@ -261,6 +264,9 @@ public interface IAlertEngineSettings
 
     /// <summary>Fire when tempdb reserved space is at/above this % of total.</summary>
     int TempDbSpaceThresholdPercent { get; }
+
+    /// <summary>Fire when the tempdb log is at/above this % used (#8881). 80 by default.</summary>
+    int TempDbLogSpaceThresholdPercent => 80;
 
     /// <summary>Fire when a volume's free space is below this % (0 disables the percent dimension).</summary>
     int LowDiskThresholdPercent { get; }

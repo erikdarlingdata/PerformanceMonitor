@@ -153,7 +153,18 @@ SELECT
     top_session_tempdb_mb,
     top_session_id,
     max_size_mb,
-    collection_time
+    collection_time,
+    log_total_mb,
+    log_used_mb,
+    log_used_percent,
+    log_reuse_wait_desc,
+    log_truncation_holdup_reason,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    holder_log_bytes_reserved
 FROM {tempDbRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -180,7 +191,20 @@ LIMIT 1";
                 /* #3653 (A5): the collector stamps UTC into DuckDB's tz-less TIMESTAMP, so the value comes back
                    Kind Unspecified and is stamped Utc because that is what it is — the AG-topology reads' idiom.
                    The engine only ever compares one server's stamps with each other. */
-                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
+                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                /* #8881: the tempdb log, NULL on a row collected before v83, on an engine that lacks the function, and (the holder) below
+                   50 percent used. Darling's twin reads the same columns, and a NULL stays null: the log alert never reads it as zero. */
+                LogTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                LogUsedMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                LogUsedPercent = reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11)),
+                LogReuseWaitDesc = reader.IsDBNull(12) ? null : reader.GetString(12),
+                LogTruncationHoldupReason = reader.IsDBNull(13) ? null : reader.GetString(13),
+                HolderSessionId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                HolderLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+                HolderProgramName = reader.IsDBNull(16) ? null : reader.GetString(16),
+                HolderBeginTimeUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
+                HolderLogBytesUsed = reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                HolderLogBytesReserved = reader.IsDBNull(19) ? null : reader.GetInt64(19)
             };
         }
 

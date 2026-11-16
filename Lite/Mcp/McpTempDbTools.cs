@@ -10,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpTempDbTools
 {
-    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation." + McpHelpers.UtcStampsDescription)]
+    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session, plus the tempdb log: the peak percent used (peak_log_used_percent), its size, the log reuse wait and truncation holdup reason, and when the log is 50 percent used or more the session, login and program holding it (log_holder_*). High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetTempDbTrend(
         LocalDataService dataService,
         ServerManager serverManager,

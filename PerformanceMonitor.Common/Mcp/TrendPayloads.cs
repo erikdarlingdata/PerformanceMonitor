@@ -63,7 +63,9 @@ internal sealed record CpuBucketPoint(
 internal sealed record TempDbBucketPoint(
     DateTime BucketStart, double UserObjectsMb, double InternalObjectsMb, double VersionStoreMb, double TotalReservedMb,
     double UnallocatedMb, double PeakTotalReservedMb, double PeakVersionStoreMb, long SessionsUsingTempDb,
-    int TopConsumerSessionId, double TopConsumerMb);
+    int TopConsumerSessionId, double TopConsumerMb,
+    double? PeakLogUsedPercent = null, double? LogTotalMb = null, string? LogReuseWaitDesc = null, string? LogTruncationHoldupReason = null,
+    int? LogHolderSessionId = null, string? LogHolderLoginName = null);
 
 /// <summary>One bucket of memory samples (#3960): each level averaged over the samples in the bucket.</summary>
 internal sealed record MemoryBucketPoint(DateTime BucketStart, double TotalServerMemoryMb, double TargetServerMemoryMb, double BufferPoolMb, double PlanCacheMb);
@@ -418,7 +420,9 @@ internal static class TrendPayloads
     /// <summary>What a tempdb point's session and consumer fields are (#3960): the one sentence the level note cannot
     /// say for them, because they are the bucket's busiest collection, not averages.</summary>
     public const string TempDbFiguresNote =
-        "sessions_using_tempdb is the most sessions any collection in the bucket saw, and top_consumer_* the single largest consumer.";
+        "sessions_using_tempdb is the most sessions any collection in the bucket saw, and top_consumer_* the single largest consumer. "
+        + "peak_log_used_percent is the fullest the tempdb LOG was in the bucket, and log_total_mb, log_reuse_wait_desc, log_truncation_holdup_reason and the log_holder_* fields describe that fullest collection. "
+        + "The log fields are null where the engine could not report them or the row predates them, and the holder is captured only while the log is 50 percent used or more.";
 
     /// <summary><c>get_tempdb_trend</c>'s data envelope (#3960), both SKUs.</summary>
     public static string TempDbTrend(
@@ -445,6 +449,12 @@ internal static class TrendPayloads
                 sessions_using_tempdb = p.SessionsUsingTempDb,
                 top_consumer_session_id = p.TopConsumerSessionId,
                 top_consumer_mb = Math.Round(p.TopConsumerMb, 1),
+                peak_log_used_percent = p.PeakLogUsedPercent is { } lp ? Math.Round(lp, 1) : (double?)null,
+                log_total_mb = p.LogTotalMb is { } lt ? Math.Round(lt, 1) : (double?)null,
+                log_reuse_wait_desc = p.LogReuseWaitDesc,
+                log_truncation_holdup_reason = p.LogTruncationHoldupReason,
+                log_holder_session_id = p.LogHolderSessionId,
+                log_holder_login_name = p.LogHolderLoginName,
             }),
         };
 

@@ -577,7 +577,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 82;
+    internal const int CurrentSchemaVersion = 83;
 
     private readonly string _archivePath;
 
@@ -3402,6 +3402,16 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v82: adding index_object_stats.answering_server_name and is_memory_optimized");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(82));
         }
+
+        if (fromVersion < 83)
+        {
+            /* v83 (#8881, twinning Darling's V269): the tempdb log's space and what holds it, on tempdb_stats. Eleven nullable columns, the LAST
+               ones (the shared added-columns list), in the collector's payload order. NULL on a row stored before v83, on an engine that lacks the
+               function, and on a holder below 50 percent used; the archive views union parquet by name, so a parquet file written before v83
+               reads NULL for them. */
+            _logger?.LogInformation("Running migration to v83: adding the tempdb log columns to tempdb_stats");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(83));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3492,6 +3502,18 @@ public partial class DuckDbInitializer : IDisposable
         (82, "index_object_stats", "answering_server_name", "VARCHAR"),
         /* #8784: a memory-optimized table, whose usage counters are always zero (the same V268 rung). NULL on a row stored before v82. */
         (82, "index_object_stats", "is_memory_optimized", "BOOLEAN"),
+        /* #8881: the tempdb log's space and what holds it (Darling's V269 columns), in the collector's payload order. NULL on a row stored before v83. */
+        (83, "tempdb_stats", "log_total_mb", "DECIMAL(18,2)"),
+        (83, "tempdb_stats", "log_used_mb", "DECIMAL(18,2)"),
+        (83, "tempdb_stats", "log_used_percent", "DECIMAL(5,2)"),
+        (83, "tempdb_stats", "log_reuse_wait_desc", "VARCHAR"),
+        (83, "tempdb_stats", "log_truncation_holdup_reason", "VARCHAR"),
+        (83, "tempdb_stats", "holder_session_id", "INTEGER"),
+        (83, "tempdb_stats", "holder_login_name", "VARCHAR"),
+        (83, "tempdb_stats", "holder_program_name", "VARCHAR"),
+        (83, "tempdb_stats", "holder_begin_time", "TIMESTAMP"),
+        (83, "tempdb_stats", "holder_log_bytes_used", "BIGINT"),
+        (83, "tempdb_stats", "holder_log_bytes_reserved", "BIGINT"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
