@@ -154,7 +154,7 @@ spec:
 | 1 | `prepare` | Unexpected: the store refused the login, the shipped script no longer matches what the verb expects, a file could not be written. |
 | 2 | `prepare` | A usage or input error: a missing, short or bad-character role password, or a connection string the Job cannot use. The message names the role or the setting. |
 | 3 | `provision-roles` | psql stopped: the script's own guard (with its message and the statements to run), or any other error, because `ON_ERROR_STOP` is on. |
-| 4 | `prepare` | The store did not reach this release's schema within `waitSeconds`. The usual cause is that the new pod has not finished migrating. The message names the version it last saw and the one it waited for. |
+| 4 | `prepare` | The store did not reach this release's schema within `waitSeconds`. The usual cause is that the new pod has not finished migrating. The message names the version it last saw and the one it waited for, or, when it never read a version, the last connection error. |
 | 5 | `prepare` | The login does not own every object in the `collect` and `config` schemas (a superuser ran the script by hand once). The message lists each object with its owner and the `ALTER ... OWNER TO` statements a superuser runs once. |
 | 1 or 2 | `provision-roles` | psql's own exit code: it could not read a file or connect. libpq's message in the log says why (a missing root certificate file, a refused login, an unreachable host). |
 
@@ -162,8 +162,8 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 
 **Around the Job.**
 
-- The Job pod's labels differ from the Darling pod's on purpose (it must never match the web or MCP Service), and `podLabels` and `podAnnotations` are not passed to it. A NetworkPolicy written for the Darling pod does not cover it: the Job needs its own egress to the store. An Istio sidecar injected into the Job would keep it from completing, so annotate or exclude the Job pod.
-- With wiring on, a missing `web` or `mcp` key, or a password the store refuses, stops the Darling pod itself from starting. Under the `Recreate` strategy the old pod is already gone by then.
+- The Job pod's labels differ from the Darling pod's on purpose (it must never match the web or MCP Service), and `podLabels` and `podAnnotations` are not passed to it. A NetworkPolicy written for the Darling pod does not cover it: the Job needs its own egress to the store. An Istio sidecar injected into the Job would keep it from completing, so exclude it from injection (for example with the injector's `neverInjectSelector` on `app.kubernetes.io/component=store-roles`).
+- With wiring on, a missing `web` or `mcp` key, or a password that breaks the role-password rule, stops the Darling pod itself from starting (its `store-logins` init container refuses it). Under the `Recreate` strategy the old pod is already gone by then.
 - `helm uninstall` leaves the hook Job in place, as Helm does for hooks; delete it with `kubectl delete job <fullname>-store-roles`.
 - The script revokes `PUBLIC`'s `CONNECT` on the database on every run, so any other login that connects to the store needs its own `GRANT CONNECT ON DATABASE`.
 

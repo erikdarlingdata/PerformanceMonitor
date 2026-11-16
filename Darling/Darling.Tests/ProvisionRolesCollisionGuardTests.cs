@@ -428,6 +428,10 @@ public sealed class ProvisionRolesCollisionGuardTests
             "the stop must come before the first ALTER ROLE ... PASSWORD.");
         Assert.DoesNotContain("GRANT", line, StringComparison.Ordinal);
 
+        Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.IndexOf("membership.admin_option", StringComparison.Ordinal),
+            "the checks for a role that is not a superuser must come after the check for another login that administers a role.");
+        Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.LastIndexOf("IS DISTINCT FROM 'darling-managed'", StringComparison.Ordinal),
+            "the checks for a role that is not a superuser must come after the marker checks, so an unrelated role is never offered a GRANT.");
         /* What stays after the roles exist: the branch for a runner that is not a superuser starts with the superuser-role check. */
         Assert.StartsWith("SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable", NonSuperuserChecks(sql)[NonSuperuserBranch.Length..].TrimStart(), StringComparison.Ordinal);
     }
