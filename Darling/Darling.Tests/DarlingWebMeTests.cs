@@ -107,9 +107,19 @@ public sealed class DarlingWebMeTests
     }
 
     [Fact]
-    public void ReadsOnly_IsReadOnlyWithNoIdentity()
+    public void ReadsOnly_WithNoSession_IsReadOnlyWithNoIdentity()
     {
         AssertShape(DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly, null), "reads_only", "read_only");
+    }
+
+    [Fact]
+    public void AReadOnlySeat_WithASession_IsStillTheSharedToken()
+    {
+        var expiry = new DateTimeOffset(2026, 11, 14, 10, 30, 15, TimeSpan.Zero);
+
+        var me = DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly with { SessionExpiresAt = expiry }, null);
+
+        AssertShape(me, "shared_token", "read_only", expiresAt: "2026-11-14T10:30:15.0000000Z");
     }
 
     [Fact]
@@ -128,7 +138,7 @@ public sealed class DarlingWebMeTests
         AssertShape(me, "managed_group", "read_only", groupName: "Ops");
     }
 
-    private static async Task<(TestServer Server, WebApplication App, NpgsqlDataSource Postgres)> StartAsync(DarlingWebTokenSet? webTokens = null, DarlingWebOidcClient? oidcClient = null)
+    private static async Task<(TestServer Server, WebApplication App, NpgsqlDataSource Postgres)> StartAsync(DarlingWebTokenSet? webTokens = null, DarlingWebOidcClient? oidcClient = null, string? accessToken = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -140,7 +150,7 @@ public sealed class DarlingWebMeTests
         var host = new DarlingWebHostService(
             NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
         host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
-            accessToken: new string('t', 40), oidcClient: oidcClient, requireTokenWhenLoopbackOnly: true,
+            accessToken: accessToken ?? new string('t', 40), oidcClient: oidcClient, requireTokenWhenLoopbackOnly: true,
             sessionSigningKeyForTests: Key, webTokens: webTokens);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return (app.GetTestServer(), app, postgres);
@@ -203,6 +213,35 @@ public sealed class DarlingWebMeTests
         Assert.Equal("read_only", (string?)me["seat"]);
         Assert.Null(me["granted_by"]);
         Assert.Equal(mapped, (bool?)me["role_mapping"]);
+    }
+
+    [Fact]
+    public async Task OnTheStore_AShortSharedToken_SignsInReadOnly_AsTheSharedToken_WithASessionEnd()
+    {
+        const string shortToken = "tiny";
+        var (server, app, postgres) = await StartAsync(accessToken: shortToken);
+        await using var _app = app;
+        await using var _pg = postgres;
+        var signIn = await DarlingWebHostGateLiveTests.PostSignIn(server, "localhost", IPAddress.Loopback, shortToken);
+        Assert.Equal(StatusCodes.Status302Found, signIn.Response.StatusCode);
+        var setCookie = Assert.Single(signIn.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = "/api/me";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers["Cookie"] = cookie;
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+        }, TestContext.Current.CancellationToken);
+        var body = await new StreamReader(ctx.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        var me = JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("shared_token", (string?)me["method"]);
+        Assert.Equal("read_only", (string?)me["seat"]);
+        Assert.NotNull((string?)me["expires_at"]);
     }
 
     [Fact]

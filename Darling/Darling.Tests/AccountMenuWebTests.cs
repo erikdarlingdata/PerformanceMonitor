@@ -62,6 +62,7 @@ public sealed class AccountMenuWebTests
     [Theory]
     [InlineData("""{"method":"oidc","seat":"admin","subject":"erik@example.com","display_name":"Erik","granted_by":"dba-admins","expires_at":"2026-11-13T20:00:00Z"}""", "erik@example.com · admin")]
     [InlineData("""{"method":"shared_token","seat":"admin"}""", "shared token · admin")]
+    [InlineData("""{"method":"shared_token","seat":"read_only","expires_at":"2026-11-13T20:00:00Z"}""", "shared token · read-only")]
     [InlineData("""{"method":"named_token","seat":"read_only","token_name":"grafana"}""", "token grafana · read-only")]
     [InlineData("""{"method":"managed_group","seat":"admin","group_name":"dbas","expires_at":"2026-11-13T20:00:00Z"}""", "group dbas · admin")]
     [InlineData("""{"method":"reads_only","seat":"read_only"}""", "read-only access")]

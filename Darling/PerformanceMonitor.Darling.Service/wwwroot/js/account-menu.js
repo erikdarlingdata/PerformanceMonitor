@@ -27,7 +27,7 @@ export function accountLine(me) {
   const seat = seatWord(me);
   switch (me && me.method) {
     case "oidc": return (me.subject || "signed in") + " · " + seat;
-    case "shared_token": return "shared token · admin";
+    case "shared_token": return "shared token · " + seat;
     case "named_token": return (me.token_name ? "token " + me.token_name : "web token") + " · " + seat;
     case "managed_group": return (me.group_name ? "group " + me.group_name : "access group") + " · " + seat;
     case "reads_only": return "read-only access";

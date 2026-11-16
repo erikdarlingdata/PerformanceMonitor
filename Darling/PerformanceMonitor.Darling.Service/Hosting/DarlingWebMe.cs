@@ -25,7 +25,7 @@ internal static class DarlingWebMe
         var method = seat.GroupId is not null ? "managed_group"
             : seat.TokenName is not null ? "named_token"
             : seat.Subject is not null ? "oidc"
-            : seat.CanEdit ? "shared_token"
+            : seat.CanEdit || seat.SessionExpiresAt is not null ? "shared_token"
             : "reads_only";
         var oidc = method == "oidc";
         return new JsonObject
