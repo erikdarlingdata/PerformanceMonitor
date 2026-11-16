@@ -584,15 +584,7 @@ public static class ObjectUsageReport
                 ["resets_crossed"] = t.Resets.Count,
                 ["blind_hours"] = Math.Round(t.BlindTime.TotalHours, 1),
                 ["index_resets"] = t.IndexResets,
-                ["resets"] = new JsonArray(t.Resets.Take(20).Select(r => (JsonNode?)new JsonObject
-                {
-                    ["collection_time_utc"] = Iso(r.CollectionTime),
-                    ["reasons"] = r.Reasons.ToString(),
-                    ["blind_from_utc"] = Iso(r.BlindFrom),
-                    ["blind_hours"] = r.BlindFrom is null ? null : Math.Round(r.BlindTime.TotalHours, 1),
-                    ["from_server"] = r.FromServerName,
-                    ["to_server"] = r.ToServerName,
-                }).ToArray()),
+                ["resets"] = new JsonArray(t.Resets.Take(20).Select(ResetJson).ToArray()),
                 ["answering_servers"] = new JsonArray(t.AnsweringServerNames.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
             },
             ["executions"] = side.Executions is { } e
@@ -610,6 +602,27 @@ public static class ObjectUsageReport
             ["object_list_captured_at_utc"] = side.Inventory is { } inv ? Iso(inv.CapturedAtUtc) : null,
             ["data_age_hours"] = t.CoveredTo is { } newest ? Math.Round((nowUtc - newest).TotalHours, 1) : null,
         };
+    }
+
+    /* #8873: the server pair says which instance took over, so it belongs to a node change or a node baseline only. A plain restart
+       can also have a null previous server (a snapshot stored before the column existed) or a different name, and the pair would read
+       like a failover. */
+    private static JsonNode ResetJson(ObjectUsageReset r)
+    {
+        var json = new JsonObject
+        {
+            ["collection_time_utc"] = Iso(r.CollectionTime),
+            ["reasons"] = r.Reasons.ToString(),
+            ["blind_from_utc"] = Iso(r.BlindFrom),
+            ["blind_hours"] = r.BlindFrom is null ? null : Math.Round(r.BlindTime.TotalHours, 1),
+        };
+        if ((r.Reasons & (ObjectUsageResetReasons.NodeChanged | ObjectUsageResetReasons.NodeBaseline)) != ObjectUsageResetReasons.None)
+        {
+            json["from_server"] = r.FromServerName;
+            json["to_server"] = r.ToServerName;
+        }
+
+        return json;
     }
 
     private static string Note(IReadOnlyList<ObjectUsageSide> sides, bool hasInventory, string? retentionNote)
