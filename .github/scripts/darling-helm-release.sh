@@ -14,6 +14,16 @@
 #     Exits 0 only when the stamped chart differs from the original in exactly the four stamped values, holding the
 #     expected ones.
 #
+#   darling-helm-release.sh decide --version <X.Y.Z> --exists <true|false> --signed <true|false> \
+#                                  --assets "<release asset names>" --overwrite <true|false>
+#     What a publish run does, from what the registry and the release already hold. Prints three lines:
+#       push=<true|false>     push the chart packaged by this run;
+#       sign=<true|false>     sign the version's digest (the pushed one, or the one already in the registry);
+#       upload=<none|packaged|pulled>  attach the .tgz and SHA256SUMS-helm.txt: this run's package, or the chart
+#                             already published (so the release assets always match the registry), or nothing.
+#     A published version is never replaced unless --overwrite true: a re-run only adds what is missing. Release assets
+#     with no chart in the registry are refused unless --overwrite true, because they would not match a new push.
+#
 # Every refusal is one stderr line starting "darling-helm-release: " and exit 1. Needs helm, yq (mikefarah, v4),
 # sha256sum and tar. The version is read from Directory.Build.props by the workflow, not here: the version-read tests
 # scan the workflows.
@@ -142,8 +152,56 @@ package() {
   echo "package=${out}/${tgz}"
 }
 
+decide() {
+  local version="" exists="" signed="" assets="" overwrite="" have_assets=0 complete_assets=0
+  local assets_set=0
+  while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || die "missing a value after $1"
+    case "$1" in
+      --version) version="$2" ;;
+      --exists) exists="$2" ;;
+      --signed) signed="$2" ;;
+      --assets) assets="$2"; assets_set=1 ;;
+      --overwrite) overwrite="$2" ;;
+      *) die "unknown argument: $1" ;;
+    esac
+    shift 2
+  done
+  [ -n "${version}" ] || die "--version is required"
+  [ "${assets_set}" = 1 ] || die "--assets is required (an empty string for none)"
+  for flag in exists signed overwrite; do
+    case "${!flag}" in
+      true | false) ;;
+      *) die "--${flag} must be true or false, not '${!flag}'" ;;
+    esac
+  done
+
+  local tgz="${CHART_NAME}-${version}.tgz" name
+  for name in ${assets}; do
+    if [ "${name}" = "${tgz}" ] || [ "${name}" = "SHA256SUMS-helm.txt" ]; then
+      have_assets=$((have_assets + 1))
+    fi
+  done
+  [ "${have_assets}" -eq 2 ] && complete_assets=1
+
+  if [ "${overwrite}" = true ]; then
+    printf 'push=true\nsign=true\nupload=packaged\n'
+    return 0
+  fi
+  if [ "${exists}" = false ]; then
+    [ "${have_assets}" -eq 0 ] \
+      || die "the release already carries chart assets but the registry has no ${version}: run with overwrite to replace them"
+    printf 'push=true\nsign=true\nupload=packaged\n'
+    return 0
+  fi
+  printf 'push=false\nsign=%s\nupload=%s\n' \
+    "$([ "${signed}" = true ] && echo false || echo true)" \
+    "$([ "${complete_assets}" = 1 ] && echo none || echo pulled)"
+}
+
 case "${1:-}" in
   package) shift; package "$@" ;;
   verify-stamp) shift; verify_stamp "$@" ;;
-  *) die "usage: darling-helm-release.sh package ... | verify-stamp ... (see the header of this script)" ;;
+  decide) shift; decide "$@" ;;
+  *) die "usage: darling-helm-release.sh package ... | verify-stamp ... | decide ... (see the header of this script)" ;;
 esac

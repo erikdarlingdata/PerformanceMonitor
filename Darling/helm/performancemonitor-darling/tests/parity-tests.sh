@@ -44,20 +44,59 @@ built="$(grep -E '^\s*image="ghcr\.io/.*/performancemonitor-darling"' "${REPO_RO
 assert_eq "${built}" "ghcr.io/erikdarlingdata/performancemonitor-darling" "build.yml image name"
 assert_eq "$(yq '.image.repository' "${CHART_DIR}/values.yaml")" "${built}" "chart image.repository vs build.yml"
 
-t release_workflow_logs_docker_in_before_signing
+t release_workflow_logs_docker_in_before_pushing_and_signing
 # cosign reads registry credentials from Docker's config only; helm registry login writes Helm's own file. build.yml logs
 # Docker in before it signs the image, and the chart release must do the same before it pushes and signs the chart.
 release_wf="${REPO_ROOT}/.github/workflows/darling-helm-release.yml"
-step_index() { # index of the first publish step whose run block contains the fixed string $1, or -1
-  yq ".jobs.publish.steps | to_entries | map(select(.value.run // \"\" | contains(\"$1\"))) | .[0].key // -1" "${release_wf}"
-}
-login_at="$(step_index 'docker login ghcr.io')"
-sign_at="$(step_index 'cosign sign')"
-push_at="$(step_index 'helm push')"
-[ "${login_at}" -ge 0 ] || { echo "the release workflow never runs docker login ghcr.io" >&2; exit 1; }
-[ "${sign_at}" -ge 0 ] || { echo "the release workflow has no cosign sign step" >&2; exit 1; }
-[ "${login_at}" -le "${push_at}" ] || { echo "docker login ghcr.io comes after helm push" >&2; exit 1; }
+# The publish job's run blocks in step order, one line each; first_line <fixed string> is the first line holding it.
+yq '.jobs.publish.steps[].run // ""' "${release_wf}" > "${OUT}"
+first_line() { grep -n -F -m1 -- "$1" "${OUT}" | cut -d: -f1; }
+login_at="$(first_line 'docker login ghcr.io')"
+push_at="$(first_line 'helm push')"
+sign_at="$(first_line 'cosign sign')"
+for what in login_at push_at sign_at; do
+  [ -n "${!what}" ] || { echo "the publish job has no ${what%_at} command" >&2; exit 1; }
+done
+[ "${login_at}" -lt "${push_at}" ] || { echo "docker login ghcr.io comes after helm push" >&2; exit 1; }
 [ "${login_at}" -lt "${sign_at}" ] || { echo "docker login ghcr.io comes after cosign sign" >&2; exit 1; }
+
+t release_workflow_write_rights_only_in_publish
+# Only the publish job may write; every other job is read-only, and no checkout keeps its token (#8870 review).
+assert_eq "$(yq '.jobs | has("package")' "${release_wf}")" "true" "a separate read-only package job"
+for job in $(yq '.jobs | keys | .[]' "${release_wf}"); do
+  perms="$(yq -o=json -I=0 ".jobs.${job}.permissions // {}" "${release_wf}")"
+  if [ "${job}" = publish ]; then
+    assert_eq "${perms}" '{"contents":"write","packages":"write","id-token":"write"}' "publish job permissions"
+  else
+    assert_eq "$(yq -o=json -I=0 ".jobs.${job}.permissions // {} | to_entries | map(select(.value != \"read\")) | from_entries" "${release_wf}")" '{}' "${job} job permissions are read-only"
+  fi
+done
+assert_eq "$(yq '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@")) | select(.with."persist-credentials" != false)] | length' "${release_wf}")" "0" "every checkout sets persist-credentials: false"
+
+t release_workflow_publishes_only_from_main
+# The signing identity names the workflow at refs/heads/main, so a run from any other ref must not publish.
+assert_eq "$(yq '.jobs.publish.if' "${release_wf}" | grep -c "github.ref == 'refs/heads/main'")" "1" "publish job is gated on main"
+
+t release_workflow_checks_tool_downloads
+# Every helm or yq download is checked against a pinned sha256 before it runs: in each step, one `sha256sum -c` per download.
+downloads=0
+export RE='get\.helm\.sh|mikefarah/yq'
+steps="$(yq '[.jobs[].steps[] | select(.run // "" | test(strenv(RE)))] | length' "${release_wf}")"
+for ((k = 0; k < steps; k++)); do
+  run="$(K="${k}" yq '[.jobs[].steps[] | select(.run // "" | test(strenv(RE)))] | .[env(K)].run' "${release_wf}")"
+  fetched="$(grep -cE "curl .*(${RE})" <<<"${run}" || true)"
+  checked="$(grep -c 'sha256sum -c' <<<"${run}" || true)"
+  assert_eq "${checked}" "${fetched}" "sha256 checks vs downloads in download step ${k}"
+  downloads=$((downloads + fetched))
+done
+[ "${downloads}" -ge 3 ] || { echo "found ${downloads} helm/yq downloads, expected at least 3; the check above proved nothing" >&2; exit 1; }
+
+t release_workflow_verify_identity_is_exact
+# The documented verify command names the exact workflow identity, never a regexp that a fork's branch name can match.
+for f in "${release_wf}" "${REPO_ROOT}/docs/darling/kubernetes.md"; do
+  if grep -q -- '--certificate-identity-regexp' "${f}"; then echo "${f} still uses --certificate-identity-regexp" >&2; exit 1; fi
+  grep -q -F -- "darling-helm-release.yml@refs/heads/main" "${f}" || { echo "${f} does not name the exact signing identity" >&2; exit 1; }
+done
 
 t release_workflow_tool_pins_match_chart_ci
 # The release lints and packages with the same helm and yq as the chart's CI, so a release behaves as its pull request did.

@@ -128,3 +128,36 @@ VERSION="${VERSION}" DIGEST="${DIGEST}" yq -i '.image.tag = strenv(VERSION) | .i
 bash "${SCRIPT}" verify-stamp "${original}" "${stamped}" "${VERSION}" "${DIGEST}"
 yq -i '.resources.limits.memory = "8Gi"' "${stamped}/values.yaml"
 assert_release_fails "resources" verify-stamp "${original}" "${stamped}" "${VERSION}" "${DIGEST}"
+
+# decide: what a publish run does, from what the registry and the release already hold (#8870 review: a published
+# version is never replaced unless the run asks for it).
+decide() { bash "${SCRIPT}" decide --version "${VERSION}" "$@"; }
+decision() { # decision <expected push> <expected sign> <expected upload> <decide args...>
+  local want="push=$1 sign=$2 upload=$3" got
+  shift 3
+  got="$(decide "$@" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "${got}" "${want}" "decide $*"
+}
+ASSETS_BOTH="performancemonitor-darling-${VERSION}.tgz SHA256SUMS-helm.txt"
+
+t decide_first_publish_does_everything
+decision true true packaged --exists false --signed false --assets "" --overwrite false
+
+t decide_complete_release_does_nothing
+decision false false none --exists true --signed true --assets "${ASSETS_BOTH}" --overwrite false
+
+t decide_existing_unsigned_version_is_signed_not_pushed
+decision false true none --exists true --signed false --assets "${ASSETS_BOTH}" --overwrite false
+
+t decide_missing_assets_come_from_the_published_chart
+decision false false pulled --exists true --signed true --assets "" --overwrite false
+decision false false pulled --exists true --signed true --assets "SHA256SUMS-helm.txt" --overwrite false
+
+t decide_overwrite_replaces_everything
+decision true true packaged --exists true --signed true --assets "${ASSETS_BOTH}" --overwrite true
+
+t decide_refuses_assets_without_a_published_chart
+assert_release_fails "overwrite" decide --version "${VERSION}" --exists false --signed false --assets "${ASSETS_BOTH}" --overwrite false
+
+t decide_refuses_bad_flags
+assert_release_fails "--exists" decide --version "${VERSION}" --exists maybe --signed false --assets "" --overwrite false

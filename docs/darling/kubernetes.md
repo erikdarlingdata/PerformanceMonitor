@@ -36,11 +36,11 @@ If you write the manifests yourself instead, the pod needs the `securityContext`
 
 ## Verify the chart
 
-The published chart is signed the same way as the image: a keyless Sigstore signature made by this repository's release workflow. Check it before installing:
+The published chart carries a keyless Sigstore signature made by this repository's release workflow, run from `main`. Check it before installing; the identity is exact, so a signature made by any other workflow, repository or branch fails:
 
 ```
 cosign verify ghcr.io/erikdarlingdata/charts/performancemonitor-darling:<release> \
-  --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+  --certificate-identity 'https://github.com/erikdarlingdata/PerformanceMonitor/.github/workflows/darling-helm-release.yml@refs/heads/main' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
