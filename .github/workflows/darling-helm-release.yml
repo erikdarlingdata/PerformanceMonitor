@@ -50,8 +50,8 @@ permissions:
 env:
   CHART_DIR: Darling/helm/performancemonitor-darling
   # The same pins as darling-helm.yml, so lint and package behave as they do on pull requests.
-  HELM_VERSION: v3.17.0
-  YQ_VERSION: v4.53.2
+  HELM_VERSION: v3.22.1
+  YQ_VERSION: v4.54.3
 
 concurrency:
   group: darling-helm-release-${{ github.event.workflow_run.head_branch || inputs.tag }}

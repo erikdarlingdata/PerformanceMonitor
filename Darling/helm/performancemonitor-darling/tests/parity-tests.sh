@@ -58,3 +58,13 @@ push_at="$(step_index 'helm push')"
 [ "${sign_at}" -ge 0 ] || { echo "the release workflow has no cosign sign step" >&2; exit 1; }
 [ "${login_at}" -le "${push_at}" ] || { echo "docker login ghcr.io comes after helm push" >&2; exit 1; }
 [ "${login_at}" -lt "${sign_at}" ] || { echo "docker login ghcr.io comes after cosign sign" >&2; exit 1; }
+
+t release_workflow_tool_pins_match_chart_ci
+# The release lints and packages with the same helm and yq as the chart's CI, so a release behaves as its pull request did.
+for pin in HELM_VERSION YQ_VERSION; do
+  assert_eq "$(yq ".env.${pin}" "${release_wf}")" "$(yq ".env.${pin}" "${REPO_ROOT}/.github/workflows/darling-helm.yml")" "${pin} in the release workflow vs darling-helm.yml"
+done
+
+t release_workflow_follows_build
+# workflow_run names the triggering workflow by its name: a renamed build.yml would silently stop the chart publishing.
+assert_eq "$(yq '.on.workflow_run.workflows[0]' "${release_wf}")" "$(yq '.name' "${REPO_ROOT}/.github/workflows/build.yml")" "workflow_run target vs build.yml name"
