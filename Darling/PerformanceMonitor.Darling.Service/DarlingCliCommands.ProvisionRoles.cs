@@ -35,6 +35,9 @@ internal static class ProvisionRolesExitCodes
 
 public static partial class DarlingCliCommands
 {
+    /// <summary>The CA file the chart mounts for the store; the only Root Certificate a connection-string login may name.</summary>
+    private const string ChartStoreCaPath = "/etc/darling/store-ca/ca.crt";
+
     private static readonly string[] ProvisionRolesRoleNames = ["admin", "viewer", "web", "mcp"];
 
     /// <summary>The verb <see cref="PrepareProvisionRolesAsync"/> handles (#8779).</summary>
@@ -197,10 +200,10 @@ public static partial class DarlingCliCommands
             return null;
         }
 
-        if (!string.IsNullOrEmpty(builder.RootCertificate) || !string.IsNullOrEmpty(builder.SslCertificate)
-            || !string.IsNullOrEmpty(builder.SslKey) || !string.IsNullOrEmpty(builder.SslPassword))
+        if ((!string.IsNullOrEmpty(builder.RootCertificate) && builder.RootCertificate != ChartStoreCaPath)
+            || !string.IsNullOrEmpty(builder.SslCertificate) || !string.IsNullOrEmpty(builder.SslKey) || !string.IsNullOrEmpty(builder.SslPassword))
         {
-            error = "The connection string may not carry Root Certificate, SSL Certificate, SSL Key or SSL Password: psql could not take them from a libpq env file here.";
+            error = $"The connection string may carry no Root Certificate other than {ChartStoreCaPath}, and no SSL Certificate, SSL Key or SSL Password.";
             return null;
         }
 
@@ -221,7 +224,8 @@ public static partial class DarlingCliCommands
             return null;
         }
 
-        return new ProvisionRolesLogin(builder.Host, builder.Port, builder.Database, builder.Username, builder.Password!, builder.SslMode, null);
+        return new ProvisionRolesLogin(builder.Host, builder.Port, builder.Database, builder.Username, builder.Password!, builder.SslMode,
+            string.IsNullOrEmpty(builder.RootCertificate) ? null : builder.RootCertificate);
     }
 
     private static bool PasswordIsUsable(string password, out string? error)

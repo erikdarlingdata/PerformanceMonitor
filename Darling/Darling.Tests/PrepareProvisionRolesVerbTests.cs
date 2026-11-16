@@ -137,6 +137,20 @@ public sealed class PrepareProvisionRolesVerbTests : IDisposable
     }
 
     [Fact]
+    public void ConnectionStringFile_Accepts_TheChartStoreCa_AndCarriesItIntoTheLibpqEnv()
+    {
+        var login = DarlingCliCommands.TryReadProvisionRolesLogin(
+            ConnectionStringArgs(), "Host=h;Database=d;Username=u;Password=p-0123456789abcdef;SSL Mode=VerifyFull;Root Certificate=/etc/darling/store-ca/ca.crt\n", out var error);
+
+        Assert.True(login is not null, error);
+        Assert.Equal("/etc/darling/store-ca/ca.crt", login!.RootCertificate);
+        var env = ProvisionRolesRenderer.LibpqEnvFile(
+            login.Host, login.Port, login.Database, login.Username, ProvisionRolesRenderer.ToLibpqSslMode(login.SslMode), login.RootCertificate);
+        Assert.Contains("PGSSLROOTCERT='/etc/darling/store-ca/ca.crt'\n", env, StringComparison.Ordinal);
+        Assert.Contains("PGSSLMODE='verify-full'\n", env, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ConnectionStringFile_QuotedPassword()
     {
         var login = DarlingCliCommands.TryReadProvisionRolesLogin(ConnectionStringArgs(), "Host=h;Database=d;Username=u;Password='a;b''c'\n", out var error);
