@@ -310,3 +310,38 @@ app.kubernetes.io/component: store
 {{- printf "%s|%s" .Values.store.external.passwordSecret.name .Values.store.external.passwordSecret.key -}}
 {{- end -}}
 {{- end -}}
+
+
+{{/* Name of the store-roles hook Job, at most 63 characters. */}}
+{{- define "performancemonitor-darling.storeRolesJobName" -}}
+{{- printf "%s-store-roles" (include "performancemonitor-darling.fullname" . | trunc 49 | trimSuffix "-") -}}
+{{- end -}}
+
+{{/* The image of the store-roles Job's psql container: store.provisionRoles.psqlImage, else store.bundled.image. */}}
+{{- define "performancemonitor-darling.psqlImage" -}}
+{{- default .Values.store.bundled.image .Values.store.provisionRoles.psqlImage -}}
+{{- end -}}
+
+{{/* The SSL mode handed to the verb: the Npgsql word of store.external.sslMode, as it is. The verb maps it to the libpq word. */}}
+{{- define "performancemonitor-darling.provisionRolesSslMode" -}}
+{{- .Values.store.external.sslMode -}}
+{{- end -}}
+
+{{/* Fails the render when store.provisionRoles is on without what makes it work. Call it only when the option is enabled. */}}
+{{- define "performancemonitor-darling.checkProvisionRoles" -}}
+{{- $p := .Values.store.provisionRoles -}}
+{{- if ne .Values.store.mode "external" -}}
+{{- fail "store.provisionRoles.enabled needs store.mode=external: the bundled store provisions its own roles, so set store.provisionRoles.enabled to false" -}}
+{{- end -}}
+{{- if not $p.rolePasswordsSecret -}}
+{{- fail "store.provisionRoles.rolePasswordsSecret is required when store.provisionRoles.enabled is true: name a Secret you manage with the keys admin, viewer, web and mcp" -}}
+{{- end -}}
+{{- $viaPassword := ne (toString $p.login.passwordSecret.name) "" -}}
+{{- $viaString := ne (toString $p.login.connectionStringSecret.name) "" -}}
+{{- if eq $viaPassword $viaString -}}
+{{- fail "store.provisionRoles.login needs exactly one of passwordSecret.name and connectionStringSecret.name: the Secret holding the store owner's password, or a whole Npgsql connection string for the owner" -}}
+{{- end -}}
+{{- if and $viaPassword .Values.store.external.connectionStringSecret.name -}}
+{{- fail "store.provisionRoles.login.passwordSecret cannot be used with store.external.connectionStringSecret: there is no host to pair the password with; use store.provisionRoles.login.connectionStringSecret instead" -}}
+{{- end -}}
+{{- end -}}

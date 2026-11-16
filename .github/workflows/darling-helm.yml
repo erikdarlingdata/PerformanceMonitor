@@ -20,6 +20,7 @@ on:
       - '.github/workflows/darling-helm.yml'
       - 'Darling/compose/docker-compose.yml'
       - 'Darling/Dockerfile'
+      - 'Darling/tools/provision-roles.sql'
       - '.github/workflows/darling-linux-store.yml'
       - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingHealth*.cs'
 
@@ -102,6 +103,7 @@ jobs:
           set -euo pipefail
           bash "${CHART_DIR}/tests/render-tests.sh"
           sh "${CHART_DIR}/tests/render-config-tests.sh"
+          sh "${CHART_DIR}/tests/run-provision-roles-tests.sh"
           bash "${CHART_DIR}/tests/parity-tests.sh"
 
   # The chart installed on a kind cluster, with the image built from this checkout: both store modes, the password key from a

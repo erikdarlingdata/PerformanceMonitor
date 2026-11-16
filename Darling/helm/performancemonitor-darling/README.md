@@ -78,7 +78,76 @@ Another worked example, with an external store, two Ingresses, `configSubstituti
 
 ### Custom alerts need a managed or compose store for now
 
-The bundled store runs custom alerts. An external store does not, by design, and the chart has no store-roles Job. If you need custom alerts today, use the bundled store, or a managed or compose store ([Security](../../../docs/darling/security.md#security--least-privilege-roles) describes the roles).
+The bundled store runs custom alerts. An external store does not, by design. If you need custom alerts today, use the bundled store, or a managed or compose store ([Security](../../../docs/darling/security.md#security--least-privilege-roles) describes the roles).
+
+### Store roles on an external store
+
+On an external store the Darling login is the database owner, and the service never creates the four least-privilege roles (`admin`, `viewer`, `web`, `mcp`) or the store functions that [`tools/provision-roles.sql`](../../tools/provision-roles.sql) creates. Almost every release adds grants or functions that only that script creates, so someone has to run it again after each upgrade. With `store.provisionRoles.enabled: true` the chart runs it for you, in the same install or upgrade (and on every Argo CD sync). It is off by default and never runs against the bundled store, which provisions its own roles (the render fails there).
+
+**What runs.** A Helm hook Job `<fullname>-store-roles` (`post-install,post-upgrade`; Argo CD maps it to `PostSync`):
+
+1. The init container `prepare` is the release's own Darling image running `--prepare-provision-roles`. It reads the owner's login and the four role passwords from mounted files, waits until the store has reached this release's schema (so the Job never runs against a store the new pod has not migrated yet), checks that the login owns every object in the `collect` and `config` schemas, and writes the shipped script with the owner, the database and the passwords filled in (as SCRAM-SHA-256 verifiers, never plain text), a pgpass file and the libpq settings into a memory-backed `emptyDir`.
+2. The container `provision-roles` runs `psql -X -v ON_ERROR_STOP=1 -f /work/provision-roles.sql` from a PostgreSQL client image (`store.provisionRoles.psqlImage`, default `store.bundled.image`). Any error stops psql with exit code 3, so a failed run fails the release (or the sync), and the script's message is in the Job log. The Job log masks every verifier. The last line is `provision-roles.sql exit code: N`.
+
+The Job runs without a service account token. The login Secret and the role-password Secret are mounted only into the init container, as files: no env variable or argument carries a password, and psql gets its password from the pgpass file. The Job keeps its last run and log until the next one.
+
+```yaml
+store:
+  mode: external
+  external: { host: db.example.internal, database: darling, username: darling, sslMode: VerifyFull }
+  provisionRoles:
+    enabled: true
+    login:
+      passwordSecret: { name: darling-secrets, key: sql-password }   # the service's own Secret and key is fine
+    rolePasswordsSecret: darling-store-roles
+```
+
+`login` takes exactly one of `passwordSecret` (the owner's password; host, port, database, username, `sslMode` and `caSecret` come from `store.external`) or `connectionStringSecret` (a whole Npgsql connection string for the owner, with no client certificate and, if it names a `Root Certificate`, only `/etc/darling/store-ca/ca.crt`, where the Job mounts `store.external.caSecret`). Either may name the Secret and key the service's own connection uses, so the owner password has one copy. `passwordSecret` cannot be combined with `store.external.connectionStringSecret`, because there is no host to pair it with.
+
+`rolePasswordsSecret` names a Secret you manage with the keys `admin`, `viewer`, `web` and `mcp`. The chart generates no passwords. Each one needs 16 or more characters from `A-Z a-z 0-9 . _ ~ + / = -`; the Job refuses anything else (exit code 2), naming the role and never the value.
+
+**The owner's rights.** The Job logs in as the store owner, not as a superuser, and the service's own connection keeps the rights it has today. The owner must hold `CREATEROLE`, and it keeps it for as long as the Job is on:
+
+- On PostgreSQL 15 and earlier, `CREATEROLE` can grant membership in any role that is not a superuser, `pg_execute_server_program` and `pg_write_server_files` included. There it is close to superuser, so weigh it before turning the Job on.
+- From PostgreSQL 16, `CREATEROLE` covers only the roles the owner created or holds `ADMIN OPTION` on. The owner holds that option on a role it created itself. For a role a superuser made, run once as a superuser:
+
+  ```sql
+  GRANT admin, viewer, web, mcp TO "<owner>" WITH ADMIN OPTION;
+  ```
+
+  The script's guard checks this before it sends a password, and stops the run (exit code 3) with the roles and the statements to run.
+
+With CloudNativePG, declare the owner with `CREATEROLE` in the Cluster:
+
+```yaml
+spec:
+  managed:
+    roles:
+      - name: darling            # the role that owns the database and that the service logs in as
+        ensure: present
+        login: true
+        createrole: true
+        passwordSecret:
+          name: darling-owner
+```
+
+**One WARNING is expected.** Nine `ALTER ROLE ... SET` lines of the script (`temp_file_limit`, `log_min_duration_statement` and `log_parameter_max_length` for `viewer`, `web` and `mcp`) need a superuser. An owner run skips them and prints exactly one WARNING containing `superuser-only settings`, which names each role still missing a setting and gives the `ALTER ROLE ... SET` statements to run. Run those once as a superuser and the WARNING is gone from every later run. The owner may also print non-fatal WARNINGs that it is a member of `darling_alert_sources`; they need no action.
+
+**When it fails.** `kubectl logs job/<fullname>-store-roles -c prepare` is the verb, `-c provision-roles` is psql. Exit codes:
+
+| Code | Where | Meaning |
+|---|---|---|
+| 1 | `prepare` | Unexpected: the store refused the login, the shipped script no longer matches what the verb expects, a file could not be written. |
+| 2 | `prepare` | A usage or input error: a missing, short or bad-character role password, or a connection string the Job cannot use. The message names the role or the setting. |
+| 3 | `provision-roles` | psql stopped: the script's own guard (with its message and the statements to run), or any other error, because `ON_ERROR_STOP` is on. |
+| 4 | `prepare` | The store did not reach this release's schema within `waitSeconds`. The usual cause is that the new pod has not finished migrating. The message names the version it last saw and the one it waited for. |
+| 5 | `prepare` | The login does not own every object in the `collect` and `config` schemas (a superuser ran the script by hand once). The message lists each object with its owner and the `ALTER ... OWNER TO` statements a superuser runs once. |
+
+The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
+
+**Timing.** Helm waits for a hook Job inside `--timeout` (5 minutes by default), and the Job's `activeDeadlineSeconds` is `waitSeconds + 300`. A release that migrates for a long time needs `helm upgrade --timeout` to cover `waitSeconds` (default 900). Without `--wait`, the Job starts as soon as the manifests are applied and waits for the new pod to migrate the store.
+
+**Tested versions.** PostgreSQL 18.6 (the live tests). <!-- #8779 task 7 adds the kind runs on PostgreSQL 17 and 15 to this line. -->
 
 ## Values
 
@@ -99,6 +168,7 @@ The bundled store runs custom alerts. An external store does not, by design, and
 | `store.mode` | `bundled` | `bundled` or `external`. |
 | `store.bundled.image`, `.persistence`, `.auth.existingSecret`, `.resources` | the image above, `10Gi`, none, requests 2Gi and limit 4Gi memory | The bundled store. |
 | `store.external.*` | empty | The external store (above). |
+| `store.provisionRoles.*` | disabled | The hook Job that runs `provision-roles.sql` on an external store ([Store roles on an external store](#store-roles-on-an-external-store)). |
 | `network.allowFrom` | `[]` | Client CIDRs the dashboard and MCP endpoint admit, unless a surface sets its own. Empty renders `127.0.0.1/32`. |
 | `network.trustedProxies` | `[]` | Proxy CIDRs the dashboard trusts `X-Forwarded-*` from. |
 | `web.enabled`, `web.port`, `web.publicBaseUrl` | `true`, `5153`, derived | The dashboard. |
