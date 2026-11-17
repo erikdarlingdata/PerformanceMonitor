@@ -146,6 +146,26 @@ public sealed class PersonalTokenGrantLiveTests
         Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.mcp_personal_token", ct));
     });
 
+    /// <summary>E2: no login but the owner writes a token event to the journal. The web login has no INSERT on it; the mcp and admin logins hold the
+    /// writer columns, so the journal's owner-only rule refuses them. Each refusal is 42501.</summary>
+    [Theory]
+    [InlineData("web", PersonalTokenEvents.Created)]
+    [InlineData("web", PersonalTokenEvents.Revoked)]
+    [InlineData("web", PersonalTokenEvents.ExpiryCut)]
+    [InlineData("mcp", PersonalTokenEvents.Created)]
+    [InlineData("mcp", PersonalTokenEvents.Revoked)]
+    [InlineData("mcp", PersonalTokenEvents.ExpiryCut)]
+    [InlineData("admin", PersonalTokenEvents.Created)]
+    [InlineData("admin", PersonalTokenEvents.Revoked)]
+    [InlineData("admin", PersonalTokenEvents.ExpiryCut)]
+    public Task JournalEvents_AreOwnerOnly(string role, string journalEvent) => WithProvisionedStoreAsync(async (owner, scratch, ct) =>
+    {
+        await using var login = await LoginAsync(scratch, role, ct);
+        await AssertDeniedAsync(login,
+            $"INSERT INTO config.investigation_journal (event, actor, detail) VALUES ('{journalEvent}', 'person:eve', '{{}}'::jsonb)", ct);
+        Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config.investigation_journal WHERE event = '{journalEvent}'", ct));
+    });
+
     [Fact]
     public Task Triggers_AreEnabledAlways() => WithProvisionedStoreAsync(async (owner, scratch, ct) =>
     {

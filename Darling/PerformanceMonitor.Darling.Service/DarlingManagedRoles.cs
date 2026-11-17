@@ -4373,7 +4373,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
     /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.
     /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
-    /// who mapped or granted a person. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
+    /// who mapped or granted a person. So are the personal MCP token events (<see cref="PersonalTokenEvents.OwnerOnly"/>, #8737): only <see cref="PersonalTokenStore"/>, on the owner connection, journals who made or revoked a token. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
     /// admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
     /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
     /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
@@ -4382,6 +4382,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
             .Concat(PersonEvents.OwnerOnly)
+            .Concat(PersonalTokenEvents.OwnerOnly)
             .Concat(ProposalEvents.OwnerOnly)
             .Append(InvestigationRequestStore.ProposalNoticeSent)
             .Append(InvestigationRequestStore.SlackThreadPosted)
