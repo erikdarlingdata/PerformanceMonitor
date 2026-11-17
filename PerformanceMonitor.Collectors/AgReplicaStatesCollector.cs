@@ -88,7 +88,7 @@ public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplica
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     replica_id = CONVERT(uniqueidentifier, ars.replica_id),
     ars.role_desc,
     ars.operational_state_desc,
@@ -97,30 +97,34 @@ SELECT
     ars.synchronization_health_desc,
     is_local = CONVERT(bit, ars.is_local)
 INTO #pm_ag_replica_states
-FROM sys.dm_hadr_availability_replica_states AS ars;
+FROM sys.dm_hadr_availability_replica_states AS ars
+OPTION(RECOMPILE);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ags.group_id),
     ags.primary_replica
 INTO #pm_ag_group_states
-FROM sys.dm_hadr_availability_group_states AS ags;
+FROM sys.dm_hadr_availability_group_states AS ags
+OPTION(RECOMPILE);
 
-SELECT
-    ar.replica_id,
-    ar.group_id,
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ar.replica_id),
+    group_id = CONVERT(uniqueidentifier, ar.group_id),
     ar.replica_server_name,
     ar.availability_mode_desc,
     ar.failover_mode_desc,
     ar.endpoint_url
 INTO #pm_ag_replicas
-FROM sys.availability_replicas AS ar;
+FROM sys.availability_replicas AS ar
+OPTION(RECOMPILE);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ag.group_id),
     ag.name,
     ag.is_distributed
 INTO #pm_ag_groups
-FROM sys.availability_groups AS ag;
+FROM sys.availability_groups AS ag
+OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,

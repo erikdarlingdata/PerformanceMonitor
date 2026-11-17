@@ -133,11 +133,11 @@ public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<A
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_id = CONVERT(integer, hdrs.database_id),
     group_id = CONVERT(uniqueidentifier, hdrs.group_id),
     replica_id = CONVERT(uniqueidentifier, hdrs.replica_id),
-    hdrs.is_local,
+    is_local = CONVERT(bit, hdrs.is_local),
     hdrs.synchronization_state_desc,
     hdrs.last_hardened_lsn,
     hdrs.last_commit_lsn,
@@ -145,7 +145,7 @@ SELECT
     hdrs.redo_queue_size,
     hdrs.log_send_rate,
     hdrs.redo_rate,
-    hdrs.is_suspended,
+    is_suspended = CONVERT(bit, hdrs.is_suspended),
     hdrs.suspend_reason_desc,
     hdrs.secondary_lag_seconds,
     hdrs.last_commit_time,
@@ -153,22 +153,25 @@ SELECT
     hdrs.last_redone_time,
     hdrs.last_received_time
 INTO #pm_ag_database_replica_states
-FROM sys.dm_hadr_database_replica_states AS hdrs;
+FROM sys.dm_hadr_database_replica_states AS hdrs
+OPTION(RECOMPILE);
 
-SELECT
-    ar.replica_id,
-    ar.group_id,
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ar.replica_id),
+    group_id = CONVERT(uniqueidentifier, ar.group_id),
     ar.replica_server_name,
     ar.availability_mode_desc
 INTO #pm_ag_replicas
-FROM sys.availability_replicas AS ar;
+FROM sys.availability_replicas AS ar
+OPTION(RECOMPILE);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ag.group_id),
     ag.name,
     ag.is_distributed
 INTO #pm_ag_groups
-FROM sys.availability_groups AS ag;
+FROM sys.availability_groups AS ag
+OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
