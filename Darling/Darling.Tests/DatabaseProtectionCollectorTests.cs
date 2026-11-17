@@ -422,6 +422,219 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.Null(rows[4].ReplicaReadable);
     }
 
+    /* #8865: the supplemental's two result sets. The first is one row per log read (archive, ok, error_number, message), the second the newest
+       matching line per database (database_name, line_time_utc, line_text). */
+    private static DataTable StatusShape()
+    {
+        var table = new DataTable();
+        table.Columns.Add("archive", typeof(int));
+        table.Columns.Add("ok", typeof(bool));
+        table.Columns.Add("error_number", typeof(int));
+        table.Columns.Add("message", typeof(string));
+        return table;
+    }
+
+    private static DataTable LineShape()
+    {
+        var table = new DataTable();
+        table.Columns.Add("database_name", typeof(string));
+        table.Columns.Add("line_time_utc", typeof(DateTime));
+        table.Columns.Add("line_text", typeof(string));
+        return table;
+    }
+
+    private static string CheckLine(string database, int errors = 0) =>
+        $"DBCC CHECKDB ({database}) WITH NO_INFOMSGS executed by someone found {errors} errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 1 seconds.";
+
+    private static DataTable Status(params (int Archive, bool Ok)[] logs)
+    {
+        var table = StatusShape();
+        foreach (var (archive, ok) in logs)
+        {
+            table.Rows.Add(archive, ok, ok ? DBNull.Value : 21, ok ? DBNull.Value : "boom");
+        }
+
+        return table;
+    }
+
+    private static async Task ApplyAsync(CollectorContext context, List<DatabaseProtectionCollector.Row> rows, DataTable status, DataTable lines)
+    {
+        using var reader = new DataTableReader(new[] { status, lines });
+        await DatabaseProtectionCollector.Instance.ApplySupplementalAsync(rows, reader, context, TestContext.Current.CancellationToken);
+    }
+
+    /* The state of an instance that has read everything: a cycle over one log (the current one) then stages nothing but a changed check. */
+    private static Dictionary<string, string> SettledState() => new()
+    {
+        [DatabaseProtectionErrorLogState.InstanceKey] = "INST1",
+        [DatabaseProtectionErrorLogState.NewestArchiveKey] = DatabaseProtectionErrorLogState.FormatDates(new[] { DateTime.MinValue }),
+        [DatabaseProtectionErrorLogState.BackfillDoneKey] = bool.TrueString,
+    };
+
+    [Fact]
+    public void TheSupplementalQuery_IsNullWithNoPlan_AndOtherwiseListsTheArchivesCurrentFirst()
+    {
+        Assert.Null(DatabaseProtectionCollector.Instance.BuildSupplementalQuery(Context()));
+        var context = new CollectorContext
+        {
+            CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "s", Deltas = new CollectorDeltaCalculator(),
+            ExcludedDatabases = new[] { "skipme" },
+        };
+        context.DatabaseProtectionErrorLogPlan = DatabaseProtectionErrorLogState.PlanArchives(
+            DatabaseProtectionErrorLogState.Load(context.State, "INST1"),
+            new[] { new DatabaseProtectionErrorLogState.ArchiveInfo(0, Checked), new DatabaseProtectionErrorLogState.ArchiveInfo(1, Checked.AddDays(-1)) },
+            true, 3);
+
+        var query = DatabaseProtectionCollector.Instance.BuildSupplementalQuery(context)!;
+
+        Assert.Equal("0,1", Assert.Single(query.Parameters, p => p.Name == "@archives").Value);
+        Assert.Contains(query.Parameters, p => p.Name == "@excl_db_0");
+    }
+
+    [Fact]
+    public async Task ANewLine_ReplacesTheRememberedCheck_AndStagesOnlyItsKey()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        Add(table, "B", "FULL", null, Full, Log);
+        var state = SettledState();
+        state[DatabaseProtectionErrorLogState.CheckKeyPrefix + "A"] = CheckValue(Checked.AddDays(-10), "full");
+        state[DatabaseProtectionErrorLogState.CheckKeyPrefix + "B"] = CheckValue(Checked.AddDays(-2), "full");
+        var context = ContextWith(state);
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        var lines = LineShape();
+        lines.Rows.Add("A", Checked.AddDays(-1), CheckLine("A", 3));
+
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+
+        Assert.Equal(Checked.AddDays(-1), rows[0].ErrorLogCheckDbTime);
+        Assert.Equal("full", rows[0].ErrorLogCheckDbOptions);
+        Assert.Equal(3, rows[0].ErrorLogCheckDbErrors);
+        Assert.Equal(Checked.AddDays(-2), rows[1].ErrorLogCheckDbTime);
+        Assert.All(rows, r => Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, r.ErrorLogState));
+        Assert.All(rows, r => Assert.Null(r.ErrorLogMessage));
+        Assert.All(rows, r => Assert.Equal(0, r.ErrorLogUnparsedLines));
+        Assert.Equal(new[] { DatabaseProtectionErrorLogState.CheckKeyPrefix + "A" }, context.PendingState.Keys.ToArray());
+        Assert.Equal(CheckValue(Checked.AddDays(-1), "full", 3), context.PendingState[DatabaseProtectionErrorLogState.CheckKeyPrefix + "A"]);
+    }
+
+    [Fact]
+    public async Task AQuietCycle_StagesNothing()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var state = SettledState();
+        state[DatabaseProtectionErrorLogState.CheckKeyPrefix + "A"] = CheckValue(Checked.AddDays(-1), "full");
+        var context = ContextWith(state);
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        Assert.Empty(context.PendingState);
+        var lines = LineShape();
+        lines.Rows.Add("A", Checked.AddDays(-1), CheckLine("A"));
+
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+
+        Assert.Empty(context.PendingState);
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, rows[0].ErrorLogState);
+    }
+
+    [Fact]
+    public async Task AnUnparseableLine_IsCountedAndNotUsed()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        Add(table, "B", "FULL", null, Full, Log);
+        var context = ContextWith(SettledState());
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        var lines = LineShape();
+        lines.Rows.Add("A", Checked.AddDays(-1), "DBCC CHECKDB (A) executed by someone, in a language we cannot read");
+        lines.Rows.Add("B", Checked.AddDays(-1), CheckLine("B"));
+
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+
+        Assert.All(rows, r => Assert.Equal(1, r.ErrorLogUnparsedLines));
+        Assert.Null(rows[0].ErrorLogCheckDbTime);
+        Assert.Equal(Checked.AddDays(-1), rows[1].ErrorLogCheckDbTime);
+        Assert.Equal(new[] { DatabaseProtectionErrorLogState.CheckKeyPrefix + "B" }, context.PendingState.Keys.ToArray());
+    }
+
+    [Fact]
+    public async Task ARefusedCurrentLog_IsRefusedWithTheGrant()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var state = SettledState();
+        state[DatabaseProtectionErrorLogState.CheckKeyPrefix + "A"] = CheckValue(Checked.AddDays(-1), "full");
+        var context = ContextWith(state);
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        var status = StatusShape();
+        status.Rows.Add(0, false, 27219, "Caller does not have permissions to execute the stored procedure.");
+
+        await ApplyAsync(context, rows, status, LineShape());
+
+        var row = Assert.Single(rows);
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogRefused, row.ErrorLogState);
+        Assert.Equal("VIEW SERVER STATE", row.ErrorLogGrant);
+        Assert.False(string.IsNullOrEmpty(row.ErrorLogMessage));
+        Assert.Equal(Checked.AddDays(-1), row.ErrorLogCheckDbTime);
+    }
+
+    [Fact]
+    public async Task ACurrentLogThatFailsForAnotherReason_IsFailedNotRefused()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var context = ContextWith(SettledState());
+        var rows = await ReadWithAsync(context, table, Logs(1));
+
+        await ApplyAsync(context, rows, Status((0, false)), LineShape());
+
+        var row = Assert.Single(rows);
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogFailed, row.ErrorLogState);
+        Assert.Null(row.ErrorLogGrant);
+        Assert.False(string.IsNullOrEmpty(row.ErrorLogMessage));
+    }
+
+    [Fact]
+    public async Task ASuccessfulArchive_ClearsItsAttempt_AndAFailedOneKeepsIt()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var context = ContextWith(new Dictionary<string, string>());
+        var rows = await ReadWithAsync(context, table, Logs(4));
+        Assert.Equal(
+            new[] { 0, 1, 2, 3 },
+            context.DatabaseProtectionErrorLogPlan!.Read.Select(a => a.Archive).ToArray());
+        Assert.Equal(3, DatabaseProtectionErrorLogState.ParseAttempts(context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]).Count);
+
+        await ApplyAsync(context, rows, Status((0, true), (1, true), (2, false), (3, true)), LineShape());
+
+        Assert.Equal(
+            DatabaseProtectionErrorLogState.FormatAttempts(new Dictionary<DateTime, int> { [Checked.AddDays(-2)] = 1 }),
+            context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+        /* A first run backfills newest first: the backfill marker moved over archive 1 only, because archive 2 failed and is retried, never jumped over. */
+        Assert.Equal(
+            DatabaseProtectionErrorLogState.FormatDates(new[] { Checked.AddDays(-1) }),
+            context.PendingState[DatabaseProtectionErrorLogState.BackfillBeforeKey]);
+        Assert.False(context.PendingState.ContainsKey(DatabaseProtectionErrorLogState.BackfillDoneKey) && context.PendingState[DatabaseProtectionErrorLogState.BackfillDoneKey] == bool.TrueString);
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, rows[0].ErrorLogState);
+        Assert.False(string.IsNullOrEmpty(rows[0].ErrorLogMessage));
+    }
+
+    [Fact]
+    public async Task AnAttemptThatSucceeds_IsUnstaged_WhenStateNeverHeldIt()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var context = ContextWith(new Dictionary<string, string>());
+        var rows = await ReadWithAsync(context, table, Logs(2));
+        Assert.Contains(DatabaseProtectionErrorLogState.AttemptsKey, context.PendingState.Keys);
+
+        await ApplyAsync(context, rows, Status((0, true), (1, true)), LineShape());
+
+        /* The read staged the attempt in advance; the archive read fine, so the value equals what state holds (nothing) and the stale entry must go. */
+        Assert.DoesNotContain(DatabaseProtectionErrorLogState.AttemptsKey, context.PendingState.Keys);
+    }
+
     [Fact]
     public void TheQuery_IsTheAzureOneOnAzureSqlDatabase_AndTheMsdbOneElsewhere()
     {
@@ -746,6 +959,238 @@ INSERT #backupset VALUES
         Assert.Equal(g.AddHours(5), msdb.LastLogBackupTime);
         Assert.Equal(g.AddMinutes(currentOffsetMinutes), msdb.LastFullBackupTime);
         Assert.Equal(DatabaseProtectionCollector.BackupRecorded, msdb.LogBackupState);
+    }
+
+    /* #8865: one real cycle against the instance, as the host runs it: the primary batch and ReadAsync, then the supplemental and its apply,
+       all on one connection. The state a cycle staged is carried into the next, like the store does. */
+    private static async Task<(List<DatabaseProtectionCollector.Row> Rows, CollectorContext Context)> RunCycleAsync(
+        SqlConnection connection, Dictionary<string, string> state, int sqlMajorVersion, CancellationToken ct)
+    {
+        var context = new CollectorContext
+        {
+            CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "live-sql", Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { SqlMajorVersion = sqlMajorVersion }, State = new Dictionary<string, string>(state, StringComparer.Ordinal),
+        };
+
+        List<DatabaseProtectionCollector.Row> rows;
+        var primary = DatabaseProtectionCollector.Instance.BuildQuery(context);
+        await using (var command = BindCommand(connection, primary))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            rows = await DatabaseProtectionCollector.Instance.ReadAsync(reader, context, ct);
+        }
+
+        var supplemental = DatabaseProtectionCollector.Instance.BuildSupplementalQuery(context);
+        Assert.NotNull(supplemental);
+        await using (var command = BindCommand(connection, supplemental))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            await DatabaseProtectionCollector.Instance.ApplySupplementalAsync(rows, reader, context, ct);
+        }
+
+        foreach (var pair in context.PendingState)
+        {
+            state[pair.Key] = pair.Value;
+        }
+
+        return (rows, context);
+    }
+
+    private static SqlCommand BindCommand(SqlConnection connection, CollectorQuery query)
+    {
+        var command = new SqlCommand(query.Text, connection) { CommandTimeout = 60 };
+        foreach (var parameter in query.Parameters)
+        {
+            command.Parameters.Add(parameter.Name, SqlDbType.NVarChar, 128).Value = parameter.Value;
+        }
+
+        return command;
+    }
+
+    private static async Task ExecuteAsync(string connectionString, string sql, CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<int> MajorVersionAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand("SELECT CONVERT(int, SERVERPROPERTY('ProductMajorVersion'));", connection);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /* A login that exists only for one test, created and dropped around it. Its connection string is returned with pooling off, so no
+       pooled session keeps the login alive when it is dropped. */
+    private static async Task<string> CreateLoginAsync(string adminConnectionString, string login, string grants, CancellationToken ct)
+    {
+        var password = "Pm8865-" + Guid.NewGuid().ToString("N");
+        await ExecuteAsync(adminConnectionString, $"CREATE LOGIN [{login}] WITH PASSWORD = N'{password}', CHECK_POLICY = OFF;{grants}", ct);
+        return new SqlConnectionStringBuilder(adminConnectionString) { UserID = login, Password = password, Pooling = false }.ConnectionString;
+    }
+
+    private static Task DropLoginAsync(string adminConnectionString, string login, CancellationToken ct) =>
+        ExecuteAsync(adminConnectionString, $"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'{login}') DROP LOGIN [{login}];", ct);
+
+    private static string Bracket(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
+
+    private static Task DropDatabaseAsync(string adminConnectionString, string database, CancellationToken ct) =>
+        ExecuteAsync(
+            adminConnectionString,
+            $"IF DB_ID(N'{database}') IS NOT NULL BEGIN ALTER DATABASE {Bracket(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {Bracket(database)}; END;",
+            ct);
+
+    /* A name with spaces, brackets and parentheses: the match on the log line has to be exact, not a LIKE pattern or a quoted identifier. */
+    private const string SpacedName = "pm 8865 [x] (a)";
+    private const string LookalikeName = "pm 8865 [x] (a) old";
+
+    [Fact]
+    public async Task TheSupplemental_FindsTheLine_ForANameWithSpacesAndBrackets_AndNotForItsLookalike()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+
+        try
+        {
+            await ExecuteAsync(cs!, $"CREATE DATABASE {Bracket(SpacedName)}; CREATE DATABASE {Bracket(LookalikeName)};", ct);
+            await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{SpacedName}');", ct);
+
+            await using var connection = new SqlConnection(cs);
+            await connection.OpenAsync(ct);
+            var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+
+            var found = rows.Single(r => r.DatabaseName == SpacedName);
+            Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, found.ErrorLogState);
+            Assert.NotNull(found.ErrorLogCheckDbTime);
+            Assert.InRange((DateTime.UtcNow - found.ErrorLogCheckDbTime!.Value).TotalSeconds, -60, 60);
+            Assert.Equal("full", found.ErrorLogCheckDbOptions);
+            Assert.Equal(0, found.ErrorLogCheckDbErrors);
+            Assert.Null(rows.Single(r => r.DatabaseName == LookalikeName).ErrorLogCheckDbTime);
+        }
+        finally
+        {
+            await DropDatabaseAsync(cs!, SpacedName, ct);
+            await DropDatabaseAsync(cs!, LookalikeName, ct);
+        }
+    }
+
+    /// <summary>
+    /// A login that may read the catalog and the DMVs the primary batch uses but not the error log. SQL Server 2022 splits VIEW SERVER STATE
+    /// into VIEW SERVER PERFORMANCE STATE (the DMVs) and VIEW SERVER SECURITY STATE; with only the first the primary facts still come and
+    /// sp_readerrorlog is refused, error 27219. Earlier versions need VIEW SERVER STATE for the DMV the primary joins, which also reads
+    /// the log, so no login reaches this state there.
+    /// </summary>
+    [Fact]
+    public async Task ALoginWithoutTheGrant_IsRefused_AndThePrimaryFactsStillCome()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        Assert.SkipWhen(major < 16, "VIEW SERVER PERFORMANCE STATE exists from SQL Server 2022.");
+        const string Login = "pm_8865_nogrant";
+
+        try
+        {
+            var loginConnection = await CreateLoginAsync(cs!, Login, $" GRANT VIEW SERVER PERFORMANCE STATE TO [{Login}];", ct);
+            await using var connection = new SqlConnection(loginConnection);
+            await connection.OpenAsync(ct);
+            var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+
+            Assert.Contains(rows, r => r.DatabaseName == "master");
+            Assert.All(rows, r => Assert.Equal(DatabaseProtectionCollector.ErrorLogRefused, r.ErrorLogState));
+            Assert.All(rows, r => Assert.Equal("VIEW SERVER STATE", r.ErrorLogGrant));
+            Assert.All(rows, r => Assert.Equal(DatabaseProtectionCollector.PlatformNative, r.Platform));
+        }
+        finally
+        {
+            await DropLoginAsync(cs!, Login, ct);
+        }
+    }
+
+    [Fact]
+    public async Task CycledLogs_AreBackfilledThreePerCycle_NewestFirst()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        const string Database = "pm_8865_cycled";
+
+        try
+        {
+            await ExecuteAsync(cs!, $"CREATE DATABASE [{Database}];", ct);
+            await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{Database}');", ct);
+            for (var i = 0; i < 5; i++)
+            {
+                await ExecuteAsync(cs!, "EXECUTE sys.sp_cycle_errorlog;", ct);
+            }
+
+            await using var connection = new SqlConnection(cs);
+            await connection.OpenAsync(ct);
+            var state = new Dictionary<string, string>(StringComparer.Ordinal);
+            var cycles = 0;
+            var archivesRead = new List<int>();
+            DatabaseProtectionCollector.Row row;
+            do
+            {
+                var (rows, context) = await RunCycleAsync(connection, state, major, ct);
+                archivesRead.Add(context.DatabaseProtectionErrorLogPlan!.Read.Count(a => a.Archive > 0));
+                row = rows.Single(r => r.DatabaseName == Database);
+                cycles++;
+            }
+            while (row.ErrorLogBackfillComplete != true && cycles < 10);
+
+            Assert.True(row.ErrorLogBackfillComplete);
+            Assert.All(archivesRead, n => Assert.True(n <= DatabaseProtectionErrorLogState.ArchivesPerCycle));
+            Assert.True(cycles >= 2, "more archives than one cycle reads should take more than one cycle");
+            Assert.NotNull(row.ErrorLogCheckDbTime);
+            Assert.InRange((DateTime.UtcNow - row.ErrorLogCheckDbTime!.Value).TotalMinutes, -1, 30);
+        }
+        finally
+        {
+            await DropDatabaseAsync(cs!, Database, ct);
+        }
+    }
+
+    /// <summary>
+    /// Task 10's grant depends on this: a login with only CONNECT SQL and VIEW SERVER STATE. The outcome is written to the test output.
+    /// </summary>
+    [Fact]
+    public async Task ViewServerStateAlone_ReadsTheLog()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        const string Login = "pm_8865_vss";
+        const string Database = "pm_8865_vss_db";
+
+        try
+        {
+            await ExecuteAsync(cs!, $"CREATE DATABASE [{Database}];", ct);
+            await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{Database}');", ct);
+            var loginConnection = await CreateLoginAsync(cs!, Login, $" GRANT VIEW SERVER STATE TO [{Login}];", ct);
+
+            await using var connection = new SqlConnection(loginConnection);
+            await connection.OpenAsync(ct);
+            var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+
+            var row = rows.Single(r => r.DatabaseName == Database);
+            TestContext.Current.TestOutputHelper?.WriteLine($"SQL Server major version {major}: a login with only VIEW SERVER STATE reads the error log -> errorlog_state = {row.ErrorLogState}");
+            Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, row.ErrorLogState);
+            Assert.NotNull(row.ErrorLogCheckDbTime);
+        }
+        finally
+        {
+            await DropLoginAsync(cs!, Login, ct);
+            await DropDatabaseAsync(cs!, Database, ct);
+        }
     }
 
     private static CollectorContext Context() => new()

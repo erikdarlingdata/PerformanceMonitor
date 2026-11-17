@@ -51,7 +51,11 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>Server-scoped: log dates of archives given up on after <see cref="MaxArchiveAttempts"/> failures.</summary>
     public const string SkippedKey = "errorlog_skipped";
 
-    /// <summary>Archives (besides the current log) read per cycle, so a long backlog never makes one cycle slow.</summary>
+    /// <summary>
+    /// Archives (besides the current log) read per cycle, so a long backlog never makes one cycle slow. Measured (#8865, SQL Server 2022 on
+    /// Linux): <c>sp_readerrorlog</c> with both search strings reads a 228 MB log in under 1 s, so three archives plus the current log are
+    /// a few seconds, far under half of the 60 s supplemental timeout; the number stays at three.
+    /// </summary>
     public const int ArchivesPerCycle = 3;
 
     /// <summary>An archive that failed this many times is skipped for good rather than blocking the markers.</summary>
@@ -101,12 +105,17 @@ public static class DatabaseProtectionErrorLogState
         IReadOnlyList<DateTime> Skipped,
         bool Reset);
 
-    /// <summary>What to read this cycle, what was newly given up on, and the state the plan was made from.</summary>
+    /// <summary>
+    /// What to read this cycle, what was newly given up on, and the state the plan was made from.
+    /// <see cref="Enumerated"/> is every archive the instance listed (not only those read), kept so the markers can be
+    /// recomputed after the read: <see cref="MarkersAfter"/> needs the whole list to know whether the backfill finished.
+    /// </summary>
     public sealed record ErrorLogPlan(
         IReadOnlyList<ArchiveInfo> Read,
         IReadOnlyList<DateTime> NewlySkipped,
         LoadedState Before,
-        bool EnumerateOk);
+        bool EnumerateOk,
+        IReadOnlyList<ArchiveInfo>? Enumerated = null);
 
     /// <summary>
     /// Loads the markers, attempts and skips. A stored <see cref="InstanceKey"/> that differs from
@@ -221,7 +230,7 @@ public static class DatabaseProtectionErrorLogState
             read.Add(archive);
         }
 
-        return new ErrorLogPlan(read, newlySkipped, before, true);
+        return new ErrorLogPlan(read, newlySkipped, before, true, enumerated);
     }
 
     /// <summary>

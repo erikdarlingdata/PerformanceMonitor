@@ -518,6 +518,310 @@ OPTION(RECOMPILE);";
         }
     }
 
+    /// <summary>
+    /// #8865: what the monitoring login is told to grant when the error log is refused. Checked live: a login with only CONNECT SQL and
+    /// VIEW SERVER STATE reads <c>sp_readerrorlog</c> on SQL Server 2019 and 2022, so VIEW SERVER STATE is enough on every version this
+    /// collector reads. A SQL Server 2022 login holding only VIEW SERVER PERFORMANCE STATE (enough for the primary batch) is refused,
+    /// with error 27219.
+    /// </summary>
+    public const string ErrorLogGrantStatement = "VIEW SERVER STATE";
+
+    /* The numbers sp_readerrorlog raises when the caller may not read the log: 27219 observed live on 2019 and 2022 for a login without
+       the grant; 15003 (the old "only members of ..." text), 229 (EXECUTE denied) and 300 (VIEW SERVER STATE denied) are the other
+       permission errors a read of the log or a server DMV raises. Anything else is a failure, not a refusal. */
+    private static bool IsPermissionError(int? number) => number is 15003 or 229 or 300 or 27219;
+
+    /* One log is read per loop pass, each inside its own TRY/CATCH, so an archive that errors (or a refused current log) leaves the others
+       readable and is reported in the first result set. The archive list is parsed with CHARINDEX rather than STRING_SPLIT, which needs
+       database compatibility level 130 and master may be lower. sp_readerrorlog filters on its two search strings in the server, so only
+       the CHECKDB completion lines come back. The line is matched to a database by the exact text "DBCC CHECKDB (" + name + ")" read
+       as a prefix, binary collation: a name with brackets or spaces needs no escaping, and ")" after the name stops "db" matching "db old". */
+    private static string SupplementalQueryText(string exclusionClause) => $@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 5000;
+SET NOCOUNT ON;
+
+DECLARE
+    @offset_minutes integer = DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()),
+    @pending nvarchar(128) = @archives + N',',
+    @archive integer,
+    @comma integer;
+
+DECLARE
+    @status table
+(
+    archive integer NOT NULL,
+    ok bit NOT NULL,
+    error_number integer NULL,
+    message nvarchar(4000) NULL
+);
+
+DECLARE
+    @one table
+(
+    log_date datetime NULL,
+    process_info nvarchar(50) NULL,
+    text nvarchar(max) NULL
+);
+
+DECLARE
+    @lines table
+(
+    log_date datetime NULL,
+    text nvarchar(max) NULL
+);
+
+WHILE LEN(@pending) > 0
+BEGIN
+    SET @comma = CHARINDEX(N',', @pending);
+    SET @archive = TRY_CONVERT(integer, LEFT(@pending, @comma - 1));
+    SET @pending = SUBSTRING(@pending, @comma + 1, 128);
+
+    IF @archive IS NULL
+    BEGIN
+        CONTINUE;
+    END;
+
+    BEGIN TRY
+        DELETE @one;
+
+        INSERT
+            @one
+        (
+            log_date,
+            process_info,
+            text
+        )
+        EXECUTE sys.sp_readerrorlog @archive, 1, N'DBCC CHECKDB', N'executed by';
+
+        INSERT
+            @lines
+        (
+            log_date,
+            text
+        )
+        SELECT
+            o.log_date,
+            o.text
+        FROM @one AS o;
+
+        INSERT
+            @status
+        (
+            archive,
+            ok
+        )
+        VALUES
+        (
+            @archive,
+            1
+        );
+    END TRY
+    BEGIN CATCH
+        INSERT
+            @status
+        (
+            archive,
+            ok,
+            error_number,
+            message
+        )
+        VALUES
+        (
+            @archive,
+            0,
+            ERROR_NUMBER(),
+            LEFT(ERROR_MESSAGE(), 4000)
+        );
+    END CATCH;
+END;
+
+SELECT
+    s.archive,
+    s.ok,
+    s.error_number,
+    s.message
+FROM @status AS s
+ORDER BY
+    s.archive;
+
+SELECT /* PerformanceMonitorLite */
+    database_name = d.name,
+    line_time_utc = DATEADD(MINUTE, @offset_minutes, x.log_date),
+    line_text = x.text
+FROM sys.databases AS d
+CROSS APPLY
+(
+    SELECT TOP (1)
+        l.log_date,
+        l.text
+    FROM @lines AS l
+    WHERE LEFT(l.text, LEN(N'DBCC CHECKDB (' + d.name + N')')) COLLATE Latin1_General_100_BIN2
+        = (N'DBCC CHECKDB (' + d.name + N')') COLLATE Latin1_General_100_BIN2
+    ORDER BY
+        l.log_date DESC
+) AS x
+WHERE d.database_id <> 2
+AND   d.source_database_id IS NULL
+" + exclusionClause + @"
+OPTION(RECOMPILE);";
+
+    /// <summary>
+    /// #8865: reads the logs <see cref="ReadAsync"/> planned. Null when there is no plan (a platform-managed target, or a pass that listed no
+    /// databases), so those cycles cost no second round trip.
+    /// </summary>
+    public override CollectorQuery? BuildSupplementalQuery(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var plan = context.DatabaseProtectionErrorLogPlan;
+        if (plan is null)
+        {
+            return null;
+        }
+
+        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+        var parameters = new List<CollectorParameter>
+        {
+            new("@archives", string.Join(',', plan.Read.Select(a => a.Archive.ToString(CultureInfo.InvariantCulture))), CollectorParameterType.NVarChar128),
+        };
+        parameters.AddRange(exclusionParameters);
+        return new CollectorQuery(SupplementalQueryText(exclusionClause), parameters);
+    }
+
+    /// <summary>
+    /// #8865: applies what the supplemental read. Every row's error log fields are rebuilt from the remembered check and the line seen this
+    /// cycle, and the state ReadAsync staged on the assumption that nothing would be read is overwritten with what actually was: the
+    /// markers move over the archives that read fine, and those archives lose their attempt. A value that equals what state already holds
+    /// is unstaged, so a quiet cycle stages nothing.
+    /// </summary>
+    public override ValueTask ApplySupplementalAsync(List<Row> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(context);
+        return ApplyErrorLogAsync(rows, reader, context, cancellationToken);
+    }
+
+    private static async ValueTask ApplyErrorLogAsync(List<Row> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var plan = context.DatabaseProtectionErrorLogPlan;
+        if (plan is null)
+        {
+            return;
+        }
+
+        var status = new Dictionary<int, (bool Ok, int? ErrorNumber, string? Message)>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            status[reader.GetInt32(0)] = (
+                Convert.ToBoolean(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3));
+        }
+
+        var seen = new Dictionary<string, DatabaseProtectionErrorLogState.StoredCheck>(StringComparer.Ordinal);
+        var unparsed = 0;
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(1) && !reader.IsDBNull(2)
+                    && CheckDbErrorLogLine.TryParse(reader.GetString(2), out var options, out var errors))
+                {
+                    seen[reader.GetString(0)] = new DatabaseProtectionErrorLogState.StoredCheck(reader.GetDateTime(1), options, errors);
+                }
+                else
+                {
+                    unparsed++;
+                }
+            }
+        }
+
+        var state = context.State;
+        var reset = plan.Before.Reset;
+
+        var readOk = plan.Read
+            .Where(a => a.Archive > 0 && status.TryGetValue(a.Archive, out var s) && s.Ok)
+            .Select(a => a.LogDate)
+            .ToList();
+        var markers = DatabaseProtectionErrorLogState.MarkersAfter(plan, readOk, plan.Enumerated ?? plan.Read);
+        var attempts = new Dictionary<DateTime, int>(plan.Before.Attempts);
+        foreach (var archive in plan.Read.Where(a => a.Archive > 0))
+        {
+            attempts[archive.LogDate] = attempts.GetValueOrDefault(archive.LogDate) + 1;
+        }
+
+        foreach (var date in readOk)
+        {
+            attempts.Remove(date);
+        }
+
+        var skipped = plan.Before.Skipped.Union(plan.NewlySkipped).ToList();
+        Overwrite(context, DatabaseProtectionErrorLogState.NewestArchiveKey, markers.NewestArchive is { } newest ? DatabaseProtectionErrorLogState.FormatDates(new[] { newest }) : string.Empty);
+        Overwrite(context, DatabaseProtectionErrorLogState.BackfillBeforeKey, markers.BackfillBefore is { } before ? DatabaseProtectionErrorLogState.FormatDates(new[] { before }) : string.Empty);
+        Overwrite(context, DatabaseProtectionErrorLogState.BackfillDoneKey, markers.BackfillDone ? bool.TrueString : bool.FalseString);
+        Overwrite(context, DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.FormatAttempts(attempts));
+        Overwrite(context, DatabaseProtectionErrorLogState.SkippedKey, DatabaseProtectionErrorLogState.FormatDates(skipped));
+
+        var (logState, message) = ErrorLogOutcome(status, plan);
+        var grant = logState == ErrorLogRefused ? ErrorLogGrantStatement : null;
+        var skippedText = skipped.Count > 0 ? DatabaseProtectionErrorLogState.FormatDates(skipped) : null;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            var stored = DatabaseProtectionErrorLogState.StoredFor(state, row.DatabaseName, reset);
+            DatabaseProtectionErrorLogState.StoredCheck? lineCheck = seen.TryGetValue(row.DatabaseName, out var found) ? found : null;
+            var check = DatabaseProtectionErrorLogState.Effective(stored, lineCheck, row.CreateDate);
+            if (check is { } effective && (stored is null || effective != stored))
+            {
+                Overwrite(context, DatabaseProtectionErrorLogState.CheckKeyPrefix + row.DatabaseName, effective.Format());
+            }
+
+            rows[i] = row with
+            {
+                ErrorLogState = logState,
+                ErrorLogMessage = message,
+                ErrorLogGrant = grant,
+                ErrorLogBackfillComplete = markers.BackfillDone,
+                ErrorLogSkippedArchives = skippedText,
+                ErrorLogUnparsedLines = unparsed,
+                ErrorLogCheckDbTime = check?.TimeUtc,
+                ErrorLogCheckDbOptions = check?.Options,
+                ErrorLogCheckDbErrors = check?.Errors,
+            };
+        }
+    }
+
+    /* The state of the current log decides the row's state: it is the log every cycle reads, and an archive that fails is only a note. */
+    private static (string State, string? Message) ErrorLogOutcome(
+        Dictionary<int, (bool Ok, int? ErrorNumber, string? Message)> status, DatabaseProtectionErrorLogState.ErrorLogPlan plan)
+    {
+        if (!status.TryGetValue(0, out var current))
+        {
+            return (ErrorLogFailed, ErrorLogDidNotComplete);
+        }
+
+        if (!current.Ok)
+        {
+            return IsPermissionError(current.ErrorNumber)
+                ? (ErrorLogRefused, "The login may not read the SQL Server error log. Grant " + ErrorLogGrantStatement + " to the monitoring login.")
+                : (ErrorLogFailed, "The current error log could not be read: " + (current.Message ?? "unknown error") + ".");
+        }
+
+        var failedArchives = plan.Read.Count(a => a.Archive > 0 && !(status.TryGetValue(a.Archive, out var s) && s.Ok));
+        return failedArchives > 0
+            ? (ErrorLogRead, string.Create(CultureInfo.InvariantCulture, $"{failedArchives} older error log(s) could not be read; they are retried in the next cycle."))
+            : (ErrorLogRead, null);
+    }
+
+    /* Replaces whatever ReadAsync staged for the key with the post-read value, staging it only when it differs from state. The staged entry
+       has to go first: a post-read value equal to state would otherwise leave the earlier, different one in place. */
+    private static void Overwrite(CollectorContext context, string key, string value)
+    {
+        context.PendingState.Remove(key);
+        StageText(context, key, value);
+    }
+
     /* Stages a text value only when it differs from what state holds; an empty value for a key state never held is no change. */
     private static void StageText(CollectorContext context, string key, string value)
     {
