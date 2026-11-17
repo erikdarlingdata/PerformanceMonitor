@@ -1681,8 +1681,10 @@ namespace PerformanceMonitor.Common
 
             if (near > 0)
             {
-                var noun = atLimit == 0 ? (near == 1 ? " column" : " columns") : "";
-                parts.Add(string.Create(CultureInfo.InvariantCulture, $"{near}{noun} near it"));
+                /* "it" needs a limit named first: with none at its limit the clause says whose limit, so it never points at nothing. */
+                parts.Add(atLimit == 0
+                    ? string.Create(CultureInfo.InvariantCulture, $"{near} column{(near == 1 ? " near its" : "s near their")} limit")
+                    : string.Create(CultureInfo.InvariantCulture, $"{near} near it"));
             }
 
             return "Identity capacity critical (" + string.Join(", ", parts) + ")";

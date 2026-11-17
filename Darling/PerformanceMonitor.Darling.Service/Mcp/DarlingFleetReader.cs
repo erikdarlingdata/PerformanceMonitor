@@ -3535,6 +3535,9 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar,
     /* #7561: how many of those are at the critical bar, so the reason can say "1 at its limit, 4 near it" rather than call all five critical. */
     [property: JsonPropertyName("critical_columns")] int CriticalColumns,
+    /* #8928: how many of the critical columns have no values left. Only those are "at their limit" in the reason. Required, so a site that forgets it does not
+       compile and print "near it" for a full column. */
+    [property: JsonPropertyName("exhausted_columns")] int ExhaustedColumns,
     /* #7416: the fullest column and its figures, so the tile names what to open. Table is schema.table. Remaining is digits (an identity bigint
        does not fit a JSON number) and null when the collector did not store the value. */
     [property: JsonPropertyName("worst_database")] string? WorstDatabase = null,
@@ -3544,19 +3547,17 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null,
     /* #8818: which grade set the worst column's band (percent or days) and its days left, null with one sample, so a column banded on days reads as intended. */
     [property: JsonPropertyName("worst_band_reason")] string? WorstBandReason = null,
-    [property: JsonPropertyName("worst_days_to_exhaustion")] double? WorstDaysToExhaustion = null,
-    /* #8928: how many of the critical columns have no values left. Only those are "at their limit" in the reason. */
-    [property: JsonPropertyName("exhausted_columns")] int ExhaustedColumns = 0)
+    [property: JsonPropertyName("worst_days_to_exhaustion")] double? WorstDaysToExhaustion = null)
 {
-    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst, int exhaustedColumns = 0) =>
+    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst, int exhaustedColumns) =>
         worst is null
-            ? new FleetIdentityCapacity(band, columns, criticalColumns, ExhaustedColumns: exhaustedColumns)
+            ? new FleetIdentityCapacity(band, columns, criticalColumns, exhaustedColumns)
             : new FleetIdentityCapacity(
-                band, columns, criticalColumns, worst.DatabaseName,
+                band, columns, criticalColumns, exhaustedColumns, worst.DatabaseName,
                 string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
                 worst.ColumnName, worst.StoredPercent,
                 worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture),
-                worst.BandReason, worst.Exhaustion?.DaysLeft is double days ? Math.Round(days, 1) : null, exhaustedColumns);
+                worst.BandReason, worst.Exhaustion?.DaysLeft is double days ? Math.Round(days, 1) : null);
 }
 
 /// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.

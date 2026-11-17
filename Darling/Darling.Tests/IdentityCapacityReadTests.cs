@@ -591,7 +591,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(1, fleet.CriticalColumns);
             Assert.Equal(0, fleet.ExhaustedColumns);
             Assert.Equal("153994682", fleet.WorstValuesRemaining);
-            Assert.Equal("Identity capacity critical (1 column near it)", ServerHealthClassifier.IdentityCapacityReason(fleet.ColumnsAtBar, fleet.CriticalColumns, fleet.ExhaustedColumns));
+            Assert.Equal("Identity capacity critical (1 column near its limit)", ServerHealthClassifier.IdentityCapacityReason(fleet.ColumnsAtBar, fleet.CriticalColumns, fleet.ExhaustedColumns));
 
             await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);

@@ -288,8 +288,8 @@ LIMIT 1";
             .OrderByDescending(c => IdentityCapacityMath.Rank(c.Band)).ThenByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst,
-                read.Columns.Count(c => c.Band == IdentityCapacityMath.BandCritical && c.AtLimit));
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical),
+                read.Columns.Count(c => c.Band == IdentityCapacityMath.BandCritical && c.AtLimit), worst);
     }
 
     /// <summary>
@@ -1786,7 +1786,7 @@ public sealed class ServerTagPill
 }
 
 /// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
-public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, int CriticalColumns, IdentityColumnFact? Worst = null, int ExhaustedColumns = 0)
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, int CriticalColumns, int ExhaustedColumns, IdentityColumnFact? Worst = null)
 {
     /// <summary>The tile's second line (#7416): the fullest column and its figures, as the web tile says them, and where the rest are listed. The generic
     /// sentence when no column is known.</summary>
