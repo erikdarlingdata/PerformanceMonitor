@@ -18,7 +18,7 @@ namespace Darling.Tests;
 public class ColumnStatsModelTests
 {
     private static StatCandidate Stat(string[] columns, string[] clustered) =>
-        new(1, "dbo", "T", 2, "S", "index", new DateTime(2026, 1, 1), columns, clustered, 1000);
+        new(1, "dbo", "T", 2, "S", "index", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1), columns, clustered, 1000);
 
     private static StoredPrefix Stored(long sampled, DateTime updated) =>
         new("S", "index", ["a"], false, 0.1, 1000, sampled, updated, null, updated);

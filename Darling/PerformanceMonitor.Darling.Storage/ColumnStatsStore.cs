@@ -42,7 +42,10 @@ internal static class ColumnStatsStore
 {
     private const int CommandTimeoutSeconds = SchemaVersionStore.WriteCommandTimeoutSeconds;
 
-    /// <summary>When each stored statistic of the (history key, database) was last updated on the monitored server, by (object id, statistics id).</summary>
+    /// <summary>
+    /// When each stored statistic of the (history key, database) was last updated, by (object id, statistics id): <c>last_updated</c>, the
+    /// raw server-local <c>STATS_DATE</c> the change check compares with (never the UTC display column).
+    /// </summary>
     internal static async Task<IReadOnlyDictionary<(int ObjectId, int StatsId), DateTime>> LoadStatsDatesAsync(
         NpgsqlConnection c, string historyKey, string database, CancellationToken ct)
     {
@@ -104,8 +107,8 @@ GROUP BY object_id, stats_id", c) { CommandTimeout = CommandTimeoutSeconds };
                 await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.column_stats (
     history_key, server_id, database_name, object_id, schema_name, object_name, stats_id, stats_name, origin,
-    prefix_length, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated, persisted_sample_percent, read_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)", c, tx)
+    prefix_length, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated, last_updated_utc, persisted_sample_percent, read_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)", c, tx)
                 { CommandTimeout = CommandTimeoutSeconds };
                 Param(insert, NpgsqlDbType.Text, historyKey);
                 Param(insert, NpgsqlDbType.Integer, serverId);
@@ -122,7 +125,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 Param(insert, NpgsqlDbType.Double, prefix.AllDensity);
                 Param(insert, NpgsqlDbType.Bigint, header.Rows);
                 Param(insert, NpgsqlDbType.Bigint, header.RowsSampled);
-                Param(insert, NpgsqlDbType.Timestamp, Naive(header.LastUpdated ?? stat.StatsDate));
+                Param(insert, NpgsqlDbType.Timestamp, Naive(stat.StatsDate));
+                Param(insert, NpgsqlDbType.Timestamp, Naive(stat.StatsDateUtc));
                 Param(insert, NpgsqlDbType.Real, header.PersistedSamplePercent);
                 Param(insert, NpgsqlDbType.Timestamp, Naive(readAt));
                 await insert.ExecuteNonQueryAsync(ct);
@@ -227,7 +231,7 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
         }
 
         await using var cmd = new NpgsqlCommand(@"
-SELECT stats_name, origin, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated, persisted_sample_percent, read_at
+SELECT stats_name, origin, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated_utc, persisted_sample_percent, read_at
 FROM collect.column_stats
 WHERE history_key = ANY($1) AND database_name = $2 AND schema_name = $3 AND object_name = $4
 ORDER BY stats_name, prefix_length", c) { CommandTimeout = CommandTimeoutSeconds };

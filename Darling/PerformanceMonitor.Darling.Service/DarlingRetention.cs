@@ -1837,7 +1837,6 @@ WHERE NOT EXISTS
     AND   s.last_seen_in_scope_at >= $1
 )";
 
-
     /// <summary>
     /// The CEILING on rows per statement for the plan dimension's purge (#2386, reframed by #4130) — not a
     /// fixed batch size any more. <see cref="NextPlanDimBatchCap"/> adapts the actual cap toward

@@ -37,7 +37,9 @@ public static class ColumnStatsQueries
     /// Result set 1: one row per candidate statistic, largest tables first, at most <see cref="ColumnStatsModel.MaxStatisticsPerDatabase"/>.
     /// Columns: object_id, schema_name, object_name, stats_id, stats_name, origin ('index', 'user' or 'auto'), stats_date, table_rows
     /// (heap or clustered partitions), stat_columns (the statistic's columns in order), clustered_key_columns (the clustering key
-    /// columns of the table, only for a nonclustered index statistic, where SQL Server appends them to the density vector). Both lists
+    /// columns of the table, only for a nonclustered index statistic, where SQL Server appends them to the density vector),
+    /// stats_date_utc. stats_date is <c>STATS_DATE</c> in the server's local time, kept as it is for the change check; stats_date_utc is
+    /// the same instant moved to UTC by the server's current offset from UTC, for display. Both lists
     /// are comma-joined with a backslash escaping <c>\</c> and <c>,</c> inside a name, as SchemaCatalogQueries writes its lists, and
     /// NULL when empty. Candidates are user tables and indexed views.
     /// Result set 2: one row of counts of statistics left out, each in exactly one bucket, first match winning: filtered,
@@ -62,6 +64,7 @@ SELECT
     CONVERT(bit, ISNULL(t.is_memory_optimized, 0)) AS is_memory_optimized,
     CONVERT(bit, CASE WHEN i.type IN (3, 4, 5, 6) THEN 1 ELSE 0 END) AS excluded_index_type,
     STATS_DATE(s.object_id, s.stats_id) AS stats_date,
+    DATEADD(MINUTE, DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()), STATS_DATE(s.object_id, s.stats_id)) AS stats_date_utc,
     CONVERT(bigint, ISNULL(ps.table_rows, 0)) AS table_rows
 INTO #pm_cs_base
 FROM sys.stats AS s
@@ -98,7 +101,8 @@ SELECT TOP ({CAP})
         JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
         WHERE ic.object_id = b.object_id AND ic.index_id = 1 AND ic.key_ordinal > 0
         ORDER BY ic.key_ordinal
-        FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 1, N'') END AS clustered_key_columns
+        FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 1, N'') END AS clustered_key_columns,
+    b.stats_date_utc
 FROM #pm_cs_base AS b
 WHERE b.has_filter = 0
   AND b.is_memory_optimized = 0
@@ -140,9 +144,10 @@ DROP TABLE #pm_cs_base;
     /// A loop over the given statistics that reads each one's header and density vector with DBCC SHOW_STATISTICS (never the histogram),
     /// each inside its own TRY/CATCH so one failing statistic does not stop the rest. Names are resolved in the batch from the ids and
     /// quoted, apostrophes doubled for the dynamic string. A statistic that fails leaves no rows in sets 1 and 2 and one row in set 3.
-    /// Result sets, in order: (1) headers keyed by object_id, stats_id: Updated, Rows, Rows Sampled, Steps, Density, Average key
-    /// length, String Index, Unfiltered Rows and, when <paramref name="headerHasPersistedSamplePercent"/>, Persisted Sample Percent
-    /// (the filter expression is captured by the DBCC call and never returned); (2) density rows keyed by object_id, stats_id, with
+    /// Result sets, in order: (1) headers keyed by object_id, stats_id: Rows, Rows Sampled, Steps, Density, Average key length, String
+    /// Index, Unfiltered Rows and, when <paramref name="headerHasPersistedSamplePercent"/>, Persisted Sample Percent (the filter expression
+    /// and DBCC's Updated text are captured by the DBCC call and never returned: Updated is text in the login's language, so it is kept as
+    /// text and never converted); (2) density rows keyed by object_id, stats_id, with
     /// ord (1-based position within that statistic's vector), all_density and average_length: row ord describes the leading ord columns, and the Columns
     /// text of DBCC is discarded because the names come from the catalog; (3) errors: object_id, stats_id, error_number, error_message.
     /// Header shape contract: the header call fails with error 213 (column count mismatch) when the chosen shape is wrong for the
@@ -159,7 +164,7 @@ DROP TABLE #pm_cs_base;
         sb.Append("IF OBJECT_ID(N'tempdb..#dv') IS NOT NULL DROP TABLE #dv;\r\n");
         sb.Append("IF OBJECT_ID(N'tempdb..#errs') IS NOT NULL DROP TABLE #errs;\r\n");
         sb.Append("CREATE TABLE #todo (ord int IDENTITY(1, 1) NOT NULL PRIMARY KEY, object_id int NOT NULL, stats_id int NOT NULL);\r\n");
-        sb.Append("CREATE TABLE #hdr (object_id int NULL, stats_id int NULL, [Name] sysname NULL, [Updated] datetime NULL, [Rows] bigint NULL, "
+        sb.Append("CREATE TABLE #hdr (object_id int NULL, stats_id int NULL, [Name] sysname NULL, [Updated] nvarchar(128) NULL, [Rows] bigint NULL, "
             + "[Rows Sampled] bigint NULL, [Steps] int NULL, [Density] float NULL, [Average key length] float NULL, [String Index] varchar(3) NULL, "
             + "[Filter Expression] nvarchar(max) NULL, [Unfiltered Rows] bigint NULL"
             + (headerHasPersistedSamplePercent ? ", [Persisted Sample Percent] float NULL" : string.Empty)
@@ -190,7 +195,7 @@ DROP TABLE #pm_cs_base;
 
         var persisted = headerHasPersistedSamplePercent ? ", [Persisted Sample Percent]" : string.Empty;
         var headerInsertColumns = "[Name], [Updated], [Rows], [Rows Sampled], [Steps], [Density], [Average key length], [String Index], [Filter Expression], [Unfiltered Rows]" + persisted;
-        var headerSelectColumns = "[Updated], [Rows], [Rows Sampled], [Steps], [Density], [Average key length], [String Index], [Unfiltered Rows]" + persisted;
+        var headerSelectColumns = "[Rows], [Rows Sampled], [Steps], [Density], [Average key length], [String Index], [Unfiltered Rows]" + persisted;
 
         sb.Append(LoopHead);
         sb.Append("        INSERT #hdr (").Append(headerInsertColumns).Append(") EXEC (@sql);\r\n");

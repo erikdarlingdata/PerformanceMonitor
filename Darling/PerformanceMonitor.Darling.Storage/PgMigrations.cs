@@ -3577,7 +3577,10 @@ ALTER TABLE config.config_alert_settings
     /// share one set of rows and a new primary's reads replace the old primary's. <c>server_id</c> is provenance only: the server whose run
     /// wrote the row. The primary key (history_key, database_name, object_id, ...) also serves the reads by table and the retention join.
     /// <c>collect.column_stats_state</c> is the per-server, per-database cursor (history key, recovery fork, last seen in scope, last full
-    /// read). The run log's (database_name, history_key, collection_time) index serves the newest-run and writing-server lookups.</para>
+    /// read). The run log's (database_name, history_key, collection_time) index serves the newest-run and writing-server lookups.
+    /// <c>last_updated</c> is the statistic's <c>STATS_DATE</c> exactly as the monitored server returns it, in that server's local time:
+    /// the value the change check compares, so a daylight saving shift never re-reads a database. <c>last_updated_utc</c> is the same
+    /// instant moved to UTC on the server at read time, the value <c>get_object_definition</c> shows as <c>stats_updated_at</c>.</para>
     ///
     /// <para>New tables, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent.</para>
     /// </summary>
@@ -3627,6 +3630,7 @@ CREATE TABLE IF NOT EXISTS collect.column_stats (
     rows bigint NOT NULL,
     rows_sampled bigint NOT NULL,
     last_updated timestamp NOT NULL,
+    last_updated_utc timestamp NOT NULL,
     persisted_sample_percent real NULL,
     read_at timestamp NOT NULL,
     PRIMARY KEY (history_key, database_name, object_id, stats_id, prefix_length)

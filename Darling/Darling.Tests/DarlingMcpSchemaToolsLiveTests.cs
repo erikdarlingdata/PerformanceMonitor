@@ -963,11 +963,11 @@ public sealed class DarlingMcpSchemaToolsLiveTests
     private static (StatCandidate Stat, StatHeader Header, IReadOnlyList<StatPrefix> Prefixes) StatEntry(
         int objectId, int statsId, string table, string name, string[] columns, double[] densities, long rows = 1000, bool clusteringTail = false)
     {
-        var stat = new StatCandidate(objectId, "dbo", table, statsId, name, "index", s_statsRead.AddDays(-1), columns, Array.Empty<string>(), rows);
+        var stat = new StatCandidate(objectId, "dbo", table, statsId, name, "index", s_statsRead.AddDays(-1), s_statsRead.AddDays(-1).AddHours(5), columns, Array.Empty<string>(), rows);
         var prefixes = densities
             .Select((d, i) => new StatPrefix(objectId, statsId, i + 1, columns.Take(i + 1).ToList(), clusteringTail && i == densities.Length - 1, d))
             .ToList();
-        return (stat, new StatHeader(stat.StatsDate, rows, rows, null), prefixes);
+        return (stat, new StatHeader(rows, rows, null), prefixes);
     }
 
     private static Task SeedRunAsync(Store s, CancellationToken ct, SchemaHistoryKey key, string? refused, int serverId = 0, DateTime? at = null) =>
@@ -1003,6 +1003,11 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             Assert.Equal("unique", columns[0].GetProperty("selectivity").GetProperty("label").GetString());
             Assert.Equal(1.0, columns[0].GetProperty("selectivity").GetProperty("selectivity").GetDouble());
             Assert.Equal("PK_Orders", columns[0].GetProperty("selectivity").GetProperty("statistic").GetString());
+            /* stats_updated_at is the UTC column; the entries' server-local STATS_DATE is five hours behind it. */
+            Assert.Equal(
+                DateTime.SpecifyKind(s_statsRead.AddDays(-1).AddHours(5), DateTimeKind.Utc),
+                columns[0].GetProperty("selectivity").GetProperty("stats_updated_at").GetDateTime().ToUniversalTime(),
+                TimeSpan.FromMilliseconds(1));
             Assert.Equal(100.0, columns[1].GetProperty("selectivity").GetProperty("distinct_estimate").GetDouble(), 6);
             Assert.Equal(JsonValueKind.Null, columns[2].GetProperty("selectivity").ValueKind);
             Assert.Equal("no statistic leads with this column", columns[2].GetProperty("selectivity_note").GetString());

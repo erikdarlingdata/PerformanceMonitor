@@ -28,17 +28,19 @@ public sealed class ColumnStatsStoreLiveTests
     private static readonly DateTime s_read = new(2026, 11, 2, 3, 0, 0, DateTimeKind.Unspecified);
 
     private static StatCandidate Stat(int objectId, int statsId, string table = "Orders", string name = "IX_Orders") =>
-        new(objectId, "dbo", table, statsId, name, "index", s_t0, new[] { "CustomerId", "Status" }, new[] { "OrderId" }, 1000);
+        new(objectId, "dbo", table, statsId, name, "index", s_t0, s_t0.AddHours(5), new[] { "CustomerId", "Status" }, new[] { "OrderId" }, 1000);
 
+    /* updated is the server-local STATS_DATE; the server runs five hours behind UTC. */
     private static (StatCandidate Stat, StatHeader Header, IReadOnlyList<StatPrefix> Prefixes) Entry(StatCandidate stat, DateTime updated, double densityScale = 1)
     {
+        stat = stat with { StatsDate = updated, StatsDateUtc = updated.AddHours(5) };
         var prefixes = new List<StatPrefix>
         {
             new(stat.ObjectId, stat.StatsId, 1, new[] { "CustomerId" }, false, 0.01 * densityScale),
             new(stat.ObjectId, stat.StatsId, 2, new[] { "CustomerId", "Status" }, false, 0.002 * densityScale),
             new(stat.ObjectId, stat.StatsId, 3, new[] { "CustomerId", "Status", "OrderId" }, true, 0.001 * densityScale),
         };
-        return (stat, new StatHeader(updated, 1000, 900, 12.5f), prefixes);
+        return (stat, new StatHeader(1000, 900, 12.5f), prefixes);
     }
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlConnection Pg)> OpenAsync(CancellationToken ct)
@@ -93,7 +95,7 @@ public sealed class ColumnStatsStoreLiveTests
         Assert.Equal(3, await CountAsync(pg, "server_id = 7", ct));
         var stored = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { key }, Db, "dbo", "Orders", ct);
         Assert.Equal(3, stored.Count);
-        Assert.All(stored, p => Assert.Equal(s_t0.AddDays(1), p.LastUpdated));
+        Assert.All(stored, p => Assert.Equal(s_t0.AddDays(1).AddHours(5), p.LastUpdatedUtc));
         Assert.Equal(0.02, stored[0].AllDensity, 9);
         Assert.Equal(new[] { "CustomerId" }, stored[0].Columns);
         Assert.False(stored[0].IncludesClusteringKey);
@@ -145,7 +147,7 @@ public sealed class ColumnStatsStoreLiveTests
 
         var byAg = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { agKey }, Db, "dbo", "Orders", ct);
         Assert.Equal(6, byAg.Count);
-        Assert.All(byAg.Where(p => p.StatsName == "Kept"), p => Assert.Equal(s_t0.AddDays(1), p.LastUpdated));
+        Assert.All(byAg.Where(p => p.StatsName == "Kept"), p => Assert.Equal(s_t0.AddDays(1).AddHours(5), p.LastUpdatedUtc));
         Assert.Equal(3, await CountAsync(pg, "stats_id = 1", ct));
         Assert.Equal(3, await CountAsync(pg, "stats_id = 1 AND server_id = 8", ct));
 

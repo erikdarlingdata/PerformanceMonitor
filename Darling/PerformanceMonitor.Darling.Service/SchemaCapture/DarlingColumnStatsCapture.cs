@@ -425,13 +425,11 @@ public static class DarlingColumnStatsCapture
             {
                 if (byId.TryGetValue((row.ObjectId, row.StatsId), out var stat))
                 {
-                    /* DBCC's Updated is text to the minute; the stored date is STATS_DATE, the value the next run compares with. */
-                    write.Add((stat, row.Header with { LastUpdated = stat.StatsDate }, ColumnStatsModel.MapDensityRows(stat, row.AllDensities)));
+                    write.Add((stat, row.Header, ColumnStatsModel.MapDensityRows(stat, row.AllDensities)));
                 }
             }
 
             await TimedStore(() => ColumnStatsStore.ReplaceStatisticsAsync(Store, _server.ServerId, keyText, database, write, DateTime.UtcNow, _ct));
-
             tally.Read += write.Count;
 
             foreach (var error in errors)

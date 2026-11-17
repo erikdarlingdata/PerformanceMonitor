@@ -116,6 +116,7 @@ internal sealed class SqlColumnStatsSource : IColumnStatsSource
                     reader.GetString(4),
                     reader.GetString(5),
                     reader.GetDateTime(6),
+                    reader.GetDateTime(10),
                     SchemaCatalogReader.SplitList(reader.IsDBNull(8) ? null : reader.GetString(8)),
                     SchemaCatalogReader.SplitList(reader.IsDBNull(9) ? null : reader.GetString(9)),
                     reader.GetInt64(7)));
@@ -136,16 +137,15 @@ internal sealed class SqlColumnStatsSource : IColumnStatsSource
             await using var command = Command(InDatabase(database, ColumnStatsQueries.BuildReadBatch(stats, headerHasPersistedSamplePercent)));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-            /* Set 1: object_id, stats_id, Updated, Rows, Rows Sampled, Steps, Density, Average key length, String Index, Unfiltered Rows
+            /* Set 1: object_id, stats_id, Rows, Rows Sampled, Steps, Density, Average key length, String Index, Unfiltered Rows
                [, Persisted Sample Percent]. */
             var headers = new List<(int ObjectId, int StatsId, StatHeader Header)>();
             while (await reader.ReadAsync(cancellationToken))
             {
-                float? persisted = headerHasPersistedSamplePercent && !reader.IsDBNull(10) ? (float)reader.GetDouble(10) : null;
+                float? persisted = headerHasPersistedSamplePercent && !reader.IsDBNull(9) ? (float)reader.GetDouble(9) : null;
                 headers.Add((reader.GetInt32(0), reader.GetInt32(1), new StatHeader(
-                    reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                     reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                     persisted)));
             }
 

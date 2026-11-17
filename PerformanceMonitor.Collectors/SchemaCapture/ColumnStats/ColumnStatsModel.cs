@@ -12,13 +12,18 @@ using System.Linq;
 
 namespace PerformanceMonitor.Collectors;
 
-/// <summary>Header of a statistics object (DBCC SHOW_STATISTICS ... STAT_HEADER): when it was built and how many rows it saw.</summary>
-public sealed record StatHeader(DateTime? LastUpdated, long Rows, long RowsSampled, float? PersistedSamplePercent);
+/// <summary>
+/// Header of a statistics object (DBCC SHOW_STATISTICS ... STAT_HEADER): how many rows the table had and how many the statistic sampled.
+/// DBCC's Updated text is not used: the update time comes from <c>STATS_DATE</c> on the candidate (<see cref="StatCandidate.StatsDate"/>).
+/// </summary>
+public sealed record StatHeader(long Rows, long RowsSampled, float? PersistedSamplePercent);
 
 /// <summary>
 /// One statistics object on one table. <see cref="StatColumns"/> is the key column list as the catalog reports it, so a column name
 /// containing a comma stays one name. <see cref="ClusteredKeyColumns"/> are the clustering key columns SQL Server appends to the
-/// density vector of a nonclustered statistic.
+/// density vector of a nonclustered statistic. <see cref="StatsDate"/> is <c>STATS_DATE</c> exactly as the server returns it, in the
+/// server's local time: the value the next run compares with, so a time zone or daylight saving change never re-reads anything.
+/// <see cref="StatsDateUtc"/> is the same instant converted to UTC on the server at read time, the value shown to callers.
 /// </summary>
 public sealed record StatCandidate(
     int ObjectId,
@@ -28,6 +33,7 @@ public sealed record StatCandidate(
     string StatsName,
     string Origin,
     DateTime StatsDate,
+    DateTime StatsDateUtc,
     IReadOnlyList<string> StatColumns,
     IReadOnlyList<string> ClusteredKeyColumns,
     long TableRows);
@@ -44,7 +50,10 @@ public sealed record StatPrefix(
 /// <summary>Selectivity derived from an all-density value: the share of distinct values, the distinct estimate and the average rows per value.</summary>
 public sealed record Selectivity(double Value, double DistinctEstimate, double RowsPerValue);
 
-/// <summary>A prefix as it was stored on an earlier run, used to choose between statistics that describe the same column list.</summary>
+/// <summary>
+/// A prefix as it was stored on an earlier run, used to choose between statistics that describe the same column list.
+/// <see cref="LastUpdatedUtc"/> is the statistic's update time in UTC (the store's <c>last_updated_utc</c>).
+/// </summary>
 public sealed record StoredPrefix(
     string StatsName,
     string Origin,
@@ -53,7 +62,7 @@ public sealed record StoredPrefix(
     double AllDensity,
     long Rows,
     long RowsSampled,
-    DateTime LastUpdated,
+    DateTime LastUpdatedUtc,
     float? PersistedSamplePercent,
     DateTime ReadAt);
 
@@ -140,7 +149,7 @@ public static class ColumnStatsModel
     {
         return sameColumnList
             .OrderByDescending(p => p.RowsSampled)
-            .ThenByDescending(p => p.LastUpdated)
+            .ThenByDescending(p => p.LastUpdatedUtc)
             .First();
     }
 

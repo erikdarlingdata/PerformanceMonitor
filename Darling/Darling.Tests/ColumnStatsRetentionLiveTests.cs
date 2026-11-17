@@ -59,8 +59,8 @@ public sealed class ColumnStatsRetentionLiveTests
     {
         await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.column_stats (server_id, history_key, database_name, object_id, schema_name, object_name, stats_id,
-                                  stats_name, origin, prefix_length, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated, read_at)
-VALUES ($1, $2, $3, $4, 'dbo', 'T', 1, 'ix', 'index', 1, ARRAY['Id'], false, 0.5, 100, 100, $5, $5)", c);
+                                  stats_name, origin, prefix_length, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated, last_updated_utc, read_at)
+VALUES ($1, $2, $3, $4, 'dbo', 'T', 1, 'ix', 'index', 1, ARRAY['Id'], false, 0.5, 100, 100, $5, $5, $5)", c);
         insert.Parameters.Add(new NpgsqlParameter { Value = serverId });
         insert.Parameters.Add(new NpgsqlParameter { Value = Key(serverId, group) });
         insert.Parameters.Add(new NpgsqlParameter { Value = database });

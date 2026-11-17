@@ -148,13 +148,13 @@ LIMIT 1";
             if (best.Columns.Count == 1)
             {
                 columns[best.Columns[0]] = new SelectivityItem(
-                    selectivity?.Value, selectivity?.DistinctEstimate, selectivity?.RowsPerValue, label, best.StatsName, Utc(best.LastUpdated), sampled);
+                    selectivity?.Value, selectivity?.DistinctEstimate, selectivity?.RowsPerValue, label, best.StatsName, Utc(best.LastUpdatedUtc), sampled);
             }
             else
             {
                 combinations.Add(new SelectivityCombination(
                     best.Columns, best.IncludesClusteringKey, selectivity?.Value, selectivity?.DistinctEstimate, selectivity?.RowsPerValue, label,
-                    best.StatsName, Utc(best.LastUpdated), sampled));
+                    best.StatsName, Utc(best.LastUpdatedUtc), sampled));
             }
         }
 
@@ -396,7 +396,6 @@ LIMIT 1";
         cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = keyTexts });
-
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {

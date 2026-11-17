@@ -102,8 +102,7 @@ public sealed class ColumnStatsCapturePassTests
                     }
 
                     var c = byId[id];
-                    /* The header's Updated is DBCC's text, to the minute; the run must store STATS_DATE, not this. */
-                    var header = new StatHeader(new DateTime(c.StatsDate.Year, c.StatsDate.Month, c.StatsDate.Day, c.StatsDate.Hour, c.StatsDate.Minute, 0), c.TableRows, c.TableRows, headerHasPersistedSamplePercent ? 100f : null);
+                    var header = new StatHeader(c.TableRows, c.TableRows, headerHasPersistedSamplePercent ? 100f : null);
                     var densities = Enumerable.Range(1, c.StatColumns.Count).Select(i => 1.0 / (10 * i)).ToList();
                     rows.Add(new ColumnStatsReadRow(id.ObjectId, id.StatsId, header, densities));
                 }
@@ -208,7 +207,7 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
         new(name, id, "ONLINE", readOnly, false, null, true, fork ?? s_fork1, group, group is null ? null : "AgOne", primary);
 
     private static StatCandidate Stat(int objectId, int statsId, DateTime date, long tableRows = 1000, params string[] columns) =>
-        new(objectId, "dbo", "T" + objectId, statsId, "st_" + objectId + "_" + statsId, statsId == 1 ? "index" : "auto", date,
+        new(objectId, "dbo", "T" + objectId, statsId, "st_" + objectId + "_" + statsId, statsId == 1 ? "index" : "auto", date, date.AddHours(5),
             columns.Length == 0 ? new[] { "Id" } : columns, Array.Empty<string>(), tableRows);
 
     private static void Seed(FakeSource source)
@@ -294,8 +293,9 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
 
             Assert.Equal(3, rig.Source.ReadIds(Sales).Count());
             Assert.Equal("3", await rig.StoredStatsAsync(Sales, ct));
-            /* One row per prefix: 1 + 2 + 1. The stored date is STATS_DATE to the millisecond, not DBCC's minute. */
-            Assert.Equal("4", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats WHERE last_updated = '2026-11-01 10:00:00.123'", ct));
+            /* One row per prefix: 1 + 2 + 1. The stored date is STATS_DATE to the millisecond as the server gave it (compared next run), and
+               beside it the same instant in UTC (shown); the fake server runs five hours behind UTC. */
+            Assert.Equal("4", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats WHERE last_updated = '2026-11-01 10:00:00.123' AND last_updated_utc = '2026-11-01 15:00:00.123'", ct));
             Assert.Equal("baseline|3|3|0|0|0|0|-|true", await rig.LastRunAsync(Sales, ct));
             Assert.Equal("1", await rig.ScalarAsync(
                 "SELECT count(*) FROM collect.column_stats_state WHERE server_id = " + server.ServerId
