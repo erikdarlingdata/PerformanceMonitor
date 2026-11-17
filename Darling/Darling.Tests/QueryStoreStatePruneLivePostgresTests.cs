@@ -351,11 +351,12 @@ public sealed class QueryStoreStatePruneLivePostgresTests
     }
 
     /// <summary>
-    /// #8865: the database_protection collector's checkdb:&lt;database&gt; keys go through the same prune, so a
-    /// server with Query Store collection off still retires a dropped database's key.
+    /// #8865: the database_protection collector's checkdb:&lt;database&gt; keys go through the same prune: with no
+    /// query_store state at all, a dropped database's key is retired and a live one kept. That the database_protection
+    /// cycle calls this prune is not pinned by a test (#5833 rules out a source-text pin); the call site is in DarlingCollectorRunner.Run.cs.
     /// </summary>
     [Fact]
-    public async Task ADroppedDatabasesCheckDbKey_IsPruned_WithQueryStoreOff()
+    public async Task ADroppedDatabasesCheckDbKey_IsPruned_WithNoQueryStoreState()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
