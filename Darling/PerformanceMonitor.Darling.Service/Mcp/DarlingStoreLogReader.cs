@@ -357,6 +357,25 @@ LIMIT $3";
         return absent;
     }
 
+    /// <summary>The unread-log fields of one answer (#8904).</summary>
+    public sealed class LogBacklogInfo
+    {
+        /// <summary>Bytes of log still unread when the newest capture finished.</summary>
+        [JsonPropertyName("bytes_pending")] public long BytesPending { get; init; }
+
+        /// <summary>The most log one capture reads.</summary>
+        [JsonPropertyName("per_capture_bound_bytes")] public long PerCaptureBoundBytes { get; init; }
+
+        /// <summary>The least captures the backlog needs if nothing more is written.</summary>
+        [JsonPropertyName("captures_needed")] public long CapturesNeeded { get; init; }
+
+        /// <summary>The log's own time stamp on the newest kept sample line, as written, in the store's log time zone.
+        /// The log after it is unread. Null when no kept sample line carries one.</summary>
+        [JsonPropertyName("newest_sample_log_stamp")] public string? NewestSampleLogStamp { get; init; }
+
+        [JsonPropertyName("note")] public string Note => "The newest hours of the log are not read yet: occurrences_last_hour counts only what was read, so 0 there is not a quiet hour.";
+    }
+
     /// <summary>What one <c>get_store_log</c> answer is.</summary>
     public sealed class StoreLogReport
     {
@@ -365,6 +384,24 @@ LIMIT $3";
         [JsonPropertyName("as_of")] public string AsOf { get; init; } = string.Empty;
 
         [JsonPropertyName("capture_summary")] public CaptureSummary Captures { get; init; } = new();
+
+        /// <summary>The log's own stamp (as written, in the store's log time zone) on the newest kept sample line, set
+        /// by the caller only while bytes are pending (#8904). Null when none was found.</summary>
+        [JsonIgnore] public string? NewestSampleLogStamp { get; init; }
+
+        /// <summary>Present only while bytes are pending (#8904): the newest hours of the log are not read yet, how much
+        /// one capture reads, and the log time the read had reached, so an <c>occurrences_last_hour</c> of 0 is not taken
+        /// for a quiet hour. Absent when the reader is level.</summary>
+        [JsonPropertyName("log_backlog"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public LogBacklogInfo? LogBacklog => Captures.BytesPending > 0
+            ? new LogBacklogInfo
+            {
+                BytesPending = Captures.BytesPending,
+                PerCaptureBoundBytes = StoreLogSweep.MaxBytesPerCapture,
+                CapturesNeeded = StoreLogSweep.CapturesNeeded(Captures.BytesPending),
+                NewestSampleLogStamp = NewestSampleLogStamp,
+            }
+            : null;
 
         [JsonPropertyName("classes")] public IReadOnlyList<ClassCensus> Classes { get; init; } = [];
 
@@ -522,11 +559,34 @@ LIMIT $3";
 
         if (summary.BytesPending > 0)
         {
-            note.Append(string.Format(
-                CultureInfo.InvariantCulture,
-                "{0} {1} still unread when the newest capture finished; the next capture reads them. ",
-                CountText.Plural(summary.BytesPending, "byte"),
-                summary.BytesPending == 1 ? "was" : "were"));
+            if (summary.BytesPending > StoreLogSweep.MaxBytesPerCapture)
+            {
+                /* #8904: more than one capture can read, so "the next capture reads them" would be untrue. */
+                var needed = StoreLogSweep.CapturesNeeded(summary.BytesPending);
+                note.Append(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} {1} still unread when the newest capture finished. One capture reads at most {2} ({3} slabs of {4}), "
+                    + "so this backlog needs at least {5} to read, at one capture an hour, and more if the log keeps growing. ",
+                    CountText.Plural(summary.BytesPending, "byte"),
+                    summary.BytesPending == 1 ? "was" : "were",
+                    CountText.Plural(StoreLogSweep.MaxBytesPerCapture, "byte"),
+                    StoreLogSweep.MaxSlabsPerCapture,
+                    CountText.Plural(StoreLogSlab.MaxBytesPerRead, "byte"),
+                    CountText.Plural(needed, "capture")));
+            }
+            else
+            {
+                note.Append(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} {1} still unread when the newest capture finished; the next capture reads them. ",
+                    CountText.Plural(summary.BytesPending, "byte"),
+                    summary.BytesPending == 1 ? "was" : "were"));
+            }
+
+            /* #8904: the newest hours are the unread ones, so a 0 in occurrences_last_hour is not a quiet hour. */
+            note.Append(report.NewestSampleLogStamp is { } stamp
+                ? $"The log is not read past its own time {stamp} (the newest stamp on a kept sample line), so occurrences_last_hour and the newest hours of every class count only what was read and can read low. "
+                : "The newest hours of the log are not read yet (no kept sample line carries a log time to name), so occurrences_last_hour and the newest hours of every class count only what was read and can read low. ");
         }
 
         note.Append("No band is applied. Whether a class moved is its count read against the per-hour median "
@@ -534,6 +594,68 @@ LIMIT $3";
             + "is healthy and has to keep reading that way.");
 
         return note.ToString();
+    }
+
+    /// <summary>
+    /// The first characters of every kept sample line in the newest capture that kept any (#8904). The sweep parses no
+    /// timestamp, so the only log time the store holds is the one a kept entry carries at the front of its own line.
+    /// $1/$2 window (naive UTC).
+    /// </summary>
+    public const string NewestSampleHeadsSql = @"
+WITH newest AS
+(
+    SELECT max(m.capture_time) AS capture_time
+    FROM collect.store_log_events AS m
+    WHERE m.sample_line IS NOT NULL
+    AND   m.capture_time >= $1
+    AND   m.capture_time <= $2
+)
+SELECT left(e.sample_line, 64)
+FROM collect.store_log_events AS e
+JOIN newest AS n
+  ON n.capture_time = e.capture_time
+WHERE e.sample_line IS NOT NULL";
+
+    private static readonly System.Text.RegularExpressions.Regex s_logStamp = new(
+        @"^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?: [A-Za-z+\-][A-Za-z0-9+:\-]*)?(?=\s|\[|$)",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>The log stamp at the front of a sample line as the log wrote it, or null when it has none.</summary>
+    public static string? LogStampOf(string? sampleHead)
+    {
+        if (string.IsNullOrEmpty(sampleHead))
+        {
+            return null;
+        }
+
+        var match = s_logStamp.Match(sampleHead);
+        return match.Success ? match.Value.Trim() : null;
+    }
+
+    /// <summary>The newest log stamp among the kept samples (#8904), or null when none carries one.</summary>
+    public static async Task<string?> GetNewestSampleLogStampAsync(
+        NpgsqlDataSource postgres,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(NewestSampleHeadsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
+
+        string? newest = null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var stamp = LogStampOf(reader.IsDBNull(0) ? null : reader.GetString(0));
+            if (stamp is not null && (newest is null || string.CompareOrdinal(stamp, newest) > 0))
+            {
+                newest = stamp;
+            }
+        }
+
+        return newest;
     }
 
     /// <summary>Reads the denominator for the window.</summary>

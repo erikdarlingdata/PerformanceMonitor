@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -65,6 +66,26 @@ public static class StoreLogSweep
     /// two hold unread bytes; the bound exists so an operator who repointed <c>log_directory</c> at something
     /// large cannot turn this into the incident.</summary>
     public const int MaxFilesPerCapture = 8;
+
+    /// <summary>
+    /// How many slabs one capture reads across all files (#8904): the first slab of each file, then further slabs of a
+    /// file that still has bytes pending. A capture therefore reads at most
+    /// <c>MaxSlabsPerCapture x</c> <see cref="StoreLogSlab.MaxBytesPerRead"/> (32 MiB), and a backlog larger than
+    /// that takes the least number of captures <see cref="CapturesNeeded"/> says. One slab is held at a time.
+    /// </summary>
+    public const int MaxSlabsPerCapture = 8;
+
+    /// <summary>The most log one capture reads (#8904).</summary>
+    public const long MaxBytesPerCapture = (long)MaxSlabsPerCapture * StoreLogSlab.MaxBytesPerRead;
+
+    /// <summary>How long a capture keeps reading on (#8904), a tenth of the tick's shared
+    /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> budget, so it stops by itself well before that budget cancels
+    /// the pass. Slabs already read are kept either way.</summary>
+    public static readonly TimeSpan ReadOnBudget = TimeSpan.FromSeconds(StoreSelfMetrics.SweepTimeoutSeconds / 10);
+
+    /// <summary>The least number of captures a backlog needs if nothing more is written (#8904).</summary>
+    public static long CapturesNeeded(long bytesPending) =>
+        bytesPending <= 0 ? 0 : (bytesPending + MaxBytesPerCapture - 1) / MaxBytesPerCapture;
 
     /// <summary>How long the census is kept — the same 400 days as the store's own growth series
     /// (<see cref="StoreSelfMetrics.RetentionDays"/>), so the two self-telemetry surfaces answer over one
@@ -140,6 +161,19 @@ FROM unnest($2::text[], $3::text[], $4::integer[], $5::text[], $6::text[])
 INSERT INTO collect.store_log_captures
     (capture_time, log_file, bytes_read, bytes_pending, lines_read, entries_read, offset_reset, groups_dropped)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+
+    /// <summary>A further slab of a file already captured this tick (#8904): adds to that capture row instead of
+    /// writing a second one, so a capture stays one row per file. $1 capture_time, $2 log_file, $3 bytes_read,
+    /// $4 bytes_pending (the level after this slab), $5 lines_read, $6 entries_read, $7 groups_dropped.</summary>
+    public const string CaptureAddSql = @"
+UPDATE collect.store_log_captures
+SET bytes_read     = bytes_read + $3,
+    bytes_pending  = $4,
+    lines_read     = lines_read + $5,
+    entries_read   = entries_read + $6,
+    groups_dropped = groups_dropped + $7
+WHERE capture_time = $1
+AND   log_file     = $2";
 
     /// <summary>The resume marker, per FILE because rotation is by weekday name. $1 log_file, $2 byte_offset,
     /// $3 last_size, $4 updated_at.</summary>
@@ -276,10 +310,37 @@ WHERE ctid = $3::tid";
     ///
     /// <para>Returns what was captured, per file, so the caller can log it and the tests can assert it.</para>
     /// </summary>
-    public static async Task<List<FileCapture>> SweepAsync(
+    public static Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,
         ILogger? logger,
+        CancellationToken cancellationToken = default) =>
+        SweepAsync(connection, utcNow, logger, files: null, cancellationToken);
+
+    /// <summary>The log files a capture reads, as a seam (#8904): the store's own <c>pg_ls_logdir()</c> and
+    /// <c>pg_read_binary_file</c> in the service, and a fixed set of bytes in a test, because a scratch store has no
+    /// logging collector and so no log file to read.</summary>
+    internal interface IStoreLogFiles
+    {
+        /// <summary>Every log file with its size, oldest first.</summary>
+        Task<IReadOnlyList<(string Name, long Size)>> ListAsync(CancellationToken cancellationToken);
+
+        /// <summary>Up to <paramref name="length"/> bytes of a file from <paramref name="offset"/>.</summary>
+        Task<byte[]> ReadAsync(string name, long offset, int length, CancellationToken cancellationToken);
+    }
+
+    /// <summary>The marker of every file, for a source that lists no markers itself.</summary>
+    private const string MarkerListSql = @"
+SELECT m.log_file, m.byte_offset, m.last_size
+FROM config.store_log_read_marker AS m";
+
+    /// <summary><see cref="SweepAsync(NpgsqlConnection, DateTime, ILogger?, CancellationToken)"/> over a given set of log
+    /// files; null reads the store's own log directory.</summary>
+    internal static async Task<List<FileCapture>> SweepAsync(
+        NpgsqlConnection connection,
+        DateTime utcNow,
+        ILogger? logger,
+        IStoreLogFiles? files,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -292,12 +353,21 @@ WHERE ctid = $3::tid";
         var captureTime = DateTime.SpecifyKind(utcNow, DateTimeKind.Unspecified);
         var captured = new List<FileCapture>();
 
-        var candidates = await ListAsync(connection, cancellationToken);
+        var candidates = await ListAsync(connection, files, cancellationToken);
 
         /* Read once per sweep, with the store login: the wording of a row-carrying DETAIL follows it, so an entry kept
            under a catalogue other than English keeps no DETAIL (StoreLogClassifier.WithheldDetail). A read that
            fails counts as not English. */
         var detailInEnglish = candidates.Count > 0 && await ReadDetailInEnglishAsync(connection, cancellationToken);
+
+        /* #8904: the first slab of every file is read as it always was. A file that still has bytes pending after that
+           is read on, oldest file first, one slab at a time, until the capture has read MaxSlabsPerCapture slabs in
+           all, the file ends, or the read-on budget runs out. Each slab is its own transaction (its census rows, the
+           capture row's totals and the marker move together), so a budget that cancels mid-way keeps every slab it
+           finished, and each slab's text is classified and released before the next is read. */
+        var clock = Stopwatch.StartNew();
+        var slabsRead = 0;
+        var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups)>();
 
         foreach (var candidate in candidates)
         {
@@ -307,34 +377,82 @@ WHERE ctid = $3::tid";
                 continue;
             }
 
-            var length = (int)Math.Min(StoreLogSlab.MaxBytesPerRead, candidate.SizeBytes - resume.Offset);
-            var raw = await ReadAsync(connection, candidate.LogFile, resume.Offset, length, cancellationToken);
-            var slab = StoreLogSlab.TrimToLastNewline(raw);
-
-            if (slab.BytesConsumed == 0)
+            var step = await ReadSlabAsync(connection, files, candidate, resume.Offset, detailInEnglish, cancellationToken);
+            if (step is null)
             {
-                /* Nothing complete yet — one partial line at the end of a file being written. The marker
+                /* Nothing complete yet - one partial line at the end of a file being written. The marker
                    stays where it is, so the line is read whole next time rather than half now. */
                 continue;
             }
 
-            var census = StoreLogClassifier.Classify(slab.Text, detailInEnglish);
-            var newOffset = resume.Offset + slab.BytesConsumed;
-
+            var newOffset = resume.Offset + step.Value.Slab.BytesConsumed;
+            var census = step.Value.Census;
             var capture = new FileCapture(
                 LogFile: candidate.LogFile,
                 Offset: resume.Offset,
-                BytesRead: slab.BytesConsumed,
+                BytesRead: step.Value.Slab.BytesConsumed,
                 BytesPending: Math.Max(0, candidate.SizeBytes - newOffset),
                 OffsetReset: resume.OffsetReset,
                 Census: census);
 
-            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, cancellationToken);
+            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, cancellationToken);
             captured.Add(capture);
+            slabsRead++;
+
+            if (capture.BytesPending > 0)
+            {
+                open.Add((captured.Count - 1, candidate, newOffset, new List<StoreLogClassifier.Group>(census.Groups)));
+            }
 
             if (captured.Count >= MaxFilesPerCapture)
             {
                 break;
+            }
+        }
+
+        foreach (var file in open)
+        {
+            var nextOffset = file.NextOffset;
+            while (slabsRead < MaxSlabsPerCapture
+                   && clock.Elapsed < ReadOnBudget
+                   && file.Candidate.SizeBytes > nextOffset)
+            {
+                var step = await ReadSlabAsync(connection, files, file.Candidate, nextOffset, detailInEnglish, cancellationToken);
+                if (step is null)
+                {
+                    break;
+                }
+
+                var slabOffset = nextOffset;
+                nextOffset += step.Value.Slab.BytesConsumed;
+                var census = step.Value.Census;
+                var before = captured[file.Index];
+
+                /* The slab's own counts go to the store, so a slab's figures are added to the capture row and
+                   never counted twice. */
+                var slabCapture = new FileCapture(
+                    LogFile: before.LogFile,
+                    Offset: slabOffset,
+                    BytesRead: step.Value.Slab.BytesConsumed,
+                    BytesPending: Math.Max(0, file.Candidate.SizeBytes - nextOffset),
+                    OffsetReset: false,
+                    Census: census);
+                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, cancellationToken);
+
+                file.Groups.AddRange(census.Groups);
+                captured[file.Index] = new FileCapture(
+                    LogFile: before.LogFile,
+                    Offset: before.Offset,
+                    BytesRead: before.BytesRead + slabCapture.BytesRead,
+                    BytesPending: slabCapture.BytesPending,
+                    OffsetReset: before.OffsetReset,
+                    Census: new StoreLogClassifier.Census(
+                        Groups: file.Groups,
+                        LinesRead: before.Census.LinesRead + census.LinesRead,
+                        EntriesRead: before.Census.EntriesRead + census.EntriesRead,
+                        ContinuationLines: before.Census.ContinuationLines + census.ContinuationLines,
+                        GroupsDropped: before.Census.GroupsDropped + census.GroupsDropped));
+                slabsRead++;
             }
         }
 
@@ -438,9 +556,35 @@ WHERE ctid = $3::tid";
         }
     }
 
-    private static async Task<List<Candidate>> ListAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<List<Candidate>> ListAsync(NpgsqlConnection connection, IStoreLogFiles? files, CancellationToken cancellationToken)
     {
         var rows = new List<Candidate>();
+
+        if (files is not null)
+        {
+            var markers = new Dictionary<string, (long Offset, long LastSize)>(StringComparer.Ordinal);
+            await using (var markerCommand = new NpgsqlCommand(MarkerListSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+            await using (var markerReader = await markerCommand.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await markerReader.ReadAsync(cancellationToken))
+                {
+                    markers[markerReader.GetString(0)] = (markerReader.GetInt64(1), markerReader.GetInt64(2));
+                }
+            }
+
+            foreach (var (name, size) in await files.ListAsync(cancellationToken))
+            {
+                if (!IsStderrLogFile(name))
+                {
+                    continue;
+                }
+
+                var found = markers.TryGetValue(name, out var marker);
+                rows.Add(new Candidate(name, size, found ? marker.Offset : null, found ? marker.LastSize : null));
+            }
+
+            return rows;
+        }
 
         await using var command = new NpgsqlCommand(LogDirectoryListSql, connection) { CommandTimeout = SweepTimeoutSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -460,6 +604,29 @@ WHERE ctid = $3::tid";
         }
 
         return rows;
+    }
+
+    /// <summary>One slab read and classified: the trimmed text, and what it classified to. Null when the read held
+    /// no complete line.</summary>
+    private static async Task<(StoreLogSlab.Slab Slab, StoreLogClassifier.Census Census)?> ReadSlabAsync(
+        NpgsqlConnection connection,
+        IStoreLogFiles? files,
+        Candidate candidate,
+        long offset,
+        bool detailInEnglish,
+        CancellationToken cancellationToken)
+    {
+        var length = (int)Math.Min(StoreLogSlab.MaxBytesPerRead, candidate.SizeBytes - offset);
+        var raw = files is null
+            ? await ReadAsync(connection, candidate.LogFile, offset, length, cancellationToken)
+            : await files.ReadAsync(candidate.LogFile, offset, length, cancellationToken);
+        var slab = StoreLogSlab.TrimToLastNewline(raw);
+        if (slab.BytesConsumed == 0)
+        {
+            return null;
+        }
+
+        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish));
     }
 
     private static async Task<byte[]> ReadAsync(
@@ -484,6 +651,7 @@ WHERE ctid = $3::tid";
         FileCapture capture,
         long newOffset,
         long sizeBytes,
+        bool firstSlab,
         CancellationToken cancellationToken)
     {
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -516,8 +684,9 @@ WHERE ctid = $3::tid";
             await events.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var row = new NpgsqlCommand(CaptureInsertSql, connection, transaction) { CommandTimeout = SweepTimeoutSeconds })
+        if (firstSlab)
         {
+            await using var row = new NpgsqlCommand(CaptureInsertSql, connection, transaction) { CommandTimeout = SweepTimeoutSeconds };
             row.Parameters.AddWithValue(captureTime);
             row.Parameters.AddWithValue(capture.LogFile);
             row.Parameters.AddWithValue((long)capture.BytesRead);
@@ -525,6 +694,18 @@ WHERE ctid = $3::tid";
             row.Parameters.AddWithValue(capture.Census.LinesRead);
             row.Parameters.AddWithValue(capture.Census.EntriesRead);
             row.Parameters.AddWithValue(capture.OffsetReset);
+            row.Parameters.AddWithValue(capture.Census.GroupsDropped);
+            await row.ExecuteNonQueryAsync(cancellationToken);
+        }
+        else
+        {
+            await using var row = new NpgsqlCommand(CaptureAddSql, connection, transaction) { CommandTimeout = SweepTimeoutSeconds };
+            row.Parameters.AddWithValue(captureTime);
+            row.Parameters.AddWithValue(capture.LogFile);
+            row.Parameters.AddWithValue((long)capture.BytesRead);
+            row.Parameters.AddWithValue(capture.BytesPending);
+            row.Parameters.AddWithValue(capture.Census.LinesRead);
+            row.Parameters.AddWithValue(capture.Census.EntriesRead);
             row.Parameters.AddWithValue(capture.Census.GroupsDropped);
             await row.ExecuteNonQueryAsync(cancellationToken);
         }
