@@ -149,7 +149,7 @@ WHERE t.token_id = v.token_id";
     /// transaction-scoped advisory lock on the owner key, so two creates for the same owner at the last slot cannot both pass the count. The name of a
     /// revoked or expired token is free.
     /// </summary>
-    public static async Task<PersonalTokenCreateOutcome> CreateAsync(NpgsqlDataSource owner, string tokenId, byte[] secretSha256,
+    public static async Task<PersonalTokenCreateOutcome> InsertAsync(NpgsqlDataSource owner, string tokenId, byte[] secretSha256,
         string ownerKey, string subject, string tokenName, string role, DateTimeOffset now, int lifetimeDays,
         int maxPerPerson, string actor, CancellationToken ct)
     {

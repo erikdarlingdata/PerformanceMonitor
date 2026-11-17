@@ -234,7 +234,7 @@ public static partial class DarlingWebEndpoints
 
                 var minted = PersonalTokenFormat.Mint();
                 var now = clock.GetUtcNow();
-                var outcome = await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, ownerKey, seat.EditorPrincipal, name!, role,
+                var outcome = await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, ownerKey, seat.EditorPrincipal, name!, role,
                     now, lifetime, settings.MaxTokensPerPerson, actor, context.RequestAborted);
                 switch (outcome)
                 {

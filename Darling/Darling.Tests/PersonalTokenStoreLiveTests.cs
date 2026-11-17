@@ -74,7 +74,7 @@ public sealed class PersonalTokenStoreLiveTests
         int lifetimeDays = 30, int cap = 5, string actor = Actor)
     {
         var minted = PersonalTokenFormat.Mint();
-        var outcome = await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, ownerKey, "subject-" + ownerKey, name, role, now,
+        var outcome = await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, ownerKey, "subject-" + ownerKey, name, role, now,
             lifetimeDays, cap, actor, ct);
         Assert.Equal(PersonalTokenCreateOutcome.Created, outcome);
         return minted.TokenId;
@@ -108,7 +108,7 @@ public sealed class PersonalTokenStoreLiveTests
     public Task LoadAll_CarriesTheHash() => WithStoreAsync(async (connection, owner, ct) =>
     {
         var minted = PersonalTokenFormat.Mint();
-        await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "laptop", "reader", DateTimeOffset.UtcNow, 30, 5, Actor, ct);
+        await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "laptop", "reader", DateTimeOffset.UtcNow, 30, 5, Actor, ct);
         var loaded = Assert.Single(await PersonalTokenStore.LoadAllAsync(owner, ct));
         Assert.Equal(minted.TokenId, loaded.Row.TokenId);
         Assert.Equal(minted.SecretSha256, loaded.SecretSha256);
@@ -122,10 +122,10 @@ public sealed class PersonalTokenStoreLiveTests
         await MakeAsync(owner, "k1", "b", "reader", now, ct, cap: 2);
         var minted = PersonalTokenFormat.Mint();
         Assert.Equal(PersonalTokenCreateOutcome.AtCap,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "c", "reader", now, 30, 2, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "c", "reader", now, 30, 2, Actor, ct));
         Assert.Equal("2", await ScalarAsync(connection, "SELECT count(*) FROM config.mcp_personal_token", ct));
         Assert.Equal(PersonalTokenCreateOutcome.Created,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k2", "s", "c", "reader", now, 30, 2, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k2", "s", "c", "reader", now, 30, 2, Actor, ct));
     });
 
     [Fact]
@@ -135,9 +135,9 @@ public sealed class PersonalTokenStoreLiveTests
         await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
         var minted = PersonalTokenFormat.Mint();
         Assert.Equal(PersonalTokenCreateOutcome.NameTaken,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "laptop", "reader", now, 30, 5, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "laptop", "reader", now, 30, 5, Actor, ct));
         Assert.Equal(PersonalTokenCreateOutcome.Created,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k2", "s", "laptop", "reader", now, 30, 5, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k2", "s", "laptop", "reader", now, 30, 5, Actor, ct));
     });
 
     [Fact]
@@ -157,8 +157,8 @@ public sealed class PersonalTokenStoreLiveTests
         var first = PersonalTokenFormat.Mint();
         var second = PersonalTokenFormat.Mint();
         var outcomes = await Task.WhenAll(
-            PersonalTokenStore.CreateAsync(owner, first.TokenId, first.SecretSha256, "k1", "s", "a", "reader", now, 30, 1, Actor, ct),
-            PersonalTokenStore.CreateAsync(owner, second.TokenId, second.SecretSha256, "k1", "s", "b", "reader", now, 30, 1, Actor, ct));
+            PersonalTokenStore.InsertAsync(owner, first.TokenId, first.SecretSha256, "k1", "s", "a", "reader", now, 30, 1, Actor, ct),
+            PersonalTokenStore.InsertAsync(owner, second.TokenId, second.SecretSha256, "k1", "s", "b", "reader", now, 30, 1, Actor, ct));
         Assert.Equal(1, outcomes.Count(o => o == PersonalTokenCreateOutcome.Created));
         Assert.Equal(1, outcomes.Count(o => o == PersonalTokenCreateOutcome.AtCap));
         Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.mcp_personal_token", ct));
@@ -179,11 +179,11 @@ public sealed class PersonalTokenStoreLiveTests
 
         var minted = PersonalTokenFormat.Mint();
         Assert.Equal(PersonalTokenCreateOutcome.TooManyRecent,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "one-more", "reader", now, 30, cap, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "one-more", "reader", now, 30, cap, Actor, ct));
         Assert.Equal(ceiling.ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT count(*) FROM config.mcp_personal_token", ct));
         /* Another person is not held by this one's creates. */
         Assert.Equal(PersonalTokenCreateOutcome.Created,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k2", "s", "one-more", "reader", now, 30, cap, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k2", "s", "one-more", "reader", now, 30, cap, Actor, ct));
     });
 
     [Fact]
@@ -204,7 +204,7 @@ public sealed class PersonalTokenStoreLiveTests
 
         var minted = PersonalTokenFormat.Mint();
         Assert.Equal(PersonalTokenCreateOutcome.Created,
-            await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "again", "reader", now, 30, cap, Actor, ct));
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "again", "reader", now, 30, cap, Actor, ct));
     });
 
     [Fact]
@@ -238,7 +238,7 @@ public sealed class PersonalTokenStoreLiveTests
     public Task Create_WritesJournalRowWithoutValue() => WithStoreAsync(async (connection, owner, ct) =>
     {
         var minted = PersonalTokenFormat.Mint();
-        await PersonalTokenStore.CreateAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "laptop", "operator", DateTimeOffset.UtcNow, 30, 5, Actor, ct);
+        await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k1", "s", "laptop", "operator", DateTimeOffset.UtcNow, 30, 5, Actor, ct);
         Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_created'", ct));
         Assert.Equal(Actor, await ScalarAsync(connection, "SELECT actor FROM config.investigation_journal WHERE event = 'mcp_personal_token_created'", ct));
         var detailText = await ScalarAsync(connection, "SELECT detail::text FROM config.investigation_journal WHERE event = 'mcp_personal_token_created'", ct);

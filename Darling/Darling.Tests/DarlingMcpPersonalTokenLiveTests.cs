@@ -97,7 +97,7 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         await using (var owner = NpgsqlDataSource.Create(scratch.ConnectionString))
         {
             var minted = PersonalTokenFormat.Mint();
-            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.CreateAsync(
+            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.InsertAsync(
                 owner, minted.TokenId, minted.SecretSha256, "owner-alice", "alice@corp", "ci", McpTokenEntry.OperatorRole,
                 DateTimeOffset.UtcNow, 30, 5, "person:alice@corp", ct));
 
@@ -142,7 +142,7 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         await using (var owner = NpgsqlDataSource.Create(scratch.ConnectionString))
         {
             var minted = PersonalTokenFormat.Mint();
-            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.CreateAsync(
+            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.InsertAsync(
                 owner, minted.TokenId, minted.SecretSha256, "owner-long", subject, tokenName, McpTokenEntry.OperatorRole,
                 DateTimeOffset.UtcNow, 30, 5, "person:long", ct));
 
@@ -187,7 +187,7 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         await using (var owner = NpgsqlDataSource.Create(scratch.ConnectionString))
         {
             var minted = PersonalTokenFormat.Mint();
-            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.CreateAsync(
+            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.InsertAsync(
                 owner, minted.TokenId, minted.SecretSha256, "owner-long-login", subject, "ci", McpTokenEntry.OperatorRole,
                 DateTimeOffset.UtcNow, 30, 5, "person:long", ct));
 
