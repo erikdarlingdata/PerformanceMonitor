@@ -290,4 +290,62 @@ public sealed class DarlingPersonalTokenSnapshotTests
         Assert.True(snapshot.ShouldLogDead("aaaa", T0.AddHours(1)));
         Assert.False(snapshot.ShouldLogDead("aaaa", T0.AddHours(1).AddMinutes(1)));
     }
+
+    [Fact]
+    public async Task Refresh_Overlapping_TheLaterStartApplyLast()
+    {
+        var token = PersonalTokenFormat.Mint();
+        var live = Row(token, T0.AddDays(1));
+        var revoked = Row(token, T0.AddDays(1), revokedAt: T0);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var snapshot = new DarlingPersonalTokenSnapshot(
+            async _ =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    started.SetResult();
+                    await gate.Task;
+                    return new[] { live };
+                }
+
+                return new[] { revoked };
+            },
+            (_, _) => Task.CompletedTask);
+        var owner = Published();
+
+        var slow = snapshot.RefreshAsync(owner, new CapturingTestLogger(), CancellationToken.None);
+        await started.Task;
+        var later = snapshot.RefreshAsync(owner, new CapturingTestLogger(), CancellationToken.None);
+        await Task.Delay(50);
+        Assert.False(later.IsCompleted);
+
+        gate.SetResult();
+        await Task.WhenAll(slow, later).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(PersonalTokenOutcome.Dead, snapshot.Check(token.Value, T0).Outcome);
+    }
+
+    [Fact]
+    public async Task Refresh_Success_ResetsTheLogLimits_SoALaterOutageLogsAgain()
+    {
+        var rig = new Rig();
+        rig.Throw = MissingTable();
+        await rig.Refresh();
+        rig.Throw = new InvalidOperationException("down");
+        await rig.Refresh();
+        Assert.Equal(1, rig.Log.CountAtLevel(LogLevel.Information));
+        Assert.Equal(1, rig.Log.CountAtLevel(LogLevel.Warning));
+
+        rig.Throw = null;
+        await rig.Refresh();
+        rig.Throw = MissingTable();
+        await rig.Refresh();
+        rig.Throw = new InvalidOperationException("down again");
+        await rig.Refresh();
+
+        Assert.Equal(2, rig.Log.CountAtLevel(LogLevel.Information));
+        Assert.Equal(2, rig.Log.CountAtLevel(LogLevel.Warning));
+    }
 }

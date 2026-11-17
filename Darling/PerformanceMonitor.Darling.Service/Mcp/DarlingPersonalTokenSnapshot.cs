@@ -31,7 +31,7 @@ internal readonly record struct PersonalTokenCheck(PersonalTokenOutcome Outcome,
 /// unavailable: it refuses every personal token until a refresh succeeds and never keeps serving the last good copy, so a revocation
 /// that cannot be read is never silently ignored.
 /// </summary>
-internal sealed class DarlingPersonalTokenSnapshot
+internal sealed class DarlingPersonalTokenSnapshot : IDisposable
 {
     private static readonly TimeSpan WarnEvery = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan FlushEvery = TimeSpan.FromMinutes(5);
@@ -43,6 +43,9 @@ internal sealed class DarlingPersonalTokenSnapshot
 
     /* Null while unavailable; otherwise the last successful load. Swapped whole, never mutated. */
     private volatile IReadOnlyDictionary<string, PersonalTokenSecretRow>? _rows;
+
+    /* One refresh at a time: the load and the swap are one step, so a refresh that starts after a write always applies last. */
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     private readonly object _logSync = new();
     private bool _missingTableLogged;
@@ -73,6 +76,19 @@ internal sealed class DarlingPersonalTokenSnapshot
     /// <summary>Reloads the rows. Throws only for cancellation; every failure leaves the snapshot unavailable.</summary>
     public async Task RefreshAsync(StoreOwnerSource owner, ILogger logger, CancellationToken ct)
     {
+        await _refreshGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await RefreshCoreAsync(owner, logger, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
+    }
+
+    private async Task RefreshCoreAsync(StoreOwnerSource owner, ILogger logger, CancellationToken ct)
+    {
         var source = owner.Read();
         if (source is null)
         {
@@ -92,6 +108,11 @@ internal sealed class DarlingPersonalTokenSnapshot
             }
 
             _rows = map;
+            lock (_logSync)
+            {
+                _missingTableLogged = false;
+                _lastWarnAt = null;
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -237,4 +258,7 @@ internal sealed class DarlingPersonalTokenSnapshot
             return true;
         }
     }
+
+    /// <summary>Releases the refresh gate.</summary>
+    public void Dispose() => _refreshGate.Dispose();
 }
