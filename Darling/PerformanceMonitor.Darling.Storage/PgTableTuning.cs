@@ -83,6 +83,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// covered by the same doctrine through <see cref="GuardedAlter"/>: its own transaction under
 /// <see cref="AlterLockTimeoutSeconds"/>. A busy table (<c>55P03</c>) is rolled back, logged once at Information as
 /// skipped until the next pass, and the sweep goes on; the settings are idempotent, so a skipped pass costs nothing.</para>
+///
+/// <para>#8949: a literal <c>ALTER TABLE ... SET (...)</c> is issued only when the catalog shows a difference
+/// (<see cref="AlterIsConvergedAsync"/>). The statement takes SHARE UPDATE EXCLUSIVE even when it changes nothing, and that
+/// cancels an autovacuum running on the table (a wraparound one excepted). On a hypertable the ALTER recurses to every chunk, so
+/// it cancels the chunk vacuums too, and a TOAST table with no reloptions of its own is vacuumed under its owner and is
+/// cancelled with it. An ALTER issued every hour keeps a multi-hour vacuum of a large table from ever finishing.</para>
 /// </summary>
 public static class PgTableTuning
 {
@@ -153,6 +159,159 @@ public static class PgTableTuning
     {
         var rest = statement.Substring(AlterTablePrefix.Length);
         return rest.Substring(0, rest.IndexOf(' ', StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The <c>schema.table</c> and the <c>(key, value)</c> pairs of an <c>ALTER TABLE &lt;table&gt; SET (k = v, k = v)</c> statement,
+    /// or null when the statement is not exactly that shape. A statement that does not parse is issued on every pass. A quoted
+    /// value, a nested parenthesis or a namespaced key (<c>toast.</c>, which is stored on the TOAST table and not in the table's
+    /// own reloptions) does not parse, because none of them can be compared with <see cref="ReloptionsCarry"/>.
+    /// </summary>
+    internal static (string Table, IReadOnlyList<KeyValuePair<string, string>> Options)? ParseAlterSet(string statement)
+    {
+        const string set = " SET (";
+        if (statement is null || !statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal) || !statement.EndsWith(')'))
+        {
+            return null;
+        }
+
+        var setAt = statement.IndexOf(set, AlterTablePrefix.Length, StringComparison.Ordinal);
+        if (setAt < 0)
+        {
+            return null;
+        }
+
+        var table = statement.Substring(AlterTablePrefix.Length, setAt - AlterTablePrefix.Length);
+        var list = statement.Substring(setAt + set.Length, statement.Length - setAt - set.Length - 1);
+        if (table.Length == 0 || table.Contains(' ', StringComparison.Ordinal) || list.AsSpan().IndexOfAny("()'\"") >= 0)
+        {
+            return null;
+        }
+
+        var options = new List<KeyValuePair<string, string>>();
+        foreach (var item in list.Split(','))
+        {
+            var equalsAt = item.IndexOf('=', StringComparison.Ordinal);
+            if (equalsAt < 0)
+            {
+                return null;
+            }
+
+            var key = item.Substring(0, equalsAt).Trim();
+            var value = item.Substring(equalsAt + 1).Trim();
+            if (key.Length == 0 || value.Length == 0 || key.Contains('.', StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            options.Add(new KeyValuePair<string, string>(key, value));
+        }
+
+        return (table, options);
+    }
+
+    /// <summary>
+    /// True when <paramref name="reloptions"/> (a <c>pg_class.reloptions</c> array of <c>key=value</c> entries, null when the
+    /// relation has none) holds every option in <paramref name="wanted"/> at the wanted value. Options the relation carries
+    /// beyond those are ignored. Keys compare without case. Values compare as numbers when both are numbers, because the catalog
+    /// keeps the spelling the option was set with (<c>0.020</c> stays <c>0.020</c>), and as text without case otherwise.
+    /// </summary>
+    internal static bool ReloptionsCarry(IReadOnlyList<KeyValuePair<string, string>> wanted, IReadOnlyList<string>? reloptions)
+    {
+        if (reloptions is null)
+        {
+            return wanted.Count == 0;
+        }
+
+        foreach (var want in wanted)
+        {
+            var carried = false;
+            foreach (var entry in reloptions)
+            {
+                var equalsAt = entry?.IndexOf('=', StringComparison.Ordinal) ?? -1;
+                if (equalsAt < 0 || !string.Equals(entry!.Substring(0, equalsAt).Trim(), want.Key, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                carried = OptionValuesEqual(want.Value, entry.Substring(equalsAt + 1).Trim());
+                break;
+            }
+
+            if (!carried)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool OptionValuesEqual(string wanted, string actual) =>
+        decimal.TryParse(wanted, NumberStyles.Float, CultureInfo.InvariantCulture, out var wantedNumber)
+        && decimal.TryParse(actual, NumberStyles.Float, CultureInfo.InvariantCulture, out var actualNumber)
+            ? wantedNumber == actualNumber
+            : string.Equals(wanted, actual, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The reloptions of a relation ($1, a <c>schema.table</c>) and of every relation that inherits from it, one row each. The
+    /// chunks of a hypertable inherit from its root; a plain table has no children. No row means the relation does not exist.
+    /// It reads <c>pg_class</c> and <c>pg_inherits</c> only, and <c>to_regclass</c> resolves the name without locking the
+    /// relation, so the read never waits on a lock held on the table itself.
+    /// </summary>
+    private const string RelationAndChildOptionsSql =
+        "SELECT c.reloptions FROM pg_class AS c WHERE c.oid = to_regclass($1) "
+        + "UNION ALL "
+        + "SELECT c.reloptions FROM pg_inherits AS i JOIN pg_class AS c ON c.oid = i.inhrelid WHERE i.inhparent = to_regclass($1)";
+
+    /// <summary>
+    /// The <c>CommandTimeout</c> (seconds) of the catalog read in <see cref="AlterIsConvergedAsync"/>. The read waits on no
+    /// table lock, so this only bounds a catalog that is itself unavailable; a read that gives up issues the ALTER.
+    /// </summary>
+    private const int ReloptionsReadTimeoutSeconds = 5;
+
+    /// <summary>
+    /// True when the table an <c>ALTER TABLE ... SET (...)</c> statement tunes, and every relation that inherits from it, already
+    /// carries every option in the statement at the statement's value, so issuing the statement would change nothing. On a
+    /// hypertable the ALTER recurses to the chunks, so a chunk that differs makes the whole statement due again.
+    /// Anything else answers false and the caller issues the ALTER: a statement that does not parse, a table that does not exist,
+    /// one option missing or different on one relation, or a catalog read that failed. The connection stays usable after a failed
+    /// read, which runs outside a transaction.
+    /// </summary>
+    internal static async Task<bool> AlterIsConvergedAsync(NpgsqlConnection connection, string statement, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var parsed = ParseAlterSet(statement);
+        if (parsed is null)
+        {
+            return false;
+        }
+
+        var (table, options) = parsed.Value;
+
+        try
+        {
+            using var command = new NpgsqlCommand(RelationAndChildOptionsSql, connection) { CommandTimeout = ReloptionsReadTimeoutSeconds };
+            command.Parameters.AddWithValue(table);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var relations = 0;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                relations++;
+                if (!ReloptionsCarry(options, reader.IsDBNull(0) ? null : reader.GetFieldValue<string[]>(0)))
+                {
+                    return false;
+                }
+            }
+
+            return relations > 0;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "Could not read the current settings of {Table}, so its tuning setting is applied without the check: {Message}",
+                table, ex.Message);
+            return false;
+        }
     }
 
     /// <summary>
@@ -628,7 +787,8 @@ public static class PgTableTuning
     /// <see cref="ApplyAsync(NpgsqlConnection, ILogger?, CancellationToken)"/> with a choice of pass. With
     /// <paramref name="hourly"/> set (the convergence tick, beside live collection) a missing index is NOT
     /// built: one Warning per index per process says the next service start builds it, and it is not counted
-    /// as applied. Every other statement runs as on the start path.
+    /// as applied. Every other statement runs as on the start path: an <c>ALTER TABLE ... SET</c> is issued on either
+    /// pass only when <see cref="AlterIsConvergedAsync"/> finds a setting missing or different.
     /// </summary>
     public static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken = default)
     {
@@ -727,6 +887,14 @@ public static class PgTableTuning
                 }
                 else if (statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal))
                 {
+                    if (await AlterIsConvergedAsync(connection, statement, logger, cancellationToken))
+                    {
+                        /* #8949: the table and its chunks already hold these settings. The ALTER would take SHARE UPDATE
+                           EXCLUSIVE to change nothing and cancel an autovacuum running there. Counted as applied, as a skip is. */
+                        applied++;
+                        continue;
+                    }
+
                     sql = GuardedAlter(statement);
                 }
 
