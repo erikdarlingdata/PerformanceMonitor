@@ -184,10 +184,11 @@ public partial class ViewerServerTab : UserControl
            right-click "Show Active Queries at This Time" drill-down (every lane: CPU / Wait Stats /
            Blocking / Buffer Pool / I/O Latency) to the Active Queries loader — the lanes plot X as the
            UTC instant, so the event's argument is already naive UTC, the centre
-           OnActiveQueriesDrillDown reads its window around. ThemeManager is fixed to Dark, so the shared
-           chart chrome applies without any per-control theme plumbing. */
+           OnActiveQueriesDrillDown reads its window around. A later theme change reaches the lanes through
+           OnThemeChanged (#8898). */
         OverviewLanes.Initialize(_dataService, _server.ServerId);
         OverviewLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
+        ThemeManager.ThemeChanged += OnThemeChanged; // #8898: released in Dispose
 
         /* CPU + tempdb inner-tab charts (copied from Lite): theme up front + wire hover. */
         InitializeCpuTempDbCharts();

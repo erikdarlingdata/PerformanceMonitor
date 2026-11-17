@@ -84,6 +84,7 @@ public sealed class CollectionHealthDetachedSweepPressureTests
     [InlineData("plan_correction")]
     [InlineData("pg_wait_sampling")]
     [InlineData("schema_objects")]
+    [InlineData("column_stats")]
     [InlineData("index_object_stats")]
     [InlineData("pg_index_bloat")]
     [InlineData("server_config")]
@@ -108,7 +109,7 @@ public sealed class CollectionHealthDetachedSweepPressureTests
     {
         foreach (var (name, schedule) in CollectorScheduleDefaults.All)
         {
-            var byName = name is "query_store" or "plan_correction" or "pg_wait_sampling" or "schema_objects";
+            var byName = name is "query_store" or "plan_correction" or "pg_wait_sampling" or "schema_objects" or "column_stats";
             var effective = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes);
             var expectedInPass = !byName && effective < 1440;
 

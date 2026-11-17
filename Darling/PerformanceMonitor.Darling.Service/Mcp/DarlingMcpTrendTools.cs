@@ -1073,7 +1073,7 @@ public sealed class DarlingMcpTrendTools
         + $"{TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention. "
         + (bucket.Minutes == 60
             ? "Each point is one hour's summed work divided by 3,600 seconds"
-            : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucket.Minutes)} bucket, stamped at its start: their summed work over 3,600 seconds per hour the rollup holds in it")
+            : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucket.Minutes)} bucket, stamped at its start (a point in the window's first bucket at the window's start): their summed work over 3,600 seconds per hour the rollup holds in it")
         + ", so an hour the collector covered only partly reads LOW, never high; the rollup trails the "
         + "clock by up to three hours (the current hour is never materialized and an hour is added one to two hours after it ends). "
         + "peak_elapsed_ms_per_second is the bucket's busiest HOUR on this tier: the rollup keeps hourly sums, not the collections inside them."

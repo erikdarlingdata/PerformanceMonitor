@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// it had been cut for bytes: <c>get_alert_history</c> (50 rows with their whole <c>detail_text</c>),
 /// <c>get_forced_plans</c> (200 forces), <c>get_top_queries_by_cpu</c> (20 rows with 2,000 characters of
 /// <c>query_text</c>), <c>get_pg_session_states</c>, <c>get_pg_server_config</c> (100 settings) and
-/// <c>get_store_log</c> (every retained row with its whole <c>sample_line</c>). Each test seeds a store whose
+/// <c>get_store_log</c> (every retained row with its whole <c>sample_line</c>). #8901 adds <c>get_change_watches</c>, whose watches carry 40 to 60 changes each. Each test seeds a store whose
 /// default answer is over the budget, calls the tool as a caller would, and holds the answer to the budget, to
 /// whole rows, and to saying what it left out. <c>get_table_index_sizes</c> (#8655, its 100-table page) is held to
 /// the same rule here. The fleet cards are covered in
@@ -688,12 +688,131 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
         });
     }
 
+    /// <summary>#8901: records one watch of <paramref name="count"/> plan changes, one a minute from <paramref name="first"/>, and closes it so the next change opens a new watch.</summary>
+    private static async Task<Guid> RecordPlanChangeWatchAsync(
+        NpgsqlConnection connection, NpgsqlDataSource postgres, DateTime first, int count, string tag, CancellationToken ct)
+    {
+        var store = new ChangeWatchStore(postgres, 30, () => first.AddMinutes(count));
+        var changes = Enumerable.Range(0, count).Select(i => new ChangeWatchChange(
+            $"plan_force:{tag}:{i:D3}", "plan_force", first.AddMinutes(i),
+            $"Query Store plan forced: query {1000 + i} in database SalesDb now uses plan {5000 + i} ({tag}, change {i:D3}), forced by the plan forcing policy after a regression.",
+            "SalesDb", 1000 + i, 5000 + i)).ToList();
+        var watchId = await store.RecordChangesAsync(ServerId, ServerName, changes, ct);
+        Assert.NotNull(watchId);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "UPDATE config.change_watches SET state = 'closed', closed_at = window_ends_at, result = 'flat' WHERE watch_id = $1", watchId!.Value);
+        return watchId.Value;
+    }
+
     /// <summary>
     /// #8655: <c>get_table_index_sizes</c> answered its 100-table page whole, which is over the budget on a server whose
     /// rows carry a growth note, and its <c>truncated</c> was the 100-table cap alone. A default call over 130 tables
     /// fits the budget and says what it left out, and following <c>next_offset</c> reads every table exactly once,
     /// largest first. The web route's read names no budget and keeps the 100-table page.
     /// </summary>
+    [Fact]
+    public async Task ChangeWatches_Default_ThreeWatchesOfManyPlanChanges_KeepsWholeWatchesNewestFirst_AndSaysWhatItLeftOut()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            var start = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-30);
+            var ids = new List<Guid>();
+            for (var w = 0; w < 3; w++)
+            {
+                ids.Add(await RecordPlanChangeWatchAsync(connection, postgres, start.AddHours(w * 5), 60, $"watch{w}", ct));
+            }
+
+            var root = AssertWithinBudget("get_change_watches", await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName));
+            var watches = root.GetProperty("watches").EnumerateArray().ToList();
+
+            /* Three watches of 60 changes are over the budget; whole watches are kept, newest first, and the count is the kept count. */
+            Assert.InRange(watches.Count, 1, 2);
+            Assert.Equal(watches.Count, root.GetProperty("watch_count").GetInt32());
+            AssertSaysItWasCutForBytes(root, 3, watches.Count);
+            Assert.Contains("watch_id", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            for (var i = 0; i < watches.Count; i++)
+            {
+                Assert.Equal(ids[2 - i], watches[i].GetProperty("watch_id").GetGuid());
+                Assert.Equal(60, watches[i].GetProperty("changes").GetArrayLength());
+                Assert.False(watches[i].TryGetProperty("changes_left_out", out _));
+            }
+
+            /* watch_id reads one watch in full: the oldest, which the page left out. */
+            var one = AssertWithinBudget("get_change_watches watch_id", await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName, watch_id: ids[0].ToString()));
+            Assert.False(one.GetProperty("budget_truncated").ValueKind == JsonValueKind.True);
+            Assert.Equal(60, one.GetProperty("watches")[0].GetProperty("changes").GetArrayLength());
+        });
+    }
+
+    [Fact]
+    public async Task ChangeWatches_OneWatchOverTheBudgetOnItsOwn_KeepsItsNewestChanges_AndSaysHowManyWereLeftOut()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            var start = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-30);
+            const int total = 160;
+            var older = await RecordPlanChangeWatchAsync(connection, postgres, start, 5, "older", ct);
+            var big = await RecordPlanChangeWatchAsync(connection, postgres, start.AddHours(5), total, "big", ct);
+            var newestChange = start.AddHours(5).AddMinutes(total - 1);
+
+            foreach (var json in new[]
+            {
+                await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName),
+                await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName, watch_id: big.ToString()),
+            })
+            {
+                var root = AssertWithinBudget("get_change_watches", json);
+                var watches = root.GetProperty("watches").EnumerateArray().ToList();
+                Assert.Single(watches);
+                Assert.Equal(1, root.GetProperty("watch_count").GetInt32());
+                Assert.Equal(big, watches[0].GetProperty("watch_id").GetGuid());
+
+                /* The watch is cut by its changes: the newest are kept in their order, and it says how many were left off. */
+                var changes = watches[0].GetProperty("changes").EnumerateArray().ToList();
+                var leftOut = watches[0].GetProperty("changes_left_out").GetInt32();
+                Assert.InRange(changes.Count, 1, total - 1);
+                Assert.Equal(total - changes.Count, leftOut);
+                Assert.Equal(newestChange, ParseUtc(changes[^1].GetProperty("change_time").GetString()!));
+                Assert.Equal(newestChange.AddMinutes(-(changes.Count - 1)), ParseUtc(changes[0].GetProperty("change_time").GetString()!));
+                Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+                var note = root.GetProperty("budget_note").GetString()!;
+                Assert.Contains($"{leftOut:#,0} of its {total:#,0} changes were left out", note, StringComparison.Ordinal);
+                Assert.Contains("32,768-byte response budget", note, StringComparison.Ordinal);
+            }
+
+            /* With an older watch behind it, the default read says both: one watch fit, and the one that did lost changes. */
+            var both = JsonDocument.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName)).RootElement;
+            Assert.Contains($"only 1 fit", both.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("1 were left out", both.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            Assert.NotEqual(older, both.GetProperty("watches")[0].GetProperty("watch_id").GetGuid());
+        });
+    }
+
+    /// <summary>#8901: the web viewer's read is not held to the MCP budget: a watch of 160 changes comes back whole.</summary>
+    [Fact]
+    public async Task ChangeWatches_WebRoute_KeepsAWatchOfManyChangesWhole()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            var start = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-30);
+            const int total = 160;
+            var big = await RecordPlanChangeWatchAsync(connection, postgres, start, total, "web", ct);
+
+            /* The MCP read is cut for bytes. */
+            var mcp = AssertWithinBudget("get_change_watches", await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName));
+            Assert.True(mcp.GetProperty("budget_truncated").GetBoolean());
+
+            var web = JsonDocument.Parse(await DarlingWebEndpoints.BuildReadDispatch()["get_change_watches"](new DefaultHttpContext(), postgres, null!)).RootElement;
+            var watch = Assert.Single(web.GetProperty("watches").EnumerateArray());
+            Assert.Equal(big, watch.GetProperty("watch_id").GetGuid());
+            Assert.Equal(total, watch.GetProperty("changes").GetArrayLength());
+            Assert.False(watch.TryGetProperty("changes_left_out", out _));
+            Assert.False(web.TryGetProperty("budget_truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True);
+            Assert.False(web.TryGetProperty("changes_left_out", out _));
+            Assert.Equal(1, web.GetProperty("watch_count").GetInt32());
+        });
+    }
+
     [Fact]
     public async Task TableIndexSizes_Default_OverOneHundredTables_FitsTheBudget_AndPagesToEveryTable()
     {

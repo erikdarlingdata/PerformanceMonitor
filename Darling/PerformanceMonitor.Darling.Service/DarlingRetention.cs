@@ -1310,6 +1310,45 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* #8798: collect.column_stats (the current column statistics rows) is NOT purged by age. A row is replaced in place when its
+               statistic is read again, and a statistic nobody has updated for months is still the current one, so its last_updated and
+               read_at say nothing about whether the row is live. The schema histories' rule applies: the rows go only when no
+               collect.column_stats_state row of ANY server points at their (history key, database) with a last_seen_in_scope_at inside
+               the collector's retention horizon (ColumnStatsStaleCutoff): a dropped database, a removed or switched-off server, a
+               database that left the collector's scope, once no run of any server has stamped it for that long. A server that cannot be
+               reached for a day or two keeps its rows. An availability group's rows stay while any of its servers still sees the
+               database. The run itself deletes a dropped or out-of-scope database's rows on a server it still reaches; this sweep is
+               the backstop for what no run reaches. The rows go first, then the state rows: a failed row purge is retried by the next
+               sweep, because the keep list counts only state stamped inside the window, so the stale state still leaves those rows
+               unkept. collect.column_stats_runs is a catalogue table and is purged by the loop above. */
+            var columnStatsCutoff = ColumnStatsStaleCutoff(utcNow, retentionDaysFor);
+            var staleColumnStatsDeleted = await PurgeOneAsync(
+                postgres, "collect.column_stats", StaleColumnStatsDeleteSql, columnStatsCutoff, logger, cancellationToken,
+                batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleColumnStatsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleColumnStatsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            var staleColumnStatsStateDeleted = await PurgeOneAsync(
+                postgres, "collect.column_stats_state",
+                "DELETE FROM collect.column_stats_state WHERE last_seen_in_scope_at IS NULL OR last_seen_in_scope_at < $1",
+                columnStatsCutoff, logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleColumnStatsStateDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleColumnStatsStateDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
                guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
                collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
@@ -1780,6 +1819,32 @@ WHERE NOT EXISTS
     FROM keep AS k
     WHERE k.database_name = o.database_name
     AND   k.history_key = CASE WHEN o.ag_group_id IS NOT NULL THEN 'g' || o.ag_group_id::text ELSE 's' || o.server_id::text END
+)";
+
+    /// <summary>
+    /// #8798: <c>$1</c> for the column statistics sweep, the rule the schema histories use: now less the <c>column_stats</c> retention
+    /// (<paramref name="retentionDaysFor"/>, the fleet override or the shipped default, through <see cref="EffectivePurgeRetentionDays"/>, so
+    /// never under one day). A database no run of any server stamped since then is out of every server's scope.
+    /// </summary>
+    internal static DateTime ColumnStatsStaleCutoff(DateTime utcNow, Func<string, int>? retentionDaysFor) =>
+        utcNow.AddDays(-EffectivePurgeRetentionDays(
+            "column_stats", retentionDaysFor?.Invoke("column_stats") ?? CollectorScheduleDefaults.All["column_stats"].RetentionDays));
+
+    /// <summary>
+    /// #8798: every current column statistics row of a (history key, database) that no <c>collect.column_stats_state</c> row of any server
+    /// points at with a <c>last_seen_in_scope_at</c> at or after <c>$1</c>. Both tables carry the same <c>history_key</c> text (the run
+    /// log's: 'server:' and the server id, or 'ag:' and the group id), and the rows are keyed by it, so the join is the primary key's prefix.
+    /// </summary>
+    internal const string StaleColumnStatsDeleteSql = @"
+DELETE FROM collect.column_stats AS o
+WHERE NOT EXISTS
+(
+    SELECT
+        1
+    FROM collect.column_stats_state AS s
+    WHERE s.history_key = o.history_key
+    AND   s.database_name = o.database_name
+    AND   s.last_seen_in_scope_at >= $1
 )";
 
     /// <summary>

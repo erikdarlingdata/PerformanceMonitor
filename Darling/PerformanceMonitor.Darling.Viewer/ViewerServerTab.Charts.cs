@@ -90,6 +90,8 @@ public partial class ViewerServerTab : IDisposable
         _tempDbFileIoHover?.Dispose();
         /* Each partial owns its own hover fields; the single Dispose() forwards to their teardowns
            so the whole tab tears down through one path. */
+        /* #8898: the static theme event holds this tab until it lets go. */
+        ThemeManager.ThemeChanged -= OnThemeChanged;
         DisposeChartHelpers();
         DisposeMemoryHelpers();
         DisposePlanCacheHelpers();
@@ -103,6 +105,34 @@ public partial class ViewerServerTab : IDisposable
         DisposeQueriesTabHelpers();
         DisposePlanHelpers();
         DisposeSystemHealthChartHelpers();
+    }
+
+    /// <summary>
+    /// #8898: a chart takes the theme in its own draw method, so a theme change (a Settings pick, its live preview, or the revert on
+    /// Close) left every chart on an open tab in the old theme until its next load. Mirrors Lite's <c>ServerTab.OnThemeChanged</c>: applies
+    /// the theme to every chart the tab owns, refreshes it, and reapplies the Overview lanes' theme. The charts are the tab's
+    /// <c>WpfPlot</c> fields (one per chart in the XAML) and the PostgreSQL trend charts, which are built in code and held in a dictionary.
+    /// Subscribed in the constructor and released in <see cref="Dispose"/>, not on Unloaded: a tab control unloads a tab it switches away
+    /// from, and a handler dropped there would stop following the theme after the first switch.
+    /// </summary>
+    private void OnThemeChanged(string _)
+    {
+        foreach (var field in GetType().GetFields(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+        {
+            if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+            {
+                ApplyTheme(chart);
+                chart.Refresh();
+            }
+        }
+
+        foreach (var (chart, _) in _pgTrendCharts.Values)
+        {
+            ApplyTheme(chart);
+            chart.Refresh();
+        }
+
+        OverviewLanes.ReapplyTheme();
     }
 
     /// <summary>Loads the CPU tab: raw per-sample CPU utilization over the window.</summary>

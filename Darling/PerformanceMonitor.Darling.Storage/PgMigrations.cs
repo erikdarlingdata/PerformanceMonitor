@@ -2913,6 +2913,34 @@ BEGIN
 END $$;";
 
     /// <summary>
+    /// V273 (#8824): the hourly wait totals, <c>collect.wait_stats_hourly</c>, created where the store can hold it at migration time so the
+    /// Daily Summary can read the hours of an open day from it instead of summing raw <c>wait_stats</c>. V259's shape at hour grain: per
+    /// server, per UTC hour, per stored wait type, the summed positive <c>delta_wait_time_ms</c>. On a TimescaleDB store whose
+    /// <c>wait_stats</c> is already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is
+    /// catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it and gives it the refresh policy (four days
+    /// of window, which fills it) and the five-day retention. There is no backfill step: the policy's own first run fills the days it keeps.
+    /// On a store without TimescaleDB, or a fresh one whose table is not yet a hypertable here, it is the plain view over
+    /// <c>collect.wait_stats</c>, which the sweep drops for the aggregate once the table is a hypertable. Idempotent. An older build ignores
+    /// the relation and reads raw <c>wait_stats</c> as before.
+    /// </summary>
+    private static readonly string V273Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
+    END IF;
+
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsHourlySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.wait_stats_hourly') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsHourlyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V263 (#8549): the oldest-run rollup, <c>collect.job_history_oldest_daily</c>, created where the store can hold it at migration time
     /// so the Job History time range picker's "Data starts" note can read each server's first run from one small row per server per day
     /// instead of sorting every compressed <c>job_history</c> chunk. Per server, per UTC day of collection: the smallest <c>run_datetime</c>.
@@ -3490,7 +3518,12 @@ $rung$;";
         new Migration(270, "database-size-autogrow-all-files", V270Sql),
         /* V271 (#8884): the Instance Restarted and Memory Dumps alert switches on the alert settings. Two catalog-only boolean columns that default on. */
         new Migration(271, "instance-event-alert-switches", V271Sql),
-        /* V272 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
+        /* V272 (#8798): column selectivity. The current column statistics rows, their per-database cursor and the run log of the column_stats
+           collector. Three new tables created empty: no data moves, so the upgrade stays fast. */
+        new Migration(272, "column-stats", V272Sql),
+        /* V273 (#8824): the hourly wait totals, the open day's read under the Daily Summary. Catalog-only: no existing row moves. */
+        new Migration(273, "wait-stats-hourly-rollup", V273Sql),
+        /* V274 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
         new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
     };
 
@@ -3560,6 +3593,90 @@ ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS instance_restarted_enabled boolean NOT NULL DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS memory_dumps_enabled boolean NOT NULL DEFAULT TRUE;";
+
+
+    /// <summary>
+    /// V272 (#8798): column selectivity, for the <c>column_stats</c> collector (Darling only).
+    ///
+    /// <para><c>collect.column_stats_runs</c> is the collector's own table, the run log: one row per database per run. A PLAIN table on every
+    /// store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly
+    /// <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one agree.</para>
+    ///
+    /// <para><c>collect.column_stats</c> holds the CURRENT density vector rows, one per (statistic, leading-column prefix), replaced in place
+    /// when a statistic is read again. It carries names, densities, row and sample counts and update times, and no column value, histogram or
+    /// filter expression. The rows are keyed by the HISTORY KEY, like the schema tables: <c>history_key</c> is the text the run log writes
+    /// ('server:' and the server id, or 'ag:' and the availability group id for a database that belongs to one), so the replicas of a group
+    /// share one set of rows and a new primary's reads replace the old primary's. <c>server_id</c> is provenance only: the server whose run
+    /// wrote the row. The primary key (history_key, database_name, object_id, ...) also serves the reads by table and the retention join.
+    /// <c>collect.column_stats_state</c> is the per-server, per-database cursor (history key, recovery fork, last seen in scope, last full
+    /// read). The run log's (database_name, history_key, collection_time) index serves the newest-run and writing-server lookups.
+    /// <c>last_updated</c> is the statistic's <c>STATS_DATE</c> exactly as the monitored server returns it, in that server's local time:
+    /// the value the change check compares, so a daylight saving shift never re-reads a database. <c>last_updated_utc</c> is the same
+    /// instant moved to UTC on the server at read time, the value <c>get_object_definition</c> shows as <c>stats_updated_at</c>.</para>
+    ///
+    /// <para>New tables, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent.</para>
+    /// </summary>
+    private const string V272Sql = @"
+CREATE TABLE IF NOT EXISTS collect.column_stats_runs (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    history_key text,
+    kind text,
+    checked integer,
+    read integer,
+    deleted integer,
+    skipped_filtered integer,
+    skipped_memory_optimized integer,
+    skipped_xml_spatial_columnstore integer,
+    skipped_never_updated integer,
+    skipped_locked integer,
+    skipped_over_cap integer,
+    errors integer,
+    sample_error text,
+    refused text,
+    complete boolean,
+    note text
+);
+
+CREATE INDEX IF NOT EXISTS idx_column_stats_runs_time ON collect.column_stats_runs(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_column_stats_runs_history ON collect.column_stats_runs(database_name, history_key, collection_time);
+
+CREATE TABLE IF NOT EXISTS collect.column_stats (
+    history_key text NOT NULL,
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    object_id integer NOT NULL,
+    schema_name text NOT NULL,
+    object_name text NOT NULL,
+    stats_id integer NOT NULL,
+    stats_name text NOT NULL,
+    origin text NOT NULL,
+    prefix_length smallint NOT NULL,
+    columns text[] NOT NULL,
+    includes_clustering_key boolean NOT NULL,
+    all_density double precision NOT NULL,
+    rows bigint NOT NULL,
+    rows_sampled bigint NOT NULL,
+    last_updated timestamp NOT NULL,
+    last_updated_utc timestamp NOT NULL,
+    persisted_sample_percent real NULL,
+    read_at timestamp NOT NULL,
+    PRIMARY KEY (history_key, database_name, object_id, stats_id, prefix_length)
+);
+
+CREATE TABLE IF NOT EXISTS collect.column_stats_state (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    history_key text NOT NULL,
+    recovery_fork_guid uuid NULL,
+    last_seen_in_scope_at timestamp NULL,
+    last_full_read_at timestamp NULL,
+    PRIMARY KEY (server_id, database_name)
+);";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

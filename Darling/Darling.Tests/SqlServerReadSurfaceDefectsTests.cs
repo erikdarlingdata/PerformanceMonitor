@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Linq;
 using System.Text.Json;
@@ -328,6 +329,18 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             var note = StringOrNull(aDayLater, "automatic_tuning_note");
             Assert.Contains("1 day", note, StringComparison.Ordinal);
             Assert.Contains("plan_correction", note, StringComparison.Ordinal);
+            /* #8903: every field the note names is one the reply carries. The stamp lives on the rows as as_of, not as captured_at. */
+            var carried = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in aDayLater.EnumerateObject()) carried.Add(property.Name);
+            foreach (var property in aDayLater.GetProperty("automatic_tuning")[0].EnumerateObject()) carried.Add(property.Name);
+            var named = System.Text.RegularExpressions.Regex.Matches(note!, "[a-z]+(?:_[a-z]+)+")
+                .Select(m => m.Value)
+                .Where(w => w != "plan_correction" && !w.StartsWith("get_", StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            Assert.Contains("as_of", named);
+            Assert.DoesNotContain("captured_at", named);
+            Assert.All(named, w => Assert.Contains(w, carried));
         });
     }
 

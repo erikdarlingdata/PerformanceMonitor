@@ -331,6 +331,69 @@ public sealed class DailySummaryWarmerLiveTests
         }
     }
 
+    /// <summary>#8824: the service reads one store through three pools, and the warm pass runs through the worker's. A visitor's
+    /// first read of a server goes through the web host's pool, which used to probe the store's rollup coverage itself (the
+    /// longest statement of that read on a large store) because the warm pass's probe was kept for the worker's pool alone. The
+    /// first visit now runs the statements the visit after it runs, and no probe of its own.</summary>
+    [Fact]
+    public async Task WarmerPass_ThroughTheWorkersPool_LeavesTheWebHostsFirstVisitNoCoverageProbeToRun()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var workerPool = NpgsqlDataSource.Create(cs!);
+        await using var webPool = DarlingWorker.CreateHostStoreDataSource(cs!, DarlingManagedPostgres.WebApplicationName);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+
+            var today = DateTime.UtcNow.Date;
+            await PlantWaitAsync(connection, ServerIdA, ServerA, today.AddDays(-2).AddHours(10), 1000, ct);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+
+            var warmer = Warmers.Create(
+                servers: () => [(ServerIdA, ServerA)],
+                warm: (serverId, name, token) => Warmers.WarmAsync(workerPool, serverId, name, token),
+                enabled: () => true,
+                admission: null);
+            await Warmers.RunPassAsync(warmer, ct);
+
+            /* The web host's pool has opened no connection yet, and a new connection's own setup is counted as a statement of
+               the read that opens it. It is the pool's, not the read's: open one first so neither visit counts it. */
+            await using (var warmedConnection = await webPool.OpenConnectionAsync(ct))
+            {
+                await using var ping = warmedConnection.CreateCommand();
+                ping.CommandText = "SELECT 1";
+                await ping.ExecuteScalarAsync(ct);
+            }
+
+            var first = await StatementsRunAsync(() => DarlingMcpHealthTools.GetDailySummaryRange(webPool, ServerA, 31));
+            var second = await StatementsRunAsync(() => DarlingMcpHealthTools.GetDailySummaryRange(webPool, ServerA, 31));
+
+            SkipWhenTheDayChanged(today);
+            Assert.True(first == second,
+                $"the web host's first visit after the warm pass ran {first} statements and the visit after it ran {second}: the first one probed the store's rollup coverage again");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>The warmer and the visitor read the UTC day from the real clock themselves, so a run that crosses 00:00 UTC
     /// plants its rows for one day and reads another, and fails on correct code. Such a run is skipped, with the reason.</summary>
     private static void SkipWhenTheDayChanged(DateTime today) =>

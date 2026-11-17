@@ -320,7 +320,8 @@ WHERE status = 'in_progress'
                     return new CommandOutcome(false, "refused", ErrorJson(refusal));
                 }
 
-                var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken);
+                var columnStatsDatabases = await ReadColumnStatsGrantDatabasesAsync(server, cancellationToken);
+                var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken, columnStatsDatabases: columnStatsDatabases);
                 var (resultStatus, resultJson) = MapProbeResult(probe);
                 _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, server.DisplayName, resultStatus);
                 return new CommandOutcome(probe.Success, resultStatus, resultJson);
@@ -1096,6 +1097,50 @@ WHERE status = 'in_progress'
         }
 
         return TestConnectPasswordNeededText;
+    }
+
+    /// <summary>
+    /// #8798: the databases the connection test checks for the column_stats SELECT grant, resolved the way the runner resolves the collector (the
+    /// stored schedule rows and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>): the explicit list when column_stats is enabled for the
+    /// server, otherwise null. An empty scope means "every database" for collection, but the test never checks every database, so it is null too.
+    /// </summary>
+    internal static IReadOnlyList<string>? ResolveColumnStatsGrantDatabases(int serverId, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var name = ColumnStatsCollector.Instance.Name;
+        if (!StoreConfigProvider.ResolveSchedule(name, serverId, overrides).Enabled)
+        {
+            return null;
+        }
+
+        var scope = StoreConfigProvider.ResolveDatabaseScope(name, serverId, overrides);
+        return scope.Count == 0 ? null : scope;
+    }
+
+    /// <summary>
+    /// Reads the schedule rows for the tested server and resolves <see cref="ResolveColumnStatsGrantDatabases"/>. A PostgreSQL target has no such
+    /// grant. A store that cannot be read gives null (the grant check is left out) and a log line: the connection test itself goes on.
+    /// </summary>
+    private async Task<IReadOnlyList<string>?> ReadColumnStatsGrantDatabasesAsync(MonitoredServer server, CancellationToken cancellationToken)
+    {
+        if (server.IsPostgres)
+        {
+            return null;
+        }
+
+        try
+        {
+            var overrides = await Mcp.DarlingDataReader.ReadScheduleOverridesAsync(_postgres, server.ServerId, cancellationToken, throwOnFailure: true);
+            return ResolveColumnStatsGrantDatabases(server.ServerId, overrides);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "test_connect could not read the column_stats schedule, so the column_stats grant is not checked");
+            return null;
+        }
     }
 
     /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
