@@ -106,18 +106,18 @@ WHERE server_id = $1
     private const string StateStampsSql = @"
 SELECT max(last_seen_in_scope_at), max(last_full_read_at)
 FROM collect.column_stats_state
-WHERE database_name = $1
-  AND (history_ag_group_id = ANY($2) OR (history_ag_group_id IS NULL AND history_server_id = ANY($3)))";
+WHERE database_name = $1 AND history_key = ANY($2)";
 
+    /* Equal times (two servers stamping in the same instant) fall to the lower server id, so the answer is the same on every read. */
     private const string WriterSql = @"
 SELECT server_id FROM (
     SELECT server_id, collection_time AS t, 1 AS p FROM collect.column_stats_runs WHERE database_name = $1 AND history_key = ANY($2)
     UNION ALL
-    SELECT server_id, read_at, 2 FROM collect.column_stats WHERE database_name = $1 AND history_ag_group_id = ANY($3)
+    SELECT server_id, read_at, 2 FROM collect.column_stats WHERE database_name = $1 AND history_key = ANY($2)
     UNION ALL
-    SELECT server_id, last_seen_in_scope_at, 3 FROM collect.column_stats_state WHERE database_name = $1 AND history_ag_group_id = ANY($3)
+    SELECT server_id, last_seen_in_scope_at, 3 FROM collect.column_stats_state WHERE database_name = $1 AND history_key = ANY($2)
 ) w
-ORDER BY p, t DESC NULLS LAST
+ORDER BY p, t DESC NULLS LAST, server_id
 LIMIT 1";
 
     internal static ColumnSelectivityView Shape(SchemaObjectDefinition definition, IReadOnlyList<StoredPrefix> stored)
@@ -293,11 +293,11 @@ LIMIT 1";
             return new SelectivityResult(off, null);
         }
 
-        var stored = await ColumnStatsStore.ReadForObjectAsync(connection, keys, database, definition.Schema, definition.Name, cancellationToken);
-        var keyTexts = keys.Select(DarlingSchemaCapture.KeyText).ToArray();
+        var keyTexts = keys.Select(DarlingSchemaCapture.KeyText).Distinct(StringComparer.Ordinal).ToArray();
+        var stored = await ColumnStatsStore.ReadForObjectAsync(connection, keyTexts, database, definition.Schema, definition.Name, cancellationToken);
         var run = await ReadNewestRunAsync(postgres, keyTexts, database, cancellationToken);
         var noGrant = await ReadServerRunHadNoGrantAsync(postgres, serverId, cancellationToken);
-        var (seen, fullRead) = await ReadStateStampsAsync(postgres, keys, database, cancellationToken);
+        var (seen, fullRead) = await ReadStateStampsAsync(postgres, keyTexts, database, cancellationToken);
         var traceFlag = false;
         if (run?.Refused is not null || noGrant)
         {
@@ -319,8 +319,8 @@ LIMIT 1";
     /// </summary>
     private static async Task<int?> ReadWritingServerAsync(NpgsqlDataSource postgres, IReadOnlyList<SchemaHistoryKey> keys, string database, CancellationToken ct)
     {
-        var groups = keys.Where(k => k.AgGroupId is not null).Select(k => k.AgGroupId!.Value).Distinct().ToArray();
-        if (groups.Length == 0)
+        var groupKeys = keys.Where(k => k.AgGroupId is not null).Select(DarlingSchemaCapture.KeyText).Distinct(StringComparer.Ordinal).ToArray();
+        if (groupKeys.Length == 0)
         {
             return null;
         }
@@ -328,8 +328,7 @@ LIMIT 1";
         await using var cmd = postgres.CreateCommand(WriterSql);
         cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = groups.Select(g => "ag:" + g.ToString("D", CultureInfo.InvariantCulture)).ToArray() });
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid, Value = groups });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = groupKeys });
         var value = await cmd.ExecuteScalarAsync(ct);
         return value is int id ? id : null;
     }
@@ -391,15 +390,13 @@ LIMIT 1";
 
     /// <summary>The newest in-scope stamp and full-read time of the database under any of the history keys.</summary>
     private static async Task<(DateTime? Seen, DateTime? FullRead)> ReadStateStampsAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<SchemaHistoryKey> keys, string database, CancellationToken ct)
+        NpgsqlDataSource postgres, string[] keyTexts, string database, CancellationToken ct)
     {
-        var groups = keys.Where(k => k.AgGroupId is not null).Select(k => k.AgGroupId!.Value).Distinct().ToArray();
-        var servers = keys.Where(k => k.AgGroupId is null && k.ServerId is not null).Select(k => k.ServerId!.Value).Distinct().ToArray();
         await using var cmd = postgres.CreateCommand(StateStampsSql);
         cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid, Value = groups });
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = servers });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = keyTexts });
+
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {

@@ -1822,28 +1822,21 @@ WHERE NOT EXISTS
 
     /// <summary>
     /// #8798: every current column statistics row of a (history key, database) that no <c>collect.column_stats_state</c> row of any server
-    /// points at with a <c>last_seen_in_scope_at</c> at or after <c>$1</c>. The key is one text value per kind ('g' and the group id, or
-    /// 's' and the server id), as <see cref="StaleSchemaHistoryDeleteSql"/> writes it; a state row names the group when it has one.
+    /// points at with a <c>last_seen_in_scope_at</c> at or after <c>$1</c>. Both tables carry the same <c>history_key</c> text (the run
+    /// log's: 'server:' and the server id, or 'ag:' and the group id), and the rows are keyed by it, so the join is the primary key's prefix.
     /// </summary>
     internal const string StaleColumnStatsDeleteSql = @"
-WITH keep AS
-(
-    SELECT
-        CASE WHEN s.history_ag_group_id IS NOT NULL THEN 'g' || s.history_ag_group_id::text ELSE 's' || s.history_server_id::text END AS history_key,
-        s.database_name
-    FROM collect.column_stats_state AS s
-    WHERE s.last_seen_in_scope_at >= $1
-    AND   (s.history_ag_group_id IS NOT NULL OR s.history_server_id IS NOT NULL)
-)
 DELETE FROM collect.column_stats AS o
 WHERE NOT EXISTS
 (
     SELECT
         1
-    FROM keep AS k
-    WHERE k.database_name = o.database_name
-    AND   k.history_key = CASE WHEN o.history_ag_group_id IS NOT NULL THEN 'g' || o.history_ag_group_id::text ELSE 's' || o.history_server_id::text END
+    FROM collect.column_stats_state AS s
+    WHERE s.history_key = o.history_key
+    AND   s.database_name = o.database_name
+    AND   s.last_seen_in_scope_at >= $1
 )";
+
 
     /// <summary>
     /// The CEILING on rows per statement for the plan dimension's purge (#2386, reframed by #4130) — not a

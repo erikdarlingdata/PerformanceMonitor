@@ -338,6 +338,42 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
     }
 
     [Fact]
+    public async Task AgFailover_NewPrimaryReplacesTheOldPrimarysRows_AndAnOrphanGoes()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            var oldPrimary = rig.Server("colstats-node-a");
+            var newPrimary = rig.Server("colstats-node-b");
+            Assert.NotEqual(oldPrimary.ServerId, newPrimary.ServerId);
+
+            /* The old primary reads a large-sample statistic on Id and one only it has. */
+            rig.Source.Probes.Add(Probe(Sales, 5, group: s_group, primary: true));
+            rig.Source.Candidates[Sales] = [Stat(100, 1, s_t0, 50_000, "Id"), Stat(100, 2, s_t0, 50_000, "Status")];
+            await rig.RunAsync(oldPrimary, ct);
+            Assert.Equal("2", await rig.StoredStatsAsync(Sales, ct));
+
+            /* Failover: the new primary's Id statistic is newer and sampled smaller, and (100, 2) was dropped after the failover. */
+            rig.Source.Candidates[Sales] = [Stat(100, 1, s_t0.AddHours(2), 300, "Id")];
+            rig.Source.Reads.Clear();
+            await rig.RunAsync(newPrimary, ct);
+
+            Assert.Equal("baseline|1|1|0|0|0|0|-|true", await rig.LastRunAsync(Sales, ct));
+            Assert.Equal("1", await rig.StoredStatsAsync(Sales, ct));
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats WHERE stats_id = 2", ct));
+            Assert.Equal("300|" + newPrimary.ServerId, await rig.ScalarAsync("SELECT string_agg(DISTINCT rows_sampled || '|' || server_id, ',') FROM collect.column_stats", ct));
+            Assert.Equal("ag:" + s_group.ToString("D"), await rig.ScalarAsync("SELECT string_agg(DISTINCT history_key, ',') FROM collect.column_stats", ct));
+
+            /* Failing back, the old primary compares with the group's rows the new primary wrote: only the statistic made since is read. */
+            rig.Source.Candidates[Sales] = [Stat(100, 1, s_t0.AddHours(2), 300, "Id"), Stat(100, 4, s_t0.AddHours(3), 300, "Total")];
+            rig.Source.Reads.Clear();
+            await rig.RunAsync(oldPrimary, ct);
+
+            Assert.Equal(new[] { (100, 4) }, rig.Source.ReadIds(Sales).ToArray());
+            Assert.Equal("2", await rig.StoredStatsAsync(Sales, ct));
+        });
+    }
+
+    [Fact]
     public async Task RecoveryForkChange_ReadsEverything()
     {
         await WithRigAsync(async (rig, ct) =>

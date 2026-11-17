@@ -152,10 +152,16 @@ public static class DarlingColumnStatsCapture
             var work = new List<(SchemaDatabaseProbe Probe, ColumnStatsStateRow? State)>();
             foreach (var probe in Covered(probes))
             {
-                if (!NoteNotWritable(probe))
+                var state = await TimedStore(() => ColumnStatsStore.LoadStateAsync(Store, _server.ServerId, probe.Name, _ct));
+                if (NoteNotWritable(probe))
                 {
-                    work.Add((probe, await TimedStore(() => ColumnStatsStore.LoadStateAsync(Store, _server.ServerId, probe.Name, _ct))));
+                    /* Not read, but still in scope: a read-only, standby or offline database's statistics cannot change there, and a
+                       secondary's rows are its group's, so the stored rows stay current and the stamp keeps them from ageing out. */
+                    await StampAsync(state);
+                    continue;
                 }
+
+                work.Add((probe, state));
             }
 
             _toRead = work.Count;
@@ -200,8 +206,14 @@ public static class DarlingColumnStatsCapture
                     await using var connection = await TimedSql(() => _runner.ColumnStatsSource.OpenAsync(_server, database, _ct));
                     var probe = (await TimedSql(() => connection.ReadProbesAsync(_ct)))
                         .FirstOrDefault(p => string.Equals(p.Name, database, StringComparison.OrdinalIgnoreCase));
-                    if (probe is null || Covered([probe]).Count == 0 || NoteNotWritable(probe))
+                    if (probe is null || Covered([probe]).Count == 0)
                     {
+                        continue;
+                    }
+
+                    if (NoteNotWritable(probe))
+                    {
+                        await StampAsync(state);
                         continue;
                     }
 
@@ -270,10 +282,11 @@ public static class DarlingColumnStatsCapture
         {
             var database = probe.Name;
             var key = SchemaWorkPlanner.KeyFor(_server.ServerId, probe);
+            var keyText = DarlingSchemaCapture.KeyText(key);
             await StampAsync(state);
 
             var forkChanged = state?.RecoveryForkGuid is { } storedFork && probe.RecoveryForkGuid is { } fork && storedFork != fork;
-            var keyChanged = state is not null && (state.HistoryServerId != key.ServerId || state.HistoryAgGroupId != key.AgGroupId);
+            var keyChanged = state is not null && !string.Equals(state.HistoryKey, keyText, StringComparison.Ordinal);
             var fresh = state is null || forkChanged || keyChanged;
             var kind = _runNow ? "run_now" : fresh || state!.LastFullReadAt is null ? "baseline" : "incremental";
             var tally = new Tally();
@@ -304,18 +317,30 @@ public static class DarlingColumnStatsCapture
 
                 if (fresh)
                 {
-                    await TimedStore(() => ColumnStatsStore.DeleteDatabaseAsync(Store, _server.ServerId, database, _ct));
+                    /* A fresh start replaces the history's rows, whichever server wrote them: after a failover the new primary's baseline
+                       removes what the old primary stored. A database that moved from this server's own key (it joined a group) also
+                       loses the rows under that key; a group's rows are the group's and are left to its servers and the stamp age. */
+                    await TimedStore(() => ColumnStatsStore.DeleteDatabaseAsync(Store, keyText, database, _ct));
+                    if (keyChanged && state!.HistoryKey == DarlingSchemaCapture.KeyText(new SchemaHistoryKey(_server.ServerId, null, null)))
+                    {
+                        await TimedStore(() => ColumnStatsStore.DeleteDatabaseAsync(Store, state.HistoryKey, database, _ct));
+                    }
+
+                    /* The new key and fork are saved now, not after the last batch: a purge between the two would otherwise find no
+                       stamp under the new key and delete the rows this run is writing. */
+                    await TimedStore(() => ColumnStatsStore.SaveStateAsync(
+                        Store, new ColumnStatsStateRow(_server.ServerId, database, keyText, probe.RecoveryForkGuid ?? state?.RecoveryForkGuid, _runTime, null), _ct));
                     advanceState = true;
                 }
 
-                var stored = await TimedStore(() => ColumnStatsStore.LoadStatsDatesAsync(Store, _server.ServerId, database, _ct));
+                var stored = await TimedStore(() => ColumnStatsStore.LoadStatsDatesAsync(Store, keyText, database, _ct));
                 var byId = candidates.ToDictionary(c => (c.ObjectId, c.StatsId));
 
                 /* Over the cap the list is not the whole database, so a statistic missing from it is not known to be gone. */
                 if (skipped.OverCap == 0)
                 {
                     var gone = stored.Keys.Where(k => !byId.ContainsKey(k)).ToList();
-                    await TimedStore(() => ColumnStatsStore.DeleteStatisticsAsync(Store, _server.ServerId, database, gone, _ct));
+                    await TimedStore(() => ColumnStatsStore.DeleteStatisticsAsync(Store, keyText, database, gone, _ct));
                     tally.Deleted = gone.Count;
                 }
 
@@ -334,7 +359,7 @@ public static class DarlingColumnStatsCapture
                         break;
                     }
 
-                    await ReadBatchAsync(connection, database, key, toRead.Skip(offset).Take(BatchSize).ToList(), byId, tally, token);
+                    await ReadBatchAsync(connection, database, keyText, toRead.Skip(offset).Take(BatchSize).ToList(), byId, tally, token);
                 }
 
                 if (tally.PermissionErrors > 0 && _traceFlag9485)
@@ -364,8 +389,7 @@ public static class DarlingColumnStatsCapture
                 var saved = new ColumnStatsStateRow(
                     _server.ServerId,
                     database,
-                    key.ServerId,
-                    key.AgGroupId,
+                    keyText,
                     probe.RecoveryForkGuid ?? state?.RecoveryForkGuid,
                     _runTime,
                     complete ? _runTime : fresh ? null : state?.LastFullReadAt);
@@ -376,7 +400,7 @@ public static class DarlingColumnStatsCapture
         }
 
         private async Task ReadBatchAsync(
-            IColumnStatsConnection connection, string database, SchemaHistoryKey key, List<StatCandidate> batch,
+            IColumnStatsConnection connection, string database, string keyText, List<StatCandidate> batch,
             Dictionary<(int, int), StatCandidate> byId, Tally tally, CancellationToken token)
         {
             var ids = batch.Select(c => (c.ObjectId, c.StatsId)).ToList();
@@ -406,7 +430,8 @@ public static class DarlingColumnStatsCapture
                 }
             }
 
-            await TimedStore(() => ColumnStatsStore.ReplaceStatisticsAsync(Store, _server.ServerId, key, database, write, DateTime.UtcNow, _ct));
+            await TimedStore(() => ColumnStatsStore.ReplaceStatisticsAsync(Store, _server.ServerId, keyText, database, write, DateTime.UtcNow, _ct));
+
             tally.Read += write.Count;
 
             foreach (var error in errors)

@@ -3572,8 +3572,12 @@ ALTER TABLE config.config_alert_settings
     ///
     /// <para><c>collect.column_stats</c> holds the CURRENT density vector rows, one per (statistic, leading-column prefix), replaced in place
     /// when a statistic is read again. It carries names, densities, row and sample counts and update times, and no column value, histogram or
-    /// filter expression. History is keyed like the schema tables: a server, or an availability group for a database that belongs to one.
-    /// <c>collect.column_stats_state</c> is the per-database cursor (recovery fork, last seen in scope, last full read).</para>
+    /// filter expression. The rows are keyed by the HISTORY KEY, like the schema tables: <c>history_key</c> is the text the run log writes
+    /// ('server:' and the server id, or 'ag:' and the availability group id for a database that belongs to one), so the replicas of a group
+    /// share one set of rows and a new primary's reads replace the old primary's. <c>server_id</c> is provenance only: the server whose run
+    /// wrote the row. The primary key (history_key, database_name, object_id, ...) also serves the reads by table and the retention join.
+    /// <c>collect.column_stats_state</c> is the per-server, per-database cursor (history key, recovery fork, last seen in scope, last full
+    /// read). The run log's (database_name, history_key, collection_time) index serves the newest-run and writing-server lookups.</para>
     ///
     /// <para>New tables, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent.</para>
     /// </summary>
@@ -3604,10 +3608,11 @@ CREATE TABLE IF NOT EXISTS collect.column_stats_runs (
 
 CREATE INDEX IF NOT EXISTS idx_column_stats_runs_time ON collect.column_stats_runs(server_id, collection_time);
 
+CREATE INDEX IF NOT EXISTS idx_column_stats_runs_history ON collect.column_stats_runs(database_name, history_key, collection_time);
+
 CREATE TABLE IF NOT EXISTS collect.column_stats (
+    history_key text NOT NULL,
     server_id integer NOT NULL,
-    history_server_id integer NULL,
-    history_ag_group_id uuid NULL,
     database_name text NOT NULL,
     object_id integer NOT NULL,
     schema_name text NOT NULL,
@@ -3624,16 +3629,13 @@ CREATE TABLE IF NOT EXISTS collect.column_stats (
     last_updated timestamp NOT NULL,
     persisted_sample_percent real NULL,
     read_at timestamp NOT NULL,
-    PRIMARY KEY (server_id, database_name, object_id, stats_id, prefix_length)
+    PRIMARY KEY (history_key, database_name, object_id, stats_id, prefix_length)
 );
-
-CREATE INDEX IF NOT EXISTS idx_column_stats_history_object ON collect.column_stats (history_server_id, history_ag_group_id, database_name, schema_name, object_name);
 
 CREATE TABLE IF NOT EXISTS collect.column_stats_state (
     server_id integer NOT NULL,
     database_name text NOT NULL,
-    history_server_id integer NULL,
-    history_ag_group_id uuid NULL,
+    history_key text NOT NULL,
     recovery_fork_guid uuid NULL,
     last_seen_in_scope_at timestamp NULL,
     last_full_read_at timestamp NULL,

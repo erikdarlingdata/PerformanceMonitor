@@ -50,17 +50,19 @@ public sealed class ColumnStatsRetentionLiveTests
         }
     }
 
+    private static string Key(int serverId, Guid? group) =>
+        group is { } g ? "ag:" + g.ToString("D") : "server:" + serverId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
     /* One current row of the history (server key, or group key when a group is given), 60 days old. */
     private static async Task SeedRowAsync(
         NpgsqlConnection c, int serverId, string database, int objectId, CancellationToken ct, Guid? group = null)
     {
         await using var insert = new NpgsqlCommand(@"
-INSERT INTO collect.column_stats (server_id, history_server_id, history_ag_group_id, database_name, object_id, schema_name, object_name, stats_id,
+INSERT INTO collect.column_stats (server_id, history_key, database_name, object_id, schema_name, object_name, stats_id,
                                   stats_name, origin, prefix_length, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated, read_at)
-VALUES ($1, $2, $3, $4, $5, 'dbo', 'T', 1, 'ix', 'index', 1, ARRAY['Id'], false, 0.5, 100, 100, $6, $6)", c);
+VALUES ($1, $2, $3, $4, 'dbo', 'T', 1, 'ix', 'index', 1, ARRAY['Id'], false, 0.5, 100, 100, $5, $5)", c);
         insert.Parameters.Add(new NpgsqlParameter { Value = serverId });
-        insert.Parameters.Add(new NpgsqlParameter { Value = group is null ? serverId : DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
-        insert.Parameters.Add(new NpgsqlParameter { Value = (object?)group ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Uuid });
+        insert.Parameters.Add(new NpgsqlParameter { Value = Key(serverId, group) });
         insert.Parameters.Add(new NpgsqlParameter { Value = database });
         insert.Parameters.Add(new NpgsqlParameter { Value = objectId });
         insert.Parameters.Add(new NpgsqlParameter { Value = s_now.AddDays(-60), NpgsqlDbType = NpgsqlDbType.Timestamp });
@@ -71,12 +73,11 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', 'T', 1, 'ix', 'index', 1, ARRAY['Id'], false,
         NpgsqlConnection c, int serverId, string database, DateTime lastSeen, CancellationToken ct, Guid? group = null)
     {
         await using var insert = new NpgsqlCommand(@"
-INSERT INTO collect.column_stats_state (server_id, database_name, history_server_id, history_ag_group_id, last_seen_in_scope_at)
-VALUES ($1, $2, $3, $4, $5)", c);
+INSERT INTO collect.column_stats_state (server_id, database_name, history_key, last_seen_in_scope_at)
+VALUES ($1, $2, $3, $4)", c);
         insert.Parameters.Add(new NpgsqlParameter { Value = serverId });
         insert.Parameters.Add(new NpgsqlParameter { Value = database });
-        insert.Parameters.Add(new NpgsqlParameter { Value = group is null ? serverId : DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
-        insert.Parameters.Add(new NpgsqlParameter { Value = (object?)group ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Uuid });
+        insert.Parameters.Add(new NpgsqlParameter { Value = Key(serverId, group) });
         insert.Parameters.Add(new NpgsqlParameter { Value = lastSeen, NpgsqlDbType = NpgsqlDbType.Timestamp });
         await insert.ExecuteNonQueryAsync(ct);
     }

@@ -64,15 +64,15 @@ public sealed class ColumnStatsStoreLiveTests
         var (scratch, pg) = await OpenAsync(ct);
         await using var _ = scratch;
         await using var __ = pg;
-        var key = new SchemaHistoryKey(7, null, null);
+        const string key = "server:7";
 
         await ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, key, Db, new[] { Entry(Stat(100, 1), s_t0), Entry(Stat(100, 2, name: "IX_Other"), s_t0.AddHours(1)) }, s_read, ct);
 
-        var dates = await ColumnStatsStore.LoadStatsDatesAsync(pg, 7, Db, ct);
+        var dates = await ColumnStatsStore.LoadStatsDatesAsync(pg, key, Db, ct);
         Assert.Equal(2, dates.Count);
         Assert.Equal(s_t0, dates[(100, 1)]);
         Assert.Equal(s_t0.AddHours(1), dates[(100, 2)]);
-        Assert.Empty(await ColumnStatsStore.LoadStatsDatesAsync(pg, 8, Db, ct));
+        Assert.Empty(await ColumnStatsStore.LoadStatsDatesAsync(pg, "server:8", Db, ct));
         Assert.Equal(6, await CountAsync(pg, "server_id = 7", ct));
     }
 
@@ -84,7 +84,7 @@ public sealed class ColumnStatsStoreLiveTests
         var (scratch, pg) = await OpenAsync(ct);
         await using var _ = scratch;
         await using var __ = pg;
-        var key = new SchemaHistoryKey(7, null, null);
+        const string key = "server:7";
         var stat = Stat(100, 1);
 
         await ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, key, Db, new[] { Entry(stat, s_t0) }, s_read, ct);
@@ -114,42 +114,49 @@ public sealed class ColumnStatsStoreLiveTests
         var (scratch, pg) = await OpenAsync(ct);
         await using var _ = scratch;
         await using var __ = pg;
-        var key = new SchemaHistoryKey(7, null, null);
+        const string key = "server:7";
         await ColumnStatsStore.ReplaceStatisticsAsync(
             pg, 7, key, Db, new[] { Entry(Stat(100, 1), s_t0), Entry(Stat(100, 2, name: "IX_Other"), s_t0), Entry(Stat(200, 1, "Lines", "IX_Lines"), s_t0) }, s_read, ct);
 
-        var deleted = await ColumnStatsStore.DeleteStatisticsAsync(pg, 7, Db, new[] { (100, 2), (200, 1) }, ct);
+        var deleted = await ColumnStatsStore.DeleteStatisticsAsync(pg, key, Db, new[] { (100, 2), (200, 1) }, ct);
 
         Assert.Equal(6, deleted);
-        var left = await ColumnStatsStore.LoadStatsDatesAsync(pg, 7, Db, ct);
+        var left = await ColumnStatsStore.LoadStatsDatesAsync(pg, key, Db, ct);
         Assert.Equal(new[] { (100, 1) }, left.Keys.ToArray());
 
-        Assert.Equal(3, await ColumnStatsStore.DeleteDatabaseAsync(pg, 7, Db, ct));
-        Assert.Empty(await ColumnStatsStore.LoadStatsDatesAsync(pg, 7, Db, ct));
+        Assert.Equal(3, await ColumnStatsStore.DeleteDatabaseAsync(pg, key, Db, ct));
+        Assert.Empty(await ColumnStatsStore.LoadStatsDatesAsync(pg, key, Db, ct));
     }
 
     [Fact]
-    public async Task ReadForObject_FindsByAgKeyFromEitherServer()
+    public async Task AgKey_OneSetOfRows_TheNewPrimaryReplacesTheOldPrimarysRows()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipMessage);
         var ct = TestContext.Current.CancellationToken;
         var (scratch, pg) = await OpenAsync(ct);
         await using var _ = scratch;
         await using var __ = pg;
-        var group = Guid.NewGuid();
-        var agKey = new SchemaHistoryKey(null, group, "AG1");
+        var agKey = "ag:" + Guid.NewGuid().ToString("D");
 
-        await ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, agKey, Db, new[] { Entry(Stat(100, 1, name: "FromA"), s_t0) }, s_read, ct);
-        await ColumnStatsStore.ReplaceStatisticsAsync(pg, 8, agKey, Db, new[] { Entry(Stat(100, 2, name: "FromB"), s_t0) }, s_read, ct);
-        await ColumnStatsStore.ReplaceStatisticsAsync(pg, 9, new SchemaHistoryKey(9, null, null), Db, new[] { Entry(Stat(100, 3, name: "Other"), s_t0) }, s_read, ct);
+        /* Server 7 (the old primary) wrote two statistics; server 8 (the new primary) reads one of them again under the same key. */
+        await ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, agKey, Db, new[] { Entry(Stat(100, 1, name: "Kept"), s_t0), Entry(Stat(100, 2, name: "Other"), s_t0) }, s_read, ct);
+        await ColumnStatsStore.ReplaceStatisticsAsync(pg, 8, agKey, Db, new[] { Entry(Stat(100, 1, name: "Kept"), s_t0.AddDays(1)) }, s_read.AddDays(1), ct);
+        await ColumnStatsStore.ReplaceStatisticsAsync(pg, 9, "server:9", Db, new[] { Entry(Stat(100, 3, name: "Elsewhere"), s_t0) }, s_read, ct);
 
         var byAg = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { agKey }, Db, "dbo", "Orders", ct);
-        Assert.Equal(new[] { "FromA", "FromB" }, byAg.Select(p => p.StatsName).Distinct().OrderBy(n => n).ToArray());
+        Assert.Equal(6, byAg.Count);
+        Assert.All(byAg.Where(p => p.StatsName == "Kept"), p => Assert.Equal(s_t0.AddDays(1), p.LastUpdated));
+        Assert.Equal(3, await CountAsync(pg, "stats_id = 1", ct));
+        Assert.Equal(3, await CountAsync(pg, "stats_id = 1 AND server_id = 8", ct));
 
-        var both = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { agKey, new SchemaHistoryKey(9, null, null) }, Db, "dbo", "Orders", ct);
-        Assert.Equal(9, both.Count);
-        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, new[] { agKey }, "Other", "dbo", "Orders", ct));
-        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, Array.Empty<SchemaHistoryKey>(), Db, "dbo", "Orders", ct));
+        /* The dates load and the deletes go by key, whichever server wrote the row. */
+        Assert.Equal(2, (await ColumnStatsStore.LoadStatsDatesAsync(pg, agKey, Db, ct)).Count);
+        Assert.Equal(3, await ColumnStatsStore.DeleteStatisticsAsync(pg, agKey, Db, new[] { (100, 2) }, ct));
+        Assert.Equal(3, await ColumnStatsStore.DeleteDatabaseAsync(pg, agKey, Db, ct));
+        Assert.Equal(3, await CountAsync(pg, "true", ct));
+
+        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, new[] { "server:9" }, "Other", "dbo", "Orders", ct));
+        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, Array.Empty<string>(), Db, "dbo", "Orders", ct));
     }
 
     [Fact]
@@ -162,11 +169,11 @@ public sealed class ColumnStatsStoreLiveTests
         await using var __ = pg;
         Assert.Null(await ColumnStatsStore.LoadStateAsync(pg, 7, Db, ct));
 
-        var first = new ColumnStatsStateRow(7, Db, 7, null, Guid.NewGuid(), s_t0, null);
+        var first = new ColumnStatsStateRow(7, Db, "server:7", Guid.NewGuid(), s_t0, null);
         await ColumnStatsStore.SaveStateAsync(pg, first, ct);
         Assert.Equal(first, await ColumnStatsStore.LoadStateAsync(pg, 7, Db, ct));
 
-        var second = first with { HistoryServerId = null, HistoryAgGroupId = Guid.NewGuid(), LastSeenInScopeAt = s_t0.AddHours(1), LastFullReadAt = s_t0.AddHours(2) };
+        var second = first with { HistoryKey = "ag:" + Guid.NewGuid().ToString("D"), LastSeenInScopeAt = s_t0.AddHours(1), LastFullReadAt = s_t0.AddHours(2) };
         await ColumnStatsStore.SaveStateAsync(pg, second, ct);
         Assert.Equal(second, await ColumnStatsStore.LoadStateAsync(pg, 7, Db, ct));
     }

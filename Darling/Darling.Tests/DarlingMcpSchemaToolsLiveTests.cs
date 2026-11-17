@@ -946,6 +946,8 @@ public sealed class DarlingMcpSchemaToolsLiveTests
 
     private static readonly DateTime s_statsRead = DateTime.UtcNow.AddHours(-1);
 
+    private static string K(SchemaHistoryKey key) => PerformanceMonitor.Darling.Service.DarlingSchemaCapture.KeyText(key);
+
     private static async Task EnableSelectivityAsync(Store s, CancellationToken ct, int serverId = 0, string[]? ownList = null)
     {
         var id = serverId == 0 ? s_serverId : serverId;
@@ -973,7 +975,7 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             s.Connection, ct,
             "INSERT INTO collect.column_stats_runs (collection_id, collection_time, server_id, server_name, database_name, history_key, kind, refused, complete) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at ?? s_statsRead.AddMinutes(1)), serverId == 0 ? s_serverId : serverId, ServerName, Db,
-            key.AgGroupId is { } g ? "ag:" + g.ToString("D") : "server:" + (key.ServerId ?? 0), "baseline", refused is null ? (object)DBNull.Value : refused, refused is null);
+            K(key), "baseline", refused is null ? (object)DBNull.Value : refused, refused is null);
 
     [Fact]
     public async Task Selectivity_OnColumns_AndCombinations_FromTheStore()
@@ -983,7 +985,7 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "CustomerId", "Status" }));
             await EnableSelectivityAsync(s, ct);
             await ColumnStatsStore.ReplaceStatisticsAsync(
-                s.Connection, s_serverId, s_key, Db,
+                s.Connection, s_serverId, K(s_key), Db,
                 new[]
                 {
                     StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }),
@@ -991,7 +993,7 @@ public sealed class DarlingMcpSchemaToolsLiveTests
                 },
                 s_statsRead, ct);
             await SeedRunAsync(s, ct, s_key, null);
-            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, s_key.ServerId, null, null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(s_key), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
 
             var answer = await Parse(Definition(s, ct, "dbo.Orders"));
 
@@ -1034,9 +1036,9 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             await EnableSelectivityAsync(s, ct, secondary);
             await EnableSelectivityAsync(s, ct);
             await ColumnStatsStore.ReplaceStatisticsAsync(
-                s.Connection, s_serverId, agKey, Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+                s.Connection, s_serverId, K(agKey), Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
             await SeedRunAsync(s, ct, agKey, null);
-            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, null, group, null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(agKey), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
 
             var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
 
@@ -1053,7 +1055,7 @@ public sealed class DarlingMcpSchemaToolsLiveTests
         {
             await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
             await ColumnStatsStore.ReplaceStatisticsAsync(
-                s.Connection, s_serverId, s_key, Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+                s.Connection, s_serverId, K(s_key), Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
 
             var answer = await Parse(Definition(s, ct, "dbo.Orders"));
 
@@ -1128,9 +1130,9 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             var entries = Enumerable.Range(0, 40)
                 .Select(i => StatEntry(10, i + 1, "Wide", "IX_Wide_" + i, columnNames.Skip(i).Concat(columnNames.Take(i)).Take(8).ToArray(), Enumerable.Range(1, 8).Select(d => 0.5 / (d * 10)).ToArray()))
                 .ToArray();
-            await ColumnStatsStore.ReplaceStatisticsAsync(s.Connection, s_serverId, s_key, Db, entries, s_statsRead, ct);
+            await ColumnStatsStore.ReplaceStatisticsAsync(s.Connection, s_serverId, K(s_key), Db, entries, s_statsRead, ct);
             await SeedRunAsync(s, ct, s_key, null);
-            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, s_key.ServerId, null, null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(s_key), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
 
             var json = await Definition(s, ct, "dbo.Wide");
             var answer = await Parse(Task.FromResult(json));
@@ -1169,9 +1171,9 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             /* Only the primary, which wrote the rows, has the collectors on; the secondary has no schedule row at all. */
             await EnableSelectivityAsync(s, ct);
             await ColumnStatsStore.ReplaceStatisticsAsync(
-                s.Connection, s_serverId, agKey, Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+                s.Connection, s_serverId, K(agKey), Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
             await SeedRunAsync(s, ct, agKey, null);
-            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, null, agKey.AgGroupId, null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(agKey), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
 
             var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
 
