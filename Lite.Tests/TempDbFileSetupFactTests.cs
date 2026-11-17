@@ -52,6 +52,9 @@ public sealed class TempDbFileSetupFactTests : IClassFixture<SharedDuckDbFixture
 
     private static IEnumerable<File> DataFiles(int count) => Enumerable.Range(0, count).Select(_ => Data());
 
+    private static double Unix(DateTime naiveUtc) =>
+        new DateTimeOffset(DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
     private static DateTime Clock(int minutesAgo)
     {
         var t = DateTime.UtcNow.AddMinutes(-minutesAgo);
@@ -324,11 +327,38 @@ VALUES ($1, $2, $3, 'srv', $4, $5, $6, $7, $8, $9, $10, 1, $11, -1, $12, $13, $1
 
         var brokenId = _nextServerId++;
         await SeedFilesAsync(brokenId, Clock(90), DataFiles(8).Append(Log()));
-        await SeedFilesAsync(brokenId, Clock(30), DataFiles(8).Append(Log()).Append(Log()));
-        await SeedSchedulersAsync(brokenId, Clock(20), 8);
+        var newestFiles = Clock(30);
+        var newestSchedulers = Clock(20);
+        await SeedFilesAsync(brokenId, newestFiles, DataFiles(8).Append(Log()).Append(Log()));
+        await SeedSchedulersAsync(brokenId, newestSchedulers, 8);
 
         var broken = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context(brokenId, end))).SingleOrDefault(f => f.Key == "TEMPDB_FILE_SETUP");
         AssertOnlyFails(broken, "check_log_file_count");
+
+        /* The fact says WHEN: the newest collections' times, not the older one's. */
+        Assert.Equal(Unix(newestFiles), broken!.Metadata[TempDbFileSetup.MetaFilesCollectedUnix]);
+        Assert.Equal(Unix(newestSchedulers), broken.Metadata[TempDbFileSetup.MetaSchedulerCollectedUnix]);
+    }
+
+    [Fact]
+    public async Task TheSchedulerCount_IsBoundedByItsOwnCollectorsLookback_NotTheDatabaseSizeCollectors()
+    {
+        /* The database size collector runs weekly, so its lookback is two weeks. A scheduler count from two days ago is outside
+           the scheduler collector's own day, and the read must not accept it: with no count the file-count check is skipped. */
+        var serverId = _nextServerId++;
+        var end = Clock(0);
+        await SeedFilesAsync(serverId, Clock(30), DataFiles(1).Append(Log()));
+        await SeedSchedulersAsync(serverId, Clock(48 * 60), 16);
+
+        var context = Context(serverId, end);
+        context.LatestValueStarts = new Dictionary<string, DateTime>
+        {
+            ["database_size_stats"] = end.AddDays(-14),
+            ["cpu_scheduler_stats"] = end.AddHours(-24),
+        };
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(context);
+        Assert.Null(facts.SingleOrDefault(f => f.Key == "TEMPDB_FILE_SETUP"));
     }
 
     [Fact]
@@ -354,5 +384,29 @@ VALUES ($1, $2, $3, 'srv', $4, $5, $6, $7, $8, $9, $10, 1, $11, -1, $12, $13, $1
         Assert.Equal(2048, rows[1].GetProperty("total_size_mb").GetDouble());
         Assert.Equal("10%", rows[1].GetProperty("growth").GetString());
         Assert.Equal("LOG", rows[2].GetProperty("file_type").GetString());
+    }
+
+    [Fact]
+    public async Task TheDrillDown_SaysWhichCollectionItListsFilesFrom()
+    {
+        var serverId = _nextServerId++;
+        await SeedFilesAsync(serverId, Clock(90), DataFiles(1).Append(Log()));
+        var newest = Clock(30);
+        await SeedFilesAsync(serverId, newest, DataFiles(2).Append(Log()));
+        var context = Context(serverId, Clock(0));
+
+        var finding = new AnalysisFinding
+        {
+            ServerId = serverId,
+            RootFactKey = "TEMPDB_FILE_SETUP",
+            StoryPath = "TEMPDB_FILE_SETUP",
+            PathKeys = ["TEMPDB_FILE_SETUP"],
+            Severity = 0.3,
+        };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], context);
+
+        var rows = JsonSerializer.SerializeToElement(finding.DrillDown!["tempdb_files"]).EnumerateArray().ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows, row => Assert.Equal(newest, row.GetProperty("collected_at").GetDateTime()));
     }
 }

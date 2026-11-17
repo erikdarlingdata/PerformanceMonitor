@@ -26,7 +26,7 @@ internal static class PgTempDbFileSetupReader
     internal const string FilesSql = @"
 WITH ranked AS (
     SELECT file_id, file_type_desc, file_name, total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb,
-           is_autogrow_all_files,
+           is_autogrow_all_files, collection_time,
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS newest
     FROM database_size_stats
     WHERE server_id = $1
@@ -34,7 +34,7 @@ WITH ranked AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
 )
-SELECT file_type_desc, file_name, total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb, is_autogrow_all_files
+SELECT file_type_desc, file_name, total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb, is_autogrow_all_files, collection_time
 FROM ranked
 WHERE newest = 1
 ORDER BY file_id";
@@ -45,7 +45,7 @@ WITH newest AS
 (
     {PerformanceMonitor.Common.CpuSchedulerCollectionSql.PerCollection("cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
 )
-SELECT scheduler_count
+SELECT scheduler_count, collection_time
 FROM newest";
 
     private static DateTime AsNaive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
@@ -70,19 +70,21 @@ FROM newest";
                 IsPercentGrowth: !reader.IsDBNull(4) && reader.GetBoolean(4),
                 GrowthPct: reader.IsDBNull(5) ? null : Convert.ToDouble(reader.GetValue(5)),
                 MaxSizeMb: reader.IsDBNull(6) ? null : Convert.ToDouble(reader.GetValue(6)),
-                IsAutogrowAllFiles: reader.IsDBNull(7) ? null : reader.GetBoolean(7)));
+                IsAutogrowAllFiles: reader.IsDBNull(7) ? null : reader.GetBoolean(7),
+                CollectedAt: reader.GetDateTime(8)));
         }
 
         return files;
     }
 
-    /// <summary>The newest visible online scheduler count, or null when none was collected in the lookback.</summary>
-    internal static async Task<int?> ReadSchedulerCountAsync(NpgsqlDataSource postgres, AnalysisContext context, int commandTimeoutSeconds)
+    /// <summary>The newest visible online scheduler count and when it was collected, or null when none was collected in the lookback.</summary>
+    internal static async Task<TempDbSchedulerCount?> ReadSchedulerCountAsync(NpgsqlDataSource postgres, AnalysisContext context, int commandTimeoutSeconds)
     {
+        /* Its own collector's lookback, not the file read's: a slowed database size collector must not widen this read. */
         await using var connection = await postgres.OpenConnectionAsync(context.CancellationToken);
         using var cmd = new NpgsqlCommand(SchedulerCountSql, connection) { CommandTimeout = commandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
+        cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(CpuSchedulerStatsCollector.Instance.Name)));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -90,6 +92,6 @@ FROM newest";
             return null;
 
         var count = Convert.ToInt32(reader.GetValue(0));
-        return count > 0 ? count : null;
+        return count > 0 ? new TempDbSchedulerCount(count, reader.GetDateTime(1)) : null;
     }
 }

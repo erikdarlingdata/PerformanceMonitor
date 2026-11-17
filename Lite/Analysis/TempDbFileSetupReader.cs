@@ -27,7 +27,7 @@ internal static class TempDbFileSetupReader
     internal const string FilesSql = @"
 WITH ranked AS (
     SELECT file_id, file_type_desc, file_name, total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb,
-           is_autogrow_all_files,
+           is_autogrow_all_files, collection_time,
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS newest
     FROM v_database_size_stats
     WHERE server_id = $1
@@ -35,7 +35,7 @@ WITH ranked AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
 )
-SELECT file_type_desc, file_name, total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb, is_autogrow_all_files
+SELECT file_type_desc, file_name, total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb, is_autogrow_all_files, collection_time
 FROM ranked
 WHERE newest = 1
 ORDER BY file_id";
@@ -46,7 +46,7 @@ WITH newest AS
 (
     {PerformanceMonitor.Common.CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
 )
-SELECT scheduler_count
+SELECT scheduler_count, collection_time
 FROM newest";
 
     internal static async Task<List<TempDbSetupFile>> ReadFilesAsync(DuckDbInitializer duckDb, AnalysisContext context)
@@ -75,16 +75,18 @@ FROM newest";
                 IsPercentGrowth: !reader.IsDBNull(4) && Convert.ToBoolean(reader.GetValue(4)),
                 GrowthPct: reader.IsDBNull(5) ? null : Convert.ToDouble(reader.GetValue(5)),
                 MaxSizeMb: reader.IsDBNull(6) ? null : Convert.ToDouble(reader.GetValue(6)),
-                IsAutogrowAllFiles: reader.IsDBNull(7) ? null : Convert.ToBoolean(reader.GetValue(7))));
+                IsAutogrowAllFiles: reader.IsDBNull(7) ? null : Convert.ToBoolean(reader.GetValue(7)),
+                CollectedAt: reader.GetDateTime(8)));
         }
 
         return files;
     }
 
-    /// <summary>The newest visible online scheduler count, or null when none was collected in the lookback.</summary>
-    internal static async Task<int?> ReadSchedulerCountAsync(DuckDbInitializer duckDb, AnalysisContext context)
+    /// <summary>The newest visible online scheduler count and when it was collected, or null when none was collected in the lookback.</summary>
+    internal static async Task<TempDbSchedulerCount?> ReadSchedulerCountAsync(DuckDbInitializer duckDb, AnalysisContext context)
     {
-        var start = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name);
+        /* Its own collector's lookback, not the file read's: a slowed database size collector must not widen this read. */
+        var start = context.LatestValueStartFor(CpuSchedulerStatsCollector.Instance.Name);
         var plan = await duckDb.PlanArchiveReadAsync("cpu_scheduler_stats", "collection_time", start, context.CancellationToken);
         using var readLock = duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = duckDb.CreateConnection();
@@ -101,6 +103,6 @@ FROM newest";
             return null;
 
         var count = Convert.ToInt32(reader.GetValue(0));
-        return count > 0 ? count : null;
+        return count > 0 ? new TempDbSchedulerCount(count, reader.GetDateTime(1)) : null;
     }
 }

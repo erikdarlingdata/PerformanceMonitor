@@ -21,7 +21,8 @@ public sealed record TempDbSetupFile(
     bool IsPercentGrowth,
     double? GrowthPct,
     double? MaxSizeMb,
-    bool? IsAutogrowAllFiles)
+    bool? IsAutogrowAllFiles,
+    DateTime CollectedAt)
 {
     public bool IsData => string.Equals(FileType, "ROWS", StringComparison.OrdinalIgnoreCase);
     public bool IsLog => string.Equals(FileType, "LOG", StringComparison.OrdinalIgnoreCase);
@@ -36,6 +37,9 @@ public sealed record TempDbSetupFile(
         IsPercentGrowth ? $"{(GrowthPct ?? 0):0.##}%" : (AutoGrowthMb is > 0 ? $"{AutoGrowthMb.Value:N0} MB" : "off");
 }
 
+/// <summary>The newest visible online scheduler count and the collection that stored it (#8883).</summary>
+public sealed record TempDbSchedulerCount(int Count, DateTime CollectedAt);
+
 /// <summary>
 /// The TEMPDB_FILE_SETUP fact (#8883): tempdb file layouts that cause allocation contention or uneven file use. It is built
 /// from the newest tempdb collection and the visible online scheduler count, by the same code on both products, so Lite and
@@ -46,6 +50,12 @@ public static class TempDbFileSetup
 {
     public const string FactKey = "TEMPDB_FILE_SETUP";
 
+    /// <summary>Fact metadata: when the tempdb files were collected, in Unix seconds (the unit the other facts' time keys use).</summary>
+    public const string MetaFilesCollectedUnix = "files_collected_unix";
+
+    /// <summary>Fact metadata: when the scheduler count was collected, in Unix seconds. Absent when no scheduler count was collected.</summary>
+    public const string MetaSchedulerCollectedUnix = "scheduler_collected_unix";
+
     /// <summary>The data file count past which more files stop helping: the lesser of this and the schedulers is the target.</summary>
     public const int MaxRecommendedDataFiles = 8;
 
@@ -54,10 +64,11 @@ public static class TempDbFileSetup
 
     /// <summary>
     /// Builds the fact, or returns null when the server fails no check or has no tempdb rows (an Azure SQL Database stores none).
-    /// <paramref name="schedulerCount"/> is the visible online scheduler count, null or 0 when none was collected, which skips
-    /// the file-count check. The fact's value is the number of checks failed.
+    /// <paramref name="scheduler"/> is the visible online scheduler count with its collection time, null when none was collected,
+    /// which skips the file-count check. The fact's value is the number of checks failed, and its metadata says when the files
+    /// and the scheduler count were collected.
     /// </summary>
-    public static Fact? BuildFact(AnalysisContext context, IReadOnlyList<TempDbSetupFile> files, int? schedulerCount)
+    public static Fact? BuildFact(AnalysisContext context, IReadOnlyList<TempDbSetupFile> files, TempDbSchedulerCount? scheduler)
     {
         if (files.Count == 0)
             return null;
@@ -69,6 +80,7 @@ public static class TempDbFileSetup
         {
             ["data_file_count"] = data.Count,
             ["log_file_count"] = logs.Count,
+            [MetaFilesCollectedUnix] = Unix(files.Max(f => f.CollectedAt)),
         };
 
         var failed = 0;
@@ -80,10 +92,11 @@ public static class TempDbFileSetup
         }
 
         /* 1. Fewer data files than the lesser of 8 and the schedulers. */
-        if (schedulerCount is > 0)
+        if (scheduler is { Count: > 0 })
         {
-            var target = Math.Min(MaxRecommendedDataFiles, schedulerCount.Value);
-            metadata["scheduler_count"] = schedulerCount.Value;
+            var target = Math.Min(MaxRecommendedDataFiles, scheduler.Count);
+            metadata["scheduler_count"] = scheduler.Count;
+            metadata[MetaSchedulerCollectedUnix] = Unix(scheduler.CollectedAt);
             metadata["recommended_data_file_count"] = target;
             Check("check_data_file_count", data.Count < target);
         }
@@ -134,7 +147,12 @@ public static class TempDbFileSetup
         };
     }
 
-    /// <summary>The drill-down rows: one per tempdb file with its size and growth, data files first.</summary>
+    /// <summary>Naive UTC to Unix seconds. The store's timestamps are naive UTC, so the kind is stamped rather than converted.</summary>
+    private static double Unix(DateTime utc) =>
+        new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
+    /// <summary>The drill-down rows: one per tempdb file with its size and growth, data files first, each with the time of the
+    /// collection it came from.</summary>
     public static List<object> DrillDownRows(IReadOnlyList<TempDbSetupFile> files) =>
         files
             .OrderBy(f => f.IsData ? 0 : 1)
@@ -147,7 +165,8 @@ public static class TempDbFileSetup
                 growth = f.GrowthText,
                 is_percent_growth = f.IsPercentGrowth,
                 max_size_mb = f.MaxSizeMb,
-                autogrow_all_files = f.IsAutogrowAllFiles
+                autogrow_all_files = f.IsAutogrowAllFiles,
+                collected_at = f.CollectedAt
             })
             .ToList();
 }

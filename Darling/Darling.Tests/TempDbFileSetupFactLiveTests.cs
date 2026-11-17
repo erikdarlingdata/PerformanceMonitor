@@ -47,6 +47,9 @@ public sealed class TempDbFileSetupFactLiveTests
 
     private static IEnumerable<File> DataFiles(int count) => Enumerable.Range(0, count).Select(_ => Data());
 
+    private static double Unix(DateTime naiveUtc) =>
+        new DateTimeOffset(DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
     private static DateTime Clock(int minutesAgo)
     {
         var raw = DateTime.UtcNow.AddMinutes(-minutesAgo);
@@ -225,10 +228,16 @@ VALUES ($1, $2, $3, 'srv', 512, $4, $4, 0, 0, 128, 0.5, 2, 0, 0, 0, 12.5, false,
 
             var broken = FirstServerId - 101;
             await SeedFilesAsync(connection, broken, Clock(90), DataFiles(8).Append(Log()), ct);
-            await SeedFilesAsync(connection, broken, Clock(30), new[] { Data(size: 1024, step: 256), Data(size: 2048, step: 0, percent: true, pct: 10), Log() }, ct);
-            await SeedSchedulersAsync(connection, broken, Clock(20), 16, ct);
+            var newestFiles = Clock(30);
+            var newestSchedulers = Clock(20);
+            await SeedFilesAsync(connection, broken, newestFiles, new[] { Data(size: 1024, step: 256), Data(size: 2048, step: 0, percent: true, pct: 10), Log() }, ct);
+            await SeedSchedulersAsync(connection, broken, newestSchedulers, 16, ct);
             var fact = await FactAsync(dataSource, broken, ct);
             AssertFails("newest collection counts", fact, "check_data_file_count", "check_data_file_sizes", "check_data_file_growth", "check_percent_growth");
+
+            /* The fact says WHEN: the newest collections' times, not the older one's. */
+            Assert.Equal(Unix(newestFiles), fact!.Metadata[TempDbFileSetup.MetaFilesCollectedUnix]);
+            Assert.Equal(Unix(newestSchedulers), fact.Metadata[TempDbFileSetup.MetaSchedulerCollectedUnix]);
 
             var facts = new List<Fact> { fact! };
             new FactScorer().ScoreAll(facts);
@@ -256,6 +265,29 @@ VALUES ($1, $2, $3, 'srv', 512, $4, $4, 0, 0, 128, 0.5, 2, 0, 0, 0, 12.5, false,
             Assert.Equal(2048, rows[1].GetProperty("total_size_mb").GetDouble());
             Assert.Equal("10%", rows[1].GetProperty("growth").GetString());
             Assert.Equal("LOG", rows[2].GetProperty("file_type").GetString());
+            Assert.All(rows, row => Assert.Equal(newestFiles, row.GetProperty("collected_at").GetDateTime()));
+        });
+    }
+
+    [Fact]
+    public async Task TheSchedulerCount_IsBoundedByItsOwnCollectorsLookback_NotTheDatabaseSizeCollectors()
+    {
+        await RunAsync(async (connection, dataSource, ct) =>
+        {
+            /* The database size collector runs weekly, so its lookback is two weeks. A scheduler count from two days ago is outside
+               the scheduler collector's own day, and the read must not accept it: with no count the file-count check is skipped. */
+            var serverId = FirstServerId - 102;
+            await SeedFilesAsync(connection, serverId, Clock(30), DataFiles(1).Append(Log()), ct);
+            await SeedSchedulersAsync(connection, serverId, Clock(48 * 60), 16, ct);
+
+            var context = Context(serverId);
+            context.LatestValueStarts = new Dictionary<string, DateTime>
+            {
+                ["database_size_stats"] = context.TimeRangeEnd.AddDays(-14),
+                ["cpu_scheduler_stats"] = context.TimeRangeEnd.AddHours(-24),
+            };
+            var facts = await new PgFactCollector(dataSource).CollectFactsAsync(context);
+            AssertFails("the stale scheduler count is not read", facts.SingleOrDefault(f => f.Key == "TEMPDB_FILE_SETUP"));
         });
     }
 }
