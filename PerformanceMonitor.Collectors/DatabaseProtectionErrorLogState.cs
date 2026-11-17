@@ -214,8 +214,15 @@ public static class DatabaseProtectionErrorLogState
             return new ErrorLogPlan(new[] { current }, Array.Empty<DateTime>(), loaded, false, null, enumerateError);
         }
 
-        var before = loaded;
         var archives = enumerated.Where(a => a.Archive > 0).ToList();
+        /* #8865: an attempt count or a skip for a date the list no longer holds is for an archive that aged out; kept, the skipped list
+           would show a note nobody can clear. Trimmed only when the list was read, since a list that was not read says nothing. */
+        var listed = new HashSet<DateTime>(archives.Select(a => a.LogDate));
+        var before = loaded with
+        {
+            Attempts = loaded.Attempts.Where(p => listed.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value),
+            Skipped = loaded.Skipped.Where(listed.Contains).ToList(),
+        };
         if (before.Markers.NewestArchive is null)
         {
             /* #8865: with no archives yet the marker is the minimum date, not null: a null marker would make the

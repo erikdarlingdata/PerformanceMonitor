@@ -841,6 +841,33 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     [Fact]
+    public async Task SkipsAndAttemptsForArchivesThatAgedOut_AreDropped_WhenTheListIsRead()
+    {
+        /* #8865 M1: a skipped archive that later rolled off kept its "skipped archives" note for good, and nothing could clear it. */
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var agedOut = Checked.AddDays(-30);
+        var stillListed = Checked.AddDays(-2);
+        var state = SettledState();
+        state[DatabaseProtectionErrorLogState.NewestArchiveKey] = DatabaseProtectionErrorLogState.FormatNewestArchive(
+            new DatabaseProtectionErrorLogState.Markers(Checked.AddDays(-1), null, true, 1));
+        state[DatabaseProtectionErrorLogState.SkippedKey] = DatabaseProtectionErrorLogState.FormatDates(new[] { agedOut, stillListed });
+        state[DatabaseProtectionErrorLogState.AttemptsKey] = DatabaseProtectionErrorLogState.FormatAttempts(new Dictionary<DateTime, int> { [agedOut] = 1 });
+        var context = ContextWith(state);
+
+        var row = Assert.Single(await ReadWithAsync(context, table, Logs(3)));
+
+        Assert.Equal(DatabaseProtectionErrorLogState.FormatDates(new[] { stillListed }), context.PendingState[DatabaseProtectionErrorLogState.SkippedKey]);
+        Assert.Equal(string.Empty, context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+        Assert.Equal(DatabaseProtectionErrorLogState.FormatDates(new[] { stillListed }), row.ErrorLogSkippedArchives);
+
+        /* A list that was not read trims nothing. */
+        var refused = ContextWith(state);
+        await ReadWithAsync(refused, table, RefusedList());
+        Assert.DoesNotContain(DatabaseProtectionErrorLogState.SkippedKey, refused.PendingState.Keys);
+    }
+
+    [Fact]
     public async Task AnAttemptThatSucceeds_IsUnstaged_WhenStateNeverHeldIt()
     {
         var table = Shape();
