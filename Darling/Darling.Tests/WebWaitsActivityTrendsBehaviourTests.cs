@@ -120,6 +120,20 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
     }
 
     [Fact]
+    public void TheSessionStatsTrend_DrawsTotalLastAndDashed_SoNoStatusLineHidesIt()
+    {
+        // #8937: Total counts every session and Background is part of Running and Sleeping, so Total runs close beside Sleeping. A series drawn
+        // later is drawn over the earlier ones, so Total goes last, dashed. Each series keeps its place's color.
+        var chart = Run("session").GetProperty("chart");
+        var labels = Strings(chart.GetProperty("labels"));
+        Assert.Equal("Total", labels[^1]);
+        Assert.Equal(new[] { "Running", "Sleeping", "Background", "Dormant", "Idle over 30 min", "Waiting for memory", "Total" }, labels);
+        Assert.Equal(new[] { "Total" }, Strings(chart.GetProperty("dashed")));
+        var colors = Strings(chart.GetProperty("colors"));
+        Assert.Equal(labels.Length, colors.Distinct().Count());
+    }
+
+    [Fact]
     public void TheChoices_SurviveARebuildForTheSameServer_AndStartFreshForAnotherServerAndKind()
     {
         var r = Run("survives");
