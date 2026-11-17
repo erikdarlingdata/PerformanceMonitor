@@ -1285,6 +1285,44 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* #8798: collect.column_stats (the current column statistics rows) is NOT purged by age. A row is replaced in place when its
+               statistic is read again, and a statistic nobody has updated for months is still the current one, so its last_updated and
+               read_at say nothing about whether the row is live. Like the current schema versions, the rows go only when no
+               collect.column_stats_state row of ANY server points at their (history key, database) with a last_seen_in_scope_at inside
+               the window: a dropped database, a removed or switched-off server, a database that left the collector's scope. An
+               availability group's rows stay while any of its servers still sees the database. The window is twice the collector's
+               interval, never under a day (ColumnStatsStaleCutoff), so a removed server's rows age out within a day. Retention has no
+               access to the resolved schedule, so the interval is the shipped default. The rows first, then the state rows, so a failed
+               row purge is retried by the next sweep (the state still points at them). collect.column_stats_runs is a catalogue table
+               and is purged by the loop above. */
+            var columnStatsCutoff = ColumnStatsStaleCutoff(utcNow);
+            var staleColumnStatsDeleted = await PurgeOneAsync(
+                postgres, "collect.column_stats", StaleColumnStatsDeleteSql, columnStatsCutoff, logger, cancellationToken,
+                batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleColumnStatsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleColumnStatsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            var staleColumnStatsStateDeleted = await PurgeOneAsync(
+                postgres, "collect.column_stats_state",
+                "DELETE FROM collect.column_stats_state WHERE last_seen_in_scope_at IS NULL OR last_seen_in_scope_at < $1",
+                columnStatsCutoff, logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleColumnStatsStateDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleColumnStatsStateDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
                guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
                collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
@@ -1755,6 +1793,38 @@ WHERE NOT EXISTS
     FROM keep AS k
     WHERE k.database_name = o.database_name
     AND   k.history_key = CASE WHEN o.ag_group_id IS NOT NULL THEN 'g' || o.ag_group_id::text ELSE 's' || o.server_id::text END
+)";
+
+    /// <summary>
+    /// #8798: <c>$1</c> for the column statistics sweep: now less the larger of twice the <c>column_stats</c> collector's default interval
+    /// and one day. A database no pass stamped since then is out of every server's scope.
+    /// </summary>
+    internal static DateTime ColumnStatsStaleCutoff(DateTime utcNow) =>
+        utcNow.AddMinutes(-Math.Max(2 * CollectorScheduleDefaults.All["column_stats"].FrequencyMinutes, 24 * 60));
+
+    /// <summary>
+    /// #8798: every current column statistics row of a (history key, database) that no <c>collect.column_stats_state</c> row of any server
+    /// points at with a <c>last_seen_in_scope_at</c> at or after <c>$1</c>. The key is one text value per kind ('g' and the group id, or
+    /// 's' and the server id), as <see cref="StaleSchemaHistoryDeleteSql"/> writes it; a state row names the group when it has one.
+    /// </summary>
+    internal const string StaleColumnStatsDeleteSql = @"
+WITH keep AS
+(
+    SELECT
+        CASE WHEN s.history_ag_group_id IS NOT NULL THEN 'g' || s.history_ag_group_id::text ELSE 's' || s.history_server_id::text END AS history_key,
+        s.database_name
+    FROM collect.column_stats_state AS s
+    WHERE s.last_seen_in_scope_at >= $1
+    AND   (s.history_ag_group_id IS NOT NULL OR s.history_server_id IS NOT NULL)
+)
+DELETE FROM collect.column_stats AS o
+WHERE NOT EXISTS
+(
+    SELECT
+        1
+    FROM keep AS k
+    WHERE k.database_name = o.database_name
+    AND   k.history_key = CASE WHEN o.history_ag_group_id IS NOT NULL THEN 'g' || o.history_ag_group_id::text ELSE 's' || o.history_server_id::text END
 )";
 
     /// <summary>
