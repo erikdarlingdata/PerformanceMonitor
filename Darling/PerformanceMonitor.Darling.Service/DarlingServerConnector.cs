@@ -824,7 +824,9 @@ FROM pg_catalog.pg_control_system() AS s";
     /// path + credentials) and the <c>--test-connection</c>/<c>--validate-config</c> CLI verb, so both
     /// classify a server identically. <see cref="OperationCanceledException"/> propagates (shutdown).
     /// </summary>
-    public static async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken, bool runsAsConsoleUser = false)
+    public static async Task<ConnectionProbeResult> ProbeAsync(
+        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken, bool runsAsConsoleUser = false,
+        IReadOnlyList<string>? columnStatsDatabases = null)
     {
         if (config is null)
         {
@@ -852,7 +854,7 @@ FROM pg_catalog.pg_control_system() AS s";
             var checksTheWrongPrincipal = runsAsConsoleUser && !config.UsesSqlAuth && !config.UsesEntra;
             var missingGrants = isPostgres || checksTheWrongPrincipal
                 ? null
-                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken, isAwsRds: runtime.Target.IsAwsRds);
+                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken, isAwsRds: runtime.Target.IsAwsRds, columnStatsDatabases: columnStatsDatabases);
 
             return new ConnectionProbeResult(
                 Success: true,
@@ -909,11 +911,15 @@ FROM pg_catalog.pg_control_system() AS s";
     /// says nothing when it cannot read the answer (an old version that does not know a permission name answers NULL, which is no claim):
     /// the connection worked, and a missing grant is a warning beside that result, not a failure of it.
     /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection. <paramref name="isAwsRds"/> leaves out the grants RDS refuses (#6889).
+    /// <paramref name="columnStatsDatabases"/> (#8798) are the databases the column_stats collector is configured to read: for each, the login's
+    /// database-level SELECT is checked and a missing one is described. The caller passes the list only when column_stats is enabled for the server;
+    /// null or empty checks nothing (an empty collector scope means "every database", and the connection test never checks every database).
     /// </summary>
     internal static async Task<string?> ProbeMissingGrantsAsync(
         string connectionString, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
         Func<string, System.Data.Common.DbConnection>? createConnection = null,
-        bool isAwsRds = false)
+        bool isAwsRds = false,
+        IReadOnlyList<string>? columnStatsDatabases = null)
     {
         /* #6889: Amazon RDS refuses CONNECT ANY DATABASE to its master user, so asking for it there names a statement that cannot succeed. */
         var entries = isAzureSqlDatabase
@@ -925,33 +931,43 @@ FROM pg_catalog.pg_control_system() AS s";
         {
             await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.BuildPermissionCheckSql(entries);
-            command.CommandTimeout = 15;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
+            string who;
+            string? missingText;
+            string? noUserText;
+            await using (var command = connection.CreateCommand())
             {
-                return null;
+                command.CommandText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.BuildPermissionCheckSql(entries);
+                command.CommandTimeout = 15;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    return null;
+                }
+
+                var held = new List<int?>();
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    held.Add(reader.IsDBNull(i) ? null : Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture));
+                }
+
+                who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
+                missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+
+                /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
+                long noUserDatabases = 0;
+                if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
+                {
+                    noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
             }
 
-            var held = new List<int?>();
-            for (var i = 0; i < entries.Count; i++)
-            {
-                held.Add(reader.IsDBNull(i) ? null : Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture));
-            }
-
-            var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
-            var missingText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
-
-            /* #6889: the count of online user databases the login cannot enter rides after the login name (server scope only). */
-            long noUserDatabases = 0;
-            if (reader.FieldCount > entries.Count + 1 && !reader.IsDBNull(entries.Count + 1))
-            {
-                noUserDatabases = Convert.ToInt64(reader.GetValue(entries.Count + 1), System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            var noUserText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeNoUserDatabases(noUserDatabases, who, isAwsRds);
-            return missingText is null ? noUserText : noUserText is null ? missingText : missingText + " " + noUserText;
+            var columnStatsText = columnStatsDatabases is { Count: > 0 } && !isAzureSqlDatabase
+                ? await ProbeMissingColumnStatsSelectAsync(connection, columnStatsDatabases, who, cancellationToken)
+                : null;
+            var parts = new[] { missingText, noUserText, columnStatsText }.Where(t => t is not null).ToList();
+            return parts.Count == 0 ? null : string.Join(" ", parts);
         }
         catch (OperationCanceledException)
         {
@@ -962,6 +978,41 @@ FROM pg_catalog.pg_control_system() AS s";
             logger?.LogDebug("The grant check did not run ({Message}); the connection result stands without it", ex.Message);
             return null;
         }
+    }
+
+    /// <summary>
+    /// #8798: the listed databases where the login lacks database-level SELECT (the grant DBCC SHOW_STATISTICS needs), described, or null when none is
+    /// missing. One <c>HAS_PERMS_BY_NAME</c> per database in a single query. Only a 0 counts as missing: NULL (a name this server does not know) is no claim.
+    /// </summary>
+    private static async Task<string?> ProbeMissingColumnStatsSelectAsync(
+        System.Data.Common.DbConnection connection, IReadOnlyList<string> databases, string who, CancellationToken cancellationToken)
+    {
+        var listed = databases.Where(d => !string.IsNullOrWhiteSpace(d)).Select(d => d.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (listed.Count == 0)
+        {
+            return null;
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT " + string.Join(", ", listed.Select((d, i) =>
+            "HAS_PERMS_BY_NAME(N'" + d.Replace("'", "''", StringComparison.Ordinal) + "', N'DATABASE', N'SELECT') AS d" + i)) + ";";
+        command.CommandTimeout = 15;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var missing = new List<string>();
+        for (var i = 0; i < listed.Count; i++)
+        {
+            if (!reader.IsDBNull(i) && Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture) == 0)
+            {
+                missing.Add(listed[i]);
+            }
+        }
+
+        return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingColumnStatsSelect(missing, who);
     }
 
     /// <summary>

@@ -786,6 +786,10 @@ public sealed partial class DarlingWorker
     internal static bool IsSchemaObjectsCollector(string collectorName) =>
         string.Equals(collectorName, SchemaObjectsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>#8798: whether a dispatched collector name is column_stats, detached from the sequential body like schema_objects: a first baseline reads every statistic of every database for minutes. A skipped tick is safe, the next run re-reads whatever STATS_DATE says changed.</summary>
+    internal static bool IsColumnStatsCollector(string collectorName) =>
+        string.Equals(collectorName, ColumnStatsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>#5640 (H2): the permission fault the attention run records as PERMISSIONS, or null for any other collector and when the ensure was not denied.</summary>
     internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
         IsAttentionCollector(collectorName) ? server.AttentionXePermissionFault : null;

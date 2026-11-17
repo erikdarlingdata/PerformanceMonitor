@@ -79,6 +79,7 @@ public sealed class UnpooledDropConnectionCensusTests
         ["SchemaChangesXeSessionLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["SchemaEventLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["SchemaCaptureEndToEndLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
+        ["ColumnStatsEndToEndLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]) and a scratch login; the scratch store it also makes is dropped by ScratchPostgres.",
         ["ScratchPostgresQuiesceTests.cs"] = "The quiesce census: its samples hold the drop text on purpose, and the live test there drops through ScratchPostgres.",
     };
 
