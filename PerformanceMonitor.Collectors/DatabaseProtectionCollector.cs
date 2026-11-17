@@ -746,9 +746,18 @@ OPTION(RECOMPILE);";
             .ToList();
         var markers = DatabaseProtectionErrorLogState.MarkersAfter(plan, readOk, plan.Enumerated ?? plan.Read);
         var attempts = new Dictionary<DateTime, int>(plan.Before.Attempts);
+        /* #8865: a permission refusal is not an archive fault. When the current log is refused, or an archive's own error is a permission
+           error, the archive keeps the attempt count it was loaded with (ReadAsync staged +1 in advance), so a missing grant never uses up
+           the archives' tries and the backlog is still there to backfill once the grant is added. A timeout never reaches here and counts. */
+        var currentRefused = status.TryGetValue(0, out var currentStatus) && !currentStatus.Ok && IsPermissionError(currentStatus.ErrorNumber);
         foreach (var archive in plan.Read.Where(a => a.Archive > 0))
         {
-            attempts[archive.LogDate] = attempts.GetValueOrDefault(archive.LogDate) + 1;
+            var refused = currentRefused
+                || (status.TryGetValue(archive.Archive, out var archiveStatus) && !archiveStatus.Ok && IsPermissionError(archiveStatus.ErrorNumber));
+            if (!refused)
+            {
+                attempts[archive.LogDate] = attempts.GetValueOrDefault(archive.LogDate) + 1;
+            }
         }
 
         foreach (var date in readOk)

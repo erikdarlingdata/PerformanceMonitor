@@ -621,6 +621,52 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     [Fact]
+    public async Task ARefusedCurrentLog_DoesNotCountAttempts_OnOlderArchives()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var state = new Dictionary<string, string>();
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            var context = ContextWith(state);
+            var rows = await ReadWithAsync(context, table, Logs(4));
+            var status = StatusShape();
+            foreach (var archive in new[] { 0, 1, 2, 3 })
+            {
+                status.Rows.Add(archive, false, 27219, "Caller does not have permissions to execute the stored procedure.");
+            }
+
+            await ApplyAsync(context, rows, status, LineShape());
+
+            Assert.Equal(DatabaseProtectionCollector.ErrorLogRefused, rows[0].ErrorLogState);
+            Assert.False(context.PendingState.ContainsKey(DatabaseProtectionErrorLogState.AttemptsKey), "cycle " + cycle);
+            Assert.False(context.PendingState.ContainsKey(DatabaseProtectionErrorLogState.SkippedKey), "cycle " + cycle);
+            Assert.Equal(new[] { 0, 1, 2, 3 }, context.DatabaseProtectionErrorLogPlan!.Read.Select(a => a.Archive).ToArray());
+            state = Carry(context, state);
+        }
+    }
+
+    [Fact]
+    public async Task AnArchiveWithAPermissionError_KeepsItsLoadedAttempts_AndOtherFailuresStillCount()
+    {
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var context = ContextWith(new Dictionary<string, string>());
+        var rows = await ReadWithAsync(context, table, Logs(4));
+        var status = StatusShape();
+        status.Rows.Add(0, true, DBNull.Value, DBNull.Value);
+        status.Rows.Add(1, false, 229, "denied");
+        status.Rows.Add(2, false, 21, "boom");
+        status.Rows.Add(3, true, DBNull.Value, DBNull.Value);
+
+        await ApplyAsync(context, rows, status, LineShape());
+
+        Assert.Equal(
+            DatabaseProtectionErrorLogState.FormatAttempts(new Dictionary<DateTime, int> { [Checked.AddDays(-2)] = 1 }),
+            context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+    }
+
+    [Fact]
     public async Task AnAttemptThatSucceeds_IsUnstaged_WhenStateNeverHeldIt()
     {
         var table = Shape();
