@@ -367,7 +367,7 @@ FROM config.store_log_read_marker AS m";
            finished, and each slab's text is classified and released before the next is read. */
         var clock = Stopwatch.StartNew();
         var slabsRead = 0;
-        var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups)>();
+        var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups, StoreLogClassifier.CaptureBudget Budget)>();
 
         foreach (var candidate in candidates)
         {
@@ -377,7 +377,8 @@ FROM config.store_log_read_marker AS m";
                 continue;
             }
 
-            var step = await ReadSlabAsync(connection, files, candidate, resume.Offset, detailInEnglish, cancellationToken);
+            var budget = new StoreLogClassifier.CaptureBudget();
+            var step = await ReadSlabAsync(connection, files, candidate, resume.Offset, detailInEnglish, budget, cancellationToken);
             if (step is null)
             {
                 /* Nothing complete yet - one partial line at the end of a file being written. The marker
@@ -401,7 +402,7 @@ FROM config.store_log_read_marker AS m";
 
             if (capture.BytesPending > 0)
             {
-                open.Add((captured.Count - 1, candidate, newOffset, new List<StoreLogClassifier.Group>(census.Groups)));
+                open.Add((captured.Count - 1, candidate, newOffset, new List<StoreLogClassifier.Group>(census.Groups), budget));
             }
 
             if (captured.Count >= MaxFilesPerCapture)
@@ -417,7 +418,7 @@ FROM config.store_log_read_marker AS m";
                    && clock.Elapsed < ReadOnBudget
                    && file.Candidate.SizeBytes > nextOffset)
             {
-                var step = await ReadSlabAsync(connection, files, file.Candidate, nextOffset, detailInEnglish, cancellationToken);
+                var step = await ReadSlabAsync(connection, files, file.Candidate, nextOffset, detailInEnglish, file.Budget, cancellationToken);
                 if (step is null)
                 {
                     break;
@@ -614,6 +615,7 @@ FROM config.store_log_read_marker AS m";
         Candidate candidate,
         long offset,
         bool detailInEnglish,
+        StoreLogClassifier.CaptureBudget budget,
         CancellationToken cancellationToken)
     {
         var length = (int)Math.Min(StoreLogSlab.MaxBytesPerRead, candidate.SizeBytes - offset);
@@ -626,7 +628,7 @@ FROM config.store_log_read_marker AS m";
             return null;
         }
 
-        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish));
+        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget));
     }
 
     private static async Task<byte[]> ReadAsync(

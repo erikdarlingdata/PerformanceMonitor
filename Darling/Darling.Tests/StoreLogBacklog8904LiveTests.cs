@@ -177,6 +177,61 @@ public sealed class StoreLogBacklog8904LiveTests
         NewestSampleLogStamp = stamp,
     };
 
+    /// <summary>One slab of exactly <see cref="StoreLogSlab.MaxBytesPerRead"/> bytes: the named messages first, then
+    /// checkpoint lines, then spaces on a last line so the slab ends on a newline at the read size and the next slab
+    /// begins where this fixture says it does.</summary>
+    private static string ExactSlab(IEnumerable<int> messages)
+    {
+        var text = new StringBuilder();
+        foreach (var m in messages)
+        {
+            text.Append("2026-11-17 16:00:00.000 UTC [1] ERROR:  function f")
+                .Append((char)('a' + m / 26))
+                .Append((char)('a' + m % 26))
+                .Append("() does not exist\n");
+        }
+
+        var i = 0;
+        while (StoreLogSlab.MaxBytesPerRead - text.Length >= EntryLine(1).Length + 100)
+        {
+            text.Append(EntryLine(++i));
+        }
+
+        text.Append(' ', (int)StoreLogSlab.MaxBytesPerRead - text.Length - 1).Append('\n');
+        Assert.Equal(StoreLogSlab.MaxBytesPerRead, text.Length);
+        return text.ToString();
+    }
+
+    [Fact]
+    public async Task OneCapture_KeepsTheRetainedMessageBudgetOverAllItsSlabs_AndCountsAMessageFoldedInTwoSlabsOnce()
+    {
+        await WithStoreAsync(async (connection, _, ct) =>
+        {
+            /* Thirty distinct messages of one class over three slabs. Slab 1 holds 0-14, slab 2 holds 10-24 and slab 3
+               holds 18-29. With one budget for the capture, 20 are kept (0-19), and 20-29 are folded: 20-24 in slab 2
+               and again in slab 3, 25-29 in slab 3. A budget that starts again each slab keeps 15, 15 and 12. */
+            var file = Encoding.UTF8.GetBytes(
+                ExactSlab(Enumerable.Range(0, 15)) + ExactSlab(Enumerable.Range(10, 15)) + ExactSlab(Enumerable.Range(18, 12)));
+
+            var capture = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", file), ct));
+            Assert.Equal(3 * StoreLogSlab.MaxBytesPerRead, capture.BytesRead);
+            Assert.Equal(0, capture.BytesPending);
+
+            var errors = capture.Census.Groups.Where(g => string.Equals(g.Severity, "ERROR", StringComparison.Ordinal)).ToArray();
+            var kept = errors.Where(g => g.MessageText is not null).ToArray();
+            Assert.Equal(StoreLogClassifier.MaxRetainedGroupsPerClass, kept.Select(g => g.MessageText).Distinct().Count());
+            Assert.Equal(10, capture.Census.GroupsDropped);
+
+            /* A message kept in an earlier slab keeps adding occurrences in later ones (18 and 19 are in slabs 2 and 3),
+               and nothing is lost. */
+            Assert.Equal(4, kept.Where(g => g.MessageText!.Contains("fas", StringComparison.Ordinal) || g.MessageText.Contains("fat", StringComparison.Ordinal)).Sum(g => g.Occurrences));
+            Assert.Equal(15 + 15 + 12, errors.Sum(g => g.Occurrences));
+
+            await using var stored = new NpgsqlCommand("SELECT groups_dropped FROM collect.store_log_captures", connection);
+            Assert.Equal(10, (int)(await stored.ExecuteScalarAsync(ct))!);
+        });
+    }
+
     [Fact]
     public void Note_ForABacklogOverTheBound_NamesTheBoundAndTheCapturesItNeeds_AndOtherwiseKeepsTheOldSentence()
     {
@@ -211,7 +266,9 @@ public sealed class StoreLogBacklog8904LiveTests
             Assert.Equal(1, backlog.GetProperty("captures_needed").GetInt64());
             Assert.Equal(stamp, backlog.GetProperty("newest_sample_log_stamp").GetString());
             Assert.Contains("not a quiet hour", backlog.GetProperty("note").GetString(), StringComparison.Ordinal);
-            Assert.Contains(stamp, pending.GetProperty("note").GetString(), StringComparison.Ordinal);
+            Assert.Contains($"The read reached at least the log's own time {stamp}", pending.GetProperty("note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("how far past it is not known", pending.GetProperty("note").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("not read past", pending.GetProperty("note").GetString(), StringComparison.Ordinal);
             Assert.Contains("can read low", pending.GetProperty("note").GetString(), StringComparison.Ordinal);
 
             await StoreLogTestCapture.WriteAsync(postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), slab, ct);

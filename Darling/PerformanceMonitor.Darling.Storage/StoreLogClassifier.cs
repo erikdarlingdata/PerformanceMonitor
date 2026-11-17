@@ -450,6 +450,22 @@ public static class StoreLogClassifier
         int GroupsDropped);
 
     /// <summary>
+    /// The retained-message budget of ONE capture of ONE file, carried across the slabs the capture reads (#8904):
+    /// which retained messages the capture has kept, how many each class has kept, and which over-budget messages
+    /// it has already folded. Without it every slab would start the budget again, so a capture of eight slabs would
+    /// keep eight times <see cref="MaxRetainedGroupsPerClass"/> messages a class and count a message folded in two
+    /// slabs twice. One instance lives for one capture of one file and holds only keys, never slab text.
+    /// </summary>
+    public sealed class CaptureBudget
+    {
+        internal HashSet<(string Class, string Severity, string? Message)> Kept { get; } = [];
+
+        internal Dictionary<string, int> PerClass { get; } = new(StringComparer.Ordinal);
+
+        internal HashSet<(string Class, string Severity, string? Message)> Folded { get; } = [];
+    }
+
+    /// <summary>
     /// The invariant behind every excluding rule: it names its severities explicitly and anchors its text at
     /// the START of the message. Exported so the pin asserts the shipped table rather than a copy of it — an
     /// excluding rule added with <see cref="MatchKind.Contains"/> is how a real shape becomes invisible, and
@@ -540,7 +556,7 @@ public static class StoreLogClassifier
     /// classified, because a fixture legitimately ends that way and dropping it would make the pin's own
     /// last case silently untested.</para>
     /// </summary>
-    public static Census Classify(string? slab, bool detailInEnglish = true)
+    public static Census Classify(string? slab, bool detailInEnglish = true, CaptureBudget? budget = null)
     {
         var entries = new List<Entry>();
         var lines = 0;
@@ -642,7 +658,7 @@ public static class StoreLogClassifier
         }
 
         return new Census(
-            Groups: GroupEntries(entries, out var dropped),
+            Groups: GroupEntries(entries, budget ?? new CaptureBudget(), out var dropped),
             LinesRead: lines,
             EntriesRead: entries.Count,
             ContinuationLines: continuations,
@@ -655,10 +671,10 @@ public static class StoreLogClassifier
     /// novel message is immediately its own), and an excluded class groups by class and severity alone with no
     /// text at all.
     /// </summary>
-    private static List<Group> GroupEntries(List<Entry> entries, out int dropped)
+    private static List<Group> GroupEntries(List<Entry> entries, CaptureBudget budget, out int dropped)
     {
         var counts = new Dictionary<(string Class, string Severity, string? Message), (int Count, string? Sample)>();
-        var perClass = new Dictionary<string, int>(StringComparer.Ordinal);
+        var perClass = budget.PerClass;
         var order = new List<(string Class, string Severity, string? Message)>();
 
         /* Which over-budget MESSAGES have already been folded. Needed because a folded message's own key is
@@ -667,7 +683,7 @@ public static class StoreLogClassifier
            hundred distinct messages folded, which is the opposite of what this figure is documented to mean
            in three places (this struct, CaptureSummary.MessagesFolded, and the sentence get_store_log
            renders) and would read to a human as five hundred separate problems. */
-        var folded = new HashSet<(string Class, string Severity, string? Message)>();
+        var folded = budget.Folded;
         dropped = 0;
 
         foreach (var entry in entries)
@@ -684,7 +700,10 @@ public static class StoreLogClassifier
             if (entry.Retained)
             {
                 perClass.TryGetValue(entry.EventClass, out var distinct);
-                if (distinct >= MaxRetainedGroupsPerClass)
+
+                /* A message an earlier slab of this capture kept is already inside the budget: it adds its
+                   occurrences here as a row of its own (the store sums them) and spends no new place. */
+                if (!budget.Kept.Contains(key) && distinct >= MaxRetainedGroupsPerClass)
                 {
                     /* Past the budget: fold into the class's untexted row so the OCCURRENCE is never lost,
                        and report the fold ONCE PER DISTINCT MESSAGE, not once per occurrence of it. */
@@ -707,7 +726,10 @@ public static class StoreLogClassifier
                     continue;
                 }
 
-                perClass[entry.EventClass] = distinct + 1;
+                if (budget.Kept.Add(key))
+                {
+                    perClass[entry.EventClass] = distinct + 1;
+                }
             }
 
             counts[key] = (1, entry.Retained ? entry.RawText : null);

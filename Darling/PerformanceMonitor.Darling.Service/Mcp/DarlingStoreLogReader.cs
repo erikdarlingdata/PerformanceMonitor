@@ -370,7 +370,8 @@ LIMIT $3";
         [JsonPropertyName("captures_needed")] public long CapturesNeeded { get; init; }
 
         /// <summary>The log's own time stamp on the newest kept sample line, as written, in the store's log time zone.
-        /// The log after it is unread. Null when no kept sample line carries one.</summary>
+        /// It is a floor, not a ceiling: the read reached at least this time, and how far past it is not known, because only
+        /// a retained class keeps a sample line. Null when no kept sample line carries one.</summary>
         [JsonPropertyName("newest_sample_log_stamp")] public string? NewestSampleLogStamp { get; init; }
 
         [JsonPropertyName("note")] public string Note => "The newest hours of the log are not read yet: occurrences_last_hour counts only what was read, so 0 there is not a quiet hour.";
@@ -390,7 +391,7 @@ LIMIT $3";
         [JsonIgnore] public string? NewestSampleLogStamp { get; init; }
 
         /// <summary>Present only while bytes are pending (#8904): the newest hours of the log are not read yet, how much
-        /// one capture reads, and the log time the read had reached, so an <c>occurrences_last_hour</c> of 0 is not taken
+        /// one capture reads, and the log time the read reached at least, so an <c>occurrences_last_hour</c> of 0 is not taken
         /// for a quiet hour. Absent when the reader is level.</summary>
         [JsonPropertyName("log_backlog"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public LogBacklogInfo? LogBacklog => Captures.BytesPending > 0
@@ -585,7 +586,7 @@ LIMIT $3";
 
             /* #8904: the newest hours are the unread ones, so a 0 in occurrences_last_hour is not a quiet hour. */
             note.Append(report.NewestSampleLogStamp is { } stamp
-                ? $"The log is not read past its own time {stamp} (the newest stamp on a kept sample line), so occurrences_last_hour and the newest hours of every class count only what was read and can read low. "
+                ? $"The read reached at least the log's own time {stamp} (the newest stamp on a kept sample line) and how far past it is not known, so occurrences_last_hour and the newest hours of every class count only what was read and can read low. "
                 : "The newest hours of the log are not read yet (no kept sample line carries a log time to name), so occurrences_last_hour and the newest hours of every class count only what was read and can read low. ");
         }
 
