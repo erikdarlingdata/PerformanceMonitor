@@ -286,8 +286,6 @@ public sealed class ViewerControlPlaneMigration
             LongRunningQueryThresholdMinutes = s.AlertLongRunningQueryThresholdMinutes,
             TempDbSpaceEnabled = s.AlertTempDbSpaceEnabled,
             TempDbSpaceThresholdPercent = s.AlertTempDbSpaceThresholdPercent,
-            TempDbLogSpaceEnabled = s.AlertTempDbLogSpaceEnabled,
-            TempDbLogSpaceThresholdPercent = s.AlertTempDbLogSpaceThresholdPercent,
             LowDiskEnabled = s.AlertLowDiskEnabled,
             LowDiskThresholdPercent = s.AlertLowDiskThresholdPercent,
             LowDiskThresholdGb = s.AlertLowDiskThresholdGb,

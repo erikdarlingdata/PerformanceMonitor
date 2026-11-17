@@ -160,8 +160,6 @@ public sealed class ViewerAppSettings
 
     public bool AlertTempDbSpaceEnabled { get; set; } = true;
     public int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
-    public bool AlertTempDbLogSpaceEnabled { get; set; } = true;
-    public int AlertTempDbLogSpaceThresholdPercent { get; set; } = 80;
 
     public bool AlertLowDiskEnabled { get; set; } = true;
     public int AlertLowDiskThresholdPercent { get; set; } = 10;
@@ -245,7 +243,6 @@ public sealed class ViewerAppSettings
         AlertLongRunningQueryThresholdMinutes = Clamp(AlertLongRunningQueryThresholdMinutes, 1, int.MaxValue, 30);
         AlertLongRunningQueryMaxResults = Clamp(AlertLongRunningQueryMaxResults, 1, 1000, 5);
         AlertTempDbSpaceThresholdPercent = Clamp(AlertTempDbSpaceThresholdPercent, 1, 100, 80);
-        AlertTempDbLogSpaceThresholdPercent = Clamp(AlertTempDbLogSpaceThresholdPercent, 1, 100, 80);
         AlertLowDiskThresholdPercent = Clamp(AlertLowDiskThresholdPercent, 0, 100, 10);
         AlertLowDiskThresholdGb = Clamp(AlertLowDiskThresholdGb, 0, int.MaxValue, 5);
         AlertLongRunningJobMultiplier = Clamp(AlertLongRunningJobMultiplier, 2, 20, 3);
