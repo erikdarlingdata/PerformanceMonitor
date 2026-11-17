@@ -213,7 +213,10 @@ internal static class StoreHealthRows
 
         if (r.LargerThanHeap)
         {
-            flags.Add(r.LargerThanHeapCount > 1 ? $"Larger than its table ({r.LargerThanHeapCount})" : "Larger than its table");
+            /* #8897: a rolled-up row's flag is about its copies, not the sum the ratio beside it is of, so it always says how many, even one. */
+            flags.Add(r.IndexCount > 1
+                ? $"{r.LargerThanHeapCount} of {r.IndexCount} copies larger than its table"
+                : "Larger than its table");
         }
 
         if (r.RarelyUsed)
@@ -222,6 +225,19 @@ internal static class StoreHealthRows
         }
 
         return string.Join(", ", flags);
+    }
+
+    /// <summary>
+    /// #8897: the share is of the size the estimate covered. When only some of a rolled-up row's copies have an estimate, that is less than the
+    /// row's Size, so the cell names its basis ("6.0 MB of the 6.0 MB estimated (100.0%)") instead of sitting a bare 100% beside a bigger size.
+    /// A row whose copies were all estimated keeps the plain text: its basis is an older reading of the same size, not a smaller part of it.
+    /// </summary>
+    internal static string ReclaimableText(StoreIndexHealthRow r, long reclaimableBytes)
+    {
+        var share = Share(r.EstimatedBloatShare ?? 0);
+        return r is { EstimatedBasisBytes: { } basis } && r.EstimateIndexesUsable < r.IndexCount && basis < r.Bytes
+            ? $"{PgDisplay.Bytes(reclaimableBytes)} of the {PgDisplay.Bytes(basis)} estimated ({share})"
+            : $"{PgDisplay.Bytes(reclaimableBytes)} ({share})";
     }
 
     internal static StoreIndexRow Index(StoreIndexHealthRow r)
@@ -253,7 +269,7 @@ internal static class StoreHealthRows
             Scans = Number(r.IndexScans),
             ScansSort = r.IndexScans,
             Reclaimable = r.EstimatedReclaimableBytes is { } bytes
-                ? $"{PgDisplay.Bytes(bytes)} ({Share(r.EstimatedBloatShare ?? 0)})"
+                ? ReclaimableText(r, bytes)
                 : r.EstimateSkippedReason is { Length: > 0 } skipped ? skipped : "no estimate",
             ReclaimableSort = r.EstimatedBloatShare,
             Note = string.Join(", ", notes),
