@@ -326,23 +326,22 @@ const DATABASE_PROTECTION_COLUMNS = [
   { key: "platform_label", label: "Platform", hideWhenEmpty: true, small: true },
   { key: "excluded_reason", label: "Not judged because", small: true },
 ];
-/* #8865: how the error log read went, server-wide: refused or failed reads and skipped archives are named, so a CHECKDB judged on the boot page
-   or on a partial log is not read as a clean one. */
+/* #8865 (R12): a server-level note only when there is something to act on: a refused or failed read, skipped archives or unparsed lines, so a CHECKDB
+   judged on the boot page or on a partial log is not read as a clean one. A healthy read, an old capture and a platform that is not read say nothing (null). */
 export function errorLogNote(data) {
   const e = data && data.error_log;
-  if (!e || e.status === "not_applicable") return "not read";
+  if (!e) return null;
   const parts = [];
   if (e.status === "precondition") parts.push("refused" + (e.grant ? ", grant " + e.grant : ""));
   else if (e.status === "failed") parts.push("failed" + (e.message ? ": " + e.message : ""));
-  else parts.push("read");
-  if (e.backfill === "in_progress") parts.push("older logs still being read");
+
   if (e.skipped_archives) parts.push("skipped archives " + e.skipped_archives);
   if (e.unparsed_lines) parts.push(e.unparsed_lines + " unparsed " + (e.unparsed_lines === 1 ? "line" : "lines"));
-  return parts.join("; ");
+  return parts.length ? parts.join("; ") : null;
 }
 const DATABASE_PROTECTION_STATS = [
   { key: "summary.text", label: "Overdue", format: "text", small: true, sentence: true },
-  { key: "error_log.status", label: "Error log", display: errorLogNote, small: true, hint: "How the read of each replica's SQL Server error log went. CHECKDB is judged from it for an Availability Group database." },
+  { key: "error_log.status", label: "Error log", display: errorLogNote, hideWhenDisplayEmpty: true, small: true, hint: "How the read of each replica's SQL Server error log went. CHECKDB is judged from it for an Availability Group database." },
   { key: "captured_at", label: "Captured", format: "time", small: true },
 ];
 export const platformLabel = (r) => (r && r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : "");

@@ -108,6 +108,7 @@ public partial class DatabaseProtectionTab : UserControl
         {
             StatusLine.Text = "";
             ErrorLogLine.Text = "";
+            ErrorLogLine.Visibility = Visibility.Collapsed;
             DatabasesDataGrid.ItemsSource = new List<ViewerDatabaseProtectionRow>();
             PlatformColumn.Visibility = Visibility.Collapsed;
             CheckDbOptionsColumn.Visibility = Visibility.Collapsed;
@@ -116,7 +117,9 @@ public partial class DatabaseProtectionTab : UserControl
         }
 
         StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read);
-        ErrorLogLine.Text = read.HasCapture ? "Error log: " + ViewerDatabaseProtectionText.ErrorLogNote(read) : "";
+        var errorLogNote = read.HasCapture ? ViewerDatabaseProtectionText.ErrorLogNote(read) : null;
+        ErrorLogLine.Text = errorLogNote is null ? "" : "Error log: " + errorLogNote;
+        ErrorLogLine.Visibility = errorLogNote is null ? Visibility.Collapsed : Visibility.Visible;
         var rows = ViewerDatabaseProtectionText.Rows(read);
         DatabasesDataGrid.ItemsSource = rows;
         PlatformColumn.Visibility = ViewerDatabaseProtectionText.ShowsPlatformColumn(rows) ? Visibility.Visible : Visibility.Collapsed;

@@ -390,14 +390,43 @@ public sealed class DatabaseProtectionPerReplicaSurfacesTests
         var viewerNote = ViewerDatabaseProtectionText.ErrorLogNote(new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Overdue, null, Now, banded, DatabaseProtectionBands.Summarize(banded)));
         Assert.Equal("failed: timeout; skipped archives 3; 2 unparsed lines", viewerNote);
         Assert.Equal(viewerNote, web.GetProperty("errorLog").GetString());
+
+        /* R12: a healthy read and an old capture have no tile on the web and no note on the Viewer. */
+        var healthy = ToolReply(Logged("Sales", "PRIMARY", TimeSpan.FromDays(1)));
+        var healthyFile = Path.Combine(Path.GetTempPath(), "darling-8865-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            File.WriteAllText(healthyFile, healthy.GetRawText());
+            Assert.Equal(JsonValueKind.Null, WebTileTruthsTests.Run(healthyFile).GetProperty("protectionRead").GetProperty("errorLog").ValueKind);
+        }
+        finally
+        {
+            File.Delete(healthyFile);
+        }
+    }
+
+    [Fact]
+    public void TheErrorLogNote_IsPresentForASkippedArchiveAndForUnparsedLines_EvenOnAHealthyRead()
+    {
+        static string? Note(DatabaseProtectionFact f)
+        {
+            var banded = new[] { (Fact: f, Band: DatabaseProtectionBands.Evaluate(f, Now, Limits)) }.ToList();
+            return ViewerDatabaseProtectionText.ErrorLogNote(new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Ok, null, Now, banded, DatabaseProtectionBands.Summarize(banded)));
+        }
+
+        var healthy = Logged("a", "PRIMARY", TimeSpan.FromDays(1));
+        Assert.Null(Note(healthy));
+        Assert.Equal("skipped archives 2", Note(healthy with { ErrorLogSkippedArchives = "2" }));
+        Assert.Equal("1 unparsed line", Note(healthy with { ErrorLogUnparsedLines = 1 }));
+        Assert.Equal("failed: boom", Note(healthy with { ErrorLogState = "failed", ErrorLogMessage = "boom" }));
     }
 
     [Theory]
-    [InlineData(null, "not read")]
-    [InlineData("not_applicable", "not read")]
-    [InlineData("read", "read")]
+    [InlineData(null, null)]
+    [InlineData("not_applicable", null)]
+    [InlineData("read", null)]
     [InlineData("refused", "refused, grant VIEW SERVER STATE")]
-    public void TheErrorLogSentence_ReadsTheSameOnTheViewer_AsTheToolsStatusMapsTo(string? state, string expected)
+    public void TheErrorLogNote_IsAbsentWhenThereIsNothingToActOn_AndNamesTheGrantWhenRefused(string? state, string? expected)
     {
         var fact = Base("a") with { ErrorLogState = state, ErrorLogGrant = state == "refused" ? "VIEW SERVER STATE" : null };
         var banded = new[] { (Fact: fact, Band: DatabaseProtectionBands.Evaluate(fact, Now, Limits)) }.ToList();

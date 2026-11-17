@@ -110,10 +110,8 @@ public sealed class WebTileTruthsTests
         var r = Run();
         Assert.Single(Strings(r.GetProperty("healthSentenceClasses")));
         var tiles = Strings(r.GetProperty("healthTiles"));
-        /* #8865: the Error log tile (how each replica's error log read went) sits beside Captured; the sentence is still no tile. */
-        Assert.Equal(2, tiles.Length);
-        Assert.EndsWith("Error log", tiles[0], StringComparison.Ordinal);
-        Assert.EndsWith("Captured", tiles[1], StringComparison.Ordinal);
+        Assert.Single(tiles);
+        Assert.EndsWith("Captured", tiles[0], StringComparison.Ordinal);
     }
 
     [Fact]

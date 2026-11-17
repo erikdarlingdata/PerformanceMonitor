@@ -1560,7 +1560,7 @@ function vizStat(data, desc) {
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
   /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
-  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
+  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))) && !(s.hideWhenDisplayEmpty && typeof s.display === "function" && s.display(data) == null));
   /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
      so when it is true the panel says so in words (the stat's `pageCut` sentence, or what its `pageCut(data)` returns when the sentence carries a count, #7551) under the tiles. */
   const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(typeof s.pageCut === "function" ? s.pageCut(data) : s.pageCut));

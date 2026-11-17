@@ -120,17 +120,17 @@ public static class ViewerDatabaseProtectionText
     }
 
     /// <summary>
-    /// #8865: how the error log read went, server-wide, in the web Error log tile's words: <c>read</c>, <c>refused, grant VIEW SERVER STATE</c>,
-    /// <c>failed: message</c> or <c>not read</c>, then what the read could not use (older logs still being read, skipped archives, unparsed lines).
+    /// #8865 (R12): the server-level note, in the web Error log tile's words, and null when there is nothing to act on: <c>refused, grant VIEW SERVER STATE</c>,
+    /// <c>failed: message</c>, <c>skipped archives ...</c> or <c>N unparsed lines</c>. A healthy read, an old capture and a platform that is not read give null.
     /// The values repeat on every row of a capture, so the first fact speaks for the server.
     /// </summary>
-    public static string ErrorLogNote(ViewerDatabaseProtectionRead read)
+    public static string? ErrorLogNote(ViewerDatabaseProtectionRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
         var first = read.Databases.Count > 0 ? read.Databases[0].Fact : null;
-        if (first is null || first.ErrorLogState is null or DatabaseProtectionCollector.ErrorLogNotApplicable)
+        if (first is null)
         {
-            return "not read";
+            return null;
         }
 
         var parts = new List<string>();
@@ -142,14 +142,6 @@ public static class ViewerDatabaseProtectionText
             case DatabaseProtectionCollector.ErrorLogFailed:
                 parts.Add("failed" + (string.IsNullOrEmpty(first.ErrorLogMessage) ? "" : ": " + first.ErrorLogMessage));
                 break;
-            default:
-                parts.Add("read");
-                break;
-        }
-
-        if (first.ErrorLogBackfillComplete == false)
-        {
-            parts.Add("older logs still being read");
         }
 
         if (!string.IsNullOrEmpty(first.ErrorLogSkippedArchives))
@@ -162,7 +154,7 @@ public static class ViewerDatabaseProtectionText
             parts.Add(string.Create(CultureInfo.InvariantCulture, $"{lines} unparsed {(lines == 1 ? "line" : "lines")}"));
         }
 
-        return string.Join("; ", parts);
+        return parts.Count == 0 ? null : string.Join("; ", parts);
     }
 
     /// <summary>
