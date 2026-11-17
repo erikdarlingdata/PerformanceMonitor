@@ -24,6 +24,8 @@ namespace Darling.Tests;
 /// <c>config.Alerts</c> with what the store holds at every start. A switch that exists only in darling.json is lost at that reload and always reads
 /// on. These tests set the columns in the store, load them the way the service does, and check the engine's settings read the stored value.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Each fact mints its own scratch database through
+   ScratchPostgres and never touches the shared store's tables. */
 public sealed class InstanceEventAlertSwitchesLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
