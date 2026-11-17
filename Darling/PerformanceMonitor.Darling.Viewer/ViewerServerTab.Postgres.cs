@@ -295,7 +295,7 @@ public partial class ViewerServerTab
             _server.ServerId, startUtc, endUtc, collectors.Select(c => c.Name).ToList());
 
         PgCollectorHealthGrid.ItemsSource =
-            ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
+            ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts, _extensionsNotOffered);
 
         /* #3691 part a2: the persisted analysis collection caveats, as on the SQL Server Collection Health tab. */
         var caveats = await _dataService.GetCollectionCaveatsAsync(_server.ServerId);

@@ -116,21 +116,70 @@ public sealed class AuroraOptionalExtensionGapTests
         Assert.Equal(2, ungated.NoPermission);
     }
 
+    private static PostgresException MissingFunction() => new("function public.f() does not exist", "ERROR", "ERROR", "42883");
+
     [Theory]
     [InlineData("pg_kernel_stats")]
     [InlineData("pg_predicate_stats")]
-    public void The_missing_extension_sentence_names_the_server_entry_database_for_both_collectors(string collector)
+    public void The_missing_extension_sentence_names_the_stamped_database_when_there_is_one(string collector)
     {
-        /* The fan-out collector stamps the database that failed first on the exception, and that is "postgres" here. */
-        var fault = new PostgresException("function public.f() does not exist", "ERROR", "ERROR", "42883");
+        /* The fan-out collector stamps the database that failed on the exception, and the call site passes the stamp ahead of the entry database. */
+        var fault = MissingFunction();
         CollectorFaultDatabase.Stamp(fault, "postgres");
 
-        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
-            fault, collector, CollectorFaultDatabase.For(fault, "appdb"), serverEntryDatabase: "appdb");
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(fault, collector, CollectorFaultDatabase.For(fault, "appdb"));
 
         Assert.Equal("EXTENSION_MISSING", status);
-        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
-        Assert.DoesNotContain("'postgres'", explanation, StringComparison.Ordinal);
+        Assert.Contains("database 'postgres'", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("'appdb'", explanation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_missing_extension_sentence_names_the_entry_database_when_nothing_is_stamped()
+    {
+        var fault = MissingFunction();
+
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(fault, "pg_kernel_stats", CollectorFaultDatabase.For(fault, "appdb"));
+
+        Assert.Equal("EXTENSION_MISSING", status);
+        Assert.Contains("database 'appdb', which is the one this collector connects to", explanation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_per_database_collector_is_told_to_create_the_extension_in_each_database_and_names_the_one_that_failed()
+    {
+        var fault = MissingFunction();
+        CollectorFaultDatabase.Stamp(fault, "postgres");
+
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(fault, "pg_predicate_stats", CollectorFaultDatabase.For(fault, "appdb"));
+
+        Assert.Equal("EXTENSION_MISSING", status);
+        Assert.Contains("CREATE EXTENSION pg_qualstats in each database this collector reads", explanation, StringComparison.Ordinal);
+        Assert.Contains("it failed in database 'postgres'", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("which is the one this collector connects to", explanation, StringComparison.Ordinal);
+
+        /* No stamp: the entry database stands in for the one that failed, and the sentence still says each database. */
+        var unstamped = MissingFunction();
+        var (_, fallback) = DarlingWorker.PostgresFaultOutcome(unstamped, "pg_predicate_stats", CollectorFaultDatabase.For(unstamped, "appdb"));
+        Assert.Contains("in each database this collector reads", fallback, StringComparison.Ordinal);
+        Assert.Contains("it failed in database 'appdb'", fallback, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_per_database_collector_without_a_declared_extension_gets_the_same_each_database_sentence_on_the_generic_arm()
+    {
+        var fault = new PostgresException("relation \"public.t\" does not exist", "ERROR", "ERROR", "42P01");
+        CollectorFaultDatabase.Stamp(fault, "postgres");
+
+        var perDatabase = CollectorCatalog.All.First(c => c.TargetEngine == CollectorTargetEngine.PostgreSql
+            && c.RunsPerDatabase(new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql })
+            && c.RequiredPgExtensions.Count == 0);
+
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(fault, perDatabase.Name, CollectorFaultDatabase.For(fault, "appdb"));
+
+        Assert.Contains("in each database this collector reads", explanation, StringComparison.Ordinal);
+        Assert.Contains("it failed in database 'postgres'", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("which is the one this collector connects to", explanation, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -166,11 +166,15 @@ public sealed partial class ViewerDataService
     /// <para>The three states are deliberately distinct, because they need three different responses: a
     /// permanent engine gap is nothing to do, a collector that should be running and has no rows in the
     /// window is something to chase, and a collector that ran and failed carries its own error text.</para>
+    ///
+    /// <para>#8913: <paramref name="extensionsNotOffered"/> is the stored extension list the other panels use. On Aurora, a collector whose
+    /// extension the server does not offer is an engine limit here, as it is on Collection Health, not a fault with a setup step.</para>
     /// </summary>
     public static List<PostgresCollectorHealthRow> BuildPostgresCollectorHealth(
         DarlingServer server,
         IReadOnlyList<ICollectorSchemaInfo> postgresCollectors,
-        IReadOnlyList<PostgresCollectorLogFacts> logFacts)
+        IReadOnlyList<PostgresCollectorLogFacts> logFacts,
+        IReadOnlyCollection<string>? extensionsNotOffered = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         ArgumentNullException.ThrowIfNull(postgresCollectors);
@@ -182,7 +186,7 @@ public sealed partial class ViewerDataService
         foreach (var definition in postgresCollectors)
         {
             var gap = CollectorEngineCapability.NotCollectedMessage(
-                server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None);
+                server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None, extensionsNotOffered);
 
             byName.TryGetValue(definition.Name, out var facts);
 
