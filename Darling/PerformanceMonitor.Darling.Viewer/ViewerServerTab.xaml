@@ -5838,7 +5838,7 @@
                         <DataGridTextColumn Header="Table" Binding="{Binding FullName}" Width="200"/>
                         <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
                         <DataGridTextColumn Header="Size" Binding="{Binding IndexSize}" SortMemberPath="IndexSizeSort" Width="100"/>
-                        <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" SortMemberPath="ScansInWindowSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" SortMemberPath="ScansInWindowSort" Width="130"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}"><Setter Property="ToolTip" Value="{Binding ScansInWindowNote}"/></Style></DataGridTextColumn.ElementStyle></DataGridTextColumn>
                         <DataGridTextColumn Header="Lifetime Scans" Binding="{Binding TotalScans}" SortMemberPath="TotalScansSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Last Scan" Binding="{Binding LastScan}" Width="140" SortMemberPath="LastScanUtc"/>
                         <DataGridTextColumn Header="Blocks" Binding="{Binding BlockAccesses}" SortMemberPath="BlockAccessesSort" ElementStyle="{StaticResource NumericCell}" Width="110"/>
