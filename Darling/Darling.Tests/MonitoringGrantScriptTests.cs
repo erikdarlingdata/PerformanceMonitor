@@ -800,6 +800,34 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Fact]
+    public void AzureSqlDatabase_ListedGivesTheDatabaseLevelSelect_NoListGivesNone()
+    {
+        var principal = MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor", "x.database.windows.net"));
+        var plain = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: true);
+        var listed = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: true, columnStatsDatabases: new[] { "SalesDb", "Hr*/Db" });
+
+        Assert.DoesNotContain("GRANT SELECT TO ", plain);
+        Assert.Equal(plain, MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: true, columnStatsDatabases: new[] { " " }));
+        Assert.StartsWith(plain, listed, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT TO [pm_monitor];", listed);
+        Assert.Contains("SalesDb", listed);
+        /* A database name cannot end the comment it is named in. */
+        Assert.DoesNotContain("Hr*/Db", listed);
+        Assert.DoesNotContain("sp_executesql", listed);
+    }
+
+    [Fact]
+    public void MissingSelectWarning_MakesTheUserBeforeTheGrant()
+    {
+        var note = MonitoringGrantScript.DescribeMissingColumnStatsSelect(new[] { "SalesDb" }, "pm_monitor")!;
+
+        var create = note.IndexOf("CREATE USER [pm_monitor] FOR LOGIN [pm_monitor]", StringComparison.Ordinal);
+        Assert.True(create >= 0, note);
+        Assert.True(create < note.IndexOf("GRANT SELECT TO [pm_monitor]", StringComparison.Ordinal), note);
+        Assert.Null(MonitoringGrantScript.DescribeMissingColumnStatsSelect(Array.Empty<string>(), "pm_monitor"));
+    }
+
+    [Fact]
     public void NoList_NoBlock()
     {
         var plain = MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), false, false);

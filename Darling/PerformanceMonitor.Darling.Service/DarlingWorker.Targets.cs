@@ -1390,7 +1390,7 @@ public sealed partial class DarlingWorker
                    the same slot: held means the scheduled run is still going, and the snapshot leaves that
                    collector out and says so. Free means the snapshot runs it inline, as before, holds the slot for
                    that run only, and gives it back after, so a snapshot that is over never makes the next scheduled
-                   run skip. The four collectors detached by name take their own slot inside RunOneAsync. */
+                   run skip. The collectors detached by name take their own slot inside RunOneAsync. */
                 var snapshotSlot = TryTakeInlineDailySlot(runtime.ServerId, name, effective);
                 if (snapshotSlot is null)
                 {

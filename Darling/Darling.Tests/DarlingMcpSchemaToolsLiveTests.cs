@@ -1054,6 +1054,25 @@ public sealed class DarlingMcpSchemaToolsLiveTests
     }
 
     [Fact]
+    public async Task SelectivityReadFails_StatusUnavailable_DefinitionStillReturned()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            await EnableSelectivityAsync(s, ct);
+            /* The current rows' table is gone, so the selectivity read fails part way. */
+            await DarlingMcpTestData.ExecAsync(s.Connection, ct, "DROP TABLE collect.column_stats");
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            Assert.Equal("unavailable", answer.GetProperty("selectivity_status").GetString());
+            Assert.Contains("could not be read", answer.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(new[] { "Id", "Total" }, Names(answer.GetProperty("columns"), "name"));
+            Assert.Equal(JsonValueKind.Null, answer.GetProperty("column_combinations").ValueKind);
+        });
+    }
+
+    [Fact]
     public async Task CollectorOff_StatusNotCollected_DefinitionStillReturned()
     {
         await WithStoreAsync(async (s, ct) =>

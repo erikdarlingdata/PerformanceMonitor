@@ -326,6 +326,27 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// <see cref="ReadAsync"/>, but a failure to read selectivity never fails the definition: the answer then carries status
+    /// <c>unavailable</c> with the reason and no numbers, and the failure is logged. A cancellation is not swallowed.
+    /// </summary>
+    internal static async Task<SelectivityResult> ReadOrUnavailableAsync(
+        NpgsqlDataSource postgres, NpgsqlConnection connection, int serverId, string askedDatabase, string database, IReadOnlyList<SchemaHistoryKey> keys,
+        SchemaObjectDefinition definition, DateTime? at, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadAsync(postgres, connection, serverId, askedDatabase, database, keys, definition, at, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.Warn($"get_object_definition could not read column selectivity for {askedDatabase}; the definition is returned without it.", ex);
+            return new SelectivityResult(
+                new SelectivityStatus("unavailable", "Column selectivity could not be read from the store (" + ex.Message + "); the definition is complete without it.", null),
+                null);
+        }
+    }
+
+    /// <summary>
     /// The server that wrote the rows of an availability group's database: the newest run row's, else the newest current-rows or state row's.
     /// Null for a server key (the named server is the writer) or when nothing exists under the group's key.
     /// </summary>

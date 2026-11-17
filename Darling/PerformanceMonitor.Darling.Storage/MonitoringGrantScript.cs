@@ -379,7 +379,8 @@ public static class MonitoringGrantScript
     /// SETTINGS and eight msdb grants to its master user, so those are left out and the login gets a user in each current user database
     /// instead. It has no effect on an Azure SQL Database script.
     /// <paramref name="columnStatsDatabases"/> (#8798) adds the database-level SELECT the column_stats collector needs, in exactly those
-    /// databases; no list or an empty one adds nothing, so the grant never defaults to every database. It has no effect on an Azure SQL Database script.
+    /// databases; no list or an empty one adds nothing, so the grant never defaults to every database. On an Azure SQL Database script, which runs
+    /// in one database, a non-empty list adds the database-level SELECT for the database it runs in and names the listed databases to run it in.
     /// </summary>
     public static string Build(
         GrantPrincipal principal, bool finOps, bool azureSqlDatabase, string? serverLabel = null, bool awsRds = false,
@@ -409,6 +410,16 @@ public static class MonitoringGrantScript
         if (azureSqlDatabase)
         {
             AppendAzure(sb, principal, q, finOps);
+            var azureListed = (columnStatsDatabases ?? []).Where(d => !string.IsNullOrWhiteSpace(d)).Select(d => InComment(d.Trim())).ToList();
+            if (azureListed.Count > 0)
+            {
+                /* An Azure SQL Database script runs in one database, so the column_stats grant is the database-level SELECT there. */
+                sb.Append('\n').Append("/* ").Append(ColumnStatsGrantNote).Append(" */\n");
+                sb.Append("/* Azure SQL Database: this SELECT is granted in the database the script runs in. Run the script in each database listed: ")
+                    .Append(string.Join(", ", azureListed)).Append(". */\n");
+                sb.Append("GRANT SELECT TO ").Append(q).Append(";\n");
+            }
+
             return sb.ToString();
         }
 
@@ -502,10 +513,7 @@ public static class MonitoringGrantScript
             .Append(Literal(name)).Append("\n)\nBEGIN\n").Append(createStatement).Append("\nEND;\n\n");
     }
 
-    /// <summary>
-    /// The per-database block. <paramref name="grants"/> adds the FinOps grants; <paramref name="awsRds"/> (#6889) is the RDS form, which
-    /// is there for the CREATE USER alone (RDS has no CONNECT ANY DATABASE, so no user means no database) and skips rdsadmin.
-    /// </summary>
+    /// <summary>Text that sits inside a string literal of the script: each quote doubles once.</summary>
     private static string InString(string t) => t.Replace("'", "''", StringComparison.Ordinal);
 
     /// <summary>
@@ -585,11 +593,16 @@ public static class MonitoringGrantScript
             return null;
         }
 
-        var lines = missingDatabases.Select(d => $"SELECT is missing in {Quote(d)} (USE {Quote(d)}; GRANT SELECT TO {Quote(principal)};)");
+        var lines = missingDatabases.Select(d =>
+            $"SELECT is missing in {Quote(d)} (USE {Quote(d)}; IF DATABASE_PRINCIPAL_ID({Literal(principal)}) IS NULL CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)}; GRANT SELECT TO {Quote(principal)};)");
         return "The column_stats collector is on for databases this login cannot read: " + string.Join("; ", lines)
             + ". Those databases return no column selectivity until it is granted. The --grant-script command with --column-stats-databases prints the full block.";
     }
 
+    /// <summary>
+    /// The per-database block. <paramref name="grants"/> adds the FinOps grants; <paramref name="awsRds"/> (#6889) is the RDS form, which
+    /// is there for the CREATE USER alone (RDS has no CONNECT ANY DATABASE, so no user means no database) and skips rdsadmin.
+    /// </summary>
     private static void AppendEachDatabase(StringBuilder sb, string name, bool grants, bool awsRds)
     {
         /* The block docs/permissions.md gives for "all databases", built from the list: a cursor over the online read-write user
