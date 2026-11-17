@@ -20,16 +20,40 @@ namespace PerformanceMonitor.Analysis;
 public static class WindowEmptyText
 {
     /// <summary>
+    /// Appended by the MCP tools after the window-empty message, to point at collection health. It is wrong for a window
+    /// that retention removed (#8910): collection health is green and says nothing about it.
+    /// </summary>
+    public const string CollectionHealthPointer = " Check get_collection_health to see when each collector last succeeded.";
+
+    /// <summary>
+    /// The window-empty message's closing pointer: <see cref="CollectionHealthPointer"/> for a window that may have lost its
+    /// collection, nothing for one that retention removed.
+    /// </summary>
+    public static string HealthPointer(bool removedByRetention) => removedByRetention ? string.Empty : CollectionHealthPointer;
+
+    /// <summary>
     /// Composes the message for a window with no observed time. <paramref name="factCount"/> is how many facts the
     /// pass still read (the point-in-time ones: configuration, trace flags, hardware), which changes the opening
     /// sentence and nothing else.
     /// </summary>
-    public static string Compose(AnalysisContext context, double dataSpanHours, int factCount)
+    public static string Compose(AnalysisContext context, double dataSpanHours, int factCount, RetentionBoundary? retention = null)
     {
         var window = string.Create(
             CultureInfo.InvariantCulture,
             $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC)");
         var history = string.Create(CultureInfo.InvariantCulture, $"{dataSpanHours:F1} hours of total collected history");
+
+        /* #8910: a window that ends before the oldest row the store keeps was removed by retention. Collection did not
+           break, and "even though this server has N hours of history" would read as "the data should be there". */
+        if (retention is not null && retention.RemovedWindow(context.TimeRangeEnd))
+        {
+            var removedOpening = factCount > 0
+                ? $"Nothing was measured in the analysis window {window}. " +
+                  $"The {CountText.Plural(factCount, "fact")} that could still be read {(factCount == 1 ? "is" : "are")} point-in-time configuration and state, " +
+                  "not measurements of this window. "
+                : $"No facts were collected in the analysis window {window}. ";
+            return removedOpening + retention.Describe() + " This is NOT an all-clear.";
+        }
 
         var opening = factCount > 0
             ? $"The collector observed none of the analysis window {window}, even though this server has {history}. " +
