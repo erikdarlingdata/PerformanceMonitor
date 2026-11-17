@@ -601,6 +601,7 @@ export const SERVER_TABS = [
           span: 2,
           /* #7692: rows exist only where queries ran, so the gap rule needs the reply's bucket. */
           bucketKey: "bucket_minutes",
+          noteKind: "summed",
           emptyText: "No query duration samples in this window.",
         },
         {
@@ -612,6 +613,7 @@ export const SERVER_TABS = [
           series: EXECUTION_RATE_SERIES,
           span: 2,
           bucketKey: "bucket_minutes",
+          noteKind: "summed",
           emptyText: "No query executions recorded in this window.",
         },
       ]),
@@ -627,6 +629,7 @@ export const SERVER_TABS = [
           format: "ms",
           span: 2,
           bucketKey: "bucket_minutes",
+          noteKind: "summed",
           emptyText:
             "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }
