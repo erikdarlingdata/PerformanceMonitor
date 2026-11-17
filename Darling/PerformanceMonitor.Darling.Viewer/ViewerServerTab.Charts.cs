@@ -129,15 +129,19 @@ public partial class ViewerServerTab : IDisposable
         var (startUtc, endUtc) = GetWindowUtc();
 
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
-        using var readFanOut = ViewerReadFanOut.Of(2);
+        using var readFanOut = ViewerReadFanOut.Of(3);
         var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc);
         var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc);
+        /* #8881: who holds the oldest open tempdb log transaction as of the chart's newest collection. */
+        var holderTask = _dataService.GetNewestTempDbLogHolderAsync(_server.ServerId, startUtc, endUtc);
         var trend = await trendTask;
         var fileIo = await fileIoTask;
+        var holder = await holderTask;
 
         /* Both reads are bucketed (#4234/#4349) and already windowed server-side on endUtc; no client-side
            post-filter is needed for a custom range. */
         RenderTempDbUsageChart(trend, startUtc, endUtc);
+        ViewerChartCards.SetSubtitle(TempDbChart, TempDbLogHolderLine.Build(holder));
         RenderTempDbSizeChart(trend, startUtc, endUtc);
         RenderTempDbFileIoChart(fileIo, startUtc, endUtc);
 
@@ -253,12 +257,24 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(vsPlot);
         _tempDbHover?.Add(vsPlot, "Version Store");
 
+        /* #8881: the tempdb log's used space, drawn only where the store has a reading. A bucket with none is NaN, which the plot leaves as a gap:
+           never a zero, which would read as an empty log. */
+        var logUsed = TempDbLogSeries.Values(data.Select(d => d.LogUsedMb).ToList());
+        if (logUsed is not null)
+        {
+            var logPlot = TempDbChart.Plot.Add.TimeSeries(times, logUsed);
+            logPlot.LegendText = "Log Used";
+            logPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TempDbLog"));
+            ChartStyle.StyleScatter(logPlot);
+            _tempDbHover?.Add(logPlot, "Log Used");
+        }
+
         TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
-        var maxVal = new[] { userObj.Max(), internalObj.Max(), versionStore.Max() }.Max();
+        var maxVal = new[] { userObj.Max(), internalObj.Max(), versionStore.Max(), logUsed is null ? 0 : TempDbLogSeries.Max(logUsed) }.Max();
         SetChartYLimitsWithLegendPadding(TempDbChart, 0, maxVal);
 
         ShowChartLegend(TempDbChart);

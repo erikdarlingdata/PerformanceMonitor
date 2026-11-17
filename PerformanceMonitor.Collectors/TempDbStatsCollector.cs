@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -56,7 +57,21 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
         /* The ROWS-file growth ceiling in MB. -1 = at least one data file is unlimited, so there is no
            ceiling; 0 = the query returned NULL (no ROWS files visible). Appended LAST because both
            writers are positional and the payload column had to append too. */
-        decimal MaxSizeMb);
+        decimal MaxSizeMb,
+        /* #8881: the tempdb LOG, appended LAST for the same reason. Every one is nullable and defaults to NULL:
+           NULL means the engine could not say (a function that is missing or refuses), which is not a zero.
+           The holder members are filled only while the log is at or above TempDbLogHolderLine.MinLogUsedPercent (#8881). */
+        decimal? LogTotalMb = null,
+        decimal? LogUsedMb = null,
+        decimal? LogUsedPercent = null,
+        string? LogReuseWaitDesc = null,
+        string? LogTruncationHoldupReason = null,
+        int? HolderSessionId = null,
+        string? HolderLoginName = null,
+        string? HolderProgramName = null,
+        DateTime? HolderBeginTimeUtc = null,
+        long? HolderLogBytesUsed = null,
+        long? HolderLogBytesReserved = null);
 
     public override string Name => "tempdb_stats";
 
@@ -127,7 +142,7 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
 
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
-    private const string QueryText = @"
+    private static readonly string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
@@ -182,7 +197,106 @@ CROSS APPLY
 ) AS held
 WHERE held.page_count > 0
 ORDER BY held.page_count DESC
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* #8881: the tempdb LOG. Every read below runs in its own sp_executesql inside its own TRY/CATCH, so an engine
+   that lacks a view or function (dm_db_log_stats needs 2016 SP2, dm_db_log_space_usage needs 2012), or refuses
+   it for a permission, leaves that one value NULL and takes nothing else with it. A missing object is a
+   compile error in the same scope, which a TRY/CATCH in that scope does not catch, hence the dynamic batch.
+   The third result set is always exactly one row. */
+DECLARE
+    @log_total_mb decimal(18,2),
+    @log_used_mb decimal(18,2),
+    @log_used_percent decimal(5,2),
+    @log_reuse_wait_desc nvarchar(60),
+    @log_truncation_holdup_reason nvarchar(60),
+    @holder_session_id int,
+    @holder_login_name nvarchar(128),
+    @holder_program_name nvarchar(128),
+    @holder_begin_time_utc datetime,
+    @holder_log_bytes_used bigint,
+    @holder_log_bytes_reserved bigint;
+
+BEGIN TRY
+    EXECUTE sys.sp_executesql
+        N'SELECT /* PerformanceMonitorLite */
+              @total_mb = CONVERT(decimal(18,2), lsu.total_log_size_in_bytes / 1048576.0),
+              @used_mb = CONVERT(decimal(18,2), lsu.used_log_space_in_bytes / 1048576.0),
+              @used_percent = CONVERT(decimal(5,2), lsu.used_log_space_in_percent)
+          FROM tempdb.sys.dm_db_log_space_usage AS lsu;',
+        N'@total_mb decimal(18,2) OUTPUT, @used_mb decimal(18,2) OUTPUT, @used_percent decimal(5,2) OUTPUT',
+        @total_mb = @log_total_mb OUTPUT,
+        @used_mb = @log_used_mb OUTPUT,
+        @used_percent = @log_used_percent OUTPUT;
+END TRY
+BEGIN CATCH
+END CATCH;
+
+BEGIN TRY
+    EXECUTE sys.sp_executesql
+        N'SELECT /* PerformanceMonitorLite */ @reuse = d.log_reuse_wait_desc FROM sys.databases AS d WHERE d.database_id = 2;',
+        N'@reuse nvarchar(60) OUTPUT',
+        @reuse = @log_reuse_wait_desc OUTPUT;
+END TRY
+BEGIN CATCH
+END CATCH;
+
+BEGIN TRY
+    EXECUTE sys.sp_executesql
+        N'SELECT /* PerformanceMonitorLite */ @holdup = ls.log_truncation_holdup_reason FROM sys.dm_db_log_stats(2) AS ls;',
+        N'@holdup nvarchar(60) OUTPUT',
+        @holdup = @log_truncation_holdup_reason OUTPUT;
+END TRY
+BEGIN CATCH
+END CATCH;
+
+/* The holder: the oldest active tempdb transaction, read only while the log is at or above the bar. LEFT JOINs
+   keep a transaction that no session owns. The begin time is the server's local time, moved to UTC here so the
+   store holds one clock. */
+IF @log_used_percent >= __LOG_HOLDER_MIN_USED_PERCENT__
+BEGIN
+    BEGIN TRY
+        EXECUTE sys.sp_executesql
+            N'SELECT /* PerformanceMonitorLite */ TOP (1)
+                  @session_id = st.session_id,
+                  @login_name = es.login_name,
+                  @program_name = es.program_name,
+                  @begin_time_utc = DATEADD(SECOND, DATEDIFF(SECOND, GETDATE(), GETUTCDATE()), dt.database_transaction_begin_time),
+                  @log_bytes_used = dt.database_transaction_log_bytes_used,
+                  @log_bytes_reserved = dt.database_transaction_log_bytes_reserved
+              FROM sys.dm_tran_database_transactions AS dt
+              LEFT JOIN sys.dm_tran_session_transactions AS st
+                ON st.transaction_id = dt.transaction_id
+              LEFT JOIN sys.dm_exec_sessions AS es
+                ON es.session_id = st.session_id
+              WHERE dt.database_id = 2
+              AND   dt.database_transaction_begin_time IS NOT NULL
+              ORDER BY dt.database_transaction_begin_time ASC;',
+            N'@session_id int OUTPUT, @login_name nvarchar(128) OUTPUT, @program_name nvarchar(128) OUTPUT, @begin_time_utc datetime OUTPUT, @log_bytes_used bigint OUTPUT, @log_bytes_reserved bigint OUTPUT',
+            @session_id = @holder_session_id OUTPUT,
+            @login_name = @holder_login_name OUTPUT,
+            @program_name = @holder_program_name OUTPUT,
+            @begin_time_utc = @holder_begin_time_utc OUTPUT,
+            @log_bytes_used = @holder_log_bytes_used OUTPUT,
+            @log_bytes_reserved = @holder_log_bytes_reserved OUTPUT;
+    END TRY
+    BEGIN CATCH
+    END CATCH;
+END;
+
+SELECT /* PerformanceMonitorLite */
+    log_total_mb = @log_total_mb,
+    log_used_mb = @log_used_mb,
+    log_used_percent = @log_used_percent,
+    log_reuse_wait_desc = @log_reuse_wait_desc,
+    log_truncation_holdup_reason = @log_truncation_holdup_reason,
+    holder_session_id = @holder_session_id,
+    holder_login_name = @holder_login_name,
+    holder_program_name = @holder_program_name,
+    holder_begin_time_utc = @holder_begin_time_utc,
+    holder_log_bytes_used = @holder_log_bytes_used,
+    holder_log_bytes_reserved = @holder_log_bytes_reserved;
+".Replace("__LOG_HOLDER_MIN_USED_PERCENT__", TempDbLogHolderLine.MinLogUsedPercent.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -197,6 +311,18 @@ OPTION(RECOMPILE);";
         /* Appended, never inserted: both stores generate their DDL from this list in order and both row
            writers are positional, so a column added anywhere else would silently re-map history. */
         new CollectorColumn("max_size_mb", CollectorColumnType.Decimal, 18, 2),
+        /* #8881: the tempdb log, appended for the same reason. All nullable: NULL is "the engine could not say". */
+        new CollectorColumn("log_total_mb", CollectorColumnType.Decimal, 18, 2),
+        new CollectorColumn("log_used_mb", CollectorColumnType.Decimal, 18, 2),
+        new CollectorColumn("log_used_percent", CollectorColumnType.Decimal, 5, 2),
+        new CollectorColumn("log_reuse_wait_desc", CollectorColumnType.Varchar),
+        new CollectorColumn("log_truncation_holdup_reason", CollectorColumnType.Varchar),
+        new CollectorColumn("holder_session_id", CollectorColumnType.Integer),
+        new CollectorColumn("holder_login_name", CollectorColumnType.Varchar),
+        new CollectorColumn("holder_program_name", CollectorColumnType.Varchar),
+        new CollectorColumn("holder_begin_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("holder_log_bytes_used", CollectorColumnType.BigInt),
+        new CollectorColumn("holder_log_bytes_reserved", CollectorColumnType.BigInt),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -227,9 +353,33 @@ OPTION(RECOMPILE);";
             totalSessions = reader.IsDBNull(2) ? 0L : reader.GetInt64(2);
         }
 
+        /* #8881: the third result set is the log, always one row of nullable values. A reader without it (a
+           fake, an older query text) simply leaves every log member NULL. */
+        decimal? logTotalMb = null, logUsedMb = null, logUsedPercent = null;
+        string? reuseWait = null, holdupReason = null, holderLogin = null, holderProgram = null;
+        int? holderSession = null;
+        DateTime? holderBegin = null;
+        long? holderUsed = null, holderReserved = null;
+
+        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+        {
+            logTotalMb = reader.IsDBNull(0) ? null : reader.GetDecimal(0);
+            logUsedMb = reader.IsDBNull(1) ? null : reader.GetDecimal(1);
+            logUsedPercent = reader.IsDBNull(2) ? null : reader.GetDecimal(2);
+            reuseWait = reader.IsDBNull(3) ? null : reader.GetString(3);
+            holdupReason = reader.IsDBNull(4) ? null : reader.GetString(4);
+            holderSession = reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5));
+            holderLogin = reader.IsDBNull(6) ? null : reader.GetString(6);
+            holderProgram = reader.IsDBNull(7) ? null : reader.GetString(7);
+            holderBegin = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Unspecified);
+            holderUsed = reader.IsDBNull(9) ? null : reader.GetInt64(9);
+            holderReserved = reader.IsDBNull(10) ? null : reader.GetInt64(10);
+        }
+
         return new List<Row>
         {
-            new(userObjMb, internalObjMb, versionStoreMb, totalReservedMb, unallocatedMb, totalSessions, topSessionId, topSessionMb, maxSizeMb),
+            new(userObjMb, internalObjMb, versionStoreMb, totalReservedMb, unallocatedMb, totalSessions, topSessionId, topSessionMb, maxSizeMb,
+                logTotalMb, logUsedMb, logUsedPercent, reuseWait, holdupReason, holderSession, holderLogin, holderProgram, holderBegin, holderUsed, holderReserved),
         };
     }
 
@@ -244,6 +394,17 @@ OPTION(RECOMPILE);";
             .Value(row.TotalSessions)             /* total_sessions_using_tempdb BIGINT */
             .Value(row.TopSessionId)              /* top_session_id INTEGER */
             .Value(row.TopSessionMb)              /* top_session_tempdb_mb DECIMAL */
-            .Value(row.MaxSizeMb);                /* max_size_mb DECIMAL */
+            .Value(row.MaxSizeMb)                 /* max_size_mb DECIMAL */
+            .Value(row.LogTotalMb)                /* log_total_mb DECIMAL, NULL when the engine could not say */
+            .Value(row.LogUsedMb)                 /* log_used_mb DECIMAL */
+            .Value(row.LogUsedPercent)            /* log_used_percent DECIMAL */
+            .Value(row.LogReuseWaitDesc)          /* log_reuse_wait_desc VARCHAR */
+            .Value(row.LogTruncationHoldupReason) /* log_truncation_holdup_reason VARCHAR */
+            .Value(row.HolderSessionId)           /* holder_session_id INTEGER, only at or above the bar */
+            .Value(row.HolderLoginName)           /* holder_login_name VARCHAR */
+            .Value(row.HolderProgramName)         /* holder_program_name VARCHAR */
+            .Value(row.HolderBeginTimeUtc)        /* holder_begin_time TIMESTAMP, UTC */
+            .Value(row.HolderLogBytesUsed)        /* holder_log_bytes_used BIGINT */
+            .Value(row.HolderLogBytesReserved);   /* holder_log_bytes_reserved BIGINT */
     }
 }

@@ -57,6 +57,39 @@ public class TempDbSpaceInfo
     /// </summary>
     public DateTime? CollectionTimeUtc { get; set; }
 
+    /* ---- The tempdb LOG (#8881). Every member is nullable: NULL means the snapshot has no measurement of it (a row
+       stored before the log columns existed, an engine whose view or function is missing or refused). It never means
+       zero, and the TempDB Log Space alert treats a null used percent as "nothing to judge". ---- */
+
+    /// <summary>The log file's total size in MB (<c>tempdb.sys.dm_db_log_space_usage</c>).</summary>
+    public double? LogTotalMb { get; set; }
+
+    /// <summary>The log space in use, in MB.</summary>
+    public double? LogUsedMb { get; set; }
+
+    /// <summary>The log space in use, as a percent of the log file (0 to 100). The figure the TempDB Log Space alert judges.</summary>
+    public double? LogUsedPercent { get; set; }
+
+    /// <summary><c>log_reuse_wait_desc</c> for tempdb: what the log is waiting on before it can reuse space.</summary>
+    public string? LogReuseWaitDesc { get; set; }
+
+    /// <summary><c>log_truncation_holdup_reason</c> from <c>sys.dm_db_log_stats(2)</c>; NULL where the function is missing or refused.</summary>
+    public string? LogTruncationHoldupReason { get; set; }
+
+    /// <summary>The session of the oldest active tempdb transaction. Captured only while the log is 50 percent used or more.</summary>
+    public int? HolderSessionId { get; set; }
+
+    public string? HolderLoginName { get; set; }
+
+    public string? HolderProgramName { get; set; }
+
+    /// <summary>When the holder's transaction began, UTC.</summary>
+    public DateTime? HolderBeginTimeUtc { get; set; }
+
+    public long? HolderLogBytesUsed { get; set; }
+
+    public long? HolderLogBytesReserved { get; set; }
+
     /// <summary>How much tempdb the files hold RIGHT NOW — reserved plus unallocated, both from
     /// <c>dm_db_file_space_usage</c>, which reports the files as currently allocated.</summary>
     public double AllocatedMb => TotalReservedMb + UnallocatedMb;

@@ -528,6 +528,9 @@ export const SERVER_TABS = [
         format: "mb",
         span: 2,
         emptyText: "No tempdb samples in this window.",
+        /* #8881: no "Log used" line while no point has a log reading, and one plain line on the oldest open tempdb log transaction when the newest collection has a holder. */
+        hideEmptySeries: true,
+        captionKey: "log_holder_note",
       }),
       /* `noteKey` carries the read's own note when a Hyperscale log file is in the snapshot: its size is n/a
          (log service) and it is left out of these totals, so the page says so instead of looking short. */

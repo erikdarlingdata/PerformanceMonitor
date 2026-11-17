@@ -222,6 +222,16 @@ public class AlertBodyClockFrameDisciplineTests
                 TopConsumerSessionId = 91, TopConsumerMb = 12_000, MaxSizeMb = 51_200
             })),
 
+        /* #8881: the log card. Its holder's begin time is the instant the card turns into an age against the
+           alert's own clock, so it is planted here. */
+        ("BuildTempDbLogSpaceContext", () => AlertContextBuilders.BuildTempDbLogSpaceContext(
+            new TempDbSpaceInfo
+            {
+                CollectionTimeUtc = AnchorUtc, LogTotalMb = 10_000, LogUsedMb = 9_100, LogUsedPercent = 91,
+                LogReuseWaitDesc = "ACTIVE_TRANSACTION", LogTruncationHoldupReason = "ACTIVE_TRANSACTION",
+                HolderSessionId = 57, HolderLoginName = "etl_login", HolderProgramName = "nightly load",
+                HolderBeginTimeUtc = AnchorUtc.AddMinutes(-42), HolderLogBytesUsed = 734_003_200, HolderLogBytesReserved = 1_048_576_000
+            }, AnchorUtc)),
         ("BuildTempDbGrowthFitContext", () => AlertContextBuilders.BuildTempDbGrowthFitContext(
             new TempDbGrowthFitResult
             {
@@ -301,7 +311,7 @@ public class AlertBodyClockFrameDisciplineTests
 
         /* And the census is closed, not a floor: a builder that vanishes has to be a deliberate edit here
            rather than a silently shorter scan. */
-        Assert.Equal(11, reflected.Count);
+        Assert.Equal(12, reflected.Count);
     }
 
     [Fact]

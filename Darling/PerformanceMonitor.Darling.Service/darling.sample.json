@@ -251,6 +251,10 @@
     // Deliver the Server-Unreachable / Server-Restored alerts when a monitored server's reachability flips
     // (the headless twin of Lite's connection-change toasts). Default true; gated together with "enabled".
     "notifyConnectionChanges": true,
+    // The TempDB Log Space alert: fires when the tempdb LOG is at or above this percent used (default 80) for three samples in a row.
+    // The file seeds a new store only; after that the store's value governs, and the Viewer's Settings window edits it.
+    "tempDbLogSpaceEnabled": true,
+    "tempDbLogSpaceThresholdPercent": 80,
     // TempDB Growth Won't Fit: alert when the next autogrowth of a tempdb file will not fit on its volume. Default true.
     "tempDbGrowthFitEnabled": true,
     "cpuThresholdPercent": 80,
