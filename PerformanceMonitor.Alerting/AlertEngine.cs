@@ -263,6 +263,12 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbLogSpaceAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbGrowthFitAlert = new();
+    /* #8882: the collection time the tempdb growth fit alert last fired on, per server. The collection is hourly and the sweep runs far
+       more often, so the gate keeps the incident open on every sweep and the cooldown alone would page the same rows again each time it
+       expires. A collection that is not newer than this one is not news; a newer one that still breaches is. Stamped on fire, muted or
+       not, put back when no channel received it, dropped when the incident resolves, and seeded on the first sweep after a restart from
+       the open fire in the history, the way _lastAlertedFileGrowthObservation is. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastAlertedTempDbGrowthFitCollection = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLowDiskAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastFailedJobAlert = new();
 
@@ -3777,11 +3783,30 @@ public sealed class AlertEngine
 
             if (incidentOpen && breaching)
             {
-                if (!suppressed && CooldownElapsed(_lastTempDbGrowthFitAlert, key, now, alertCooldown))
+                /* The first sweep of this process that finds the incident open: a fire the history shows open is a standing one, and
+                   the collection it was told on counts as reported (its fire time is at or after that collection's time). */
+                var standingRead = await ReadFirstStandingAsync(key, TempDbGrowthFitPersistenceMetric, "tempdb Growth Fit Resolved", ct);
+                readClock.Restart();
+                if (standingRead?.NewestOpen() is { } standingFire)
+                {
+                    _lastAlertedTempDbGrowthFitCollection.TryAdd(key, standingFire.FireAtUtc);
+                }
+
+                /* "Not newer" rather than "equal", and a stampless collection never matches, so it keeps the cooldown repeat. */
+                bool newCollection = !(fit.CollectionTimeUtc is { } collectedAt
+                    && _lastAlertedTempDbGrowthFitCollection.TryGetValue(key, out var lastAlertedCollection)
+                    && collectedAt <= lastAlertedCollection);
+
+                if (!suppressed && newCollection && CooldownElapsed(_lastTempDbGrowthFitAlert, key, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = TempDbGrowthFitPersistenceMetric };
                     var mute = JudgeMute(muteCtx);
                     _lastTempDbGrowthFitAlert[key] = now;
+                    DateTime? priorCollection = _lastAlertedTempDbGrowthFitCollection.TryGetValue(key, out var before) ? before : null;
+                    if (fit.CollectionTimeUtc is { } reportedCollection)
+                    {
+                        _lastAlertedTempDbGrowthFitCollection[key] = reportedCollection;
+                    }
 
                     var worst = fit.Shortfalls[0];
                     var fitContext = AlertContextBuilders.BuildTempDbGrowthFitContext(fit) ?? new AlertContext();
@@ -3800,11 +3825,25 @@ public sealed class AlertEngine
                         Muted: mute.Muted, Hold: mute.Hold, Severity: fitContext.SeverityOverride,
                         ShortMessage: $"tempdb next growth of {worst.NeededMb:F0} MB won't fit on {worst.Volume}"), ct);
                     AfterFire(TempDbGrowthFitPersistenceMetric, _lastTempDbGrowthFitAlert, key, now, alertCooldown, delivery);
+                    /* A fire no channel received puts the memory back, so the retry sweep still reads the collection as news. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        if (priorCollection is { } told)
+                        {
+                            _lastAlertedTempDbGrowthFitCollection[key] = told;
+                        }
+                        else
+                        {
+                            _lastAlertedTempDbGrowthFitCollection.TryRemove(key, out _);
+                        }
+                    }
                     readClock.Restart();
                 }
             }
             else if (outcome == PersistenceOutcome.Resolve)
             {
+                /* The incident ended: the next breach is a new episode with no memory, as the cooldown clock's does. */
+                _lastAlertedTempDbGrowthFitCollection.TryRemove(key, out _);
                 if (!suppressed)
                 {
                     await NotifyResolutionAsync(new AlertResolution(
