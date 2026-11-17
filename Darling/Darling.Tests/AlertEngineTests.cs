@@ -83,6 +83,8 @@ public sealed class AlertEngineTests
         public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExcludedProgramNamePrefixesList;
         public IReadOnlyList<string> LongRunningQueryExcludedLogins => LongRunningQueryExcludedLoginsList;
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
+        public bool TempDbLogSpaceEnabled { get; set; }
+        public int TempDbLogSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
         /* #2107: the previously-hardcoded knobs, at their shipped defaults. */

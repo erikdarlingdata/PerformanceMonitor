@@ -191,7 +191,7 @@ namespace PerformanceMonitor.Common
                more; it is kept solely so already-stored rows format like the new ones.
                "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
                share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
-            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
+            "High CPU" or "tempdb Space" or "tempdb Log Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
                 or "Collection Falling Behind" or "Identity Capacity" => $"{value:F1}%",
 
             /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute

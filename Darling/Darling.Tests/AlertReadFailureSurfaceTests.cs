@@ -914,7 +914,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 21, 9),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 22, 9),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
            not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
            rollup's catch, a write after the deadlock read, which counts its own failure. */
@@ -1070,8 +1070,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTY-SEVENTH since #8302: the read that closes a stale-rollup episode that ended while the service was down ("stale rollup ended-episode close self-alert"), counted because a swallowed failure leaves the old row open.
     /// And a FIFTY-SIXTH and FIFTY-SEVENTH since #7295: the blocking and deadlock count watermark seed ("blocking and deadlock count watermark seed") and the CPU incident opened-time seed ("CPU incident opened-time seed"), counted because a swallowed read there leaves the key seeded at 0 and pages again what a page already carried, or reads an open incident as opened at its first sweep.
     /// And a FIFTY-EIGHTH since #7368: the Store Autovacuum Behind read ("store autovacuum self-alert"), in <c>DarlingSelfAlertEvaluator.cs</c>.
+    /// And a FIFTY-NINTH since #8881: the TempDB Log Space alert's snapshot read ("TempDB log space"), in <c>AlertEngine.cs</c>, counted on its own name and its own clock like the data-file check beside it.
     /// </summary>
-    private const int CountedSites = 60;
+    private const int CountedSites = 61;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

@@ -143,6 +143,7 @@ public sealed class AlertEngine
     private const string FailedJobSeedStep = "failed-job";
     private const string CpuSeedStep = "cpu";
     private const string TempDbSeedStep = "tempdb";
+    private const string TempDbLogSeedStep = "tempdb-log";
     private const string BlockingWaitSeedStep = "blocking-wait";
 
     /* #7295: the blocking and deadlock count watermarks are seeded apart from the rest, and a failed read leaves the key unseeded
@@ -259,6 +260,7 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitCollectionTime = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastTempDbLogSpaceAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLowDiskAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastFailedJobAlert = new();
 
@@ -292,6 +294,7 @@ public sealed class AlertEngine
        row sits under the alert's own metric name in the same table. */
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _cpuPersistence = new();
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbPersistence = new();
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbLogPersistence = new();
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _blockingWaitPersistence = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
@@ -715,6 +718,7 @@ public sealed class AlertEngine
         await CheckAttentionAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckTempDbLogSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
@@ -820,6 +824,21 @@ public sealed class AlertEngine
                 if (tempDbPersistence.Value.State.Firing)
                 {
                     _lastTempDbSpaceAlert[key] = _utcNow();
+                }
+            }
+        }, ct);
+
+        /* #8881: the TempDB Log Space gate's record, seeded the same way under its own metric name: a second row in the same
+           (server, metric) table, so nothing new is stored and no rung was needed for the state. */
+        await SeedStepAsync(key, TempDbLogSeedStep, "tempdb log space persistence record", async () =>
+        {
+            var tempDbLogPersistence = await _stateStore.LoadAlertPersistenceAsync(key, TempDbLogSpacePersistenceMetric);
+            if (tempDbLogPersistence.HasValue)
+            {
+                _tempDbLogPersistence[key] = tempDbLogPersistence.Value;
+                if (tempDbLogPersistence.Value.State.Firing)
+                {
+                    _lastTempDbLogSpaceAlert[key] = _utcNow();
                 }
             }
         }, ct);
@@ -1118,6 +1137,17 @@ public sealed class AlertEngine
     /// <c>(server_id, metric_name)</c> for exactly this), so the rollout needed no rung.
     /// </summary>
     public const string TempDbSpacePersistenceMetric = "tempdb Space";
+
+    /// <summary>Consecutive breaching tempdb LOG samples required before the log's used percent is an incident (#8881). The same gate
+    /// shape and count as <see cref="TempDbSpaceBreachSamples"/>: a log that crosses the bar for one collection and drops back is the
+    /// flap the data-file alert already gates against.</summary>
+    public const int TempDbLogSpaceBreachSamples = 3;
+
+    /// <summary>Consecutive clearing samples that resolve an open tempdb log incident (#8881). One, like <see cref="TempDbSpaceClearSamples"/>.</summary>
+    public const int TempDbLogSpaceClearSamples = 1;
+
+    /// <summary>The metric name the TempDB Log Space alert fires, mutes and persists under (#8881).</summary>
+    public const string TempDbLogSpacePersistenceMetric = "tempdb Log Space";
 
     /// <summary>
     /// Consecutive breaching blocking SNAPSHOTS required before a total blocked wait at or above
@@ -3561,6 +3591,104 @@ public sealed class AlertEngine
         {
             LogCheckFailure(key, "TempDB space", ex, "Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
             _readFailures?.RecordReadFailure(key, "TempDB space", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /* ---------------- tempdb log space (#8881) ---------------- */
+
+    /// <summary>
+    /// The TempDB Log Space alert (#8881): a sibling of tempdb Space for the tempdb LOG. A full tempdb log stops every session that writes
+    /// to tempdb, and until this alert the first sign was error 9002. It reads the same latest tempdb snapshot as the data-file check
+    /// through the same adapter call, judges <see cref="TempDbSpaceInfo.LogUsedPercent"/> against its own threshold, and sits behind the
+    /// same persistence gate (three consecutive collected samples to fire, one to resolve).
+    ///
+    /// <para>A NULL used percent is no measurement (an engine without the view, a row stored before the log columns existed). It freezes
+    /// the gate, exactly as a missing row does for the data-file alert: it is never a breach and never a clear.</para>
+    ///
+    /// <para>The message names the used percent, the truncation holdup reason and, when the collector captured one, the holder: the
+    /// oldest active tempdb transaction, with its session, login, program, age and log bytes.</para>
+    /// </summary>
+    private async Task CheckTempDbLogSpaceAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.TempDbLogSpaceEnabled)
+        {
+            return;
+        }
+
+        if (!IsSeeded(key, TempDbLogSeedStep))
+        {
+            return;
+        }
+
+        int logThreshold = Threshold(AlertThresholdKey.TempDbLogSpaceThresholdPercent, key);
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);
+            readClock.Restart();
+
+            if (tempDb == null || tempDb.LogUsedPercent is not { } usedPercent)
+            {
+                /* No row, or a row with no log measurement: an absence of evidence freezes the gate, never a breach and never a
+                   clear. Resolving on it would announce a recovery nobody measured. */
+                return;
+            }
+
+            bool breaching = usedPercent >= logThreshold;
+            var (outcome, incidentOpen) = await ObservePersistenceAsync(
+                _tempDbLogPersistence, TempDbLogSpacePersistenceMetric, key, tempDb.CollectionTimeUtc, breaching,
+                TempDbLogSpaceBreachSamples, TempDbLogSpaceClearSamples);
+            readClock.Restart();
+
+            if (incidentOpen && breaching)
+            {
+                if (!suppressed && CooldownElapsed(_lastTempDbLogSpaceAlert, key, now, alertCooldown))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = TempDbLogSpacePersistenceMetric };
+                    var mute = JudgeMute(muteCtx);
+                    _lastTempDbLogSpaceAlert[key] = now;
+
+                    var logContext = AlertContextBuilders.BuildTempDbLogSpaceContext(tempDb, now) ?? new AlertContext();
+                    /* Warning only, for the reason the data-file alert states: the product has no measured "tempdb log nearly full"
+                       bar to cite for a second tier. */
+                    logContext.SeverityOverride = AlertSeverityLevel.Warning;
+                    AlertSampleAge.Stamp(logContext, "tempdb", tempDb.CollectionTimeUtc, now);
+                    var detailText = AlertContextBuilders.ContextToDetailText(logContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, TempDbLogSpacePersistenceMetric,
+                        AlertContextBuilders.TempDbLogSpaceMessage(tempDb, now),
+                        $"{logThreshold}%",
+                        logContext, detailText,
+                        NumericCurrentValue: usedPercent,
+                        NumericThresholdValue: logThreshold,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: logContext.SeverityOverride,
+                        ShortMessage: $"tempdb log at {usedPercent:F0}% of its size"), ct);
+                    AfterFire(TempDbLogSpacePersistenceMetric, _lastTempDbLogSpaceAlert, key, now, alertCooldown, delivery);
+                    readClock.Restart();
+                }
+            }
+            else if (outcome == PersistenceOutcome.Resolve)
+            {
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, TempDbLogSpacePersistenceMetric,
+                        "tempdb Log Space Resolved",
+                        $"{serverName}: tempdb log back to {usedPercent:F0}% of its size"), ct);
+                }
+            }
+            _checkFailures.Succeeded((key, "TempDB log space"));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogCheckFailure(key, "TempDB log space", ex, "Failed to check TempDB log space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "TempDB log space", readClock.ElapsedMilliseconds);
         }
     }
 

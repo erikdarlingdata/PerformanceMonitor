@@ -127,6 +127,7 @@ const GROUP_LABELS = {
   identity_capacity: "Identity capacity",
   long_running_query: "Long-running query",
   tempdb_space: "TempDB space",
+  tempdb_log_space: "TempDB log space",
   low_disk: "Low disk",
   self_alerts: "Monitor self-alerts",
   pvs: "Version store (PVS)",
@@ -184,7 +185,7 @@ export function settingLabel(prefix, key) {
 export const SETTING_SECTIONS = [
   {
     title: "Alert Thresholds",
-    groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
+    groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "tempdb_log_space", "low_disk",
       "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "agent_alert_gaps", "backup_overdue", "log_backup_overdue", "checkdb_overdue", "identity_capacity", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
       "cooldown_minutes"],
@@ -219,6 +220,7 @@ export const GROUP_FIELDS = {
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],
+  tempdb_log_space: ["enabled", "threshold_percent"],
   low_disk: ["enabled", "threshold_percent", "threshold_gb", "critical_free_percent", "critical_free_gb"],
   self_alerts: ["disk_free_warn_percent", "disk_free_warn_gb", "collection_stale_minutes", "collection_failure_threshold",
     "store_job_cadence_warn_percent", "retention_hold_warn_ratio", "retention_hold_critical_ratio"],

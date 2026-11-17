@@ -141,6 +141,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool ClientTimeoutsEnabled => _config.Alerts.ClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => _config.Alerts.LongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => _config.Alerts.TempDbSpaceEnabled;
+    public bool TempDbLogSpaceEnabled => _config.Alerts.TempDbLogSpaceEnabled;
     public bool LowDiskEnabled => _config.Alerts.LowDiskEnabled;
     public bool LongRunningJobEnabled => _config.Alerts.LongRunningJobEnabled;
     public bool FailedJobEnabled => _config.Alerts.FailedJobEnabled;
@@ -216,6 +217,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int CheckDbOverdueThresholdHours => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey);
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
+    public int TempDbLogSpaceThresholdPercent => Math.Clamp(_config.Alerts.TempDbLogSpaceThresholdPercent, 1, 100);
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);
     public int LowDiskThresholdGb => Math.Max(0, _config.Alerts.LowDiskThresholdGb);
 

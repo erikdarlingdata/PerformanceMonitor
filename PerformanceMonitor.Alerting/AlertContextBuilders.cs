@@ -1387,6 +1387,143 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>The TempDB Log Space alert's one-line message (#8881): the used percent, the truncation holdup reason and the holder
+    /// (session, login, program, transaction age and log bytes) when the collector captured one.</summary>
+    public static string TempDbLogSpaceMessage(TempDbSpaceInfo tempDb, DateTime now)
+    {
+        var used = tempDb.LogUsedPercent ?? 0;
+        var sb = new System.Text.StringBuilder();
+        sb.Append(System.Globalization.CultureInfo.InvariantCulture, $"tempdb log at {used:F0}% of its size");
+        if (tempDb.LogUsedMb is { } usedMb && tempDb.LogTotalMb is { } totalMb)
+        {
+            sb.Append(System.Globalization.CultureInfo.InvariantCulture, $" ({usedMb:F0} of {totalMb:F0} MB)");
+        }
+
+        sb.Append(", holdup reason ").Append(string.IsNullOrWhiteSpace(tempDb.LogTruncationHoldupReason) ? "unknown" : tempDb.LogTruncationHoldupReason);
+        if (tempDb.HolderSessionId is { } session)
+        {
+            sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", held by session {session}");
+            sb.Append(", login ").Append(string.IsNullOrWhiteSpace(tempDb.HolderLoginName) ? "unknown" : tempDb.HolderLoginName);
+            sb.Append(", program ").Append(string.IsNullOrWhiteSpace(tempDb.HolderProgramName) ? "unknown" : tempDb.HolderProgramName);
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                sb.Append(", transaction open ").Append(FormatHolderAge(age));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesUsed / 1048576.0:F0} MB of log used");
+            }
+
+            if (tempDb.HolderLogBytesReserved is { } bytesReserved)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesReserved / 1048576.0:F0} MB reserved");
+            }
+        }
+        else if (tempDb.HolderBeginTimeUtc is not null || tempDb.HolderLogBytesUsed is not null)
+        {
+            /* The collector keeps the oldest open tempdb transaction even when no session owns it, so a begin time or log bytes without a session
+               id is a real holder: a system or orphaned transaction. Saying "none captured" for it would be false. */
+            sb.Append(", the oldest open tempdb transaction has no session (a system or orphaned transaction)");
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                sb.Append(", open ").Append(FormatHolderAge(age));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesUsed / 1048576.0:F0} MB of log used");
+            }
+        }
+        else if (HolderWasNotRead(tempDb))
+        {
+            sb.Append(", ").Append(TempDbLogHolderLine.NotReadBelowBarText);
+        }
+        else if (tempDb.HolderLoginName is null)
+        {
+            sb.Append(", no holding transaction captured");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>True when the snapshot's log is under the percent the collector starts reading the holder at, so an empty holder means
+    /// "not read" and not "none found". An alert bar set below that percent fires in this range (#8881).</summary>
+    private static bool HolderWasNotRead(TempDbSpaceInfo tempDb) =>
+        (tempDb.LogUsedPercent ?? 0) < TempDbLogHolderLine.MinLogUsedPercent;
+
+    /// <summary>How long the holder's transaction has been open at <paramref name="now"/>, or null when the snapshot has no begin time.
+    /// Never negative: a clock that reads a moment behind the server's would otherwise print a negative age.</summary>
+    public static TimeSpan? TempDbHolderAge(TempDbSpaceInfo tempDb, DateTime now) =>
+        tempDb.HolderBeginTimeUtc is { } begin ? (now > begin ? now - begin : TimeSpan.Zero) : null;
+
+    private static string FormatHolderAge(TimeSpan age) =>
+        age.TotalHours >= 1
+            ? System.FormattableString.Invariant($"{(int)age.TotalHours} h {age.Minutes} min")
+            : age.TotalMinutes >= 1
+                ? System.FormattableString.Invariant($"{(int)age.TotalMinutes} min {age.Seconds} s")
+                : System.FormattableString.Invariant($"{(int)age.TotalSeconds} s");
+
+    /// <summary>The TempDB Log Space alert's detail card (#8881): the log's size and use, why it cannot truncate, and the holder.</summary>
+    public static AlertContext? BuildTempDbLogSpaceContext(TempDbSpaceInfo tempDb, DateTime now)
+    {
+        var context = new AlertContext();
+        var fields = new List<(string, string)>
+        {
+            ("Log Used", tempDb.LogUsedMb is { } u && tempDb.LogTotalMb is { } t ? System.FormattableString.Invariant($"{u:F0} of {t:F0} MB") : "Unknown"),
+            ("Log Reuse Wait", string.IsNullOrWhiteSpace(tempDb.LogReuseWaitDesc) ? "Unknown" : tempDb.LogReuseWaitDesc),
+            ("Truncation Holdup", string.IsNullOrWhiteSpace(tempDb.LogTruncationHoldupReason) ? "Unknown" : tempDb.LogTruncationHoldupReason),
+        };
+        if (tempDb.HolderSessionId is { } session)
+        {
+            fields.Add(("Holder Session", System.FormattableString.Invariant($"#{session}")));
+            fields.Add(("Holder Login", string.IsNullOrWhiteSpace(tempDb.HolderLoginName) ? "Unknown" : tempDb.HolderLoginName));
+            fields.Add(("Holder Program", string.IsNullOrWhiteSpace(tempDb.HolderProgramName) ? "Unknown" : tempDb.HolderProgramName));
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                fields.Add(("Transaction Age", FormatHolderAge(age)));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                fields.Add(("Holder Log Used", System.FormattableString.Invariant($"{bytesUsed / 1048576.0:F0} MB")));
+            }
+
+            if (tempDb.HolderLogBytesReserved is { } bytesReserved)
+            {
+                fields.Add(("Holder Log Reserved", System.FormattableString.Invariant($"{bytesReserved / 1048576.0:F0} MB")));
+            }
+        }
+        else if (tempDb.HolderBeginTimeUtc is not null || tempDb.HolderLogBytesUsed is not null)
+        {
+            fields.Add(("Holder", "Oldest open tempdb transaction has no session (a system or orphaned transaction)"));
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                fields.Add(("Transaction Age", FormatHolderAge(age)));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                fields.Add(("Holder Log Used", System.FormattableString.Invariant($"{bytesUsed / 1048576.0:F0} MB")));
+            }
+        }
+        else if (HolderWasNotRead(tempDb))
+        {
+            fields.Add(("Holder", "Not read: " + TempDbLogHolderLine.NotReadBelowBarText));
+        }
+        else
+        {
+            fields.Add(("Holder", "None captured"));
+        }
+
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = System.FormattableString.Invariant($"tempdb log at {tempDb.LogUsedPercent ?? 0:F0}% of its size"),
+            Fields = fields
+        });
+        return context;
+    }
+
     /// <summary>The <c>Fired By</c> label on the Blocking Wait Time gate item (#3653 A5) — the one field a
     /// renderer or an MCP reader of <c>get_alert_history</c>'s <c>context_json</c> looks up to learn which arm
     /// admitted the delivery. A constant so the engine, the tests and any reader spell it once.</summary>

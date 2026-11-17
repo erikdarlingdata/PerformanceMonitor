@@ -104,6 +104,7 @@ public static class AlertFamily
         [ClientTimeoutsMetric] = Performance,
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
+        ["tempdb Log Space"] = Performance,
         ["Volume Free Space"] = Performance,
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,
