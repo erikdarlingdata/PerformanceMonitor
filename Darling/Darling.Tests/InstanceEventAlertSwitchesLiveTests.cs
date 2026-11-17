@@ -129,7 +129,7 @@ public sealed class InstanceEventAlertSwitchesLiveTests
     }
 
     [Fact]
-    public async Task AStoreUpgradedFromV268_GainsBothSwitchesOn_KeepsItsOtherSettings_AndTheProbeNamesTheRung()
+    public async Task AStoreUpgradedFromV270_GainsBothSwitchesOn_KeepsItsOtherSettings_AndTheProbeNamesTheRung()
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
@@ -149,8 +149,8 @@ public sealed class InstanceEventAlertSwitchesLiveTests
 
             await ExecAsync(connection, ct, "UPDATE config.config_alert_settings SET cpu_threshold_percent = 91 WHERE id = 1");
 
-            /* The store as V268 left it: neither column, and no V271 row in the version table. */
-            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 268, ct);
+            /* The store as V270 left it: neither column, and no V271 row in the version table. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 270, ct);
             await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 271");
             await using (var check = new NpgsqlCommand(
                 "SELECT count(*) FROM pg_attribute WHERE attrelid = 'config.config_alert_settings'::regclass AND NOT attisdropped " +
@@ -161,7 +161,7 @@ public sealed class InstanceEventAlertSwitchesLiveTests
 
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
-                Assert.Equal(268, await older.GetStoreSchemaVersionAsync(ct));
+                Assert.Equal(270, await older.GetStoreSchemaVersionAsync(ct));
             }
 
             var applied = await PgMigrations.MigrateAsync(connection, ct);

@@ -279,7 +279,8 @@ public sealed class AlertNotebookTableCatalogTests
         ["get_wait_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "WaitTrend") },
         ["get_lock_wait_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "LockWaitTrend") },
         ["get_cpu_utilization"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "CpuUtilization") },
-        ["get_tempdb_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbTrend") },
+        /* #8881: the point is built by TempDbPoint, a private helper the envelope builder calls. */
+        ["get_tempdb_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbTrend"), (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbPoint") },
         ["get_memory_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "MemoryTrend") },
         ["get_perfmon_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "PerfmonTrend") },
         ["get_file_io_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "FileIoTrend") },
@@ -331,8 +332,9 @@ public sealed class AlertNotebookTableCatalogTests
             foreach (var (folder, file, method) in builders)
             {
                 var text = File.ReadAllText(PathTo(folder.Append(file).ToArray()));
-                var at = text.IndexOf("public static string " + method + "(", StringComparison.Ordinal);
-                Assert.True(at >= 0, read + ": shared builder " + method + " not found in " + file);
+                var found = Regex.Match(text, @"(?:public|private|internal) static [\w<>?,\[\] ]+ " + Regex.Escape(method) + @"\(");
+                Assert.True(found.Success, read + ": shared builder " + method + " not found in " + file);
+                var at = found.Index;
                 source += SliceTo(text, at, "\n    public static ");
             }
         }

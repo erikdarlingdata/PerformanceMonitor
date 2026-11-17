@@ -143,6 +143,8 @@ public sealed class AlertEngine
     private const string FailedJobSeedStep = "failed-job";
     private const string CpuSeedStep = "cpu";
     private const string TempDbSeedStep = "tempdb";
+    private const string TempDbLogSeedStep = "tempdb-log";
+    private const string TempDbGrowthFitSeedStep = "tempdb-growth-fit";
     private const string BlockingWaitSeedStep = "blocking-wait";
 
     /* #7295: the blocking and deadlock count watermarks are seeded apart from the rest, and a failed read leaves the key unseeded
@@ -259,6 +261,14 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitCollectionTime = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastTempDbLogSpaceAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastTempDbGrowthFitAlert = new();
+    /* #8882: the collection time the tempdb growth fit alert last fired on, per server. The collection is hourly and the sweep runs far
+       more often, so the gate keeps the incident open on every sweep and the cooldown alone would page the same rows again each time it
+       expires. A collection that is not newer than this one is not news; a newer one that still breaches is. Stamped on fire, muted or
+       not, put back when no channel received it, dropped when the incident resolves, and seeded on the first sweep after a restart from
+       the open fire in the history, the way _lastAlertedFileGrowthObservation is. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastAlertedTempDbGrowthFitCollection = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLowDiskAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastFailedJobAlert = new();
 
@@ -292,6 +302,8 @@ public sealed class AlertEngine
        row sits under the alert's own metric name in the same table. */
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _cpuPersistence = new();
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbPersistence = new();
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbLogPersistence = new();
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _tempDbGrowthFitPersistence = new();
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _blockingWaitPersistence = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
@@ -719,6 +731,8 @@ public sealed class AlertEngine
         await CheckAttentionAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckTempDbLogSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckTempDbGrowthFitAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
@@ -825,6 +839,36 @@ public sealed class AlertEngine
                 if (tempDbPersistence.Value.State.Firing)
                 {
                     _lastTempDbSpaceAlert[key] = _utcNow();
+                }
+            }
+        }, ct);
+
+        /* #8881: the TempDB Log Space gate's record, seeded the same way under its own metric name: a second row in the same
+           (server, metric) table, so nothing new is stored and no rung was needed for the state. */
+        await SeedStepAsync(key, TempDbLogSeedStep, "tempdb log space persistence record", async () =>
+        {
+            var tempDbLogPersistence = await _stateStore.LoadAlertPersistenceAsync(key, TempDbLogSpacePersistenceMetric);
+            if (tempDbLogPersistence.HasValue)
+            {
+                _tempDbLogPersistence[key] = tempDbLogPersistence.Value;
+                if (tempDbLogPersistence.Value.State.Firing)
+                {
+                    _lastTempDbLogSpaceAlert[key] = _utcNow();
+                }
+            }
+        }, ct);
+
+        /* #8882: the TempDB Growth Won't Fit gate's record, seeded the same way under its own metric name: another row in the same
+           (server, metric) table, so nothing new is stored and no rung was needed for the state. */
+        await SeedStepAsync(key, TempDbGrowthFitSeedStep, "tempdb growth fit persistence record", async () =>
+        {
+            var growthFitPersistence = await _stateStore.LoadAlertPersistenceAsync(key, TempDbGrowthFitPersistenceMetric);
+            if (growthFitPersistence.HasValue)
+            {
+                _tempDbGrowthFitPersistence[key] = growthFitPersistence.Value;
+                if (growthFitPersistence.Value.State.Firing)
+                {
+                    _lastTempDbGrowthFitAlert[key] = _utcNow();
                 }
             }
         }, ct);
@@ -1123,6 +1167,26 @@ public sealed class AlertEngine
     /// <c>(server_id, metric_name)</c> for exactly this), so the rollout needed no rung.
     /// </summary>
     public const string TempDbSpacePersistenceMetric = "tempdb Space";
+
+    /// <summary>Consecutive breaching tempdb LOG samples required before the log's used percent is an incident (#8881). The same gate
+    /// shape and count as <see cref="TempDbSpaceBreachSamples"/>: a log that crosses the bar for one collection and drops back is the
+    /// flap the data-file alert already gates against.</summary>
+    public const int TempDbLogSpaceBreachSamples = 3;
+
+    /// <summary>Consecutive clearing samples that resolve an open tempdb log incident (#8881). One, like <see cref="TempDbSpaceClearSamples"/>.</summary>
+    public const int TempDbLogSpaceClearSamples = 1;
+
+    /// <summary>The metric name the TempDB Log Space alert fires, mutes and persists under (#8881).</summary>
+    public const string TempDbLogSpacePersistenceMetric = "tempdb Log Space";
+    /// <summary>Consecutive breaching tempdb file collections required before a growth that won't fit is an incident (#8882). One: the
+    /// collection runs hourly, and the condition is a fact about the settings and the volume, not a flap.</summary>
+    public const int TempDbGrowthFitBreachSamples = 1;
+
+    /// <summary>Consecutive clearing collections that resolve an open growth-fit incident (#8882). One.</summary>
+    public const int TempDbGrowthFitClearSamples = 1;
+
+    /// <summary>The metric name the TempDB Growth Won't Fit alert fires, mutes and persists under (#8882).</summary>
+    public const string TempDbGrowthFitPersistenceMetric = "tempdb Growth Fit";
 
     /// <summary>
     /// Consecutive breaching blocking SNAPSHOTS required before a total blocked wait at or above
@@ -3525,6 +3589,9 @@ public sealed class AlertEngine
                        a Warning the operator configured at TempDbSpaceThresholdPercent, honestly labelled. */
                     tempDbContext ??= new AlertContext();
                     tempDbContext.SeverityOverride = AlertSeverityLevel.Warning;
+                    /* #8882: when no data file can grow, a full tempdb is the end state, not a stage. Say so here. */
+                    await AddTempDbCannotGrowItemAsync(tempDbContext, key, ct);
+                    readClock.Restart();
                     AlertSampleAge.Stamp(tempDbContext, "tempdb", tempDb.CollectionTimeUtc, now);
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
@@ -3566,6 +3633,268 @@ public sealed class AlertEngine
         {
             LogCheckFailure(key, "TempDB space", ex, "Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
             _readFailures?.RecordReadFailure(key, "TempDB space", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /* ---------------- tempdb log space (#8881) ---------------- */
+
+    /// <summary>
+    /// The TempDB Log Space alert (#8881): a sibling of tempdb Space for the tempdb LOG. A full tempdb log stops every session that writes
+    /// to tempdb, and until this alert the first sign was error 9002. It reads the same latest tempdb snapshot as the data-file check
+    /// through the same adapter call, judges <see cref="TempDbSpaceInfo.LogUsedPercent"/> against its own threshold, and sits behind the
+    /// same persistence gate (three consecutive collected samples to fire, one to resolve).
+    ///
+    /// <para>A NULL used percent is no measurement (an engine without the view, a row stored before the log columns existed). It freezes
+    /// the gate, exactly as a missing row does for the data-file alert: it is never a breach and never a clear.</para>
+    ///
+    /// <para>The message names the used percent, the truncation holdup reason and, when the collector captured one, the holder: the
+    /// oldest active tempdb transaction, with its session, login, program, age and log bytes.</para>
+    /// </summary>
+    private async Task CheckTempDbLogSpaceAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.TempDbLogSpaceEnabled)
+        {
+            return;
+        }
+
+        if (!IsSeeded(key, TempDbLogSeedStep))
+        {
+            return;
+        }
+
+        int logThreshold = Threshold(AlertThresholdKey.TempDbLogSpaceThresholdPercent, key);
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);
+            readClock.Restart();
+
+            if (tempDb == null || tempDb.LogUsedPercent is not { } usedPercent)
+            {
+                /* No row, or a row with no log measurement: an absence of evidence freezes the gate, never a breach and never a
+                   clear. Resolving on it would announce a recovery nobody measured. */
+                return;
+            }
+
+            bool breaching = usedPercent >= logThreshold;
+            var (outcome, incidentOpen) = await ObservePersistenceAsync(
+                _tempDbLogPersistence, TempDbLogSpacePersistenceMetric, key, tempDb.CollectionTimeUtc, breaching,
+                TempDbLogSpaceBreachSamples, TempDbLogSpaceClearSamples);
+            readClock.Restart();
+
+            if (incidentOpen && breaching)
+            {
+                if (!suppressed && CooldownElapsed(_lastTempDbLogSpaceAlert, key, now, alertCooldown))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = TempDbLogSpacePersistenceMetric };
+                    var mute = JudgeMute(muteCtx);
+                    _lastTempDbLogSpaceAlert[key] = now;
+
+                    var logContext = AlertContextBuilders.BuildTempDbLogSpaceContext(tempDb, now) ?? new AlertContext();
+                    /* Warning only, for the reason the data-file alert states: the product has no measured "tempdb log nearly full"
+                       bar to cite for a second tier. */
+                    logContext.SeverityOverride = AlertSeverityLevel.Warning;
+                    AlertSampleAge.Stamp(logContext, "tempdb", tempDb.CollectionTimeUtc, now);
+                    var detailText = AlertContextBuilders.ContextToDetailText(logContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, TempDbLogSpacePersistenceMetric,
+                        AlertContextBuilders.TempDbLogSpaceMessage(tempDb, now),
+                        $"{logThreshold}%",
+                        logContext, detailText,
+                        NumericCurrentValue: usedPercent,
+                        NumericThresholdValue: logThreshold,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: logContext.SeverityOverride,
+                        ShortMessage: $"tempdb log at {usedPercent:F0}% of its size"), ct);
+                    AfterFire(TempDbLogSpacePersistenceMetric, _lastTempDbLogSpaceAlert, key, now, alertCooldown, delivery);
+                    readClock.Restart();
+                }
+            }
+            else if (outcome == PersistenceOutcome.Resolve)
+            {
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, TempDbLogSpacePersistenceMetric,
+                        "tempdb Log Space Resolved",
+                        $"{serverName}: tempdb log back to {usedPercent:F0}% of its size"), ct);
+                }
+            }
+            _checkFailures.Succeeded((key, "TempDB log space"));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogCheckFailure(key, "TempDB log space", ex, "Failed to check TempDB log space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "TempDB log space", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /* ---------------- tempdb growth fit (#8882) ---------------- */
+
+    /// <summary>
+    /// The TempDB Growth Won't Fit alert (#8882): fires when a tempdb file's next autogrowth, as configured, is larger than the free space
+    /// on its volume. Judged on the newest <c>database_size_stats</c> collection only (<see cref="TempDbGrowthFit"/> holds the arithmetic).
+    ///
+    /// <para><b>Files that cannot grow do not fire.</b> A fixed-size, pre-sized tempdb is a deliberate setup, and TempDB Space already
+    /// alerts when it fills. The count, and "no data file can grow", go into this alert's context and into TempDB Space's.</para>
+    ///
+    /// <para><b>Gate.</b> One breaching collection opens an incident and one clearing collection resolves it. The collection runs hourly,
+    /// so a longer streak would take hours to page about a condition that is already true. The row's <c>collection_time</c> is the
+    /// observation identity, so a sweep that re-reads the last collection is not a second observation.</para>
+    ///
+    /// <para>No rows, or rows with no readable volume or no growth figure, are no measurement: the gate holds, never a breach and never a
+    /// clear (Azure SQL Database, a login without the volume permission, a row stored before the growth columns were read).</para>
+    /// </summary>
+    private async Task CheckTempDbGrowthFitAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.TempDbGrowthFitEnabled)
+        {
+            return;
+        }
+
+        if (!IsSeeded(key, TempDbGrowthFitSeedStep))
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var files = await _readAdapter.GetTempDbFilesAsync(key, ct);
+            readClock.Restart();
+
+            if (files == null || files.Count == 0)
+            {
+                return;
+            }
+
+            var fit = TempDbGrowthFit.Evaluate(files);
+            if (fit.JudgedFileCount == 0)
+            {
+                return;
+            }
+
+            bool breaching = fit.Shortfalls.Count > 0;
+            var (outcome, incidentOpen) = await ObservePersistenceAsync(
+                _tempDbGrowthFitPersistence, TempDbGrowthFitPersistenceMetric, key, fit.CollectionTimeUtc, breaching,
+                TempDbGrowthFitBreachSamples, TempDbGrowthFitClearSamples);
+            readClock.Restart();
+
+            if (incidentOpen && breaching)
+            {
+                /* The first sweep of this process that finds the incident open: a fire the history shows open is a standing one, and
+                   the collection it was told on counts as reported (its fire time is at or after that collection's time). */
+                var standingRead = await ReadFirstStandingAsync(key, TempDbGrowthFitPersistenceMetric, "tempdb Growth Fit Resolved", ct);
+                readClock.Restart();
+                if (standingRead?.NewestOpen() is { } standingFire)
+                {
+                    _lastAlertedTempDbGrowthFitCollection.TryAdd(key, standingFire.FireAtUtc);
+                }
+
+                /* "Not newer" rather than "equal", and a stampless collection never matches, so it keeps the cooldown repeat. */
+                bool newCollection = !(fit.CollectionTimeUtc is { } collectedAt
+                    && _lastAlertedTempDbGrowthFitCollection.TryGetValue(key, out var lastAlertedCollection)
+                    && collectedAt <= lastAlertedCollection);
+
+                if (!suppressed && newCollection && CooldownElapsed(_lastTempDbGrowthFitAlert, key, now, alertCooldown))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = TempDbGrowthFitPersistenceMetric };
+                    var mute = JudgeMute(muteCtx);
+                    _lastTempDbGrowthFitAlert[key] = now;
+                    DateTime? priorCollection = _lastAlertedTempDbGrowthFitCollection.TryGetValue(key, out var before) ? before : null;
+                    if (fit.CollectionTimeUtc is { } reportedCollection)
+                    {
+                        _lastAlertedTempDbGrowthFitCollection[key] = reportedCollection;
+                    }
+
+                    var worst = fit.Shortfalls[0];
+                    var fitContext = AlertContextBuilders.BuildTempDbGrowthFitContext(fit) ?? new AlertContext();
+                    /* Warning only: the growth has not failed, it is configured to fail when it is next needed. */
+                    fitContext.SeverityOverride = AlertSeverityLevel.Warning;
+                    AlertSampleAge.Stamp(fitContext, "tempdb files", fit.CollectionTimeUtc, now);
+                    var detailText = AlertContextBuilders.ContextToDetailText(fitContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, TempDbGrowthFitPersistenceMetric,
+                        AlertContextBuilders.TempDbGrowthFitMessage(fit),
+                        $"{worst.FreeMb:F0} MB free",
+                        fitContext, detailText,
+                        NumericCurrentValue: worst.NeededMb,
+                        NumericThresholdValue: worst.FreeMb,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: fitContext.SeverityOverride,
+                        ShortMessage: $"tempdb next growth of {worst.NeededMb:F0} MB won't fit on {worst.Volume}"), ct);
+                    AfterFire(TempDbGrowthFitPersistenceMetric, _lastTempDbGrowthFitAlert, key, now, alertCooldown, delivery);
+                    /* A fire no channel received puts the memory back, so the retry sweep still reads the collection as news. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        if (priorCollection is { } told)
+                        {
+                            _lastAlertedTempDbGrowthFitCollection[key] = told;
+                        }
+                        else
+                        {
+                            _lastAlertedTempDbGrowthFitCollection.TryRemove(key, out _);
+                        }
+                    }
+                    readClock.Restart();
+                }
+            }
+            else if (outcome == PersistenceOutcome.Resolve)
+            {
+                /* The incident ended: the next breach is a new episode with no memory, as the cooldown clock's does. */
+                _lastAlertedTempDbGrowthFitCollection.TryRemove(key, out _);
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, TempDbGrowthFitPersistenceMetric,
+                        "tempdb Growth Fit Resolved",
+                        $"{serverName}: the next tempdb growth fits on its volume again"), ct);
+                }
+            }
+            _checkFailures.Succeeded((key, "TempDB growth fit"));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogCheckFailure(key, "TempDB growth fit", ex, "Failed to check TempDB growth fit for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "TempDB growth fit", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// Adds the "no data file can grow" item to a TempDB Space context (#8882). The read is best effort: it runs only when that alert is
+    /// about to fire, and a failure leaves the context as it was, because the alert is the point and this line is a footnote.
+    /// </summary>
+    private async Task AddTempDbCannotGrowItemAsync(AlertContext context, string key, CancellationToken ct)
+    {
+        try
+        {
+            var files = await _readAdapter.GetTempDbFilesAsync(key, ct);
+            if (files is { Count: > 0 })
+            {
+                var item = AlertContextBuilders.BuildTempDbCannotGrowItem(TempDbGrowthFit.Evaluate(files), onlyWhenNoDataFileCanGrow: true);
+                if (item is not null)
+                {
+                    context.Details.Add(item);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "The tempdb file read for the TempDB Space context failed for {Server}: {Message}", key, ex.Message);
         }
     }
 
@@ -4664,6 +4993,7 @@ public sealed class AlertEngine
             try
             {
                 fired.RestartMark = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, InstanceRestartedFiredMetric);
+                seedClock.Restart();
                 fired.DumpMark = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, MemoryDumpsFiredMetric);
                 fired.Seeded = true;
             }

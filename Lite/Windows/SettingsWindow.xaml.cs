@@ -956,6 +956,9 @@ public partial class SettingsWindow : Window
         AlertExcludedVolumesBox.Text = SettingsListText.Join(App.AlertExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
+        AlertTempDbLogSpaceCheckBox.IsChecked = App.AlertTempDbLogSpaceEnabled;
+        AlertTempDbLogSpaceThresholdBox.Text = App.AlertTempDbLogSpaceThresholdPercent.ToString();
+        AlertTempDbGrowthFitCheckBox.IsChecked = App.AlertTempDbGrowthFitEnabled;
         AlertInstanceRestartedCheckBox.IsChecked = App.AlertInstanceRestartedEnabled;
         AlertMemoryDumpsCheckBox.IsChecked = App.AlertMemoryDumpsEnabled;
         AlertLowDiskCheckBox.IsChecked = App.AlertLowDiskEnabled;
@@ -1124,6 +1127,10 @@ public partial class SettingsWindow : Window
         App.AlertTempDbSpaceEnabled =AlertTempDbSpaceCheckBox.IsChecked == true;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb > 0 && tempDb <= 100)
             App.AlertTempDbSpaceThresholdPercent = tempDb;
+        App.AlertTempDbLogSpaceEnabled = AlertTempDbLogSpaceCheckBox.IsChecked == true;
+        if (int.TryParse(AlertTempDbLogSpaceThresholdBox.Text, out var tempDbLog) && tempDbLog > 0 && tempDbLog <= 100)
+            App.AlertTempDbLogSpaceThresholdPercent = tempDbLog;
+        App.AlertTempDbGrowthFitEnabled = AlertTempDbGrowthFitCheckBox.IsChecked == true;
         App.AlertInstanceRestartedEnabled = AlertInstanceRestartedCheckBox.IsChecked == true;
         App.AlertMemoryDumpsEnabled = AlertMemoryDumpsCheckBox.IsChecked == true;
         App.AlertLowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true;
@@ -1247,6 +1254,9 @@ public partial class SettingsWindow : Window
         root["alert_long_running_query_excluded_logins"] = lrqLoginArray;
         root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
         root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
+        root["alert_tempdb_log_space_enabled"] = App.AlertTempDbLogSpaceEnabled;
+        root["alert_tempdb_log_space_threshold_percent"] = App.AlertTempDbLogSpaceThresholdPercent;
+        root["alert_tempdb_growth_fit_enabled"] = App.AlertTempDbGrowthFitEnabled;
         root["alert_instance_restarted_enabled"] = App.AlertInstanceRestartedEnabled;
         root["alert_memory_dumps_enabled"] = App.AlertMemoryDumpsEnabled;
         root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
@@ -1302,6 +1312,7 @@ public partial class SettingsWindow : Window
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
+        AlertTempDbLogSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
         AlertPvsThresholdPercentBox.Text = "40";
@@ -1385,6 +1396,10 @@ public partial class SettingsWindow : Window
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
+        if (AlertTempDbLogSpaceCheckBox.IsChecked == true)
+            parts.Add($"tempdb log > {AlertTempDbLogSpaceThresholdBox.Text}%");
+        if (AlertTempDbGrowthFitCheckBox.IsChecked == true)
+            parts.Add("tempdb growth will not fit");
         if (AlertInstanceRestartedCheckBox.IsChecked == true)
             parts.Add("instance restarted");
         if (AlertMemoryDumpsCheckBox.IsChecked == true)
@@ -1437,6 +1452,9 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbLogSpaceCheckBox.IsEnabled = enabled;
+        AlertTempDbLogSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbGrowthFitCheckBox.IsEnabled = enabled;
         AlertInstanceRestartedCheckBox.IsEnabled = enabled;
         AlertMemoryDumpsCheckBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;

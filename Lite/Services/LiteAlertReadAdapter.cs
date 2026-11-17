@@ -190,6 +190,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetPvsPressureAsync(serverId), cancellationToken);
     }
 
+    /// <summary>#8882: the newest tempdb file collection, for the TempDB Growth Won't Fit alert.</summary>
+    public async Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetTempDbFilesAsync(serverId), cancellationToken);
+    }
+
     public async Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {

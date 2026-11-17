@@ -73,6 +73,8 @@ public static class InvestigationFamily
         /* Not in the draft: the scheduler queue is CPU pressure, read the other way round. */
         ["Runnable Queue"] = Resources,
         ["tempdb Space"] = Resources,
+        ["tempdb Log Space"] = Resources,
+        ["tempdb Growth Fit"] = Resources,
         ["Version Store (PVS)"] = Resources,
         ["Volume Free Space"] = Resources,
         ["Database File Growth"] = Resources,

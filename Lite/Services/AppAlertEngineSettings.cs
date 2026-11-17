@@ -41,6 +41,8 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool ClientTimeoutsEnabled => App.AlertClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => App.AlertLongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => App.AlertTempDbSpaceEnabled;
+    public bool TempDbLogSpaceEnabled => App.AlertTempDbLogSpaceEnabled;
+    public bool TempDbGrowthFitEnabled => App.AlertTempDbGrowthFitEnabled;
     public bool LowDiskEnabled => App.AlertLowDiskEnabled;
     public bool PvsEnabled => App.AlertPvsEnabled;
     public bool LongRunningJobEnabled => App.AlertLongRunningJobEnabled;
@@ -102,6 +104,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public IReadOnlyList<string> LongRunningQueryExcludedLogins => App.AlertLongRunningQueryExcludedLogins;
 
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;
+    public int TempDbLogSpaceThresholdPercent => Math.Clamp(App.AlertTempDbLogSpaceThresholdPercent, 1, 100);
     public int LowDiskThresholdPercent => App.AlertLowDiskThresholdPercent;
     public int LowDiskThresholdGb => App.AlertLowDiskThresholdGb;
 

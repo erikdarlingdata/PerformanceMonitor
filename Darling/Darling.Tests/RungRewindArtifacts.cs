@@ -808,6 +808,30 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
+        // V269 (#8881): the tempdb log columns on collect.tempdb_stats. The sentinel is log_used_percent; the rewind drops the view, drops all
+        // eleven columns and creates the view again over the older shape, and a re-run of V269 adds them back. Safe on a store that never had them.
+        new(269, "hasTempDbLogSpace",
+            @"DROP VIEW IF EXISTS collect.v_tempdb_stats;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_log_bytes_reserved;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_log_bytes_used;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_begin_time;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_program_name;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_login_name;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS holder_session_id;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_truncation_holdup_reason;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_reuse_wait_desc;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_used_percent;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_used_mb;
+ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_total_mb;
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS tempdb_log_space_threshold_percent;
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS tempdb_log_space_enabled;
+CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;"),
+        // V270 (#8882): tempdb's autogrow-all-files flag on collect.database_size_stats. The rewind drops the view, drops the column and creates the
+        // view again over the older shape; a re-run of V270 adds the column back and re-expands the view. Safe on a store that never had it.
+        new(270, "hasDatabaseSizeAutogrowAllFiles",
+            @"DROP VIEW IF EXISTS collect.v_database_size_stats;
+ALTER TABLE IF EXISTS collect.database_size_stats DROP COLUMN IF EXISTS is_autogrow_all_files;
+CREATE OR REPLACE VIEW collect.v_database_size_stats AS SELECT * FROM collect.database_size_stats;"),
         // V271 (#8884): the Instance Restarted and Memory Dumps switches on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops both
         // (the probe's sentinel is the Memory Dumps one) and the re-run of V271 adds them back on. Safe on a store that never had them.
         new(271, "hasInstanceEventAlertSwitches",

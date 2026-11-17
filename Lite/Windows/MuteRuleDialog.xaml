@@ -77,6 +77,8 @@
             <ComboBoxItem Content="{x:Static n:AlertFamily.ClientTimeoutsMetric}"/>
             <ComboBoxItem Content="Long-Running Query"/>
             <ComboBoxItem Content="tempdb Space"/>
+            <ComboBoxItem Content="tempdb Log Space"/>
+            <ComboBoxItem Content="tempdb Growth Fit"/>
             <ComboBoxItem Content="Volume Free Space"/>
             <ComboBoxItem Content="Long-Running Job"/>
         </ComboBox>
