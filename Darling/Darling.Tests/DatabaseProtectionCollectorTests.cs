@@ -575,7 +575,7 @@ public sealed class DatabaseProtectionCollectorTests
     private static Dictionary<string, string> SettledState() => new()
     {
         [DatabaseProtectionErrorLogState.InstanceKey] = "INST1",
-        [DatabaseProtectionErrorLogState.NewestArchiveKey] = DatabaseProtectionErrorLogState.FormatDates(new[] { DateTime.MinValue }),
+        [DatabaseProtectionErrorLogState.NewestArchiveKey] = DatabaseProtectionErrorLogState.FormatNewestArchive(new DatabaseProtectionErrorLogState.Markers(DateTime.MinValue, null, true)),
         [DatabaseProtectionErrorLogState.BackfillDoneKey] = bool.TrueString,
     };
 
@@ -772,6 +772,30 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.Equal(
             DatabaseProtectionErrorLogState.FormatAttempts(new Dictionary<DateTime, int> { [Checked.AddDays(-2)] = 1 }),
             context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+    }
+
+    [Fact]
+    public async Task ArchivesSharingADate_CountOneAttempt_AndOneFailingKeepsTheDateUnread()
+    {
+        /* #8865 I1: three archives cycled in one minute. They are one date: one attempt, and the date is read only when all three read. */
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var logs = LogShape();
+        logs.Rows.Add(true, 0, Checked, DBNull.Value);
+        foreach (var archive in new[] { 1, 2, 3 })
+        {
+            logs.Rows.Add(true, archive, Checked.AddDays(-1), DBNull.Value);
+        }
+
+        var context = ContextWith(new Dictionary<string, string>());
+        var rows = await ReadWithAsync(context, table, logs);
+        var oneAttempt = DatabaseProtectionErrorLogState.FormatAttempts(new Dictionary<DateTime, int> { [Checked.AddDays(-1)] = 1 });
+        Assert.Equal(oneAttempt, context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+
+        await ApplyAsync(context, rows, Status((0, true), (1, true), (2, false), (3, true)), LineShape());
+
+        Assert.Equal(oneAttempt, context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+        Assert.False(rows[0].ErrorLogBackfillComplete);
     }
 
     [Fact]
@@ -1267,20 +1291,40 @@ INSERT #backupset VALUES
         }
     }
 
+    /* Waits for the next minute when the server's clock is late in the current one, so a few quick log cycles land in one minute. */
+    private static async Task WaitForEarlyInAMinuteAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand("SELECT DATEPART(SECOND, SYSDATETIME());", connection);
+        var second = Convert.ToInt32(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+        if (second > 40)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(61 - second), ct);
+        }
+    }
+
+    /// <summary>
+    /// #8865 I1: the list dates an archive to the minute, so logs cycled within one minute share one date. The CHECKDB line is written and
+    /// then the log is cycled five times at once, which leaves the line in archive 5 only, behind four newer archives of the same minute.
+    /// The old plan read three archives of that date and marked the date (so all five) read, and archive 5 was never read.
+    /// </summary>
     [Fact]
-    public async Task CycledLogs_AreBackfilledThreePerCycle_NewestFirst()
+    public async Task CycledLogs_InOneMinute_AreReadWhole_AndTheLineInTheOldestOfThemIsFound()
     {
         var cs = ConnectionString();
         Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
         var ct = TestContext.Current.CancellationToken;
         var major = await MajorVersionAsync(cs!, ct);
         const string Database = "pm_8865_cycled";
+        const int Rolls = 5;
 
         try
         {
             await ExecuteAsync(cs!, $"CREATE DATABASE [{Database}];", ct);
+            await WaitForEarlyInAMinuteAsync(cs!, ct);
             await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{Database}');", ct);
-            for (var i = 0; i < 5; i++)
+            for (var i = 0; i < Rolls; i++)
             {
                 await ExecuteAsync(cs!, "EXECUTE sys.sp_cycle_errorlog;", ct);
             }
@@ -1288,23 +1332,38 @@ INSERT #backupset VALUES
             await using var connection = new SqlConnection(cs);
             await connection.OpenAsync(ct);
             var state = new Dictionary<string, string>(StringComparer.Ordinal);
-            var cycles = 0;
-            var archivesRead = new List<int>();
+            var plans = new List<DatabaseProtectionErrorLogState.ErrorLogPlan>();
+            var maxCycles = int.MaxValue;
             DatabaseProtectionCollector.Row row;
             do
             {
                 var (rows, context) = await RunCycleAsync(connection, state, major, ct);
-                archivesRead.Add(context.DatabaseProtectionErrorLogPlan!.Read.Count(a => a.Archive > 0));
+                var plan = context.DatabaseProtectionErrorLogPlan!;
+                plans.Add(plan);
                 row = rows.Single(r => r.DatabaseName == Database);
-                cycles++;
+                if (plans.Count == 1)
+                {
+                    /* Every read here succeeds, so each cycle finishes at least one listed date: the backfill ends within that many
+                       cycles, and one more is spare. */
+                    maxCycles = plan.Enumerated!.Where(a => a.Archive > 0).Select(a => a.LogDate).Distinct().Count() + 1;
+                }
             }
-            while (row.ErrorLogBackfillComplete != true && cycles < 10);
+            while (row.ErrorLogBackfillComplete != true && plans.Count < maxCycles);
 
+            var listed = plans[0].Enumerated!.Where(a => a.Archive is >= 1 and <= Rolls).ToList();
+            Assert.True(
+                listed.Count == Rolls && listed.Select(a => a.LogDate).Distinct().Count() == 1,
+                "the five rolls must share one minute for this test to say anything; rerun it");
             Assert.True(row.ErrorLogBackfillComplete);
-            Assert.All(archivesRead, n => Assert.True(n <= DatabaseProtectionErrorLogState.ArchivesPerCycle));
-            Assert.True(cycles >= 2, "more archives than one cycle reads should take more than one cycle");
             Assert.NotNull(row.ErrorLogCheckDbTime);
             Assert.InRange((DateTime.UtcNow - row.ErrorLogCheckDbTime!.Value).TotalMinutes, -1, 30);
+
+            /* A cycle reads at most ArchivesPerCycle archives, unless it reads one date alone that holds more. */
+            Assert.All(plans, p =>
+            {
+                var archives = p.Read.Where(a => a.Archive > 0).ToList();
+                Assert.True(archives.Count <= DatabaseProtectionErrorLogState.ArchivesPerCycle || archives.Select(a => a.LogDate).Distinct().Count() == 1);
+            });
         }
         finally
         {

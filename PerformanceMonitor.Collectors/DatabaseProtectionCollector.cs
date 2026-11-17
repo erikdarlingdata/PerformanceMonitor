@@ -242,7 +242,9 @@ SELECT
     archive = CONVERT(integer, NULL),
     log_date = CONVERT(datetime, NULL),
     enumerate_error = @enumerate_error
-WHERE @enumerate_ok = 0;";
+WHERE @enumerate_ok = 0
+ORDER BY
+    archive;";
 
     /* The backups read runs in sp_executesql inside TRY/CATCH: a refused VIEW DATABASE STATE is a compile-time permission error of the
        inner batch, which a CATCH in the outer batch catches. backup_finish_date there is already UTC. */
@@ -490,9 +492,9 @@ OPTION(RECOMPILE);";
         context.DatabaseProtectionErrorLogPlan = plan;
 
         var attempts = new Dictionary<DateTime, int>(plan.Before.Attempts);
-        foreach (var archive in plan.Read.Where(a => a.Archive > 0))
+        foreach (var date in DatabaseProtectionErrorLogState.PlannedDates(plan))
         {
-            attempts[archive.LogDate] = attempts.GetValueOrDefault(archive.LogDate) + 1;
+            attempts[date] = attempts.GetValueOrDefault(date) + 1;
         }
 
         var skipped = plan.Before.Skipped.Union(plan.NewlySkipped).ToList();
@@ -758,23 +760,22 @@ OPTION(RECOMPILE);";
         var state = context.State;
         var reset = plan.Before.Reset;
 
-        var readOk = plan.Read
-            .Where(a => a.Archive > 0 && status.TryGetValue(a.Archive, out var s) && s.Ok)
-            .Select(a => a.LogDate)
-            .ToList();
+        /* #8865: archives are identified by a minute-precision date, so a date counts as read only when every archive carrying it read fine. */
+        var readOk = DatabaseProtectionErrorLogState.DatesReadWhole(plan, archive => status.TryGetValue(archive, out var s) && s.Ok);
         var markers = DatabaseProtectionErrorLogState.MarkersAfter(plan, readOk, plan.Enumerated ?? plan.Read);
         var attempts = new Dictionary<DateTime, int>(plan.Before.Attempts);
-        /* #8865: a permission refusal is not an archive fault. When the current log is refused, or an archive's own error is a permission
-           error, the archive keeps the attempt count it was loaded with (ReadAsync staged +1 in advance), so a missing grant never uses up
-           the archives' tries and the backlog is still there to backfill once the grant is added. A timeout never reaches here and counts. */
+        /* #8865: a permission refusal is not an archive fault. When the current log is refused, or every archive of a date that did not
+           read failed with a permission error, the date keeps the attempt count it was loaded with (ReadAsync staged +1 in advance), so a
+           missing grant never uses up the archives' tries and the backlog is still there to backfill once the grant is added. A timeout
+           never reaches here and counts. One attempt per date, however many archives share it. */
         var currentRefused = status.TryGetValue(0, out var currentStatus) && !currentStatus.Ok && IsPermissionError(currentStatus.ErrorNumber);
-        foreach (var archive in plan.Read.Where(a => a.Archive > 0))
+        foreach (var group in plan.Read.Where(a => a.Archive > 0).GroupBy(a => a.LogDate))
         {
             var refused = currentRefused
-                || (status.TryGetValue(archive.Archive, out var archiveStatus) && !archiveStatus.Ok && IsPermissionError(archiveStatus.ErrorNumber));
+                || group.All(a => status.TryGetValue(a.Archive, out var s) && (s.Ok || IsPermissionError(s.ErrorNumber)));
             if (!refused)
             {
-                attempts[archive.LogDate] = attempts.GetValueOrDefault(archive.LogDate) + 1;
+                attempts[group.Key] = attempts.GetValueOrDefault(group.Key) + 1;
             }
         }
 
@@ -864,7 +865,7 @@ OPTION(RECOMPILE);";
         CollectorContext context, Action<CollectorContext, string, string> stage, DatabaseProtectionErrorLogState.Markers markers,
         IReadOnlyDictionary<DateTime, int> attempts, IReadOnlyCollection<DateTime> skipped)
     {
-        stage(context, DatabaseProtectionErrorLogState.NewestArchiveKey, markers.NewestArchive is { } newest ? DatabaseProtectionErrorLogState.FormatDates(new[] { newest }) : string.Empty);
+        stage(context, DatabaseProtectionErrorLogState.NewestArchiveKey, DatabaseProtectionErrorLogState.FormatNewestArchive(markers));
         stage(context, DatabaseProtectionErrorLogState.BackfillBeforeKey, markers.BackfillBefore is { } before ? DatabaseProtectionErrorLogState.FormatDates(new[] { before }) : string.Empty);
         stage(context, DatabaseProtectionErrorLogState.BackfillDoneKey, markers.BackfillDone ? bool.TrueString : bool.FalseString);
         stage(context, DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.FormatAttempts(attempts));

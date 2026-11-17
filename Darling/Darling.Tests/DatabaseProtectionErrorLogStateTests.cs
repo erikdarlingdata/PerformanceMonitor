@@ -169,7 +169,7 @@ public sealed class DatabaseProtectionErrorLogStateTests
     {
         /* Everything older than archive 6 is already read; five archives are new since the marker. */
         var logs = Logs(12);
-        var markers = new S.Markers(LogDate(6), LogDate(11), true);
+        var markers = new S.Markers(LogDate(6), LogDate(11), true, 1);
 
         var plan1 = S.PlanArchives(WithMarkers(markers), logs, true, S.ArchivesPerCycle);
         Assert.Equal(new[] { 0, 5, 4, 3 }, Numbers(plan1));
@@ -205,7 +205,7 @@ public sealed class DatabaseProtectionErrorLogStateTests
     {
         var logs = Logs(4);
         var attempts = new Dictionary<DateTime, int> { [LogDate(2)] = S.MaxArchiveAttempts };
-        var loaded = WithMarkers(new S.Markers(LogDate(1), null, false), attempts);
+        var loaded = WithMarkers(new S.Markers(LogDate(1), null, false, 1), attempts);
 
         var plan = S.PlanArchives(loaded, logs, true, S.ArchivesPerCycle);
         Assert.Equal(new[] { 0, 1, 3 }, Numbers(plan));
@@ -234,6 +234,101 @@ public sealed class DatabaseProtectionErrorLogStateTests
             Assert.Same(loaded, plan.Before);
             Assert.Equal(loaded.Markers, S.MarkersAfter(plan, new[] { default(DateTime) }, new List<S.ArchiveInfo>()));
         }
+    }
+
+    /* #8865 I1: logs cycled within one minute. Archives 1 to 5 share one date, 6 is older. */
+    private static List<S.ArchiveInfo> SameMinute(int sameCount, int total)
+        => Enumerable.Range(0, total)
+            .Select(n => new S.ArchiveInfo(n, n == 0 ? LogDate(0) : n <= sameCount ? LogDate(1) : LogDate(n)))
+            .ToList();
+
+    private static DateTime[] ReadWhole(S.ErrorLogPlan plan) => S.DatesReadWhole(plan, _ => true).ToArray();
+
+    [Fact]
+    public void FiveArchivesInOneMinute_AreAllReadInOneCycle_AndTheDateIsNotDoneUntilEveryOneReads()
+    {
+        /* Before the fix the plan took three of the five, and reading them marked the date (so all five) read: archives 4 and 5 were
+           never read, and a CHECKDB line only they held was lost. */
+        var logs = SameMinute(5, 7);
+
+        var plan1 = S.PlanArchives(Empty(), logs, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5 }, Numbers(plan1));
+        Assert.Equal(new[] { LogDate(1) }, S.PlannedDates(plan1));
+
+        /* One archive of the date failing keeps the whole date unread: the backfill marker does not move over it. */
+        var partly = S.DatesReadWhole(plan1, archive => archive != 4);
+        Assert.Empty(partly);
+        var held = S.MarkersAfter(plan1, partly, logs);
+        Assert.Null(held.BackfillBefore);
+        Assert.False(held.BackfillDone);
+
+        var after1 = S.MarkersAfter(plan1, ReadWhole(plan1), logs);
+        Assert.Equal(LogDate(1), after1.BackfillBefore);
+        var plan2 = S.PlanArchives(WithMarkers(after1), logs, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0, 6 }, Numbers(plan2));
+        Assert.True(S.MarkersAfter(plan2, ReadWhole(plan2), logs).BackfillDone);
+    }
+
+    [Fact]
+    public void ADateThatDoesNotFitTheCycle_WaitsForTheNextOne_RatherThanBeingSplit()
+    {
+        /* Archives 1 and 2 share a date, 3 and 4 share another: two then two, never three then one. */
+        var logs = new List<S.ArchiveInfo>
+        {
+            new(0, LogDate(0)), new(1, LogDate(1)), new(2, LogDate(1)), new(3, LogDate(3)), new(4, LogDate(3)),
+        };
+
+        var plan1 = S.PlanArchives(Empty(), logs, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0, 1, 2 }, Numbers(plan1));
+        var after1 = S.MarkersAfter(plan1, ReadWhole(plan1), logs);
+        var plan2 = S.PlanArchives(WithMarkers(after1), logs, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0, 3, 4 }, Numbers(plan2));
+    }
+
+    [Fact]
+    public void Steady_ANewArchiveClosedInTheMarkersMinute_IsRead()
+    {
+        /* The marker is archive 1's date, read when two archives carried it. A roll in that same minute adds a third: before the fix the
+           steady walk took only dates after the marker, so the new archive, and the lines written just before the roll, were never read. */
+        var markers = new S.Markers(LogDate(1), LogDate(4), true, 2);
+        var rolled = new List<S.ArchiveInfo>
+        {
+            new(0, LogDate(0)), new(1, LogDate(1)), new(2, LogDate(1)), new(3, LogDate(1)), new(4, LogDate(4)),
+        };
+
+        var plan = S.PlanArchives(WithMarkers(markers), rolled, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0, 1, 2, 3 }, Numbers(plan));
+
+        var after = S.MarkersAfter(plan, ReadWhole(plan), rolled);
+        Assert.Equal(LogDate(1), after.NewestArchive);
+        Assert.Equal(3, after.NewestArchiveCount);
+        Assert.Equal(new[] { 0 }, Numbers(S.PlanArchives(WithMarkers(after), rolled, true, S.ArchivesPerCycle)));
+
+        /* Not read whole: the marker keeps its old count, so the next cycle tries the date again. */
+        var failed = S.MarkersAfter(plan, Array.Empty<DateTime>(), rolled);
+        Assert.Equal(2, failed.NewestArchiveCount);
+
+        /* An archive of the marker's minute aging out lowers the count, and the next roll in that minute still shows as new. */
+        var agedOut = rolled.Where(a => a.Archive != 3 && a.Archive != 4).ToList();
+        var quiet = S.PlanArchives(WithMarkers(after), agedOut, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { 0 }, Numbers(quiet));
+        Assert.Equal(2, S.MarkersAfter(quiet, Array.Empty<DateTime>(), agedOut).NewestArchiveCount);
+    }
+
+    [Fact]
+    public void TheSteadyMarker_RoundTripsWithItsCount_AndABareDateLoadsAsCountZero()
+    {
+        var markers = new S.Markers(LogDate(1), null, true, 3);
+        var state = new Dictionary<string, string> { [S.NewestArchiveKey] = S.FormatNewestArchive(markers) };
+        var loaded = S.Load(state, "instance-a");
+        Assert.Equal(LogDate(1), loaded.Markers.NewestArchive);
+        Assert.Equal(3, loaded.Markers.NewestArchiveCount);
+
+        var bare = S.Load(new Dictionary<string, string> { [S.NewestArchiveKey] = S.FormatDates(new[] { LogDate(1) }) }, "instance-a");
+        Assert.Equal(LogDate(1), bare.Markers.NewestArchive);
+        Assert.Equal(0, bare.Markers.NewestArchiveCount);
+
+        Assert.Equal(string.Empty, S.FormatNewestArchive(new S.Markers(null, null, false)));
     }
 
     [Fact]

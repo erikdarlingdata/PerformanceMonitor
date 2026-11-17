@@ -36,7 +36,11 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>Server-scoped: the <c>@@SERVERNAME</c> the remembered state belongs to.</summary>
     public const string InstanceKey = "errorlog_instance";
 
-    /// <summary>Server-scoped: log date of the newest archive already read (the steady-state marker).</summary>
+    /// <summary>
+    /// Server-scoped: log date of the newest archive already read (the steady-state marker), with how many listed archives carried that
+    /// date when it was read, as <c>date=count</c>. #8865: the list dates an archive to the minute only, so several archives can share
+    /// the marker's date, and a new one closed in that same minute is told apart by the count going up.
+    /// </summary>
     public const string NewestArchiveKey = "errorlog_newest_archive";
 
     /// <summary>Server-scoped: log date below which the backfill of older archives has already been read.</summary>
@@ -45,7 +49,7 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>Server-scoped: <c>True</c> once the backfill has reached the oldest retained archive.</summary>
     public const string BackfillDoneKey = "errorlog_backfill_done";
 
-    /// <summary>Server-scoped: failed read attempts per archive, as <c>date=count</c> pairs.</summary>
+    /// <summary>Server-scoped: failed read attempts per archive date (all archives sharing that date together), as <c>date=count</c> pairs.</summary>
     public const string AttemptsKey = "errorlog_attempts";
 
     /// <summary>Server-scoped: log dates of archives given up on after <see cref="MaxArchiveAttempts"/> failures.</summary>
@@ -95,8 +99,11 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>One error log: <see cref="Archive"/> 0 is the current log, higher numbers are older archives.</summary>
     public readonly record struct ArchiveInfo(int Archive, DateTime LogDate);
 
-    /// <summary>The archive-reading markers; see the key constants for what each one means.</summary>
-    public sealed record Markers(DateTime? NewestArchive, DateTime? BackfillBefore, bool BackfillDone);
+    /// <summary>
+    /// The archive-reading markers; see the key constants for what each one means. <see cref="NewestArchiveCount"/> is how many listed
+    /// archives carried <see cref="NewestArchive"/>'s date when the marker was last set.
+    /// </summary>
+    public sealed record Markers(DateTime? NewestArchive, DateTime? BackfillBefore, bool BackfillDone, int NewestArchiveCount = 0);
 
     /// <summary>Everything loaded from state; <see cref="Reset"/> means the instance changed and it is all empty.</summary>
     public sealed record LoadedState(
@@ -134,10 +141,12 @@ public static class DatabaseProtectionErrorLogState
             return new LoadedState(new Markers(null, null, false), new Dictionary<DateTime, int>(), Array.Empty<DateTime>(), true);
         }
 
+        var (newest, newestCount) = ReadNewestArchive(state);
         var markers = new Markers(
-            ReadDate(state, NewestArchiveKey),
+            newest,
             ReadDate(state, BackfillBeforeKey),
-            state.TryGetValue(BackfillDoneKey, out var done) && done == bool.TrueString);
+            state.TryGetValue(BackfillDoneKey, out var done) && done == bool.TrueString,
+            newestCount);
         var attempts = state.TryGetValue(AttemptsKey, out var a) ? ParseAttempts(a) : new Dictionary<DateTime, int>();
         var skipped = state.TryGetValue(SkippedKey, out var s) ? ParseDates(s) : new List<DateTime>();
         return new LoadedState(markers, attempts, skipped, false);
@@ -183,6 +192,11 @@ public static class DatabaseProtectionErrorLogState
     /// archives: new ones past the steady marker oldest first, then the backfill below its marker newest first.
     /// An archive at <see cref="MaxArchiveAttempts"/> is skipped instead.
     ///
+    /// <para>#8865: archives are taken a date at a time. The list dates an archive to the minute, so logs cycled within one minute share
+    /// a date, and a date is planned, read, counted and skipped whole: reading part of a date and marking the date read would mark the
+    /// rest of it read too. A date holding more archives than <paramref name="perCycle"/> is read whole in a cycle of its own, because
+    /// splitting it is the same fault; that costs one longer read on a server that cycled its log more than three times in one minute.</para>
+    ///
     /// <para>#8865: a list that was refused or failed (<paramref name="enumerateOk"/> false) reads the current log only and
     /// leaves the loaded state exactly as it was. It says nothing about which archives exist, so it must not move a marker:
     /// marking the backfill done here would make the first list that works set the steady marker to its newest archive with the
@@ -207,41 +221,74 @@ public static class DatabaseProtectionErrorLogState
             /* #8865: with no archives yet the marker is the minimum date, not null: a null marker would make the
                first archive that later appears look like a first run and be taken as already read, losing every
                CHECKDB line written between the last current-log read and that roll. */
+            var newest = archives.Count > 0 ? archives.Max(a => a.LogDate) : DateTime.MinValue;
             before = before with
             {
-                Markers = before.Markers with { NewestArchive = archives.Count > 0 ? archives.Max(a => a.LogDate) : DateTime.MinValue },
+                Markers = before.Markers with { NewestArchive = newest, NewestArchiveCount = archives.Count(a => a.LogDate == newest) },
             };
         }
 
         var read = new List<ArchiveInfo> { current };
         var newlySkipped = new List<DateTime>();
-        foreach (var archive in WalkOrder(before.Markers, archives))
+        var archivesRead = 0;
+        foreach (var group in WalkOrder(before.Markers, archives))
         {
-            if (read.Count - 1 >= perCycle)
+            var date = group[0].LogDate;
+            if (before.Skipped.Contains(date))
+            {
+                continue;
+            }
+
+            if (before.Attempts.TryGetValue(date, out var tries) && tries >= MaxArchiveAttempts)
+            {
+                newlySkipped.Add(date);
+                continue;
+            }
+
+            if (archivesRead > 0 && archivesRead + group.Count > perCycle)
             {
                 break;
             }
 
-            if (before.Skipped.Contains(archive.LogDate))
+            read.AddRange(group);
+            archivesRead += group.Count;
+            if (archivesRead >= perCycle)
             {
-                continue;
+                break;
             }
-
-            if (before.Attempts.TryGetValue(archive.LogDate, out var tries) && tries >= MaxArchiveAttempts)
-            {
-                newlySkipped.Add(archive.LogDate);
-                continue;
-            }
-
-            read.Add(archive);
         }
 
         return new ErrorLogPlan(read, newlySkipped, before, true, enumerated);
     }
 
     /// <summary>
-    /// The markers after a cycle. Each marker moves over the contiguous run, in walk order, of archives that
-    /// are done (read, or skipped) and stops at the first that is neither, so an archive that failed in the
+    /// The dates read whole this cycle: every archive the list gave that date was in the plan and <paramref name="archiveOk"/> says it
+    /// read fine. #8865: one archive of a date reading fine says nothing about another archive with the same date, so a date with any
+    /// archive unread or failed is not read.
+    /// </summary>
+    public static List<DateTime> DatesReadWhole(ErrorLogPlan plan, Func<int, bool> archiveOk)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(archiveOk);
+        var planned = new HashSet<int>(plan.Read.Where(a => a.Archive > 0).Select(a => a.Archive));
+        return (plan.Enumerated ?? plan.Read)
+            .Where(a => a.Archive > 0)
+            .GroupBy(a => a.LogDate)
+            .Where(g => g.All(a => planned.Contains(a.Archive) && archiveOk(a.Archive)))
+            .Select(g => g.Key)
+            .ToList();
+    }
+
+    /// <summary>The distinct dates of the archives planned this cycle: one attempt each, however many archives share it.</summary>
+    public static List<DateTime> PlannedDates(ErrorLogPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan.Read.Where(a => a.Archive > 0).Select(a => a.LogDate).Distinct().ToList();
+    }
+
+    /// <summary>
+    /// The markers after a cycle. Each marker moves over the contiguous run, in walk order, of dates that
+    /// are done (read whole, or skipped) and stops at the first that is neither, so an archive that failed in the
     /// middle is retried next cycle and never jumped over. A list that was not read moves nothing (#8865).
     /// </summary>
     public static Markers MarkersAfter(
@@ -253,22 +300,34 @@ public static class DatabaseProtectionErrorLogState
             return before;
         }
 
-        var archives = enumerated.Where(a => a.Archive > 0).ToList();
+        var counts = enumerated.Where(a => a.Archive > 0).GroupBy(a => a.LogDate).ToDictionary(g => g.Key, g => g.Count());
         var skipped = new HashSet<DateTime>(plan.Before.Skipped);
         skipped.UnionWith(plan.NewlySkipped);
-        bool IsDone(ArchiveInfo a) => readOk.Contains(a.LogDate) || skipped.Contains(a.LogDate);
+        bool IsDone(DateTime date) => readOk.Contains(date) || skipped.Contains(date);
 
         var newest = before.NewestArchive;
+        var newestCount = before.NewestArchiveCount;
         if (newest is { } steadyMarker)
         {
-            foreach (var a in archives.Where(x => x.LogDate > steadyMarker).OrderBy(x => x.LogDate))
+            /* #8865: more archives on the marker's date than when it was set means one was closed in the marker's minute after it was
+               read, and the marker holds until that date is read again whole. Fewer means older ones of that date aged out, and the count
+               follows the list down so the next one closed in that minute still shows as new. The one case this cannot see is a roll that
+               adds an archive in the marker's minute while an archive of that same minute ages out, which needs every retained archive
+               to share one minute. */
+            var markerCount = counts.GetValueOrDefault(steadyMarker);
+            if (markerCount <= before.NewestArchiveCount || IsDone(steadyMarker))
             {
-                if (!IsDone(a))
+                newestCount = markerCount;
+                foreach (var date in counts.Keys.Where(d => d > steadyMarker).OrderBy(d => d))
                 {
-                    break;
-                }
+                    if (!IsDone(date))
+                    {
+                        break;
+                    }
 
-                newest = a.LogDate;
+                    newest = date;
+                    newestCount = counts[date];
+                }
             }
         }
 
@@ -276,24 +335,33 @@ public static class DatabaseProtectionErrorLogState
         var backfillDone = before.BackfillDone;
         if (!backfillDone)
         {
-            var candidates = archives.Where(x => x.LogDate < (before.BackfillBefore ?? DateTime.MaxValue))
-                .OrderByDescending(x => x.LogDate).ToList();
+            var candidates = counts.Keys.Where(d => d < (before.BackfillBefore ?? DateTime.MaxValue))
+                .OrderByDescending(d => d).ToList();
             var advanced = 0;
-            foreach (var a in candidates)
+            foreach (var date in candidates)
             {
-                if (!IsDone(a))
+                if (!IsDone(date))
                 {
                     break;
                 }
 
-                backfillBefore = a.LogDate;
+                backfillBefore = date;
                 advanced++;
             }
 
             backfillDone = advanced == candidates.Count;
         }
 
-        return new Markers(newest, backfillBefore, backfillDone);
+        return new Markers(newest, backfillBefore, backfillDone, newestCount);
+    }
+
+    /// <summary>Serialises the steady marker as <c>date=count</c>; empty when there is none.</summary>
+    public static string FormatNewestArchive(Markers markers)
+    {
+        ArgumentNullException.ThrowIfNull(markers);
+        return markers.NewestArchive is { } newest
+            ? string.Create(CultureInfo.InvariantCulture, $"{FormatDate(newest)}={markers.NewestArchiveCount}")
+            : string.Empty;
     }
 
     /// <summary>Stages <paramref name="value"/> for <paramref name="key"/> unless state already holds exactly it.</summary>
@@ -349,24 +417,57 @@ public static class DatabaseProtectionErrorLogState
         return result;
     }
 
-    private static IEnumerable<ArchiveInfo> WalkOrder(Markers markers, List<ArchiveInfo> archives)
+    /* The dates to read, each as the whole group of archives the list gave it, in archive order: first the marker's own date when it holds
+       more archives than when it was read, then the newer dates oldest first, then the backfill newest first. A date is given once. */
+    private static IEnumerable<List<ArchiveInfo>> WalkOrder(Markers markers, List<ArchiveInfo> archives)
     {
+        var groups = archives.GroupBy(a => a.LogDate).ToDictionary(g => g.Key, g => g.OrderBy(a => a.Archive).ToList());
+        var given = new HashSet<DateTime>();
         if (markers.NewestArchive is { } newest)
         {
-            foreach (var a in archives.Where(x => x.LogDate > newest).OrderBy(x => x.LogDate))
+            if (groups.TryGetValue(newest, out var same) && same.Count > markers.NewestArchiveCount && given.Add(newest))
             {
-                yield return a;
+                yield return same;
+            }
+
+            foreach (var date in groups.Keys.Where(d => d > newest).OrderBy(d => d))
+            {
+                if (given.Add(date))
+                {
+                    yield return groups[date];
+                }
             }
         }
 
         if (!markers.BackfillDone)
         {
-            foreach (var a in archives.Where(x => x.LogDate < (markers.BackfillBefore ?? DateTime.MaxValue))
-                         .OrderByDescending(x => x.LogDate))
+            foreach (var date in groups.Keys.Where(d => d < (markers.BackfillBefore ?? DateTime.MaxValue)).OrderByDescending(d => d))
             {
-                yield return a;
+                if (given.Add(date))
+                {
+                    yield return groups[date];
+                }
             }
         }
+    }
+
+    /* The steady marker as FormatNewestArchive writes it. A bare date with no count reads as count 0, so a marker written before the count
+       existed re-reads its own date once. */
+    private static (DateTime? Date, int Count) ReadNewestArchive(IReadOnlyDictionary<string, string> state)
+    {
+        if (!state.TryGetValue(NewestArchiveKey, out var value) || string.IsNullOrEmpty(value))
+        {
+            return (null, 0);
+        }
+
+        var parts = value.Split('=');
+        if (parts.Length > 2 || !TryParseDate(parts[0], out var date))
+        {
+            return (null, 0);
+        }
+
+        var count = parts.Length == 2 && int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : 0;
+        return (date, count);
     }
 
     private static DateTime? ReadDate(IReadOnlyDictionary<string, string> state, string key)
