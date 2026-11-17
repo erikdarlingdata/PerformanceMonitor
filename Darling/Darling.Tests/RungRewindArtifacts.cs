@@ -808,9 +808,9 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
-        // V270 (#8865): the ten error-log columns on collect.database_protection (V269 is held by another change). The probe's sentinel is the
-        // last one, replica_readable; the rewind drops all ten and a re-run of V270 adds them back. Safe on a store that never had them.
-        new(270, "hasDatabaseProtectionErrorLog",
+        // V269 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
+        // last one, replica_readable; the rewind drops all ten and a re-run of V269 adds them back. Safe on a store that never had them.
+        new(269, "hasDatabaseProtectionErrorLog",
             @"ALTER TABLE IF EXISTS collect.database_protection
     DROP COLUMN IF EXISTS errorlog_state, DROP COLUMN IF EXISTS errorlog_message, DROP COLUMN IF EXISTS errorlog_grant,
     DROP COLUMN IF EXISTS errorlog_backfill_complete, DROP COLUMN IF EXISTS errorlog_skipped_archives, DROP COLUMN IF EXISTS errorlog_unparsed_lines,

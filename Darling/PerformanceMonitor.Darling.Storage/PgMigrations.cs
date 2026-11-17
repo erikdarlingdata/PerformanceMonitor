@@ -3482,13 +3482,13 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
-        /* V270 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
+        /* V269 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
            Catalog-only ALTERs on a plain table, nothing is backfilled, so the upgrade stays fast. */
-        new Migration(270, "database-protection-error-log", V270Sql),
+        new Migration(269, "database-protection-error-log", V269Sql),
     };
 
     /// <summary>
-    /// V270 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
+    /// V269 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
     /// that replica's own SQL Server error log. <b>Raw facts only</b>: how the log read went (<c>errorlog_state</c>, message, the grant that
     /// would fix a refusal), whether the backfill reached the start of the retained logs, the archives skipped, the lines that did not parse,
     /// the newest completed CHECKDB the log shows (time, options, error count) and whether the database was readable on that replica. What
@@ -3497,7 +3497,7 @@ $rung$;";
     /// payload</b> after <c>log_backup_state</c>, because the writer is a positional binary COPY: a fresh store (the generated V223 table
     /// carries the columns and these ALTERs no-op there) and an upgraded one share one physical column order. Every statement is idempotent.
     /// </summary>
-    private const string V270Sql = @"
+    private const string V269Sql = @"
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_state text;
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_message text;
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_grant text;

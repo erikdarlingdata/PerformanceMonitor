@@ -1559,7 +1559,7 @@ SELECT
        finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.index_object_stats') AND attname = 'answering_server_name' AND NOT attisdropped)
     AND to_regclass('collect.object_executions_daily_built') IS NOT NULL,
-    /* V270 (#8865) adds the error-log facts to the database protection rows. Found by catalog, as the V268 line above is. */
+    /* V269 (#8865) adds the error-log facts to the database protection rows. Found by catalog, as the V268 line above is. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.database_protection') AND attname = 'replica_readable' AND NOT attisdropped)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
@@ -1837,12 +1837,12 @@ SELECT
         /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
-        /* V270 (#8865): the error-log facts on collect.database_protection. Column-existence sentinel, newest-first, and the TOP rung, so a
+        /* V269 (#8865): the error-log facts on collect.database_protection. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 268 and showing a spurious upgrade
-           banner on a store that is current. V269 is held by another change, so the rung below this one is V268. */
+           banner on a store that is current. */
         if (hasDatabaseProtectionErrorLog)
         {
-            return 270;
+            return 269;
         }
         /* V268 (#8784): the answering instance on the index and object stats, with the module execution summary. Column- and table-existence
            sentinel, newest-first, and the rung below the newest. */
