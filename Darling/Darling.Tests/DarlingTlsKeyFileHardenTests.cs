@@ -946,6 +946,65 @@ public class DarlingTlsKeyFileHardenTests
         }
     }
 
+    /// <summary>#8923: SECURED also needs the service account's read. A key whose only entries are SYSTEM and Administrators is
+    /// private, but the service cannot load its certificate from it, so it keeps the NOT CHANGED line and the icacls grant that gives
+    /// the service its read, whether the two entries are on the file or inherited from its folder.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnOutsideKeyWithNoReadForTheService_IsNotReportedSecured_AndKeepsTheIcaclsGrant(bool inherited)
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-8923-lockout-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var key = MakeKey(outside, "web.pfx");
+            var owned = new FileInfo(key).GetAccessControl();
+            owned.SetOwner(ServiceSid);
+            new FileInfo(key).SetAccessControl(owned);
+            if (inherited)
+            {
+                RestrictFolderAndInherit(outside, key, SystemFull, AdministratorsFull);
+
+                /* The folder keeps one entry for the current user that its files do not inherit, so this process can still
+                   reach the folder. The key itself inherits only SYSTEM and Administrators. */
+                var folder = new DirectoryInfo(outside);
+                var acl = folder.GetAccessControl();
+                acl.AddAccessRule(new FileSystemAccessRule(ServiceSid, FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+                folder.SetAccessControl(acl);
+            }
+            else
+            {
+                ProtectKey(key, SystemFull, AdministratorsFull);
+            }
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(key));
+            Assert.Null(DarlingFileSecurity.AccessBeyondTrusted(key));
+            Assert.False(DarlingFileSecurity.GrantsHardenedAccount(key));
+            var before = Snapshot(key);
+            var config = WriteConfig(install, "{\"pfxPath\":" + Json(key) + "}");
+
+            var (exit, output, error) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error);
+            Assert.Equal(before, Snapshot(key));
+            Assert.DoesNotContain("SECURED", output, StringComparison.Ordinal);
+            Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {key} ", Lines(output)[0], StringComparison.Ordinal);
+            Assert.Contains("icacls", Lines(output)[0], StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
     /// <summary>#8923: an inherited entry counts. A key whose own ACL is clean but whose folder lets Users read it is still reported
     /// as readable, with the icacls line.</summary>
     [Fact]
