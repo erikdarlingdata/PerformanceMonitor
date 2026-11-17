@@ -14,7 +14,12 @@
  * The page reads get_store_table_health twice, started together: section "tables" and section "indexes". The tables half
  * takes about a second and a half on a busy laptop and the indexes half about one, so each draws as its own read returns,
  * and the Indexes and coverage sections say "Loading" until theirs does. The page never asks for section "all".
- * get_store_maintenance_readiness is a third read and fills the verdict line. Refresh runs all three again.
+ * get_store_maintenance_readiness is a third read and fills the verdict line. Refresh asks for all three again.
+ *
+ * The service reads the store's catalogs for the tables and the indexes at most once in a few minutes and holds each answer
+ * in between (#8924), so a refresh inside that time gets the same read back. The page never stamps such an answer with the
+ * time it arrived: the line beside Refresh and the line under the index summary show when the store answered
+ * (tables_as_of, indexes_as_of) and how long ago that was (the _age_seconds beside each).
  *
  * Measure runs measure_store_table for ONE plain table. Only one runs at a time, and the page shows how long it has run.
  *
@@ -352,7 +357,11 @@ export function renderStoreHealth(main) {
     const tables = readTool("get_store_table_health", { section: "tables", top: READ_TOP }, signal)
       .then(guard(tablesBox, (res) => {
         const d = drawTables(res, headerBox, tablesBox);
-        if (d) updated.textContent = "Read at " + new Date().toLocaleTimeString();
+        if (d) {
+          updated.textContent = readAtLine("Tables", d.tables_as_of, d.tables_age_seconds);
+          const held = heldLine(d.held_for_seconds);
+          if (held) updated.setAttribute("title", held);
+        }
       }));
     const indexes = readTool("get_store_table_health", { section: "indexes", top: READ_TOP }, signal)
       .then(guard(indexesBox, (res) => drawIndexes(res, indexesBox, coverageBox)));
@@ -368,6 +377,31 @@ export function renderStoreHealth(main) {
 
   refresh.addEventListener("click", load);
   load();
+}
+
+/** A length of time in the largest whole unit that fits: "40 s", "4 min", "2 h". */
+function spanText(seconds) {
+  if (seconds < 60) return fmtInt(Math.floor(seconds)) + " s";
+  if (seconds < 3600) return fmtInt(Math.floor(seconds / 60)) + " min";
+  return fmtInt(Math.floor(seconds / 3600)) + " h";
+}
+
+/**
+ * When the store answered one part of the read: "Tables read 11/17/2026, 3:11:02 PM (4 min ago)". The time is the answer's own
+ * as-of time, never the time the answer reached the page, and the age is the answer's own figure. Empty when the answer carries no time.
+ */
+export function readAtLine(part, asOf, ageSeconds) {
+  if (typeof asOf !== "string" || !asOf) return "";
+  const age = Number(ageSeconds);
+  return part + " read " + localTime(asOf) + (Number.isFinite(age) && age >= 1 ? " (" + spanText(age) + " ago)" : "");
+}
+
+/** Why a refresh can show the same read: how long the service holds one. Empty when the answer does not say. */
+export function heldLine(heldForSeconds) {
+  const held = Number(heldForSeconds);
+  return Number.isFinite(held) && held > 0
+    ? "The store's tables and indexes are read at most once every " + spanText(held) + ". A refresh inside that time shows the same read."
+    : "";
 }
 
 /** Nothing to draw for a read the page left behind or a session that ended; true when the answer is data to draw. */
@@ -466,6 +500,8 @@ function drawIndexes(res, indexesBox, coverageBox) {
   const parts = [
     el("div", { class: "meta", text: total + (total === 1 ? " index" : " indexes") + ": " + fmtInt(invalid) + " invalid, " + fmtInt(larger) + " larger than their table, " + fmtInt(rarely) + " rarely used. Flagged indexes come first." }),
   ];
+  const readAt = readAtLine("Indexes", d.indexes_as_of, d.indexes_age_seconds);
+  if (readAt) parts.push(el("div", { class: "meta", text: readAt + "." }));
   if (d.indexes_truncated === true) parts.push(noticeStrip("The grid lists " + fmtInt(d.indexes_returned) + " of the " + fmtInt(total) + " indexes."));
   parts.push(gridTable(rows, {
     id: "store-health|indexes",

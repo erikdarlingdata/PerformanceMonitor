@@ -85,6 +85,7 @@ const TABLES = [
 let neverReset = false;
 const tablesAnswer = () => ({
   ...(neverReset ? { rates_known: false, rates_note: "x" } : { rates_known: true, rates_note: null }),
+  tables_as_of: "2026-11-17T15:11:02Z", tables_age_seconds: 240, held_for_seconds: 300,
   section: "tables", header: "x", estimate_note: "x", store_tables: 4, store_total_bytes: 1000 * MB, rewrite_candidates: 1, tables_without_estimate: 1,
   without_estimate_by_reason: { never_analyzed: 1 }, without_estimate_reason_text: { never_analyzed: NEVER }, truncated: false, tables_returned: 4, tables: TABLES,
 });
@@ -109,6 +110,7 @@ const indexesAnswer = (cov) => cov === null
   ? { section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
       coverage_left_out_note: "The store table health read ran past its 30-second limit and was stopped." }
   : {
+      indexes_as_of: "2026-11-17T15:11:04Z", indexes_age_seconds: 0,
       section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
       partition_index_coverage_total: cov.length, partition_index_coverage_returned: cov.length, partition_index_coverage_truncated: false, partition_index_coverage: cov,
     };
@@ -183,6 +185,8 @@ await flush();
     coverageWhileHeld: sections[8].textContent,
     readiness: sections[2].textContent,
     measureButtons: buttons(main).length,
+    readLine: byClass(sections[0], "meta").map((n) => n.textContent),
+    readLineTitle: byClass(sections[0], "meta").map((n) => n.getAttribute("title")),
   };
 }
 holdIndexes.go();

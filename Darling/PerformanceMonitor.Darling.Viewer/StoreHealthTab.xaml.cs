@@ -29,6 +29,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// strip beside Refresh says "Refreshing…". The "Loading…" text is for a section with nothing on screen. A refresh that comes right
 /// after a successful one is skipped, so a trigger that queued while a load ran (the refresh timer, a tab pick) does not run the same
 /// slow reads again the moment the first ends.</para>
+///
+/// <para>#8924: the tables and indexes reads are held for <see cref="DarlingStoreTableHealthCache.Lifetime"/>, so a refresh the timer or a
+/// tab pick starts shows the held rows and sends the store only the maintenance check. The Refresh button asks for a new read of both.
+/// The strip beside it says when the tab last refreshed and, after that, when the store answered the tables and indexes on screen, so
+/// held rows are read against the time they were true.</para>
 /// </summary>
 public partial class StoreHealthTab : UserControl
 {
@@ -51,6 +56,10 @@ public partial class StoreHealthTab : UserControl
     /// <summary>When that refresh ended, on the monotonic clock; null before the first.</summary>
     private long? _lastLoadedAt;
 
+    /// <summary>When the store answered the tables and the indexes on screen (UTC); null while that section shows no read.</summary>
+    private DateTime? _tablesReadAtUtc;
+    private DateTime? _indexesReadAtUtc;
+
     /// <summary>How long after a successful refresh another one that nothing forced is skipped (#8819). The tables read takes seconds on a
     /// large store, and a trigger queued behind a running load starts the moment it ends. The Refresh button is never skipped.</summary>
     internal TimeSpan FreshFor { get; set; } = TimeSpan.FromSeconds(5);
@@ -65,9 +74,10 @@ public partial class StoreHealthTab : UserControl
     /// <summary>The slow-load threshold of every load of this tab. A test lowers it to read a line without waiting three seconds.</summary>
     internal int SlowLoadThresholdMs { get => _firstOpen.SlowThresholdMs; set => _firstOpen.SlowThresholdMs = value; }
 
-    /// <summary>Test seams for the three reads. Null reads the store through the data service.</summary>
-    internal Func<Task<List<DarlingStoreTableHealthReader.StoreTableHealthRow>>>? TablesRead { get; set; }
-    internal Func<Task<StoreIndexHealth>>? IndexesRead { get; set; }
+    /// <summary>Test seams for the three reads. Null reads the store through the data service. The tables and indexes reads take whether
+    /// the Refresh button asked (true: a new store read; false: the held rows when the data service has them).</summary>
+    internal Func<bool, Task<StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>>>>? TablesRead { get; set; }
+    internal Func<bool, Task<StoreIndexHealth>>? IndexesRead { get; set; }
     internal Func<Task<DarlingStoreMaintenanceReadinessReader.StoreMaintenanceReadiness>>? ReadinessRead { get; set; }
 
     /// <summary>The shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
@@ -91,7 +101,8 @@ public partial class StoreHealthTab : UserControl
     /// Skipped when a refresh is running, or when one succeeded less than <see cref="FreshFor"/> ago.</summary>
     public Task RefreshAsync() => RefreshAsync(force: false);
 
-    /// <summary>The refresh. <paramref name="force"/> is the Refresh button: it skips the freshness window, but not a refresh already running.</summary>
+    /// <summary>The refresh. <paramref name="force"/> is the Refresh button: it skips the freshness window, but not a refresh already running,
+    /// and it reads the tables and indexes from the store instead of showing the held rows.</summary>
     internal async Task RefreshAsync(bool force)
     {
         if (_dataService == null && (TablesRead is null || IndexesRead is null || ReadinessRead is null))
@@ -115,7 +126,7 @@ public partial class StoreHealthTab : UserControl
         try
         {
             ShowRefreshing();
-            await Task.WhenAll(LoadTablesAsync(timer), LoadIndexesAsync(timer), LoadReadinessAsync(timer));
+            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), LoadReadinessAsync(timer));
             if (!StampIfLoaded())
             {
                 ShowStamp();
@@ -144,11 +155,27 @@ public partial class StoreHealthTab : UserControl
 
     /// <summary>The strip beside Refresh while a refresh runs: it keeps the last stamp, so the page is still read against the time it was true.</summary>
     private void ShowRefreshing() =>
-        LastRefreshedIndicator.Text = _lastStamp is null ? "Loading…" : $"Refreshing… (last refreshed {_lastStamp})";
+        LastRefreshedIndicator.Text = _lastStamp is null ? "Loading…" : $"Refreshing… (last refreshed {_lastStamp}{CatalogsReadText()})";
 
     /// <summary>The strip beside Refresh when no refresh runs: the last stamp, or nothing before the first.</summary>
     private void ShowStamp() =>
-        LastRefreshedIndicator.Text = _lastStamp is null ? "" : "Last refreshed " + _lastStamp;
+        LastRefreshedIndicator.Text = _lastStamp is null ? "" : "Last refreshed " + _lastStamp + CatalogsReadText();
+
+    /// <summary>What follows the stamp: when the store answered the tables and indexes on screen, the older of the two. The rows are held
+    /// between store reads, so this time can be minutes before the refresh stamp. A section whose read failed shows no rows, so the time
+    /// is then the other section's alone, and the text is empty when neither shows a read.</summary>
+    private string CatalogsReadText()
+    {
+        static string At(DateTime utc) => ViewerTimeHelper.RefreshedStamp(utc, ViewerTimeHelper.CurrentDisplayMode);
+
+        return (_tablesReadAtUtc, _indexesReadAtUtc) switch
+        {
+            ({ } tables, { } indexes) => ", tables and indexes read " + At(tables < indexes ? tables : indexes),
+            ({ } tables, null) => ", tables read " + At(tables),
+            (null, { } indexes) => ", indexes read " + At(indexes),
+            _ => string.Empty,
+        };
+    }
 
     /// <summary>Raises "store health: refreshed …" when all three reads last finished. Each read reports its own failure, so the stamp never
     /// writes over one. Returns whether it stamped.</summary>
@@ -166,7 +193,7 @@ public partial class StoreHealthTab : UserControl
         return true;
     }
 
-    private async Task LoadTablesAsync(ViewerLoadTimer timer)
+    private async Task LoadTablesAsync(ViewerLoadTimer timer, bool fresh)
     {
         var gen = _loads.Claim(nameof(LoadTablesAsync));
         /* #8819: a refresh over rows already on screen keeps them and the summary line; the loading text is for a grid with nothing in it. */
@@ -179,14 +206,15 @@ public partial class StoreHealthTab : UserControl
 
         try
         {
-            var read = await ViewerServerTab.Timed(timer, "store tables read", TablesRead?.Invoke() ?? _dataService!.GetStoreTableHealthAsync());
+            var read = await ViewerServerTab.Timed(timer, "store tables read", TablesRead?.Invoke(fresh) ?? _dataService!.GetStoreTableHealthAsync(fresh));
             if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
 
             var selected = (TablesDataGrid.SelectedItem as StoreTableRow)?.Table;
-            var rows = StoreHealthRows.Tables(read);
+            var rows = StoreHealthRows.Tables(read.Rows);
             TablesDataGrid.ItemsSource = rows;
             TablesDataGrid.SelectedItem = selected is null ? null : rows.Find(r => r.Table == selected);
-            HeaderText.Text = StoreHealthRows.HeaderText(read);
+            HeaderText.Text = StoreHealthRows.HeaderText(read.Rows);
+            _tablesReadAtUtc = read.ReadAtUtc;
             TablesMessage.Text = "The store has no tables to show.";
             TablesMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             _tablesLoaded = true;
@@ -196,6 +224,7 @@ public partial class StoreHealthTab : UserControl
             if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
 
             _tablesLoaded = false;
+            _tablesReadAtUtc = null;
             TablesDataGrid.ItemsSource = null;
             HeaderText.Text = "The store tables failed to load.";
             TablesMessage.Text = $"The store tables failed to load: {ex.Message}";
@@ -206,7 +235,7 @@ public partial class StoreHealthTab : UserControl
         UpdateMeasureButton();
     }
 
-    private async Task LoadIndexesAsync(ViewerLoadTimer timer)
+    private async Task LoadIndexesAsync(ViewerLoadTimer timer, bool fresh)
     {
         var gen = _loads.Claim(nameof(LoadIndexesAsync));
         if (IndexesDataGrid.Items.Count == 0)
@@ -224,7 +253,7 @@ public partial class StoreHealthTab : UserControl
 
         try
         {
-            var read = await ViewerServerTab.Timed(timer, "store indexes read", IndexesRead?.Invoke() ?? _dataService!.GetStoreIndexHealthAsync());
+            var read = await ViewerServerTab.Timed(timer, "store indexes read", IndexesRead?.Invoke(fresh) ?? _dataService!.GetStoreIndexHealthAsync(fresh));
             if (_loads.Superseded(nameof(LoadIndexesAsync), gen)) return;
 
             var indexRows = StoreHealthRows.Indexes(read.Indexes);
@@ -240,6 +269,7 @@ public partial class StoreHealthTab : UserControl
                 ? "No partitioned tables in the store have indexes to check."
                 : "The partition index coverage was left out. " + read.CoverageLeftOutNote;
             CoverageMessage.Visibility = coverageRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _indexesReadAtUtc = read.ReadAtUtc;
             _indexesLoaded = true;
         }
         catch (Exception ex)
@@ -247,6 +277,7 @@ public partial class StoreHealthTab : UserControl
             if (_loads.Superseded(nameof(LoadIndexesAsync), gen)) return;
 
             _indexesLoaded = false;
+            _indexesReadAtUtc = null;
             IndexesDataGrid.ItemsSource = null;
             CoverageDataGrid.ItemsSource = null;
             CoverageDataGrid.Visibility = Visibility.Collapsed;
