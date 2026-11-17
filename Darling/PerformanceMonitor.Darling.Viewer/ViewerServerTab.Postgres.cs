@@ -1733,4 +1733,7 @@ public partial class ViewerServerTab
 
     /// <summary>#8663: the Storage page scrolls as one, like Vacuum: a wheel over a grid at its end moves the page.</summary>
     private void PgStorageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+
+    /// <summary>#8917: the Query Shapes page scrolls as one, like Vacuum and Storage: a wheel over a grid at its end moves the page.</summary>
+    private void PgQueryShapesScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
 }

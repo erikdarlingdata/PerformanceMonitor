@@ -327,6 +327,30 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
         Assert.Equal("Qs", row.GetProperty("tag").GetString());
     }
 
+    /// <summary>#8902: the averages are written to two places, as the other query reads write them, not as the weighted double.</summary>
+    [Fact]
+    public async Task QueryStoreTop_WritesTheAveragesToTwoPlaces()
+    {
+        /* Two intervals of one plan, 3 and 4 executions: the execution-weighted averages divide by 7 and do not end at two places. */
+        foreach (var (interval, executions, durationUs, cpuUs, reads, writes, physical, rows) in new[] { (1L, 3L, 1000L, 900L, 100L, 0L, 10L, 1L), (2L, 4L, 1L, 1L, 1L, 1L, 1L, 2L) })
+        {
+            await ExecAsync(
+                "INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_hash, execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, last_execution_time, runtime_stats_interval_id, interval_start_time_utc) VALUES ($1, $2, $3, 'x', 'db1', 9, 9, '0x00000000000000CC', 'Regular', $4, $5, $6, $7, $8, $9, $10, $2, $11, $2)",
+                _nextId++, Ago(30 + (int)interval), _idA, executions, durationUs, cpuUs, reads, writes, physical, rows, interval);
+        }
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_service, _serverManager, ServerA, 24, 10));
+
+        var row = Assert.Single(root.GetProperty("queries").EnumerateArray().ToList());
+        Assert.Equal(7, row.GetProperty("execution_count").GetInt64());
+        Assert.Equal(0.43, row.GetProperty("avg_duration_ms").GetDouble(), 5);
+        Assert.Equal(0.39, row.GetProperty("avg_cpu_ms").GetDouble(), 5);
+        Assert.Equal(43.43, row.GetProperty("avg_logical_reads").GetDouble(), 5);
+        Assert.Equal(0.57, row.GetProperty("avg_logical_writes").GetDouble(), 5);
+        Assert.Equal(4.86, row.GetProperty("avg_physical_reads").GetDouble(), 5);
+        Assert.Equal(1.57, row.GetProperty("avg_rowcount").GetDouble(), 5);
+    }
+
     [Fact]
     public async Task TopQueriesByCpu_WithATag_NamesItInFilterApplied()
     {
