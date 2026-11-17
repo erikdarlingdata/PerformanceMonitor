@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -52,7 +53,20 @@ public static class DarlingPgPlanCaptureReadinessReader
         bool IsSatisfied,
         string? Observed,
         string? Detail,
-        DateTime CaptureTime);
+        DateTime CaptureTime)
+    {
+        /// <summary>#8912: this row is the Aurora engine limit on <c>plan_attribution</c>. It is unmet, and no setting the operator can change meets it,
+        /// so a surface that counts what still needs setup leaves it out and says what it is instead.</summary>
+        public bool IsEngineLimit => IsEngineLimitRow(Facet, IsSatisfied, Detail);
+    }
+
+    /// <summary>#8912: whether a stored facet row is the Aurora engine limit: the <c>plan_attribution</c> facet, unmet, whose detail opens with
+    /// <see cref="PgPlanCaptureReadinessCollector.AuroraPlanAttributionLimitPrefix"/>. The collector writes that opening only on an Aurora target.</summary>
+    public static bool IsEngineLimitRow(string? facet, bool isSatisfied, string? detail) =>
+        !isSatisfied
+        && string.Equals(facet, "plan_attribution", StringComparison.Ordinal)
+        && detail is not null
+        && detail.StartsWith(PgPlanCaptureReadinessCollector.AuroraPlanAttributionLimitPrefix, StringComparison.Ordinal);
 
     /* DISTINCT ON (facet) ordered by collection_time DESC gives the newest row per facet in one pass — the
        standard PostgreSQL idiom, and cheaper than a correlated MAX per facet on a hypertable.

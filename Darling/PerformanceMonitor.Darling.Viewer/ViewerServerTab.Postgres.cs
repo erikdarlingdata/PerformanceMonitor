@@ -1180,7 +1180,9 @@ public partial class ViewerServerTab
            no plans. */
         ShowNote(PgPlanCaptureNote, PgCollectorIsGatedOff("pg_plan_capture_readiness")
             ? PanelNoteParts("pg_plan_capture_readiness", 0, string.Empty, string.Empty)
-            : PlanCaptureReadinessNote(planCaptureTask.Result.Select(r => (r.Facet, r.IsSatisfied)).ToList()));
+            : PlanCaptureReadinessNote(
+                planCaptureTask.Result.Select(r => (r.Facet, r.IsSatisfied)).ToList(),
+                planCaptureTask.Result.Where(r => r.IsEngineLimit).Select(r => r.Facet).ToHashSet(StringComparer.Ordinal)));
     }
 
     /// <summary>The plain name of a plan-capture readiness facet, for the one-line note. A facet this build does not know keeps its own name.</summary>
@@ -1205,7 +1207,10 @@ public partial class ViewerServerTab
     /// #7410: the note over Plan Capture Readiness. One plain line says whether capture is ready and, when it is not, which preconditions are
     /// unmet, built from the facet rows. The long explanation that used to be the whole note is kept as the hover text.
     /// </summary>
-    internal static PanelNoteText PlanCaptureReadinessNote(IReadOnlyList<(string Facet, bool IsSatisfied)> facets)
+    /// <param name="facets">Every facet row, with whether it is met.</param>
+    /// <param name="engineLimited">#8912: the facets that are an Aurora engine limit (unmet, and no setting meets them). They are counted out of
+    /// the unmet list and named on their own, because the operator has nothing left to change for them.</param>
+    internal static PanelNoteText PlanCaptureReadinessNote(IReadOnlyList<(string Facet, bool IsSatisfied)> facets, IReadOnlySet<string>? engineLimited = null)
     {
         if (facets.Count == 0)
         {
@@ -1215,7 +1220,18 @@ public partial class ViewerServerTab
                 + "server added in the last hour has nothing here. It does NOT mean plan capture is unavailable.");
         }
 
-        var unmet = facets.Where(f => !f.IsSatisfied).Select(f => PlanCaptureFacetLabel(f.Facet)).ToList();
+        var unmet = facets.Where(f => !f.IsSatisfied && engineLimited?.Contains(f.Facet) != true).Select(f => PlanCaptureFacetLabel(f.Facet)).ToList();
+        var limitText = engineLimited is { Count: > 0 }
+            ? "Query ids in the log are an Aurora engine limit, not a setting you can change. Its parameter group does not let log_line_prefix carry %Q, "
+              + "so the stderr plan reader stores no plan and no other join to a statement exists."
+            : null;
+        if (unmet.Count == 0 && limitText is not null)
+        {
+            return new PanelNoteText(
+                "Plans cannot be captured on this server. " + limitText,
+                "Every step you can change is in place. " + limitText + " The row for it says engine limit, and its detail has the full explanation.");
+        }
+
         if (unmet.Count == 0)
         {
             return new PanelNoteText(
@@ -1227,7 +1243,7 @@ public partial class ViewerServerTab
         }
 
         return new PanelNoteText(
-            "Plan capture is not ready on this server. Not met: " + string.Join(", ", unmet) + ".",
+            "Plan capture is not ready on this server. Not met: " + string.Join(", ", unmet) + "." + (limitText is null ? string.Empty : " " + limitText),
             "At least one precondition is unmet, so either no execution plans are being captured by auto_explain "
                 + "here or the ones that are cannot be attributed. Read the rows in order: extension_available, "
                 + "library_loaded, capture_threshold, plan_text_setting, plan_attribution, message_locale. Each names "
