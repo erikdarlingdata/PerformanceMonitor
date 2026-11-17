@@ -149,7 +149,7 @@ public sealed class WebPgPanelTextBehaviourTests
     }
 
     [Fact]
-    public void IndexBloatRankingWithATrustedIndexInTheCensus_NeverSaysNoIndexHasAnEstimate()
+    public void IndexBloatRankingWithATrustedIndexInTheCoverageRead_NeverSaysNoIndexHasAnEstimate()
     {
         var p = Run().GetProperty("bloatSomeTrusted");
         var line = p.GetProperty("line").GetString()!;

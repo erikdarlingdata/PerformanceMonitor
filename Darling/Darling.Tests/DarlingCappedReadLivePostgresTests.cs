@@ -949,7 +949,7 @@ VALUES ($1::bigint, $2::integer, $3::text, 'pg_settings', $4::timestamp, 'SUCCES
     /// beside a trusted count above zero.
     /// </summary>
     [Fact]
-    public async Task AnsweredOnlyWhenTheWindowHoldsOnlyUntrustedRowsButTheCensusHoldsATrustedIndexNeverSaysNotOne()
+    public async Task AnsweredOnlyWhenTheWindowHoldsOnlyUntrustedRowsButTheCoverageReadHoldsATrustedIndexNeverSaysNotOne()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
