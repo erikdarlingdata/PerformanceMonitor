@@ -338,7 +338,7 @@ LIMIT 1";
         (scope.Count == 0 || scope.Contains(database, StringComparer.OrdinalIgnoreCase))
         && !excluded.Any(e => string.Equals(e.Trim(), database, StringComparison.OrdinalIgnoreCase));
 
-    private static async Task<IReadOnlyList<ScheduleOverride>> ReadOverridesAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
+    internal static async Task<IReadOnlyList<ScheduleOverride>> ReadOverridesAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
     {
         await using var cmd = postgres.CreateCommand(OverridesSql);
         cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;

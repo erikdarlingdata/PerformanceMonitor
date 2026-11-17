@@ -201,11 +201,11 @@ Exit codes: see [Exit codes](#exit-codes). If the service log is not where the v
 ### `--grant-script`
 
 ```
-PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--rds] [--config <path>]
-PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds]
+PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--rds] [--column-stats-databases <db1,db2>] [--config <path>]
+PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--column-stats-databases <db1,db2>]
 ```
 
-The first form reads the server from the configuration. The second form is for a host that is not added yet. Both print T-SQL, and neither connects to a monitored server. The script is safe to run twice. `--azure` prints the Azure SQL Database form and a `*.database.windows.net` host implies it. `--rds` prints the Amazon RDS for SQL Server form, which a `*.rds.amazonaws.com` host implies. Run the RDS form as the RDS master user, see [AWS RDS for SQL Server](../permissions.md#aws-rds-for-sql-server).
+The first form reads the server from the configuration. The second form is for a host that is not added yet. Both print T-SQL, and neither connects to a monitored server. The script is safe to run twice. `--azure` prints the Azure SQL Database form and a `*.database.windows.net` host implies it. `--rds` prints the Amazon RDS for SQL Server form, which a `*.rds.amazonaws.com` host implies. Run the RDS form as the RDS master user, see [AWS RDS for SQL Server](../permissions.md#aws-rds-for-sql-server). `--column-stats-databases` adds the optional database-level `SELECT` for the column_stats collector, in the databases you list and nowhere else; see [Column selectivity](../permissions.md#column-selectivity-per-database-select-optional).
 
 ### `--export-investigations`
 

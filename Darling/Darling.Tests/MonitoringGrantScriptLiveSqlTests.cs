@@ -335,4 +335,73 @@ public sealed class MonitoringGrantScriptLiveSqlTests
 
     private static async Task<bool> HasUser(string adminCs, string database, string login, System.Threading.CancellationToken ct) =>
         await Scalar(adminCs, database, $"SELECT dp.name FROM sys.database_principals AS dp WHERE dp.name = {Lit(login)};", ct) is not null;
+
+    [Fact]
+    public async Task ColumnStatsBlock_RunsTwice_GrantsSelectOnlyInTheListedDatabases_AndTheConnectionTestNamesTheRest()
+    {
+        var admin = Admin();
+        Assert.SkipWhen(admin is null, "Set DARLING_TEST_SQL, DARLING_TEST_SQL_USER and DARLING_TEST_SQL_PASSWORD (a sysadmin on the sql2019 dev box) to run the live grant script test.");
+        var (host, user, password) = admin!.Value;
+        var adminCs = Cs(host, user, password);
+        var ct = TestContext.Current.CancellationToken;
+
+        var login = NewName() + "'q]r";
+        var loginPassword = NewPassword();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var listed = "pm_cs_listed_" + suffix + "'a]b";
+        var unlisted = "pm_cs_other_" + suffix;
+        var missing = "pm_cs_gone_" + suffix;
+        try
+        {
+            await Exec(adminCs, $"CREATE DATABASE {MonitoringGrantScript.QuoteName(listed)};", ct);
+            await Exec(adminCs, $"CREATE DATABASE {MonitoringGrantScript.QuoteName(unlisted)};", ct);
+
+            var script = MonitoringGrantScript
+                .Build(
+                    MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("sql", login, host, null, "NOMACHINE", null)),
+                    finOps: false, azureSqlDatabase: false, columnStatsDatabases: new[] { listed, missing })
+                .Replace("<strong password>", loginPassword, StringComparison.Ordinal);
+            var messages = await ExecWithMessages(adminCs, script, ct);
+            await Exec(adminCs, script, ct);
+
+            Assert.Contains("Granted SELECT in " + MonitoringGrantScript.QuoteName(listed), messages);
+            Assert.Contains("Skipped " + MonitoringGrantScript.QuoteName(missing) + ": no such database.", messages);
+
+            /* The grant is a row in the listed database's own permission catalog for the user, and the unlisted database holds no user. */
+            Assert.True(await HasUser(adminCs, listed, login, ct), "The column_stats block left no user in the listed database.");
+            Assert.Equal(1, Convert.ToInt32(await Scalar(adminCs, listed,
+                "SELECT CAST(COUNT(*) AS nvarchar(10)) FROM sys.database_permissions AS p JOIN sys.database_principals AS dp ON dp.principal_id = p.grantee_principal_id " +
+                $"WHERE dp.name = {Lit(login)} AND p.class = 0 AND p.state = N'G' AND p.permission_name = N'SELECT';", ct)));
+            Assert.False(await HasUser(adminCs, unlisted, login, ct), "The column_stats block made a user in a database that is not listed.");
+
+            /* The connection test: nothing for the listed database, the statement for the unlisted one when it is asked about. */
+            var loginCs = Cs(host, login, loginPassword);
+            Assert.Null(await DarlingServerConnector.ProbeMissingGrantsAsync(
+                loginCs, isAzureSqlDatabase: false, null, ct, columnStatsDatabases: new[] { listed }));
+            var note = await DarlingServerConnector.ProbeMissingGrantsAsync(
+                loginCs, isAzureSqlDatabase: false, null, ct, columnStatsDatabases: new[] { listed, unlisted });
+            Assert.NotNull(note);
+            Assert.Contains("SELECT is missing in " + MonitoringGrantScript.QuoteName(unlisted), note);
+            Assert.DoesNotContain(MonitoringGrantScript.QuoteName(listed) + " (", note);
+            Assert.Null(await DarlingServerConnector.ProbeMissingGrantsAsync(loginCs, isAzureSqlDatabase: false, null, ct));
+        }
+        finally
+        {
+            System.Threading.CancellationToken none = default;
+            SqlConnection.ClearAllPools();
+            foreach (var name in new[] { listed, unlisted })
+            {
+                try
+                {
+                    await Exec(adminCs, $"IF DB_ID({Lit(name)}) IS NOT NULL BEGIN ALTER DATABASE {MonitoringGrantScript.QuoteName(name)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {MonitoringGrantScript.QuoteName(name)}; END;", none);
+                }
+                catch (SqlException)
+                {
+                    /* A scratch database named for this run; a failed drop shows as a leftover, not as a hidden test result. */
+                }
+            }
+
+            await Cleanup(adminCs, login, none);
+        }
+    }
 }
