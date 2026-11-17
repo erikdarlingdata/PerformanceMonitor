@@ -22,6 +22,15 @@ public sealed record PersonalTokenRow(string TokenId, string OwnerKey, string Su
     DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, DateTimeOffset? LastUsedAt, DateTimeOffset? RevokedAt,
     string? RevokedBy, string? RevokeReason);
 
+/// <summary>The store has no <c>config.mcp_personal_token</c> yet (it is below the rung), found by a catalog lookup before any statement names it.</summary>
+public sealed class PersonalTokenTableMissingException : Exception
+{
+    public PersonalTokenTableMissingException()
+        : base("The store has no config.mcp_personal_token table yet.")
+    {
+    }
+}
+
 /// <summary>A token with the sha256 of its secret, for the MCP snapshot only.</summary>
 public sealed record PersonalTokenSecretRow(PersonalTokenRow Row, byte[] SecretSha256);
 
@@ -41,6 +50,8 @@ public static class PersonalTokenStore
     private const int CommandSeconds = 30;
 
     private const string LockSql = "SELECT pg_advisory_xact_lock(hashtextextended('mcp_personal_token:' || $1, 0))";
+
+    private const string TableExistsSql = "SELECT to_regclass('config.mcp_personal_token') IS NOT NULL";
 
     private const string CountSql = @"
 SELECT count(*) FILTER (WHERE token_name = $2 AND revoked_at IS NULL AND expires_at > $3),
@@ -70,11 +81,15 @@ SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, l
 FROM config.mcp_personal_token
 ORDER BY created_at, token_id";
 
+    /* Whose row it is decides who revoked it and why, not the caller's seat: the caller's own row is the owner revoking it ($4, $6, $8),
+       anyone else's an administrator ($5, $7). A null $4 matches no row, so it is always the administrator's arm. */
     private const string RevokeSql = @"
 UPDATE config.mcp_personal_token
-SET revoked_at = $2, revoked_by = $3, revoke_reason = $4
-WHERE token_id = $1 AND revoked_at IS NULL AND expires_at > $2 AND ($5::text IS NULL OR owner_key = $5)
-RETURNING token_name, role";
+SET revoked_at = $2,
+    revoked_by = CASE WHEN owner_key = $4 THEN $5 ELSE $6 END,
+    revoke_reason = CASE WHEN owner_key = $4 THEN $7 ELSE $8 END
+WHERE token_id = $1 AND revoked_at IS NULL AND expires_at > $2 AND ($3::text IS NULL OR owner_key = $3)
+RETURNING token_name, role, revoke_reason";
 
     private const string RevokeForOwnerSql = @"
 UPDATE config.mcp_personal_token
@@ -109,7 +124,19 @@ WHERE t.token_id = v.token_id";
     /// <summary>The most rows one list answers.</summary>
     public const int ListLimit = 1000;
 
-    /// <summary>The reason journaled and stored when the settings turn operator tokens off.</summary>
+    /// <summary>The reason stored and journaled when a token's owner revokes it, from any seat.</summary>
+    public const string RevokedByOwnerReason = "revoked_by_owner";
+
+    /// <summary>The reason stored and journaled when an administrator revokes another person's token.</summary>
+    public const string RevokedByAdminReason = "revoked_by_admin";
+
+    /// <summary>The reason stored and journaled when the role mapping refuses the person's sign-in.</summary>
+    public const string SignInRefusedReason = "sign_in_refused";
+
+    /// <summary>The reason stored and journaled when the person signs in with a read-only seat.</summary>
+    public const string SeatLoweredReason = "seat_lowered_to_read_only";
+
+    /// <summary>The reason stored and journaled when <c>adminRole: reader</c> turns operator tokens off, at a sign-in or the start sweep.</summary>
     public const string OperatorsDisabledReason = "operator_tokens_disabled";
 
     /// <summary>
@@ -199,11 +226,13 @@ WHERE t.token_id = v.token_id";
         return new PersonalTokenPage(rows, truncated);
     }
 
-    /// <summary>Every token with the sha256 of its secret: the MCP snapshot's read, and nothing else's.</summary>
+    /// <summary>Every token with the sha256 of its secret: the MCP snapshot's read, and nothing else's. Runs every few seconds, so on a store below
+    /// the rung it throws <see cref="PersonalTokenTableMissingException"/> without sending the read (no 42P01 in the PostgreSQL log).</summary>
     public static async Task<IReadOnlyList<PersonalTokenSecretRow>> LoadAllAsync(NpgsqlDataSource owner, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(owner);
         await using var connection = await owner.OpenConnectionAsync(ct);
+        await EnsureTableAsync(connection, null, ct);
         await using var command = Command(connection, null, LoadAllSql);
         await using var reader = await command.ExecuteReaderAsync(ct);
         var rows = new List<PersonalTokenSecretRow>();
@@ -217,17 +246,19 @@ WHERE t.token_id = v.token_id";
 
     /// <summary>
     /// Revokes one live token. <paramref name="requiredOwnerKey"/> limits it to that owner's token (null lets an administrator revoke anyone's).
-    /// False when no live row matched: the token is absent, already dead, or not this owner's.
+    /// Whose row it is decides what is stored: the row of <paramref name="callerOwnerKey"/> is revoked by its owner
+    /// (<see cref="RevokedByOwnerReason"/>, <paramref name="ownerRevokedBy"/>), any other row by an administrator (<see cref="RevokedByAdminReason"/>,
+    /// <paramref name="adminRevokedBy"/>). False when no live row matched: the token is absent, already dead, or not this owner's.
     /// </summary>
-    public static async Task<bool> RevokeAsync(NpgsqlDataSource owner, string tokenId, string? requiredOwnerKey, string revokedBy,
-        string reason, string actor, DateTimeOffset now, CancellationToken ct)
+    public static async Task<bool> RevokeAsync(NpgsqlDataSource owner, string tokenId, string? requiredOwnerKey, string? callerOwnerKey,
+        string ownerRevokedBy, string adminRevokedBy, string actor, DateTimeOffset now, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(owner);
         return await RunAsync(owner, actor, async (connection, transaction) =>
         {
-            string name, role;
-            await using (var command = Command(connection, transaction, RevokeSql, Text(tokenId), Time(now.ToUniversalTime()), Text(revokedBy), Text(reason),
-                NullableText(requiredOwnerKey)))
+            string name, role, reason;
+            await using (var command = Command(connection, transaction, RevokeSql, Text(tokenId), Time(now.ToUniversalTime()), NullableText(requiredOwnerKey),
+                NullableText(callerOwnerKey), Text(ownerRevokedBy), Text(adminRevokedBy), Text(RevokedByOwnerReason), Text(RevokedByAdminReason)))
             await using (var reader = await command.ExecuteReaderAsync(ct))
             {
                 if (!await reader.ReadAsync(ct))
@@ -237,6 +268,7 @@ WHERE t.token_id = v.token_id";
 
                 name = reader.GetString(0);
                 role = reader.GetString(1);
+                reason = reader.GetString(2);
             }
 
             await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, actor, tokenId, name, role, reason, ct);
@@ -277,7 +309,8 @@ WHERE t.token_id = v.token_id";
     /// <summary>
     /// Applies the settings to the live tokens, journaled under the actor <c>config</c>: with operator tokens off, revokes every live operator token
     /// (<see cref="OperatorsDisabledReason"/>); then cuts every live token that outlives <paramref name="maxLifetimeDays"/> from its creation back to it.
-    /// Returns how many tokens it revoked and how many it cut.
+    /// Returns how many tokens it revoked and how many it cut. On a store below the rung it throws <see cref="PersonalTokenTableMissingException"/>
+    /// without sending a statement that names the table.
     /// </summary>
     public static async Task<(int Revoked, int Cut)> ApplySettingsAsync(NpgsqlDataSource owner, int maxLifetimeDays,
         bool operatorAllowed, DateTimeOffset now, CancellationToken ct)
@@ -286,6 +319,7 @@ WHERE t.token_id = v.token_id";
         const string actor = "config";
         return await RunAsync(owner, actor, async (connection, transaction) =>
         {
+            await EnsureTableAsync(connection, transaction, ct);
             var utcNow = now.ToUniversalTime();
             var revoked = new List<(string Id, string Name, string Role)>();
             if (!operatorAllowed)
@@ -351,8 +385,19 @@ WHERE t.token_id = v.token_id";
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Whether the exception is the store saying the table does not exist: a store below V272. Callers branch on this one code.</summary>
-    public static bool IsMissingTable(Exception ex) => ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable };
+    /// <summary>Whether the exception says the table does not exist: a store below V272, as the store raised it (42P01) or as the catalog check of
+    /// <see cref="LoadAllAsync"/> and <see cref="ApplySettingsAsync"/> found it. Callers branch on this one test.</summary>
+    public static bool IsMissingTable(Exception ex) =>
+        ex is PersonalTokenTableMissingException or PostgresException { SqlState: PostgresErrorCodes.UndefinedTable };
+
+    private static async Task EnsureTableAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken ct)
+    {
+        await using var command = Command(connection, transaction, TableExistsSql);
+        if (await command.ExecuteScalarAsync(ct) is not true)
+        {
+            throw new PersonalTokenTableMissingException();
+        }
+    }
 
     private static async Task<T> RunAsync<T>(NpgsqlDataSource owner, string actor,
         Func<NpgsqlConnection, NpgsqlTransaction, Task<(T Result, bool Commit)>> body, CancellationToken ct)

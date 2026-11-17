@@ -296,4 +296,25 @@ public sealed class ReadCallerTests
         var close = sql.IndexOf(')', open);
         return sql[(open + 1)..close].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
     }
+
+    /// <summary>M4: a personal identity fits the 256-character identity columns with the longest token name and client name, and a long
+    /// subject is cut on whole text elements (#3625): no joined emoji is split and no lone surrogate is kept.</summary>
+    [Fact]
+    public void APersonalIdentityWithALongSubject_FitsTheIdentityColumns_AndKeepsWholeTextElements()
+    {
+        const string Family = "\U0001F468\u200D\U0001F469\u200D\U0001F467";
+        var subject = string.Concat(Enumerable.Repeat(Family, 25));
+        var longestName = new string('n', 64);
+
+        var rendered = ReadCaller.OfTokenName("personal:" + subject + "/" + longestName);
+        var stored = "mcp:" + rendered + ", client says: " + new string('c', ReadCaller.MaxLength);
+
+        Assert.StartsWith("personal token " + longestName + " of " + Family, rendered, StringComparison.Ordinal);
+        Assert.True(stored.Length <= 256, $"{stored.Length} characters");
+        var kept = rendered[("personal token " + longestName + " of ").Length..].TrimEnd('\u2026');
+        Assert.Equal(string.Empty, kept.Replace(Family, string.Empty, StringComparison.Ordinal));
+
+        /* A subject that fits is kept as it is. */
+        Assert.Equal("personal token ci of alice@corp", ReadCaller.OfTokenName("personal:alice@corp/ci"));
+    }
 }

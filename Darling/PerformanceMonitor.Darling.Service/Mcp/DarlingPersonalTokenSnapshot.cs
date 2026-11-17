@@ -160,8 +160,10 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
         }
     }
 
-    /// <summary>Decides a presented value: parse, then look up the id, then compare the hash in fixed time, then revocation and expiry.</summary>
-    public PersonalTokenCheck Check(string? presented, DateTimeOffset now)
+    /// <summary>Decides a presented value: parse, then look up the id, then compare the hash in fixed time, then revocation and expiry. With
+    /// <paramref name="maxLifetimeDays"/>, a token older than that is Dead too, whatever its stored expiry says, so a lowered lifetime binds at
+    /// once and does not wait for the start sweep to cut the row.</summary>
+    public PersonalTokenCheck Check(string? presented, DateTimeOffset now, int? maxLifetimeDays = null)
     {
         if (!PersonalTokenFormat.TryParse(presented, out var tokenId, out var hash))
         {
@@ -184,7 +186,8 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
             return new PersonalTokenCheck(PersonalTokenOutcome.WrongSecret, null);
         }
 
-        if (found.Row.RevokedAt is not null || found.Row.ExpiresAt <= now)
+        if (found.Row.RevokedAt is not null || found.Row.ExpiresAt <= now
+            || (maxLifetimeDays is { } days && found.Row.CreatedAt.AddDays(days) <= now))
         {
             return new PersonalTokenCheck(PersonalTokenOutcome.Dead, found.Row);
         }

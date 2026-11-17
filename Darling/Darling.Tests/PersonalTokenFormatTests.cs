@@ -93,4 +93,20 @@ public sealed class PersonalTokenFormatTests
         Assert.True(PersonalTokenFormat.TryParse(PersonalTokenFormat.Prefix + GoodId + "_" + GoodSecret, out var tokenId, out _));
         Assert.Equal(GoodId, tokenId);
     }
+
+    /// <summary>M3: the record's printed form names the token id only, so an interpolation in a log line or an assertion cannot leak the value.</summary>
+    [Fact]
+    public void Minted_ToString_NeverCarriesTheValueOrTheSecret()
+    {
+        var minted = PersonalTokenFormat.Mint();
+        var secret = minted.Value[(PersonalTokenFormat.Prefix.Length + minted.TokenId.Length + 1)..];
+
+        var printed = minted.ToString();
+
+        Assert.DoesNotContain(minted.Value, printed, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, printed, StringComparison.Ordinal);
+        Assert.DoesNotContain(Convert.ToHexString(minted.SecretSha256), printed, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(minted.TokenId, printed, StringComparison.Ordinal);
+        Assert.DoesNotContain(minted.Value, $"{minted}", StringComparison.Ordinal);
+    }
 }

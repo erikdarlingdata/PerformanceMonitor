@@ -2611,7 +2611,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 /* #8737: with personal tokens served, a presented Bearer is checked against the snapshot first. Only a value that is not
                    dpt1_-shaped, or a dpt1_ value whose id no personal token has, goes on to the file tokens below. A live token is the caller.
-                   A dead one (revoked or expired) and a check that cannot be made (the snapshot is unavailable) give the reservation back
+                   A dead one (revoked, expired, or older than maxLifetimeDays now allows) and a check that cannot be made (the snapshot is unavailable) give the reservation back
                    without a miss or a success: neither says anything about guessing, and neither may exempt the source from the total
                    budget. A wrong secret on a known id is one miss, and the file tokens are not compared (a dpt1_ value with a known id is
                    that person's token, whatever a file token holds). */
@@ -2619,7 +2619,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 if (tokens?.Personal is not null && presented is not null)
                 {
                     var personalNow = new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc));
-                    var check = personalSnapshot!.Check(presented, personalNow);
+                    var check = personalSnapshot!.Check(presented, personalNow, tokens.Personal.MaxLifetimeDays);
                     switch (check.Outcome)
                     {
                         case PersonalTokenOutcome.Live:

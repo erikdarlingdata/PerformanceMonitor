@@ -461,7 +461,7 @@
     // "allowAgentMuteRules": false,
 
     // Personal MCP tokens (#8737): a person signed in to the web dashboard (web.network.oidc) mints their own short-lived MCP token.
-    // Default off. Served only with the web dashboard on, web.network.oidc configured, no front door and "allowTokenlessLoopback" off;
+    // Default off. Served only with web.enabled true in darling.json, web.network.oidc configured, no front door and "allowTokenlessLoopback" off;
     // otherwise the start logs one warning and the feature stays off. A number outside its range is clamped (1-365 days, 1-50 tokens)
     // and an "adminRole" other than "operator" or "reader" is served as "reader", each with a warning. "dataDetail" (full, maskLiterals
     // or metadataOnly) can only narrow "dataDetail" above; an unrecognized value leaves personal tokens off. "adminRole" "reader" (the

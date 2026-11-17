@@ -74,7 +74,7 @@ internal static class DarlingPersonalTokenSettings
 
         if (config.Web?.Enabled != true)
         {
-            missing.Add("the web dashboard is off (web.enabled)");
+            missing.Add("web.enabled is false in darling.json");
         }
 
         if (config.Mcp!.AllowTokenlessLoopback)

@@ -71,7 +71,8 @@ export function getMe() {
 let panelCount = 0;
 
 /** One control: the button with the line, and (when open) the panel it discloses. Each mount gets its own, with its own open state
- *  and panel id. A disclosure, not a menu: the panel is information rows and at most one plain link. */
+ *  and panel id. A disclosure, not a menu: the panel is information rows and plain links (My MCP tokens when the host serves them, and
+ *  Sign out for a session that expires). */
 function buildControl(me) {
   const panelId = "account-panel-" + ++panelCount;
   const button = el("button", { class: "account-btn", type: "button", "aria-expanded": "false", "aria-controls": panelId }, [

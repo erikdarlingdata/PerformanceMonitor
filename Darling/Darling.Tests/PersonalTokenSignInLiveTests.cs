@@ -253,7 +253,7 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
         Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(reader.Value));
         Assert.Equal("1", await rig.ScalarAsync(
-            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail::text LIKE '%seat lowered to read-only%' AND detail::text LIKE '%{op.Id}%'"));
+            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail->>'reason' = '{PersonalTokenStore.SeatLoweredReason}' AND detail::text LIKE '%{op.Id}%'"));
     }
 
     [Fact]
@@ -271,7 +271,7 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
         Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(reader.Value));
         Assert.Equal("2", await rig.ScalarAsync(
-            "SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail::text LIKE '%sign-in refused%'"
+            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail->>'reason' = '{PersonalTokenStore.SignInRefusedReason}'"
             + $" AND (detail::text LIKE '%{op.Id}%' OR detail::text LIKE '%{reader.Id}%')"));
     }
 
@@ -290,7 +290,7 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
         Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(reader.Value));
         Assert.Equal("1", await rig.ScalarAsync(
-            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail::text LIKE '%adminRole lowered to reader%' AND detail::text LIKE '%{op.Id}%'"));
+            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail->>'reason' = '{PersonalTokenStore.OperatorsDisabledReason}' AND detail::text LIKE '%{op.Id}%'"));
     }
 
     [Fact]

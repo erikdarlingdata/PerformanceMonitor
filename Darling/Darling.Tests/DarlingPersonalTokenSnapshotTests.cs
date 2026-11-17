@@ -322,6 +322,21 @@ public sealed class DarlingPersonalTokenSnapshotTests
         Assert.True(rig.Snapshot.ShouldLogDead(gone.TokenId, T0.AddMinutes(1)));
     }
 
+    /// <summary>M8: a lowered lifetime binds at the gate at once, without waiting for the start sweep to cut the stored expiry.</summary>
+    [Fact]
+    public async Task Check_OlderThanTheLifetimeNowAllowed_Dead()
+    {
+        var rig = new Rig();
+        var token = PersonalTokenFormat.Mint();
+        /* Created a day before T0, stored to expire in 29 more days. */
+        rig.Rows = () => new[] { Row(token, T0.AddDays(29)) };
+        await rig.Refresh();
+
+        Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(token.Value, T0, maxLifetimeDays: 2).Outcome);
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check(token.Value, T0, maxLifetimeDays: 1).Outcome);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(token.Value, T0).Outcome);
+    }
+
     [Fact]
     public void ShouldLogDead_OncePerHour()
     {

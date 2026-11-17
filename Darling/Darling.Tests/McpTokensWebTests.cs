@@ -96,7 +96,7 @@ public sealed class McpTokensWebTests
         var rows = string.Join(",",
             Row("a", "laptop", "live", lastUsed: "2026-11-10T08:00:00Z"),
             Row("b", "old", "expired"),
-            Row("c", "gone", "revoked", revokedBy: "boss@x.y", reason: "admin_revoked"));
+            Row("c", "gone", "revoked", revokedBy: "admin:boss@x.y", reason: "revoked_by_admin"));
         var r = Run("render", Config(OidcReader, own: Listing(rows), extra: Times));
 
         var first = r.GetProperty("first");
@@ -112,9 +112,35 @@ public sealed class McpTokensWebTests
         }, Cells(tableRows[0]));
         Assert.Equal("never", Cells(tableRows[1])[4]);
         Assert.Equal("expired", Cells(tableRows[1])[5]);
-        Assert.Equal("revoked: admin_revoked by boss@x.y", Cells(tableRows[2])[5]);
+        Assert.Equal("revoked by an administrator (admin:boss@x.y)", Cells(tableRows[2])[5]);
         Assert.Equal(new[] { 1, 0, 0 }, tableRows.Select(t => t.GetProperty("revoke").GetInt32()).ToArray());
         Assert.Equal(new[] { "My tokens" }, first.GetProperty("h3s").EnumerateArray().Select(h => h.GetString()).ToArray());
+    }
+
+    /// <summary>M2: each reason code reads as a sentence; a code the page does not know is shown as it is, with who.</summary>
+    [Fact]
+    public void RevokeReasons_ReadAsSentences()
+    {
+        var rows = string.Join(",",
+            Row("a", "a", "revoked", revokedBy: "person:me@x.y", reason: "revoked_by_owner"),
+            Row("b", "b", "revoked", revokedBy: "admin:boss@x.y", reason: "revoked_by_admin"),
+            Row("c", "c", "revoked", revokedBy: "sign-in", reason: "sign_in_refused"),
+            Row("d", "d", "revoked", revokedBy: "sign-in", reason: "seat_lowered_to_read_only"),
+            Row("e", "e", "revoked", revokedBy: "config", reason: "operator_tokens_disabled"),
+            Row("f", "f", "revoked", revokedBy: "someone", reason: "future_code"));
+        var r = Run("render", Config(OidcReader, own: Listing(rows), extra: Times));
+
+        var states = Assert.Single(r.GetProperty("first").GetProperty("tables").EnumerateArray()).GetProperty("rows").EnumerateArray()
+            .Select(t => Cells(t)[5]).ToArray();
+        Assert.Equal(new[]
+        {
+            "revoked by its owner",
+            "revoked by an administrator (admin:boss@x.y)",
+            "revoked at sign-in: the sign-in was refused",
+            "revoked at sign-in: the seat is now read-only",
+            "revoked: operator tokens are turned off",
+            "revoked: future_code by someone",
+        }, states);
     }
 
     [Fact]

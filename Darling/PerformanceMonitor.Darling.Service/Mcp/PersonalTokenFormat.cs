@@ -13,8 +13,16 @@ using System.Text;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
-/// <summary>A freshly minted personal token: the <see cref="Value"/> shown to its owner once, and what the store keeps.</summary>
-internal sealed record MintedToken(string Value, string TokenId, byte[] SecretSha256);
+/// <summary>A freshly minted personal token: the <see cref="Value"/> shown to its owner once, and what the store keeps. Its printed form
+/// (<c>ToString</c>, and so any interpolation) names the <see cref="TokenId"/> only, never the value or the hash.</summary>
+internal sealed record MintedToken(string Value, string TokenId, byte[] SecretSha256)
+{
+    private bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append("TokenId = ").Append(TokenId);
+        return true;
+    }
+}
 
 /// <summary>
 /// The personal MCP token (#8737): <c>dpt1_</c> + 16 lowercase hex characters (the token id, 8 random bytes) + <c>_</c> + 43 base64url

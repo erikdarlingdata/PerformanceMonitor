@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -30,10 +31,6 @@ public static partial class DarlingWebEndpoints
 
     /// <summary>The code a front door and a host with the feature off both answer with.</summary>
     internal const string PersonalTokensUnavailableCode = "personal_tokens_unavailable";
-
-    /// <summary>The reason stored on a token its owner revoked, and on one an administrator revoked.</summary>
-    private const string UserRevokedReason = "user_revoked";
-    private const string AdminRevokedReason = "admin_revoked";
 
     /// <summary>
     /// The personal MCP token routes (#8737). They run on the store owner connection, as the people routes do: the table grants nothing to any
@@ -54,6 +51,8 @@ public static partial class DarlingWebEndpoints
         PersonalTokenSettings? settings, ILogger logger, TimeProvider clock)
     {
         var hostStopping = app.Lifetime.ApplicationStopping;
+        /* M7: a store below the rung is logged once for this host, at Information and without a stack; the 503 says the rest. */
+        var missingTableLogged = 0;
 
         static IResult Refusal(string code, string message, int status) =>
             JsonNodeResult(new JsonObject { ["error"] = code, ["message"] = message }, status);
@@ -102,7 +101,13 @@ public static partial class DarlingWebEndpoints
             }
             catch (Exception ex) when (ex is not OperationCanceledException && PersonalTokenStore.IsMissingTable(ex))
             {
-                logger.LogWarning(ex, "Personal MCP tokens {Route}: the store has no config.mcp_personal_token table yet (it is migrated before the feature is served)", route);
+                /* The case is reported: the line below, once; the request observer must not add a Warning to every 503. */
+                DarlingWebFailureLog.MarkReported();
+                if (Interlocked.Exchange(ref missingTableLogged, 1) == 0)
+                {
+                    logger.LogInformation("Personal MCP tokens {Route}: the store has no config.mcp_personal_token table yet; the routes answer 503 until it is migrated", route);
+                }
+
                 return Retry();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -296,9 +301,12 @@ public static partial class DarlingWebEndpoints
                     return Retry();
                 }
 
-                /* The store lets the owner connection revoke any row, so this decides: an administrator revokes anyone's, everyone else only their own. */
-                var revoked = await PersonalTokenStore.RevokeAsync(owner, id, seat.CanEdit ? null : seat.OwnerKey, actor,
-                    seat.CanEdit ? AdminRevokedReason : UserRevokedReason, actor, clock.GetUtcNow(), context.RequestAborted);
+                /* The store lets the owner connection revoke any row, so this decides: an administrator revokes anyone's, everyone else only their own.
+                   Whose row it is decides what is recorded: the caller's own row is revoked by its owner (person:<subject>), any other by an
+                   administrator (admin:<subject>, or admin:web for the shared token). */
+                var adminRevokedBy = "admin:" + actor[InvestigationPersonWrites.PersonActorPrefix.Length..];
+                var revoked = await PersonalTokenStore.RevokeAsync(owner, id, seat.CanEdit ? null : seat.OwnerKey, seat.OwnerKey, actor,
+                    adminRevokedBy, actor, clock.GetUtcNow(), context.RequestAborted);
                 if (!revoked)
                 {
                     return Refusal("not_found", "No live token has that id.", StatusCodes.Status404NotFound);

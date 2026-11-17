@@ -84,6 +84,11 @@ internal static class ReadCaller
     private const string PersonalNamePrefix = Mcp.DarlingMcpTokenSet.PersonalNamePrefix;
     private const string PersonalIdentityPrefix = "personal token ";
 
+    /* The identity columns a write stamps (ck_known_patterns_created_by and its siblings) hold 256 characters. The longest form a personal identity
+       takes there is "mcp:" + the rendered identity + ", client says: " + a client name of up to MaxLength, so the subject is cut to fit that. */
+    private const int IdentityColumnLength = 256;
+    private const int IdentityFrameLength = 4 + 15 + 4 + 15 + MaxLength;
+
     /* Split at the LAST '/': a subject may hold one, a token name may not. A file token's name cannot hold a '/', so a name with no '/'
        after the prefix is a named token's own name and is left alone. */
     private static bool TryRenderPersonal(string name, out string rendered)
@@ -100,8 +105,34 @@ internal static class ReadCaller
             return false;
         }
 
-        rendered = PersonalIdentityPrefix + name[(slash + 1)..] + " of " + name[PersonalNamePrefix.Length..slash];
+        var tokenName = name[(slash + 1)..];
+        var subject = CutToTextElements(name[PersonalNamePrefix.Length..slash], IdentityColumnLength - IdentityFrameLength - tokenName.Length);
+        rendered = PersonalIdentityPrefix + tokenName + " of " + subject;
         return true;
+    }
+
+    /* M4 (#3625): a subject longer than the room left is cut on whole text elements and marked with an ellipsis, so the full identity fits its
+       column and no joined emoji or surrogate pair is split. */
+    private static string CutToTextElements(string value, int room)
+    {
+        if (value.Length <= room)
+        {
+            return value;
+        }
+
+        var end = 0;
+        while (end < value.Length)
+        {
+            var next = StringInfo.GetNextTextElementLength(value, end);
+            if (end + next > room - 1)
+            {
+                break;
+            }
+
+            end += next;
+        }
+
+        return value[..end] + "\u2026";
     }
 
     /// <summary>

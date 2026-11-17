@@ -129,7 +129,8 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
 
         public DarlingPersonalTokenSnapshot Snapshot { get; }
 
-        public static async Task<Rig> StartAsync(string connectionString, PersonalTokenSettings? settings, bool publishOwner = true, bool network = false)
+        public static async Task<Rig> StartAsync(string connectionString, PersonalTokenSettings? settings, bool publishOwner = true, bool network = false,
+            CapturingTestLogger? log = null)
         {
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -151,7 +152,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
 
             var snapshot = new DarlingPersonalTokenSnapshot();
             var host = new DarlingWebHostService(
-                NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(),
+                log is null ? NullLogger<DarlingWebHostService>.Instance : new HostLogger(log), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(),
                 new BaselineCache(), ownerSource: ownerSource)
             {
                 PersonalSnapshot = snapshot,
@@ -211,6 +212,16 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
             Snapshot.Dispose();
             await Owner.DisposeAsync();
         }
+    }
+
+    private sealed class HostLogger(CapturingTestLogger inner) : ILogger<DarlingWebHostService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => inner.Log(logLevel, eventId, state, exception, formatter);
     }
 
     private static string Create(string name, string role = "reader", int days = 7) =>
@@ -559,7 +570,8 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
             await drop.ExecuteNonQueryAsync(ct);
         }
 
-        await using var rig = await Rig.StartAsync(scratch.ConnectionString, Settings());
+        var log = new CapturingTestLogger();
+        await using var rig = await Rig.StartAsync(scratch.ConnectionString, Settings(), log: log);
         var ada = PersonFor("one-rung-behind", Seat.Admin);
 
         var list = await rig.SendAsync("GET", "/api/mcp-tokens", ada);
@@ -572,6 +584,12 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal(503, create.Status);
         Assert.Equal(503, revoke.Status);
         Assert.Equal("store_unavailable", create.Error);
+        /* M7: four requests on a store below the rung log one Information line, with no stack, and no Warning. */
+        var missing = log.Lines.Where(l => l.Contains("mcp_personal_token", StringComparison.Ordinal)).ToList();
+        Assert.Single(missing);
+        Assert.StartsWith("Information:", missing[0], StringComparison.Ordinal);
+        Assert.Empty(log.ExceptionsAtLevel(LogLevel.Information));
+        Assert.True(log.CountAtLevel(LogLevel.Warning) == 0, log.Joined);
     }
 
     [Fact]
@@ -687,7 +705,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal("live", states["live-one"]);
         Assert.Equal("revoked", states["revoked-one"]);
         Assert.Equal("expired", states["expired-one"]);
-        Assert.Equal("user_revoked", (string?)reply.Body["tokens"]!.AsArray().Single(n => (string?)n!["name"] == "revoked-one")!["revoke_reason"]);
+        Assert.Equal(PersonalTokenStore.RevokedByOwnerReason, (string?)reply.Body["tokens"]!.AsArray().Single(n => (string?)n!["name"] == "revoked-one")!["revoke_reason"]);
         Assert.NotNull(live.Body);
     }
 
@@ -805,7 +823,23 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
 
         Assert.Equal(204, reply.Status);
         Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check((string)created.Body["token"]!, DateTimeOffset.UtcNow).Outcome);
-        Assert.Equal("admin_revoked", await rig.ScalarAsync($"SELECT revoke_reason FROM config.mcp_personal_token WHERE token_id = '{id}'"));
+        Assert.Equal(PersonalTokenStore.RevokedByAdminReason, await rig.ScalarAsync($"SELECT revoke_reason FROM config.mcp_personal_token WHERE token_id = '{id}'"));
+        Assert.Equal("admin:" + ada.Subject, await rig.ScalarAsync($"SELECT revoked_by FROM config.mcp_personal_token WHERE token_id = '{id}'"));
+    }
+
+    /// <summary>M2: an admin revoking their own token is its owner revoking it: the reason and who come from whose row it is, not the seat.</summary>
+    [Fact]
+    public async Task Revoke_AdminsOwnToken_IsRevokedByOwner()
+    {
+        await using var rig = await StartAsync(Settings());
+        var ada = PersonFor("revoke-admin-own", Seat.Admin);
+        var created = await rig.CreateAsync(ada, "laptop");
+        var id = (string)created.Body!["record"]!["id"]!;
+
+        Assert.Equal(204, (await rig.SendAsync("POST", "/api/mcp-tokens/" + id + "/revoke", ada)).Status);
+
+        Assert.Equal(PersonalTokenStore.RevokedByOwnerReason, await rig.ScalarAsync($"SELECT revoke_reason FROM config.mcp_personal_token WHERE token_id = '{id}'"));
+        Assert.Equal("person:" + ada.Subject, await rig.ScalarAsync($"SELECT revoked_by FROM config.mcp_personal_token WHERE token_id = '{id}'"));
     }
 
     [Fact]
@@ -820,6 +854,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal(204, reply.Status);
         Assert.Equal("person:web", await rig.ScalarAsync(
             $"SELECT actor FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND detail->>'token_id' = '{id}'"));
+        Assert.Equal("admin:web", await rig.ScalarAsync($"SELECT revoked_by FROM config.mcp_personal_token WHERE token_id = '{id}'"));
     }
 
     [Theory]

@@ -152,6 +152,22 @@ public sealed class DarlingMcpPersonalTokenTests
         PersonalMcpRig.AssertSameBytes(expected, actual);
     }
 
+    /// <summary>M8: <c>maxLifetimeDays</c> lowered below a token's age refuses it at the gate at once, the same 401 as an unknown token.</summary>
+    [Fact]
+    public async Task Personal_OlderThanALoweredLifetime_401Identical()
+    {
+        await using var rig = await PersonalMcpRig.StartAsync(new PersonalTokenSettings(1, 5, McpTokenEntry.OperatorRole, null));
+        /* RowFor creates the token a day before the gate's clock, stored to expire 29 days after it. */
+        var aged = rig.AddToken("alice@corp", "ci", McpTokenEntry.OperatorRole);
+        await rig.RefreshAsync();
+
+        var expected = await rig.PostAsync("not-a-served-token-value-0123456789", PersonalMcpRig.ToolsListJson);
+        var actual = await rig.PostAsync(aged.Value, PersonalMcpRig.ToolsListJson);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, expected.Status);
+        PersonalMcpRig.AssertSameBytes(expected, actual);
+    }
+
     [Fact]
     public async Task Personal_FeatureOff_401Identical()
     {

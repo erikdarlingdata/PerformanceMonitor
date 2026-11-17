@@ -1743,7 +1743,7 @@ public sealed class McpConfig
     /// <summary>
     /// Personal MCP tokens (#8737): a person signed in to the web dashboard through <c>web.network.oidc</c> mints their own
     /// short-lived MCP token. Default off, and then nothing changes for the tokens in <see cref="Tokens"/> or the legacy token.
-    /// Served only with the web dashboard on, <c>web.network.oidc</c> configured, no front door and
+    /// Served only with <c>web.enabled</c> true in <c>darling.json</c>, <c>web.network.oidc</c> configured, no front door and
     /// <see cref="AllowTokenlessLoopback"/> off; otherwise one start warning names the missing piece and the feature stays off.
     /// File-only and restart-only. See <see cref="McpPersonalTokensConfig"/>.
     /// </summary>

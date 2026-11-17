@@ -145,7 +145,7 @@ public sealed class PersonalTokenStoreLiveTests
     {
         var now = DateTimeOffset.UtcNow;
         var id = await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
-        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", "user", Actor, now, ct));
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", Actor, "admin:alice", Actor, now, ct));
         await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
     });
 
@@ -174,7 +174,7 @@ public sealed class PersonalTokenStoreLiveTests
         for (var i = 0; i < ceiling; i++)
         {
             var id = await MakeAsync(owner, "k1", "t" + i.ToString(CultureInfo.InvariantCulture), "reader", now, ct, cap: cap);
-            Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", "user", Actor, now, ct));
+            Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", Actor, "admin:alice", Actor, now, ct));
         }
 
         var minted = PersonalTokenFormat.Mint();
@@ -195,7 +195,7 @@ public sealed class PersonalTokenStoreLiveTests
         for (var i = 0; i < ceiling; i++)
         {
             var id = await MakeAsync(owner, "k1", "t" + i.ToString(CultureInfo.InvariantCulture), "reader", now, ct, cap: cap);
-            Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", "user", Actor, now, ct));
+            Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", Actor, "admin:alice", Actor, now, ct));
         }
 
         /* One of them falls out of the window: one slot comes back. */
@@ -256,12 +256,14 @@ public sealed class PersonalTokenStoreLiveTests
     {
         var now = DateTimeOffset.UtcNow;
         var id = await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
-        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "person:alice", "user_revoked", Actor, now, ct));
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", "person:alice", "admin:alice", Actor, now, ct));
         var row = Assert.Single((await PersonalTokenStore.ListAsync(owner, "k1", ct)).Rows);
         Assert.NotNull(row.RevokedAt);
         Assert.Equal("person:alice", row.RevokedBy);
-        Assert.Equal("user_revoked", row.RevokeReason);
+        Assert.Equal(PersonalTokenStore.RevokedByOwnerReason, row.RevokeReason);
         Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked'", ct));
+        Assert.Equal(PersonalTokenStore.RevokedByOwnerReason, await ScalarAsync(connection,
+            "SELECT detail->>'reason' FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked'", ct));
     });
 
     [Fact]
@@ -269,7 +271,7 @@ public sealed class PersonalTokenStoreLiveTests
     {
         var now = DateTimeOffset.UtcNow;
         var id = await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
-        Assert.False(await PersonalTokenStore.RevokeAsync(owner, id, "k2", "k2", "user_revoked", "person:eve", now, ct));
+        Assert.False(await PersonalTokenStore.RevokeAsync(owner, id, "k2", "k2", "person:eve", "admin:eve", "person:eve", now, ct));
         Assert.Null(Assert.Single((await PersonalTokenStore.ListAsync(owner, null, ct)).Rows).RevokedAt);
         Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked'", ct));
     });
@@ -279,8 +281,25 @@ public sealed class PersonalTokenStoreLiveTests
     {
         var now = DateTimeOffset.UtcNow;
         var id = await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
-        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, null, "person:admin", "admin_revoked", "person:admin", now, ct));
-        Assert.NotNull(Assert.Single((await PersonalTokenStore.ListAsync(owner, null, ct)).Rows).RevokedAt);
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, null, "k-admin", "person:admin", "admin:admin", "person:admin", now, ct));
+        var row = Assert.Single((await PersonalTokenStore.ListAsync(owner, null, ct)).Rows);
+        Assert.NotNull(row.RevokedAt);
+        Assert.Equal("admin:admin", row.RevokedBy);
+        Assert.Equal(PersonalTokenStore.RevokedByAdminReason, row.RevokeReason);
+        Assert.Equal(PersonalTokenStore.RevokedByAdminReason, await ScalarAsync(connection,
+            "SELECT detail->>'reason' FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked'", ct));
+    });
+
+    /// <summary>M2: whose row it is decides the reason, not the seat: an admin revoking their own token is its owner revoking it.</summary>
+    [Fact]
+    public Task Revoke_AdminsOwnToken_IsRevokedByOwner() => WithStoreAsync(async (connection, owner, ct) =>
+    {
+        var now = DateTimeOffset.UtcNow;
+        var id = await MakeAsync(owner, "k-admin", "laptop", "operator", now, ct);
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, null, "k-admin", "person:admin", "admin:admin", "person:admin", now, ct));
+        var row = Assert.Single((await PersonalTokenStore.ListAsync(owner, null, ct)).Rows);
+        Assert.Equal("person:admin", row.RevokedBy);
+        Assert.Equal(PersonalTokenStore.RevokedByOwnerReason, row.RevokeReason);
     });
 
     [Fact]
@@ -288,8 +307,8 @@ public sealed class PersonalTokenStoreLiveTests
     {
         var now = DateTimeOffset.UtcNow;
         var id = await MakeAsync(owner, "k1", "laptop", "reader", now, ct);
-        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", "user_revoked", Actor, now, ct));
-        Assert.False(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", "user_revoked", Actor, now, ct));
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", Actor, "admin:alice", Actor, now, ct));
+        Assert.False(await PersonalTokenStore.RevokeAsync(owner, id, "k1", "k1", Actor, "admin:alice", Actor, now, ct));
         Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked'", ct));
     });
 
@@ -411,8 +430,15 @@ public sealed class PersonalTokenStoreLiveTests
         var list = await Assert.ThrowsAsync<PostgresException>(() => PersonalTokenStore.ListAsync(owner, null, ct));
         Assert.Equal("42P01", list.SqlState);
         Assert.True(PersonalTokenStore.IsMissingTable(list));
-        var load = await Assert.ThrowsAsync<PostgresException>(() => PersonalTokenStore.LoadAllAsync(owner, ct));
-        Assert.Equal("42P01", load.SqlState);
         Assert.False(PersonalTokenStore.IsMissingTable(new InvalidOperationException("x")));
+
+        /* M7: the snapshot's load and the start sweep run every few seconds, so they look the table up first and never send a statement
+           that would raise 42P01 in the PostgreSQL log: the server raised nothing, and the callers' one branch still holds. */
+        var load = await Assert.ThrowsAnyAsync<Exception>(() => PersonalTokenStore.LoadAllAsync(owner, ct));
+        Assert.IsNotType<PostgresException>(load);
+        Assert.True(PersonalTokenStore.IsMissingTable(load));
+        var sweep = await Assert.ThrowsAnyAsync<Exception>(() => PersonalTokenStore.ApplySettingsAsync(owner, 30, operatorAllowed: false, DateTimeOffset.UtcNow, ct));
+        Assert.IsNotType<PostgresException>(sweep);
+        Assert.True(PersonalTokenStore.IsMissingTable(sweep));
     });
 }

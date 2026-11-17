@@ -35,9 +35,20 @@ function messageOf(result, fallback) {
   return fallback + " (HTTP " + result.status + ").";
 }
 
+/* The sentence for each revoke reason code the server stores. A code not listed here is shown as it is, with who revoked it. */
+const REVOKE_REASONS = {
+  revoked_by_owner: () => "revoked by its owner",
+  revoked_by_admin: (row) => "revoked by an administrator" + (row.revoked_by ? " (" + row.revoked_by + ")" : ""),
+  sign_in_refused: () => "revoked at sign-in: the sign-in was refused",
+  seat_lowered_to_read_only: () => "revoked at sign-in: the seat is now read-only",
+  operator_tokens_disabled: () => "revoked: operator tokens are turned off",
+};
+
 /** The State cell: the state, and for a revoked row who revoked it and why. */
 export function stateText(row) {
   if (row.state !== "revoked") return String(row.state || "");
+  const known = Object.prototype.hasOwnProperty.call(REVOKE_REASONS, row.revoke_reason) ? REVOKE_REASONS[row.revoke_reason] : null;
+  if (known) return known(row);
   const why = [row.revoke_reason, row.revoked_by ? "by " + row.revoked_by : null].filter(Boolean).join(" ");
   return why ? "revoked: " + why : "revoked";
 }

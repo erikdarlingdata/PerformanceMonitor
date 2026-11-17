@@ -119,4 +119,53 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         Assert.Equal("1", await ScalarAsync(connection,
             "SELECT count(*) FROM config.investigation_journal WHERE event = 'note_written' AND actor = 'person:mcp personal token ci of alice@corp'", ct));
     }
+
+    /// <summary>M4: a personal operator token whose subject is about 200 characters of joined emoji writes a known pattern. The identity the row
+    /// records fits the 256-character column check, and the cut kept whole text elements (#3625).</summary>
+    [Fact]
+    public async Task Personal_LongSubject_CreateKnownPattern_FitsTheIdentityColumn()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the personal token live tests.");
+        const string Family = "\U0001F468\u200D\U0001F469\u200D\U0001F467";
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        /* The known-pattern writes are SECURITY DEFINER functions the provisioning batch makes, not a migration. */
+        await ExecAsync(connection, DarlingManagedRoles.BuildKnownPatternFunctionsSql("config"), ct);
+
+        var subject = string.Concat(Enumerable.Repeat(Family, 25));
+        var tokenName = new string('n', 64);
+        await using (var owner = NpgsqlDataSource.Create(scratch.ConnectionString))
+        {
+            var minted = PersonalTokenFormat.Mint();
+            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.CreateAsync(
+                owner, minted.TokenId, minted.SecretSha256, "owner-long", subject, tokenName, McpTokenEntry.OperatorRole,
+                DateTimeOffset.UtcNow, 30, 5, "person:long", ct));
+
+            await using var rig = await PersonalMcpRig.StartAsync(Personal(), storeConnection: scratch.ConnectionString);
+            rig.Now = DateTime.UtcNow;
+            await rig.RefreshAsync();
+
+            var response = await rig.PostAsync(minted.Value, PersonalMcpRig.ToolsCallJson(
+                "create_known_pattern", "{\"note\":\"Nightly load\",\"metric_name\":\"High CPU\"}"));
+            Assert.Equal(StatusCodes.Status200OK, response.Status);
+            var dataLine = response.Body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+            using var document = JsonDocument.Parse(dataLine is null ? response.Body : dataLine["data:".Length..].Trim());
+            var text = document.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+            using var answer = JsonDocument.Parse(text);
+            Assert.True(answer.RootElement.GetProperty("status").GetString() == "created", text);
+        }
+
+        var createdBy = await ScalarAsync(connection, "SELECT created_by FROM config.config_known_patterns ORDER BY id DESC LIMIT 1", ct);
+        Assert.NotNull(createdBy);
+        Assert.True(createdBy!.Length <= 256, $"{createdBy.Length} characters");
+        var prefix = "mcp:personal token " + tokenName + " of ";
+        Assert.StartsWith(prefix + Family, createdBy, StringComparison.Ordinal);
+        var kept = createdBy[prefix.Length..createdBy.IndexOf(", client says: ", StringComparison.Ordinal)].TrimEnd('\u2026');
+        Assert.Equal(string.Empty, kept.Replace(Family, string.Empty, StringComparison.Ordinal));
+    }
 }

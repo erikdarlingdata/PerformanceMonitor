@@ -22,9 +22,6 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 internal static class DarlingPersonalTokenSignIn
 {
     internal const string SignInActor = "sign-in";
-    internal const string RefusedReason = "sign-in refused";
-    internal const string ViewerReason = "seat lowered to read-only";
-    internal const string AdminReaderReason = "adminRole lowered to reader";
 
     /// <summary>
     /// Revokes the person's personal tokens the seat no longer allows, then refreshes the snapshot so the MCP gate sees it before the sign-in
@@ -45,15 +42,15 @@ internal static class DarlingPersonalTokenSignIn
         {
             case WebOidcRole.Denied:
                 operatorOnly = false;
-                reason = RefusedReason;
+                reason = PersonalTokenStore.SignInRefusedReason;
                 break;
             case WebOidcRole.Viewer:
                 operatorOnly = true;
-                reason = ViewerReason;
+                reason = PersonalTokenStore.SeatLoweredReason;
                 break;
             case WebOidcRole.Admin when !settings.AdminMayMintOperator:
                 operatorOnly = true;
-                reason = AdminReaderReason;
+                reason = PersonalTokenStore.OperatorsDisabledReason;
                 break;
             default:
                 return;
