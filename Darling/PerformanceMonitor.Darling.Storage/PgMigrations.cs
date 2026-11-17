@@ -3490,6 +3490,9 @@ $rung$;";
         new Migration(270, "database-size-autogrow-all-files", V270Sql),
         /* V271 (#8884): the Instance Restarted and Memory Dumps alert switches on the alert settings. Two catalog-only boolean columns that default on. */
         new Migration(271, "instance-event-alert-switches", V271Sql),
+        /* V272 (#8798): column selectivity. The current column statistics rows, their per-database cursor and the run log of the column_stats
+           collector. Three new tables created empty: no data moves, so the upgrade stays fast. */
+        new Migration(272, "column-stats", V272Sql),
     };
 
     /// <summary>
@@ -3558,6 +3561,84 @@ ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS instance_restarted_enabled boolean NOT NULL DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS memory_dumps_enabled boolean NOT NULL DEFAULT TRUE;";
+
+
+    /// <summary>
+    /// V272 (#8798): column selectivity, for the <c>column_stats</c> collector (Darling only).
+    ///
+    /// <para><c>collect.column_stats_runs</c> is the collector's own table, the run log: one row per database per run. A PLAIN table on every
+    /// store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly
+    /// <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one agree.</para>
+    ///
+    /// <para><c>collect.column_stats</c> holds the CURRENT density vector rows, one per (statistic, leading-column prefix), replaced in place
+    /// when a statistic is read again. It carries names, densities, row and sample counts and update times, and no column value, histogram or
+    /// filter expression. History is keyed like the schema tables: a server, or an availability group for a database that belongs to one.
+    /// <c>collect.column_stats_state</c> is the per-database cursor (recovery fork, last seen in scope, last full read).</para>
+    ///
+    /// <para>New tables, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent.</para>
+    /// </summary>
+    private const string V272Sql = @"
+CREATE TABLE IF NOT EXISTS collect.column_stats_runs (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    history_key text,
+    kind text,
+    checked integer,
+    read integer,
+    deleted integer,
+    skipped_filtered integer,
+    skipped_memory_optimized integer,
+    skipped_xml_spatial_columnstore integer,
+    skipped_never_updated integer,
+    skipped_locked integer,
+    skipped_over_cap integer,
+    errors integer,
+    sample_error text,
+    refused text,
+    complete boolean,
+    note text
+);
+
+CREATE INDEX IF NOT EXISTS idx_column_stats_runs_time ON collect.column_stats_runs(server_id, collection_time);
+
+CREATE TABLE IF NOT EXISTS collect.column_stats (
+    server_id integer NOT NULL,
+    history_server_id integer NULL,
+    history_ag_group_id uuid NULL,
+    database_name text NOT NULL,
+    object_id integer NOT NULL,
+    schema_name text NOT NULL,
+    object_name text NOT NULL,
+    stats_id integer NOT NULL,
+    stats_name text NOT NULL,
+    origin text NOT NULL,
+    prefix_length smallint NOT NULL,
+    columns text[] NOT NULL,
+    includes_clustering_key boolean NOT NULL,
+    all_density double precision NOT NULL,
+    rows bigint NOT NULL,
+    rows_sampled bigint NOT NULL,
+    last_updated timestamp NOT NULL,
+    persisted_sample_percent real NULL,
+    read_at timestamp NOT NULL,
+    PRIMARY KEY (server_id, database_name, object_id, stats_id, prefix_length)
+);
+
+CREATE INDEX IF NOT EXISTS idx_column_stats_history_object ON collect.column_stats (history_server_id, history_ag_group_id, database_name, schema_name, object_name);
+
+CREATE TABLE IF NOT EXISTS collect.column_stats_state (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    history_server_id integer NULL,
+    history_ag_group_id uuid NULL,
+    recovery_fork_guid uuid NULL,
+    last_seen_in_scope_at timestamp NULL,
+    last_full_read_at timestamp NULL,
+    PRIMARY KEY (server_id, database_name)
+);";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.
