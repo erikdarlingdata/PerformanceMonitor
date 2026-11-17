@@ -1086,7 +1086,9 @@ public sealed partial class DarlingWorker
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
 
                     /* #6186: a collector the server refused with the same answer run after run waits out its backoff instead
-                       of writing a PERMISSIONS row every interval. The slot is served like any other: counted above, with the
+                       of writing a PERMISSIONS row every interval, and so does one whose statement times out run after run
+                       (#8891), which would otherwise hold up the collectors after it in this pass for its whole timeout. The
+                       slot is served like any other: counted above, with the
                        grid slots the loop stepped over, and the stamp moved on, because the fleet gate measures whether the
                        sweep loop keeps cadence and those slots are real whether or not this collector then runs. The backoff
                        only decides not to run it, so the first try after the wait is an ordinary slot, not a burst of missed
@@ -1095,7 +1097,7 @@ public sealed partial class DarlingWorker
                     if (server.RefusedBackoff.IsBackedOff(name, now, intervalSpan))
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
+                            "  [{Server}] {Collector} not run this slot: it has been refused, or timed out, {Streak} times in a row, so it is tried less often until that changes (#6186, #8891)",
                             server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
                         continue;
                     }
@@ -2778,19 +2780,20 @@ LIMIT 1";
 
 
     /// <summary>
-    /// #6186: the collection_log write every <see cref="RunOneAsync"/> outcome goes through, then the refusal backoff's record
-    /// of that outcome, so no arm can write its row and forget the backoff.
+    /// #6186: the collection_log write every <see cref="RunOneAsync"/> outcome goes through, then the repeat-failure backoff's
+    /// record of that outcome, so no arm can write its row and forget the backoff. <paramref name="timedOut"/> is set only by
+    /// the arms that know the run's statement ran out of time on the monitored server (#8891); the row is ERROR either way.
     /// </summary>
     private async Task LogRunAsync(
         ServerLoopState server, ServerRuntime runtime, string collectorName, string status, int rowsCollected,
         long sqlMs, long storageMs, string? errorMessage, FanoutCost? fanout, ServerPhaseCost? phases,
         DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken,
-        string? readSource = null)
+        string? readSource = null, bool timedOut = false)
     {
         await DarlingObservability.LogCollectionAsync(
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
             fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
-        RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
+        RecordRunForBackoff(server, runtime, collectorName, status, errorMessage, timedOut);
 
         /* #8528: the row just written is the collector's own reading after any session start the ensure made, so a capture session
            marked as started and awaiting its read has been read: the Capture Down self-alert judges this collector's newest row as it
@@ -2799,11 +2802,29 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #6186: feeds one run's status to the server's refusal backoff. A PERMISSIONS run with the same answer as the last one
-    /// extends the streak; a success, an error or a different answer restarts from the normal interval. YIELDED, ABANDONED and
-    /// SKIPPED runs say nothing about whether the grant changed, so they leave the streak alone.
+    /// The answer a timed-out run is recorded under in the repeat-failure backoff (#8891). Fixed, because the timeout's own
+    /// message carries the run's elapsed time and would read as a new answer on every run, so the streak would never build.
+    /// The leading control character keeps it apart from any refusal text a server returns.
     /// </summary>
-    private void RecordRunForBackoff(ServerLoopState server, ServerRuntime runtime, string collectorName, string status, string? message)
+    internal const string TimedOutBackoffAnswer = "\u0001command timeout";
+
+    /// <summary>
+    /// Whether a fault that reached <see cref="RunOneAsync"/>'s general catch counts as a timeout for the repeat-failure
+    /// backoff (#8891): a SQL Server command timeout (number -2) on a connection that stays. A timeout that dropped the
+    /// connection is not this collector's statement (a fresh login failed too), so it does not count.
+    /// </summary>
+    internal static bool IsBackoffTimeout(Exception ex, bool dropped) => !dropped && ex is SqlException { Number: -2 };
+
+    /// <summary>
+    /// #6186: feeds one run's status to the server's repeat-failure backoff. A PERMISSIONS run with the same answer as the last
+    /// one extends the streak, and so does a run whose statement timed out after a timed-out run (#8891,
+    /// <paramref name="timedOut"/>): either one repeating is a standing condition, and the collector is tried less often while
+    /// it lasts. A success, any other error, a different answer, or a timeout after a refusal (or the other way round)
+    /// restarts from the normal interval. YIELDED, ABANDONED and SKIPPED runs say nothing about whether the condition changed,
+    /// so they leave the streak alone. Every timeout still writes its ERROR row, so collection health shows the failure.
+    /// </summary>
+    private void RecordRunForBackoff(
+        ServerLoopState server, ServerRuntime runtime, string collectorName, string status, string? message, bool timedOut = false)
     {
         if (status is "YIELDED" or "SKIPPED" || status == EnumeratedCollectorDriver.AbandonedStatus)
         {
@@ -2812,8 +2833,21 @@ LIMIT 1";
 
         var effective = StoreConfigProvider.ResolveSchedule(collectorName, runtime.ServerId, _scheduleOverrides);
         var interval = TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes));
-        var streak = server.RefusedBackoff.Record(collectorName, status == "PERMISSIONS", message, DateTime.UtcNow, interval);
-        if (streak == RefusedCollectorBackoff.FreeRefusals + 1)
+        var timeout = timedOut && status == "ERROR";
+        var streak = server.RefusedBackoff.Record(
+            collectorName, status == "PERMISSIONS" || timeout, timeout ? TimedOutBackoffAnswer : message, DateTime.UtcNow, interval);
+        if (streak != RefusedCollectorBackoff.FreeRefusals + 1)
+        {
+            return;
+        }
+
+        if (timeout)
+        {
+            _logger.LogInformation(
+                "  [{Server}] {Collector} timed out {Streak} times in a row: it is tried less often (up to every {Max}) until a run ends some other way (#8891)",
+                server.Config.DisplayName, collectorName, streak, RefusedCollectorBackoff.MaxDelay);
+        }
+        else
         {
             _logger.LogInformation(
                 "  [{Server}] {Collector} refused {Streak} times in a row with the same answer: it is tried less often (up to every {Max}) until the answer changes or it succeeds (#6186)",
@@ -2982,6 +3016,11 @@ LIMIT 1";
             {
                 /* Stands in for the PERMISSIONS arm: the same recorder the real run goes through (LogRunAsync). */
                 RecordRunForBackoff(server, runtime, collectorName, "PERMISSIONS", overrideRefusal);
+            }
+            else if (RunOneTimeoutOverride?.Invoke(collectorName) is { } overrideTimeout)
+            {
+                /* Stands in for a timeout arm: an ERROR whose message carries the run's own elapsed time, as the real one does. */
+                RecordRunForBackoff(server, runtime, collectorName, "ERROR", overrideTimeout, timedOut: true);
             }
             else
             {
@@ -3788,9 +3827,12 @@ LIMIT 1";
             _logger.LogError("  [{Server}] {Collector} => ERROR (timeout): {Message}",
                 server.Config.DisplayName, collectorName, explanation);
 
+            /* #8891: a statement that ran out of time counts toward the repeat-failure backoff, so one that times out on every
+               run stops holding up the collectors after it for its whole deadline each interval. */
             await LogRunAsync(
                 server, runtime, collectorName, "ERROR", 0, elapsedMs, 0, explanation,
-                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken,
+                timedOut: true);
             return 0;
         }
         catch (Exception ex)
@@ -3866,7 +3908,7 @@ LIMIT 1";
             /* The probe's result is kept here for the log below, not read back from the memo: another run's drop may
                have cleared the memo while this probe was in flight (#7851). */
             LivenessProbeResult? probeResult = null;
-            if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            var dropped = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
                     ex,
                     server.Runtime,
                     async (probed, token) =>
@@ -3877,7 +3919,8 @@ LIMIT 1";
                         probeResult = result;
                         return result.Alive;
                     },
-                    cancellationToken))
+                    cancellationToken);
+            if (dropped)
             {
                 server.Runtime = null;
                 server.Liveness.Clear();
@@ -3924,9 +3967,12 @@ LIMIT 1";
 
                    #5813: the fan-out comes off the exception, where the runner's all-failed rethrow put it, so a
                    one-database server whose Query Store read timed out names that database in slowest_item with
-                   the budget as slowest_item_ms. Null for every fault that carries none, as before. */
+                   the budget as slowest_item_ms. Null for every fault that carries none, as before.
+
+                   #8891: see IsBackoffTimeout for which faults here count toward the repeat-failure backoff. */
                 await LogRunAsync(
-                    server, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                    server, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken,
+                    timedOut: IsBackoffTimeout(ex, dropped));
             }
             catch
             {

@@ -639,6 +639,13 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<string, string?>? RunOneRefusalOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#8891): with <see cref="RunOneBodyOverride"/> set and no refusal answer, a non-null message here stands for
+    /// that collector's statement timing out (an ERROR run with this message, which carries the run's own elapsed time as
+    /// the real one does). The override's run is recorded the way the real run's outcome is, so the backoff sees it.
+    /// </summary>
+    internal Func<string, string?>? RunOneTimeoutOverride { get; set; }
+
+    /// <summary>
     /// Test seam (#8361): the answer to whether the server with this id is a readable secondary for every Query Store database,
     /// which decides whether a <c>query_store_hints</c> slot runs. Null in production, which asks the store
     /// (<see cref="QueryStoreHintsStandsDownAsync"/>).
@@ -1823,9 +1830,9 @@ LIMIT 1";
            the old strict single-threaded invariant (INV-1) existed to protect from tearing. */
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-        /* #6186: the collectors this server keeps refusing with the same answer, and how long each waits for its next try. In
-           memory, so a restart (and a changed definition, which clears NextDue beside it) tries every collector once at its
-           normal interval. */
+        /* #6186: the collectors this server keeps refusing with the same answer, or whose statement keeps timing out (#8891),
+           and how long each waits for its next try. In memory, so a restart (and a changed definition, which clears NextDue
+           beside it) tries every collector once at its normal interval. */
         public RefusedCollectorBackoff RefusedBackoff { get; } = new();
 
         /* The verdict of this server's last liveness probe (#4710), reused for the command timeouts that follow it within

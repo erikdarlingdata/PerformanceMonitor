@@ -12,10 +12,11 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
-/// #6186: the retry schedule for a collector the monitored server refuses on every run (a PERMISSIONS run), shared by Darling's
-/// scheduler and Lite's. A refusal that repeats with the same answer is a standing condition, not a fresh failure each interval,
-/// so the collector is tried less often while it repeats: the first <see cref="FreeRefusals"/> refusals run at the normal interval
-/// (a grant being applied can look like one), then each further identical refusal doubles the wait, up to
+/// #6186: the retry schedule for a collector that fails the same way on every run, shared by Darling's scheduler and Lite's. Both
+/// record a refusal from the monitored server (a PERMISSIONS run); Darling also records a statement that times out run after
+/// run under one fixed answer (#8891). Either one repeating with the same answer is a standing condition, not a fresh failure
+/// each interval, so the collector is tried less often while it repeats: the first <see cref="FreeRefusals"/> refusals run
+/// at the normal interval (a grant being applied can look like one), then each further identical refusal doubles the wait, up to
 /// <see cref="MaxDelay"/> (or the collector's own interval when that is longer: a backoff never makes a collector run MORE often).
 /// The collector is never stopped for good, so a granted permission is picked up at the next try. The first run that is not a
 /// refusal, or a refusal with a different answer, goes back to the normal interval.
