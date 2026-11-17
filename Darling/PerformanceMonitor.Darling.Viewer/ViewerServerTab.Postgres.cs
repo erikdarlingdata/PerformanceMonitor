@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -49,6 +50,26 @@ public partial class ViewerServerTab
     /// DataGrid asked to realise all of them is a hung UI thread rather than a slow one.
     /// </summary>
     private const int PgGridRowLimit = 200;
+
+    /// <summary>#8919: reads this PostgreSQL server's recorded time zone and applies it. The shared clock refresh calls it only for a PostgreSQL tab.</summary>
+    private async Task RefreshPgServerClockAsync()
+    {
+        var (pgClock, zoneName) = await _dataService.GetPgServerClockAsync(_server.ServerId);
+        ApplyPgServerClock(pgClock, zoneName);
+    }
+
+    /// <summary>
+    /// #8919: a PostgreSQL target's clock is the time zone its <c>pg_server_config</c> snapshot records (<paramref name="zoneName"/>). Where the
+    /// store records none, Server Time reads UTC, as the fleet-wide views do, and the time display box says so: this machine's offset was
+    /// shown as the server's. Local Time and UTC are the same either way.
+    /// </summary>
+    internal void ApplyPgServerClock(ServerClock? clock, string? zoneName)
+    {
+        _serverClock = clock ?? ServerClock.Utc;
+        TimeDisplayModeBox.ToolTip = clock is null
+            ? "How timestamps are displayed. This server's time zone is not recorded, so Server Time shows UTC."
+            : $"How timestamps are displayed. Server Time is this server's own time zone ({zoneName}).";
+    }
 
     /// <summary>
     /// Picks the engine's tab set, once, in the constructor. Only a POSITIVE PostgreSQL claim switches:
