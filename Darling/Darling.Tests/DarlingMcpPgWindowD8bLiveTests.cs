@@ -302,8 +302,22 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
             var message = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end)).GetProperty("message").GetString()!;
 
             Assert.Equal(aurora, message.Contains("Aurora readers use the shared storage volume", StringComparison.Ordinal));
+            Assert.Equal(aurora, message.Contains("No standby was streaming", StringComparison.Ordinal));
+            Assert.Equal(!aurora, message.Contains("No replica was connected", StringComparison.Ordinal));
             Assert.Equal(!aurora, message.Contains("check get_pg_replication_slots", StringComparison.Ordinal));
+            Assert.Equal(aurora, message.Contains("That is not a replication fault", StringComparison.Ordinal));
             Assert.Contains("expected answer", message, StringComparison.Ordinal);
+
+            /* A cut window drops the covered claim, so the reply leads with the factual sentence. */
+            var began = end.AddMinutes(-30);
+            await SeedServerAsync(c, t, name, began, began, end);
+            await Exec(c, "UPDATE servers SET engine_kind = $2 WHERE server_id = $1", Id(name), engineKind);
+            var cut = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end));
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), cut.ToString());
+            var cutMessage = cut.GetProperty("message").GetString()!;
+            Assert.Equal(aurora, cutMessage.StartsWith("No standby was streaming", StringComparison.Ordinal));
+            Assert.Equal(!aurora, cutMessage.StartsWith("No replica was connected", StringComparison.Ordinal));
+            Assert.DoesNotContain("expected answer", cutMessage, StringComparison.Ordinal);
         });
     }
 }

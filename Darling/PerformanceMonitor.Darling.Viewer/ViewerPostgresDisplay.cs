@@ -1690,7 +1690,7 @@ internal static class PgDisplay
     /// not invite a search for a replication fault. Reader lag would need <c>aurora_replica_status()</c>, which no
     /// collector reads yet.
     /// </summary>
-    internal static string ReplicationStatsEmptyNote(bool isAurora) => isAurora
+    internal static string ReplicationStatsEmptyNote(string? engineKind) => MonitoredEngineKind.IsAurora(engineKind)
         ? "No standby was streaming from this server in this window. Aurora readers use the shared storage "
           + "volume instead of streaming replication, so they never appear in pg_stat_replication and this "
           + "grid is always empty on an Aurora writer. That is not a replication fault. Reader lag would "
