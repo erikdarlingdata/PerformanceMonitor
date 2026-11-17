@@ -29,7 +29,11 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>Which databases.</b> Only on a server where <c>schema_objects</c> is enabled, and only the databases both its scope and
 /// <c>column_stats</c>' own scope cover (exclusions win), writable by the schema pass's rules
-/// (<see cref="SchemaWorkPlanner.NotWritableReason"/>). Oldest full read first, a never-read database before any.</para>
+/// (<see cref="SchemaWorkPlanner.NotWritableReason"/>). Oldest full read first, a never-read database before any. Only where column_stats
+/// itself is enabled: a named run of a collector that is off reads nothing. A database in scope that is not read is still stamped, with a
+/// state row made for it when it has none. On a server (not Azure SQL Database, whose list can be one database or online ones only) a
+/// database the run had before and no longer has, dropped or out of scope, loses its state row and, unless another server still points at
+/// the same history, its rows.</para>
 ///
 /// <para><b>Incremental.</b> A statistic is read when it is new, its <c>STATS_DATE</c> differs from the stored one, or a name it was
 /// stored under changed (a renamed schema, table, statistic or column keeps <c>STATS_DATE</c>), and the stored
@@ -52,6 +56,9 @@ public static class DarlingColumnStatsCapture
     /// <summary>Statistics per read batch; the rows of each batch are stored before the next starts.</summary>
     internal const int BatchSize = 200;
 
+    /* A named run (run_collectors_now, the web run) dispatches a collector even when it is off; this one reads nothing then. */
+    internal const string CollectorOffNote = "column_stats is off for this server";
+
     private const string SchemaObjectsOffNote =
         "column_stats reads only on a server where schema_objects is enabled, and it is not enabled here: enable schema_objects first. Nothing was read.";
 
@@ -71,6 +78,11 @@ public static class DarlingColumnStatsCapture
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(server);
+
+        if (!runner.CollectorEnabledFor(ColumnStatsCollector.Instance.Name, server.ServerId))
+        {
+            return new CollectorRunResult(0, 0, 0, CollectorContext.NoMeasurements, CollectorOffNote);
+        }
 
         if (!runner.CollectorEnabledFor(SchemaObjectsCollector.Instance.Name, server.ServerId))
         {
@@ -152,14 +164,16 @@ public static class DarlingColumnStatsCapture
             await using var connection = await TimedSql(() => _runner.ColumnStatsSource.OpenAsync(_server, null, _ct));
             var probes = await TimedSql(() => connection.ReadProbesAsync(_ct));
             var work = new List<(SchemaDatabaseProbe Probe, ColumnStatsStateRow? State)>();
-            foreach (var probe in Covered(probes))
+            var covered = Covered(probes);
+            await ForgetGoneAsync(covered.Select(p => p.Name).ToList());
+            foreach (var probe in covered)
             {
                 var state = await TimedStore(() => ColumnStatsStore.LoadStateAsync(Store, _server.ServerId, probe.Name, _ct));
                 if (NoteNotWritable(probe))
                 {
                     /* Not read, but still in scope: a read-only, standby or offline database's statistics cannot change there, and a
                        secondary's rows are its group's, so the stored rows stay current and the stamp keeps them from ageing out. */
-                    await StampAsync(state);
+                    await StampNotReadAsync(state, probe);
                     continue;
                 }
 
@@ -215,7 +229,7 @@ public static class DarlingColumnStatsCapture
 
                     if (NoteNotWritable(probe))
                     {
-                        await StampAsync(state);
+                        await StampNotReadAsync(state, probe);
                         continue;
                     }
 
@@ -277,6 +291,30 @@ public static class DarlingColumnStatsCapture
             if (state is not null)
             {
                 await TimedStore(() => ColumnStatsStore.SaveStateAsync(Store, state with { LastSeenInScopeAt = _runTime }, _ct));
+            }
+        }
+
+        /* A database this server does not read (read-only, standby, offline, a secondary replica). With no state row yet (a secondary that
+           was never primary) one is made under the probe's history key, never fully read, so the group's rows stay while this server
+           still sees the database even after the server that read them is switched off or removed. */
+        private Task StampNotReadAsync(ColumnStatsStateRow? state, SchemaDatabaseProbe probe) =>
+            state is not null
+                ? StampAsync(state)
+                : TimedStore(() => ColumnStatsStore.SaveStateAsync(
+                    Store,
+                    new ColumnStatsStateRow(
+                        _server.ServerId, probe.Name, DarlingSchemaCapture.KeyText(SchemaWorkPlanner.KeyFor(_server.ServerId, probe)), probe.RecoveryForkGuid, _runTime, null),
+                    _ct));
+
+        /* The run's own databases that are gone (dropped, renamed) or out of either scope: their state row goes, and their rows too when no
+           other server's state row still points at the same history and database (a group's rows stay while another replica sees it). */
+        private async Task ForgetGoneAsync(IReadOnlyCollection<string> covered)
+        {
+            var keep = new HashSet<string>(covered, StringComparer.Ordinal);
+            var states = await TimedStore(() => ColumnStatsStore.LoadServerStatesAsync(Store, _server.ServerId, _ct));
+            foreach (var state in states.Where(s => !keep.Contains(s.Database)))
+            {
+                await TimedStore(() => ColumnStatsStore.ForgetDatabaseAsync(Store, state, _ct));
             }
         }
 

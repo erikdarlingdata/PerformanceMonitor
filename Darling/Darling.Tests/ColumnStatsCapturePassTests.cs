@@ -116,6 +116,7 @@ public sealed class ColumnStatsCapturePassTests
     {
         public Rig(NpgsqlDataSource store, NpgsqlConnection connection)
         {
+            Store = store;
             Connection = connection;
             Source = new FakeSource();
             Runner = new DarlingCollectorRunner(
@@ -123,16 +124,18 @@ public sealed class ColumnStatsCapturePassTests
                 new CollectorDeltaCalculator(),
                 databaseScope: (name, _) => name == ColumnStatsCollector.Instance.Name ? ColumnStatsScope : SchemaScope,
                 separatelyMonitoredDatabases: _ => new List<string>(),
-                collectorEnabled: (name, _) => name != SchemaObjectsCollector.Instance.Name || SchemaObjectsOn);
+                collectorEnabled: (name, _) => name == SchemaObjectsCollector.Instance.Name ? SchemaObjectsOn : name != ColumnStatsCollector.Instance.Name || ColumnStatsOn);
             Runner.ColumnStatsSource = Source;
         }
 
+        public NpgsqlDataSource Store { get; }
         public NpgsqlConnection Connection { get; }
         public FakeSource Source { get; }
         public DarlingCollectorRunner Runner { get; }
         public List<string> SchemaScope { get; set; } = new();
         public List<string> ColumnStatsScope { get; set; } = new();
         public bool SchemaObjectsOn { get; set; } = true;
+        public bool ColumnStatsOn { get; set; } = true;
 
         public ServerRuntime Server(string host = "colstats-sql", params string[] excluded)
         {
@@ -236,6 +239,106 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
             Assert.Contains("schema_objects", result.HostNote);
             Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_runs", ct));
             Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ColumnStatsDisabled_NamedRun_ReadsNothing()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.ColumnStatsOn = false;
+
+            /* run_collectors_now naming column_stats runs it even when it is off; the collector itself must refuse. */
+            var result = await rig.RunNowAsync(rig.Server(), ct);
+
+            Assert.Equal(0, rig.Source.Opens);
+            Assert.Equal(0, result.Rows);
+            Assert.Equal("column_stats is off for this server", result.HostNote);
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_runs", ct));
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_state", ct));
+        });
+    }
+
+    [Fact]
+    public async Task SecondaryNeverPrimary_IsStampedWithoutAStateRow_SoTheGroupsRowsSurviveThePrimarysRemoval()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            var primary = rig.Server("colstats-node-a");
+            var secondary = rig.Server("colstats-node-b");
+
+            /* The primary reads the group's database; the secondary has never been primary and has no state row for it. */
+            rig.Source.Probes.Add(Probe("MirrorDb", 9, group: s_group, primary: true));
+            rig.Source.Candidates["MirrorDb"] = [Stat(900, 1, s_t0)];
+            await rig.RunAsync(primary, ct);
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_state WHERE server_id = " + secondary.ServerId, ct));
+
+            rig.Source.Probes[0] = Probe("MirrorDb", 9, group: s_group, primary: false);
+            await rig.RunAsync(secondary, ct);
+
+            Assert.Equal("ag:" + s_group.ToString("D"), await rig.ScalarAsync(
+                "SELECT history_key FROM collect.column_stats_state WHERE server_id = " + secondary.ServerId
+                + " AND database_name = 'MirrorDb' AND last_seen_in_scope_at IS NOT NULL AND last_full_read_at IS NULL", ct));
+
+            /* The primary is removed: its state row goes, and the secondary's stamp keeps the group's rows through the sweep. */
+            await rig.ScalarAsync("WITH d AS (DELETE FROM collect.column_stats_state WHERE server_id = " + primary.ServerId + " RETURNING 1) SELECT count(*) FROM d", ct);
+            await DarlingRetention.PurgeAsync(rig.Store, timescaleAvailable: false, null, ct);
+
+            Assert.Equal("1", await rig.StoredStatsAsync("MirrorDb", ct));
+        });
+    }
+
+    [Fact]
+    public async Task DroppedAndOutOfScopeDatabases_TheRunDeletesTheirRowsAndState()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            foreach (var (name, id) in new[] { (Reports, 6), ("ArchiveDb", 7) })
+            {
+                rig.Source.Probes.Add(Probe(name, id));
+                rig.Source.Candidates[name] = [Stat(id * 100, 1, s_t0)];
+            }
+
+            var server = rig.Server();
+            await rig.RunAsync(server, ct);
+            Assert.Equal("3", await rig.ScalarAsync("SELECT count(DISTINCT database_name) FROM collect.column_stats", ct));
+
+            /* ReportsDb is dropped, ArchiveDb leaves column_stats' scope. */
+            rig.Source.Probes.RemoveAll(p => p.Name == Reports);
+            rig.ColumnStatsScope = [Sales];
+            await rig.RunAsync(server, ct);
+
+            Assert.Equal(Sales, await rig.ScalarAsync("SELECT string_agg(DISTINCT database_name, ',') FROM collect.column_stats", ct));
+            Assert.Equal(Sales, await rig.ScalarAsync("SELECT string_agg(database_name, ',') FROM collect.column_stats_state", ct));
+        });
+    }
+
+    [Fact]
+    public async Task GroupDatabaseGoneFromOneServer_RowsStayWhileAnotherServerStillSeesIt()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            var primary = rig.Server("colstats-node-a");
+            var secondary = rig.Server("colstats-node-b");
+            rig.Source.Probes.Add(Probe("MirrorDb", 9, group: s_group, primary: true));
+            rig.Source.Candidates["MirrorDb"] = [Stat(900, 1, s_t0)];
+            await rig.RunAsync(primary, ct);
+            rig.Source.Probes[0] = Probe("MirrorDb", 9, group: s_group, primary: false);
+            await rig.RunAsync(secondary, ct);
+
+            /* The database leaves the first server: its state goes, the group's rows stay for the second. */
+            rig.Source.Probes.Clear();
+            await rig.RunAsync(primary, ct);
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_state WHERE server_id = " + primary.ServerId, ct));
+            Assert.Equal("1", await rig.StoredStatsAsync("MirrorDb", ct));
+
+            /* Gone from the second server too: nothing points at the rows any more. */
+            await rig.RunAsync(secondary, ct);
+            Assert.Equal("0", await rig.StoredStatsAsync("MirrorDb", ct));
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_state", ct));
         });
     }
 

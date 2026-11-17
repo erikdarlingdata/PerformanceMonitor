@@ -238,6 +238,63 @@ WHERE server_id = $1 AND database_name = $2", c) { CommandTimeout = CommandTimeo
             reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
 
+    /// <summary>Every state row of one server: the databases its runs have stamped or read.</summary>
+    internal static async Task<IReadOnlyList<ColumnStatsStateRow>> LoadServerStatesAsync(NpgsqlConnection c, int serverId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        await using var cmd = new NpgsqlCommand(@"
+SELECT database_name, history_key, recovery_fork_guid, last_seen_in_scope_at, last_full_read_at
+FROM collect.column_stats_state
+WHERE server_id = $1", c) { CommandTimeout = CommandTimeoutSeconds };
+        Param(cmd, NpgsqlDbType.Integer, serverId);
+
+        var result = new List<ColumnStatsStateRow>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result.Add(new ColumnStatsStateRow(
+                serverId,
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4)));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A database one server no longer has (dropped, renamed, out of scope), in one transaction under the history lock: the server's state
+    /// row goes, and the rows under its history key too unless another server's state row still points at the same (history key, database),
+    /// as a replica of the same availability group's does. Returns how many current rows went.
+    /// </summary>
+    internal static async Task<int> ForgetDatabaseAsync(NpgsqlConnection c, ColumnStatsStateRow state, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        ArgumentNullException.ThrowIfNull(state);
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await LockAsync(c, tx, state.HistoryKey, state.Database, ct);
+        await using (var forget = new NpgsqlCommand(
+            "DELETE FROM collect.column_stats_state WHERE server_id = $1 AND database_name = $2", c, tx) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            Param(forget, NpgsqlDbType.Integer, state.ServerId);
+            Param(forget, NpgsqlDbType.Text, state.Database);
+            await forget.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var delete = new NpgsqlCommand(@"
+DELETE FROM collect.column_stats AS o
+WHERE o.history_key = $1 AND o.database_name = $2
+AND NOT EXISTS (SELECT 1 FROM collect.column_stats_state AS s WHERE s.history_key = $1 AND s.database_name = $2)", c, tx)
+        { CommandTimeout = CommandTimeoutSeconds };
+        Param(delete, NpgsqlDbType.Text, state.HistoryKey);
+        Param(delete, NpgsqlDbType.Text, state.Database);
+        var deleted = await delete.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
+        return deleted;
+    }
+
     internal static Task SaveStateAsync(NpgsqlConnection c, ColumnStatsStateRow s, CancellationToken ct) => SaveStateAsync(c, null, s, ct);
 
     private static async Task SaveStateAsync(NpgsqlConnection c, NpgsqlTransaction? tx, ColumnStatsStateRow s, CancellationToken ct)
