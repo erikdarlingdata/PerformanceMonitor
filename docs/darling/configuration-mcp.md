@@ -134,7 +134,7 @@ If the port is already in use at startup, the MCP server logs an error and does 
 | `adminRole` | `operator` | `operator` or `reader`. The strongest role an admin's token may take. Any other value is served as `reader`, with a warning. |
 | `dataDetail` | none | `full`, `maskLiterals` or `metadataOnly`. It can only narrow `mcp.dataDetail`. An unrecognized value leaves personal tokens off. |
 
-Personal tokens are served only when all of these hold. If one does not, the start logs one warning that names it and the feature stays off:
+Personal tokens are served only when all of these hold. If any does not, the start logs one warning that lists every missing condition and the feature stays off:
 
 - The service is not a front door.
 - `web.network.oidc` is configured.
@@ -143,4 +143,4 @@ Personal tokens are served only when all of these hold. If one does not, the sta
 
 **A file token is still required.** The MCP server starts only with a configured token, whatever `personalTokens` says (see above). That file token is also the break-glass credential: it keeps working when the identity provider or the store is down.
 
-A person's token has the `reader` role, or the `operator` role when the person has the admin seat and `adminRole` allows it. It never has the `agent` role and never gets the investigation tools. With `adminRole` set to `reader`, an existing operator personal token is served as `reader` at once, and the start sweep revokes it. How a token is stored, revoked and expired is on [Security](security.md#personal-mcp-tokens).
+A person's token has the `reader` role, or the `operator` role when the person has the admin seat and `adminRole` allows it. It never has the `agent` role and never gets the investigation tools. An operator personal token gets the four server administration tools only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on, the same rule as a file operator token. With `adminRole` set to `reader`, an existing operator personal token is served as `reader` at once, and the start sweep revokes it. How a token is stored, revoked and expired is on [Security](security.md#personal-mcp-tokens).

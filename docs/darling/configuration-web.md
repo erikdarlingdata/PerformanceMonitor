@@ -111,7 +111,7 @@ A refused sign-in POST to `/auth/login` answers 403 before the form is read, wit
 
 ### Personal MCP token routes
 
-The web login does one more thing by itself when [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) is on: it serves `/api/mcp-tokens` and `/api/mcp-tokens/{id}/revoke`. These routes are not on the `web.allowAdminWrites` arm. A read-only OpenID Connect seat may POST exactly these two routes, with the same Host, SameSite and JSON checks as every other write, and no other write opens for that seat. A front door answers `/api/mcp-tokens*` with 404 and never forwards it. See [My MCP tokens](web-dashboard.md#my-mcp-tokens).
+The web login does one more thing by itself when [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) is on: it serves `/api/mcp-tokens` and `/api/mcp-tokens/{id}/revoke`. These routes are not on the `web.allowAdminWrites` arm. A read-only OpenID Connect seat may POST exactly these two routes, with the same Host, SameSite and JSON checks as every other write, and the write it opens is these two routes and, for a seat with an owner key, the two proposal presses (#7109), which that seat already had. A front door answers `/api/mcp-tokens*` with 404 and never forwards it. See [My MCP tokens](web-dashboard.md#my-mcp-tokens).
 
 ### Viewer-managed team access groups
 

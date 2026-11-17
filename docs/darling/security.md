@@ -227,7 +227,7 @@ With [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) on, a person s
 **What revokes a token.**
 
 - The person, or any admin, revokes it.
-- A sign-in that drops the seat. A person whose sign-in is refused loses all their tokens. A person who now signs in read-only loses their operator tokens. An admin who signs in under `adminRole: reader` loses their operator tokens.
+- A sign-in that drops the seat. A person whom the role mapping refuses (authenticated at the provider, matching neither `adminRoles` nor `viewerRoles`) loses all their tokens. An earlier refusal, such as a bad ID token or a missing or invalid subject, revokes nothing. A person who now signs in read-only loses their operator tokens. An admin who signs in under `adminRole: reader` loses their operator tokens.
 - The start sweep, for lowered settings. A lower `maxLifetimeDays` cuts the expiries, and `adminRole: reader` revokes operator tokens. Until the sweep runs, an operator token under `adminRole: reader` is already served as `reader`.
 
 **The delay.** A revoke takes effect at once for this service's own dashboard and sign-ins. Anywhere else it takes at most 5 seconds: another service on the same store, or a direct edit of the store.

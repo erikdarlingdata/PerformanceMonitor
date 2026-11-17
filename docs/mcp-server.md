@@ -180,9 +180,9 @@ With `mcp.tokens` set, each named token is served the tools of its role, and the
 With `mcp.personalTokens` on, a person signed in to the Darling web dashboard with OpenID Connect makes their own MCP token on the **My MCP tokens** page. It looks like `dpt1_` followed by a 16-hex id, an underscore and a 43-character secret. The page shows the value once, at creation, and never again.
 
 - A person with a read-only seat makes `reader` tokens. An admin seat makes tokens up to `mcp.personalTokens.adminRole` (`operator` by default). A personal token never has the `agent` role and never gets the investigation tools.
-- A token has a name of 1 to 64 of `A-Za-z0-9._:-`. The name cannot be `web`, `mcp`, `cli` or `viewer`, is case-sensitive, and is unique per person among their live tokens.
+- A token has a name of 1 to 64 of `A-Za-z0-9._:-`. The name cannot be `web`, `mcp`, `cli`, `viewer`, `invalid`, `unclaimed` or `legacy-token`, whatever its case. It is unique per person among their live tokens, and that check is case-sensitive.
 - A token lives at most `maxLifetimeDays` (30 by default) and a person holds at most `maxTokensPerPerson` (5 by default).
-- The slow-read and latency records and the journal name the caller as `personal token <name> of <subject>`, for example `personal token ci of alice@example.com`.
+- Write log lines, store rows and journal actors name the caller as `personal token <name> of <subject>`, for example `personal token ci of alice@example.com`. The slow-read and latency records carry only the MCP client's own name, not the token identity.
 - The token goes in the same `Authorization: Bearer` header as any other. A refused personal token gets the same 401 as a wrong token.
 
 The service still needs a file token (`mcp.network` or `mcp.tokens`) to start the MCP server, and that file token keeps working when the identity provider or the store is down. See [Personal tokens](darling/configuration-mcp.md#personal-tokens) for the settings and [Personal MCP tokens](darling/security.md#personal-mcp-tokens) for storage and revocation.
