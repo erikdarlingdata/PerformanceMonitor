@@ -166,12 +166,28 @@ export const TABLE_COLUMNS = [
 export function indexFlags(r) {
   const flags = [];
   if (r.valid === false) flags.push("Invalid");
-  if (r.larger_than_heap === true) flags.push("Larger than its table");
+  if (r.larger_than_heap === true) {
+    /* A rolled-up row's flag is about its copies, not the sum the ratio beside it is of, so it always says how many, even one (#8897). */
+    const copies = Number(r.index_count);
+    flags.push(copies > 1 ? Number(r.larger_than_heap_count) + " of " + copies + " copies larger than its table" : "Larger than its table");
+  }
   if (r.rarely_used === true) flags.push("Rarely used");
   return flags;
 }
 
 const indexFlagText = (r) => (indexFlags(r).join(", ") || "—");
+
+/**
+ * The share is of the size the estimate covered. When only some of a rolled-up row's copies have an estimate, that is less than the row's
+ * Size, so the cell names its basis instead of sitting a bare 100% beside a bigger size (#8897). A row whose copies were all estimated keeps
+ * the plain percent: the estimate and the Size are both pg_relation_size read in one statement, so the basis equals the Size.
+ */
+export function indexEmptyShareText(r) {
+  if (r.estimated_bloat_share == null) return "—";
+  const pct = fmtPct(Number(r.estimated_bloat_share) * 100);
+  const partial = r.estimated_basis_bytes != null && Number(r.estimate_indexes_usable) < Number(r.index_count) && Number(r.estimated_basis_bytes) < Number(r.bytes);
+  return partial ? pct + " of the " + fmtBytes(Number(r.estimated_basis_bytes)) + " estimated" : pct;
+}
 
 /** The read gives the reason an index has no estimate as one plain sentence. The grid shows it in a few words and opens the sentence on a click. */
 const INDEX_SKIP_WORDS = [
@@ -203,7 +219,7 @@ export const INDEX_COLUMNS = [
     hint: "The index size as a share of its table's size. Over 100% means the index is larger than the table." },
   { key: "idx_scan", label: "Scans", format: "int", hint: "Reads that used the index since the counters began." },
   { key: "estimated_reclaimable_bytes", label: "Empty (est.)", format: "bytes", hint: "The estimated empty space in the index. Blank when no estimate can be made." },
-  { key: "estimated_bloat_share", label: "Empty % (est.)", display: (r) => (r.estimated_bloat_share == null ? "—" : fmtPct(Number(r.estimated_bloat_share) * 100)),
+  { key: "estimated_bloat_share", label: "Empty % (est.)", display: indexEmptyShareText,
     sortValue: (r) => (r.estimated_bloat_share == null ? null : Number(r.estimated_bloat_share)) },
   detailColumn("estimate_skipped_reason", "Not Estimated", indexSkipText, "Why no empty-space figure could be estimated for this index. Blank means it was estimated."),
   { key: "index_count", label: "Copies", group: "More", display: (r) => (Number(r.index_count) > 1 ? String(r.index_count) : "—"), sortValue: (r) => Number(r.index_count),

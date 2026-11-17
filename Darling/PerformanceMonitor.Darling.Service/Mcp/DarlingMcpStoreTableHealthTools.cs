@@ -386,6 +386,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         rarely_used = r.RarelyUsed,
         estimated_reclaimable_bytes = r.EstimatedReclaimableBytes,
         estimated_bloat_share = Round(r.EstimatedBloatShare, 4),
+        estimated_basis_bytes = r.EstimatedBasisBytes,
         estimate_indexes_usable = r.EstimateIndexesUsable,
         estimate_skipped_reason = r.EstimateSkippedReason,
     };

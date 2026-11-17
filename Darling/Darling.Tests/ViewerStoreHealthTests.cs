@@ -180,6 +180,58 @@ public sealed class ViewerStoreHealthTests
         Assert.False(rows[2].IsFlagged);
     }
 
+    /// <summary>A rolled-up index row over 164 copies, with the larger-than-table count, the estimate coverage and the sizes set per case.</summary>
+    private static StoreIndexHealthRow RolledUpRow(int copies, int larger, long bytes, long? reclaim, double? share, long? basis, int usable) =>
+        IndexRow("ix_rolled", bytes, larger: larger > 0) with
+        {
+            IndexCount = copies,
+            LargerThanHeapCount = larger,
+            EstimatedReclaimableBytes = reclaim,
+            EstimatedBloatShare = share,
+            EstimatedBasisBytes = basis,
+            EstimateIndexesUsable = usable,
+            EstimateSkippedReason = reclaim is null ? "below_size_floor" : null,
+        };
+
+    [Fact]
+    public void ARolledUpRow_SaysHowManyOfItsCopiesAreLargerThanTheirTable_EvenWhenItIsOne()
+    {
+        const long mb = 1024 * 1024;
+        Assert.Equal("1 of 164 copies larger than its table", StoreHealthRows.Index(RolledUpRow(164, 1, 18 * mb, null, null, null, 0)).Flags);
+        Assert.Equal("7 of 164 copies larger than its table", StoreHealthRows.Index(RolledUpRow(164, 7, 18 * mb, null, null, null, 0)).Flags);
+        Assert.Equal("164 of 164 copies larger than its table", StoreHealthRows.Index(RolledUpRow(164, 164, 18 * mb, null, null, null, 0)).Flags);
+        Assert.Equal("Larger than its table", StoreHealthRows.Index(RolledUpRow(1, 1, 18 * mb, null, null, null, 0)).Flags);
+        Assert.Equal(string.Empty, StoreHealthRows.Index(RolledUpRow(164, 0, 18 * mb, null, null, null, 0)).Flags);
+    }
+
+    [Fact]
+    public void TheEmptySpaceCell_NamesItsBasis_WhenTheEstimateCoveredOnlySomeOfTheRowsSize()
+    {
+        const long mb = 1024 * 1024;
+        var partial = StoreHealthRows.Index(RolledUpRow(164, 1, 18 * mb, 6 * mb, 1.0, 6 * mb, 40)).Reclaimable;
+        Assert.Equal("6.0 MB of the 6.0 MB estimated (100.0%)", partial.Replace(',', '.'));
+
+        // A partial estimate that found nothing still names what it covered.
+        var none = StoreHealthRows.Index(RolledUpRow(164, 0, 18 * mb, 0, 0.0, 6 * mb, 40)).Reclaimable;
+        Assert.Equal("0 B of the 6.0 MB estimated (0.0%)", none.Replace(',', '.'));
+    }
+
+    [Fact]
+    public void TheEmptySpaceCell_KeepsItsPlainText_WhenEveryCopyWasEstimated_OrThereIsOneCopy()
+    {
+        const long mb = 1024 * 1024;
+        // Every copy has an estimate. A live read sizes the estimate and the row in one statement, so the basis equals the row's size and is not named.
+        var all = StoreHealthRows.Index(RolledUpRow(164, 0, 18 * mb, 4 * mb, 0.25, 18 * mb, 164)).Reclaimable;
+        Assert.Equal("4.0 MB (25.0%)", all.Replace(',', '.'));
+
+        var single = StoreHealthRows.Index(RolledUpRow(1, 0, 18 * mb, 4 * mb, 0.25, 18 * mb, 1)).Reclaimable;
+        Assert.Equal("4.0 MB (25.0%)", single.Replace(',', '.'));
+
+        // An estimate from a read that predates the basis column keeps the plain text.
+        var unknown = StoreHealthRows.Index(RolledUpRow(164, 0, 18 * mb, 4 * mb, 0.25, null, 40)).Reclaimable;
+        Assert.Equal("4.0 MB (25.0%)", unknown.Replace(',', '.'));
+    }
+
     [Fact]
     public void ACoverageRowWithAMissingLeaf_IsFlaggedAndNamesIt()
     {

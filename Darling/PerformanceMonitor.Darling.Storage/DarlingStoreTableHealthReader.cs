@@ -367,6 +367,9 @@ public static class DarlingStoreTableHealthReader
     /// <param name="EstimateIndexesUsable">How many of the row's indexes the estimate covered.</param>
     /// <param name="EstimateSkippedReason">NULL when any index in the row has an estimate. Otherwise the estimate's own reason,
     /// or a note that the index is not a valid, ready btree.</param>
+    /// <param name="EstimatedBasisBytes">The size, as the estimate saw it, of the indexes it covered: what
+    /// <see cref="EstimatedBloatShare"/> is a share of. Under <see cref="Bytes"/> when the estimate covered only some of the row's
+    /// copies, so a rolled-up row can say which size its share is of. NULL when nothing was estimated.</param>
     public sealed record StoreIndexHealthRow(
         string SchemaName,
         string TableName,
@@ -390,7 +393,8 @@ public static class DarlingStoreTableHealthReader
         long? EstimatedReclaimableBytes,
         double? EstimatedBloatShare,
         int EstimateIndexesUsable,
-        string? EstimateSkippedReason);
+        string? EstimateSkippedReason,
+        long? EstimatedBasisBytes = null);
 
     /// <summary>
     /// Leaf index coverage for one index of a declarative partitioned parent (#8549: a missing or invalid leaf index was silent).
@@ -950,7 +954,8 @@ SELECT
     CASE WHEN g.est_basis_bytes > 0 THEN g.est_reclaimable_bytes::double precision / g.est_basis_bytes END AS est_bloat_share,
     g.est_usable,
     CASE WHEN g.est_usable > 0 THEN NULL
-         ELSE COALESCE(g.skipped_reason, '{InvalidIndexReason}') END AS est_skipped_reason
+         ELSE COALESCE(g.skipped_reason, '{InvalidIndexReason}') END AS est_skipped_reason,
+    g.est_basis_bytes
 FROM grp AS g
 CROSS JOIN statsinfo AS si
 ORDER BY (NOT g.valid) DESC,
@@ -1242,7 +1247,8 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
                 EstimatedReclaimableBytes: reader.IsDBNull(18) ? null : reader.GetInt64(18),
                 EstimatedBloatShare: reader.IsDBNull(19) ? null : reader.GetDouble(19),
                 EstimateIndexesUsable: reader.GetInt32(20),
-                EstimateSkippedReason: reader.IsDBNull(21) ? null : PlainEstimateReason(reader.GetString(21))));
+                EstimateSkippedReason: reader.IsDBNull(21) ? null : PlainEstimateReason(reader.GetString(21)),
+                EstimatedBasisBytes: reader.IsDBNull(22) ? null : reader.GetInt64(22)));
         }
 
         return rows;
