@@ -25,7 +25,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 - **Upgrading runs Darling store migration V268 on the service's first start, and moves Lite's DuckDB schema to version 82** ([#8784]) - V268 adds two nullable columns to `index_object_stats` (`answering_server_name` and `is_memory_optimized`, catalog-only on a compressed hypertable) and creates five empty tables: `object_inventory`, `object_executions_daily`, `object_executions_daily_built`, `object_executions_daily_databases` and `object_executions_daily_retention`. Lite's v82 adds the same two columns. Nothing is rewritten and nothing needs to be done. A row stored before the upgrade reads NULL for the new columns.
 
-- **Upgrading runs Darling store migration V269 on the service's first start** ([#8798]) - V269 creates three empty tables in the `collect` schema: `column_stats` (the current statistics rows), `column_stats_runs` (one row per database per run) and `column_stats_state` (a cursor per database). No existing table changes, no data moves and no grant is needed, because the `collect` schema already carries blanket `SELECT`. The collector they serve ships off, so nothing is read from a monitored server until you turn it on.
+- **Upgrading runs Darling store migration V272 on the service's first start** ([#8798]) - V272 creates three empty tables in the `collect` schema: `column_stats` (the current statistics rows), `column_stats_runs` (one row per database per run) and `column_stats_state` (a cursor per database). No existing table changes, no data moves and no grant is needed, because the `collect` schema already carries blanket `SELECT`. The collector they serve ships off, so nothing is read from a monitored server until you turn it on.
 
 ### Added
 

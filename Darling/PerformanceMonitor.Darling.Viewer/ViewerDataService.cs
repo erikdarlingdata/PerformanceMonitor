@@ -1847,7 +1847,7 @@ SELECT
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
         /* V272 (#8798): the column statistics store. Table-existence sentinel, newest-first, and the TOP rung, so a fully-migrated store maps to
-           EXACTLY StorageVersion.SchemaVersion rather than falling through to 268 and showing a spurious upgrade banner on a store that is current. */
+           EXACTLY StorageVersion.SchemaVersion rather than falling through to 271 and showing a spurious upgrade banner on a store that is current. */
         if (hasColumnStats)
         {
             return 272;
