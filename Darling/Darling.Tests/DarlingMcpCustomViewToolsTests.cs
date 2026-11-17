@@ -404,6 +404,37 @@ public sealed class DarlingMcpCustomViewToolsSurfaceTests
         Assert.Contains("doubly nested", result, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("unknown source", result, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task RunCustomViewPanel_UnknownRootKey_IsRefused_NamingTheKey_WithoutTouchingTheStore()
+    {
+        /* #8941: "servers" for "server" used to be ignored, so the panel ran across the whole fleet and the reply said nothing.
+           A dead store proves no SQL ran: the refusal comes before any connection. */
+        await using var dead = NpgsqlDataSource.Create(DeadStore);
+        var result = await DarlingMcpCustomViewTools.RunCustomViewPanel(
+            dead,
+            "{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"},\"servers\":[\"a\"]}");
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        using var parsed = JsonDocument.Parse(result);
+        var message = parsed.RootElement.GetProperty("message").GetString()!;
+        Assert.Contains("unknown key 'servers'", message, StringComparison.Ordinal);
+        Assert.Contains("did you mean 'server'", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunCustomViewPanel_EveryKeyTheWebPageSends_IsNotRefusedAsUnknown()
+    {
+        /* The web page and the Viewer send panel, variables, values, server, hours, windowStart and windowEnd. The panel here names a
+           bad measure, so the run ends at the panel check (no connection) and the message proves the root keys were accepted. */
+        await using var dead = NpgsqlDataSource.Create(DeadStore);
+        var result = await DarlingMcpCustomViewTools.RunCustomViewPanel(
+            dead,
+            "{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"nope\",\"aggregate\":\"sum\",\"viz\":\"table\"},\"variables\":[],\"values\":{},\"server\":\"a\",\"hours\":24,"
+            + "\"windowStart\":\"2026-01-01T00:00:00Z\",\"windowEnd\":\"2026-01-02T00:00:00Z\"}");
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.DoesNotContain("unknown key", result, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("nope", result, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>

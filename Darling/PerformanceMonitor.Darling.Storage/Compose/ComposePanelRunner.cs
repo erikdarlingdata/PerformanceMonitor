@@ -327,6 +327,12 @@ internal static class ComposePanelRunner
     private static ComposeRunOutcome EmptyScopedAnswer() =>
         ComposeRunOutcome.Ok(new JsonObject { ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray() });
 
+    /// <summary>#8941: every key the runner reads at the root of the run spec. The web page and the Viewer send only these.</summary>
+    internal static readonly IReadOnlySet<string> RunSpecKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "panel", "variables", "values", "server", "hours", "windowStart", "windowEnd",
+    };
+
     internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         ComposeRunHost host, NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
         ILogger? logger = null, Action<Exception>? onRunException = null, IReadOnlyList<int>? authorizedServerIds = null, DateTime? nowUtc = null)
@@ -334,6 +340,14 @@ internal static class ComposePanelRunner
         if (body["panel"] is not JsonObject panel)
         {
             return ComposeRunOutcome.BadRequest("Request body must be a JSON object with a 'panel'.");
+        }
+
+        /* #8941: the ROOT of the run spec is strict. A mistyped scope key ("servers" for "server") used to be ignored, so the
+           panel ran across the whole fleet and the reply said nothing. Refused here, in the one runner, so the web route, the
+           MCP tool and the Viewer all get it. The panel object below stays lenient (a stored definition must keep running). */
+        if (ComposeSpec.UnknownKeyError(body, RunSpecKeys, "the run spec") is { } unknownRootKey)
+        {
+            return ComposeRunOutcome.BadRequest(unknownRootKey);
         }
 
         /* The run path stays LENIENT about unknown keys — a definition stored before the #2733 write-path
