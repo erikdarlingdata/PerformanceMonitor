@@ -193,11 +193,10 @@ public static class DarlingPgTrendReader
     /// <summary>
     /// #8074: the engine_cumulative arm's automatic choice: the event that accrued the most wait time in the window on the
     /// engine's counters. Ranked on the collector's deltas, so a restart inside the window costs nothing (the collector
-    /// re-baselines and writes no interval for that collection). The counters are engine-wide, so idle background workers DO
-    /// reach the table (#8916): the checkpointer's and WAL writer's <c>Activity</c>-class sleeps are skipped here, the class
-    /// PostgreSQL uses for "idle-waiting", the same rule the sampler arm applies. The rows carry only <c>wait_type</c> and
-    /// <c>wait_event</c>, no <c>backend_type</c>, so an <c>Extension</c> wait from an idle background worker (the pg_cron
-    /// launcher) cannot be told from an extension's real wait and stays eligible. An event the engine reports but does not name
+    /// re-baselines and writes no interval for that collection). <c>Activity</c>, <c>Client</c> and <c>Timeout</c> waits never reach
+    /// the table: the collector drops them. The generic <c>Extension</c> / <c>Extension</c> event does reach it (#8916): it is the
+    /// wait background workers (the pg_cron launcher, the TimescaleDB scheduler) sleep in, and the counters are engine-wide with no
+    /// backend type, so it is skipped here. A caller who names it still gets it. An event the engine reports but does not name
     /// cannot be followed by name and is skipped.
     /// $1 server_id, $2/$3 window.
     /// </summary>
@@ -206,7 +205,7 @@ public static class DarlingPgTrendReader
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   wait_event IS NOT NULL
-        AND   coalesce(wait_type, '') <> 'Activity'
+        AND   NOT (coalesce(wait_type, '') = 'Extension' AND wait_event = 'Extension')
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   sample_interval_seconds > 0
@@ -545,14 +544,10 @@ public static class DarlingPgTrendReader
     /// askable by name, because how much time backends spend on CPU is a real signal; it is just never the
     /// automatic answer to "what is this server waiting on".</para>
     ///
-    /// <para><b><c>event_type = 'Activity'</c> is excluded from the choice too (#8916).</b> That class is
-    /// PostgreSQL's "idle-waiting" class: a background process (the checkpointer, the WAL writer, the
-    /// autovacuum launcher) sleeping in its main loop. It accrues wall-clock time around the clock, so left in
-    /// it outranks every client wait and the trend charts an idle sleep as the event that dominates the window.
-    /// Same rule as the CPU class: still askable by name and still listed in the grids, never the automatic
-    /// pick. The sampler rows carry no <c>backend_type</c>, so an <c>Extension</c> wait from an idle
-    /// background worker (the pg_cron launcher) cannot be told from an extension's real wait here and stays
-    /// eligible.</para>
+    /// <para><b>The generic <c>Extension</c> / <c>Extension</c> event is skipped too (#8916).</b> Background workers (the pg_cron
+    /// launcher, the TimescaleDB scheduler) sleep in it around the clock, so left in it outranks every client wait. The sampler arm
+    /// drops a background worker's row at collection, but rows stored before that rule keep the old shape and the extension arm
+    /// has no backend type, so the choice skips the event as well. Still askable by name.</para>
     /// </summary>
     public const string DominantWaitEventSql = """
         WITH per_snapshot AS (
@@ -561,7 +556,7 @@ public static class DarlingPgTrendReader
             WHERE server_id = $1
             AND   event IS NOT NULL
             AND   coalesce(event_type, '') <> 'CPU'
-            AND   coalesce(event_type, '') <> 'Activity'
+            AND   NOT (coalesce(event_type, '') = 'Extension' AND event = 'Extension')
             AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY event, collection_time

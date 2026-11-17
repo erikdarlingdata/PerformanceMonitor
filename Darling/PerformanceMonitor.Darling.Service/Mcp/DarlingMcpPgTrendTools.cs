@@ -152,14 +152,13 @@ public sealed class DarlingMcpPgTrendTools
                 wait_event_source = string.IsNullOrWhiteSpace(wait_event)
                     ? engineCounters
                         ? "chosen automatically: the event with the most wait time in this window on the engine's cumulative "
-                          + "counters, never an Activity-class wait (PostgreSQL's idle-waiting class: background processes sleeping "
-                          + "in their main loop). The rows carry no backend type, so an idle background worker's wait in another "
-                          + "class cannot be told apart and is not excluded. Name an event explicitly to follow it."
+                          + "counters. The generic Extension wait is skipped because background workers sleep in it. Name an "
+                          + "event explicitly to follow it."
                         : "chosen automatically: the most-sampled event in this window that is an actual WAIT. "
                           + "The CPU class - pg_wait_sampling's 'Running', meaning the backend was not waiting - "
                           + "is excluded from the choice because it dominates any healthy server's profile and "
-                          + "would answer the opposite of the question, and so is the Activity class (idle background "
-                          + "processes sleeping in their main loop). Name either explicitly to follow it."
+                          + "would answer the opposite of the question. The generic Extension wait is skipped too, because "
+                          + "background workers sleep in it. Name either explicitly to follow it."
                     : "as requested",
                 hours_back,
                 bucket = TrendBuckets.Word(bucketMinutes),
