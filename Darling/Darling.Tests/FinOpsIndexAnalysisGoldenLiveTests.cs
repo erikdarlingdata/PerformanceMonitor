@@ -244,10 +244,11 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
                 {
                     writer.WritePropertyName(p.Name);
                     /* #8880: the options' ServerStartTime is the seeded LOCAL start time, which the seed takes from the local clock, so its offset
-                       from the UTC anchor moves with the time of day. It is pinned like the uptime it was measured for: whole days before now. */
-                    if (p.Name == nameof(PerformanceMonitor.Common.IndexCleanupOptions.ServerStartTime) && p.GetValue(value) is DateTime started)
+                       from the UTC anchor moves with the time of day. It is written as the whole days of the uptime measured from it, with no clock read. */
+                    if (p.Name == nameof(PerformanceMonitor.Common.IndexCleanupOptions.ServerStartTime) && p.GetValue(value) is DateTime started
+                        && value is PerformanceMonitor.Common.IndexCleanupOptions { ServerUptimeDays: double uptimeDays })
                     {
-                        writer.WriteStringValue($"now-{Math.Floor((DateTime.Now - started).TotalDays).ToString(System.Globalization.CultureInfo.InvariantCulture)}d[{started.Kind}]");
+                        writer.WriteStringValue($"now-{Math.Floor(uptimeDays).ToString(System.Globalization.CultureInfo.InvariantCulture)}d[{started.Kind}]");
                         continue;
                     }
                     WriteValue(writer, p.GetValue(value), anchor);

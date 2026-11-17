@@ -1061,8 +1061,7 @@ namespace PerformanceMonitor.Common
 
             var nonclusteredByObject = inputs
                 .Where(src => !src.IsDisabled
-                    && src.IndexTypeDesc != null
-                    && src.IndexTypeDesc.Contains(NonClustered, StringComparison.OrdinalIgnoreCase))
+                    && string.Equals(src.IndexTypeDesc, NonClustered, StringComparison.OrdinalIgnoreCase))
                 .GroupBy(src => (src.DatabaseId, src.ObjectId))
                 .ToDictionary(g => g.Key, g => g.Count());
 

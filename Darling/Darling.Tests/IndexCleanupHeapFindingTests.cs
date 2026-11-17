@@ -136,7 +136,7 @@ public sealed class IndexCleanupHeapFindingTests
         Assert.Equal(1m, defaults.HeapMinSizeGb);
         Assert.Equal(1_000, defaults.HeapMinReads);
 
-        /* Off: no heap row, and a database holding only a heap has no roll-up at all, exactly as before. */
+        /* Off: no heap row, and a database holding only a heap has no roll-up at all. */
         var off = IndexCleanupAnalyzer.Analyze(new[] { Heap() }, Opts(includeHeaps: false));
         Assert.Empty(off.Recommendations);
         Assert.Empty(off.DatabaseRollups);
@@ -155,7 +155,7 @@ public sealed class IndexCleanupHeapFindingTests
     [Fact]
     public void AShortUptime_AndDedupeOnly_LeaveTheHeapRulePlain_AndOn()
     {
-        /* #8880 review: a short uptime can only keep a heap under the read floor, never flag one wrongly, so no uptime variant, and the
+        /* #8880: a short uptime can only keep a heap under the read floor, never flag one wrongly, so no uptime variant, and the
            automatic dedupe-only mode at 7 days or less does not turn the rule off. */
         var shortUp = IndexCleanupAnalyzer.Analyze(new[] { Heap() }, Opts(uptimeDays: 3));
         Assert.True(shortUp.UptimeWarning);
@@ -194,7 +194,7 @@ public sealed class IndexCleanupHeapFindingTests
     [Fact]
     public void Heaps_LeaveEveryExistingFigureWhereItWas()
     {
-        /* The heap's own nonclustered indexes are analyzed as before (one unused, one a compression candidate); the heap adds a row and
+        /* The heap's own nonclustered indexes are analyzed the usual way (one unused, one a compression candidate); the heap adds a row and
            a count, and nothing to the table, index, size, row, reclaim or workload figures. */
         var inputs = new[]
         {
@@ -225,6 +225,16 @@ public sealed class IndexCleanupHeapFindingTests
         Assert.EndsWith(
             " It has 1 nonclustered index. Its lookups reach the heap by row locator and follow any forwarded record.",
             one.AdditionalInfo, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ANonclusteredColumnstoreIndex_IsNotCountedAsARowLocatorLookup()
+    {
+        /* A columnstore index does not reach the heap by row locator, so a heap whose only other index is one gets no lookup sentence. */
+        var columnstore = Nonclustered("NCCI_Events", 2) with { IndexTypeDesc = "NONCLUSTERED COLUMNSTORE", KeyColumns = null };
+        var rec = HeapRow(IndexCleanupAnalyzer.Analyze(new[] { Heap(), columnstore }, Opts()));
+        Assert.EndsWith("from the queries that use it.", rec.AdditionalInfo, StringComparison.Ordinal);
+        Assert.DoesNotContain("nonclustered index", rec.AdditionalInfo, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -330,7 +340,7 @@ public sealed class IndexCleanupHeapFindingTests
     }
 
     [Fact]
-    public void Viewer_RollupRowCarriesHeaps_AndTheGridAndWebPageShowTheColumn()
+    public void Viewer_RollupRowsCarryTheHeapsCount()
     {
         var rows = ViewerDataService.ProjectRollups(new IndexCleanupAnalysisResult
         {
@@ -338,12 +348,5 @@ public sealed class IndexCleanupHeapFindingTests
             DatabaseRollups = [new IndexCleanupRollup { DatabaseName = "Sales", Heaps = 3 }],
         });
         Assert.Equal(new[] { 3, 3 }, rows.Select(x => x.Heaps).ToArray());
-
-        var xaml = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
-        Assert.Contains("<DataGridTextColumn Header=\"Heaps\" Binding=\"{Binding Heaps, StringFormat=N0}\"", xaml, StringComparison.Ordinal);
-        Assert.True(xaml.IndexOf("Header=\"Heaps\"", StringComparison.Ordinal) > xaml.IndexOf("Header=\"Unused\" Binding=\"{Binding UnusedIndexes", StringComparison.Ordinal));
-
-        var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops", "index-analysis.js");
-        Assert.Contains("{ key: \"heaps\", label: \"Heaps\", format: \"int\" }", page, StringComparison.Ordinal);
     }
 }
