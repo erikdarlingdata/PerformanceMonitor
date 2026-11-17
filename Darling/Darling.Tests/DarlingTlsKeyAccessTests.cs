@@ -1060,55 +1060,103 @@ public sealed class DarlingTlsKeyAccessTests
     }
 
     /// <summary>
-    /// A certificate whose key is a legacy CryptoAPI key (the "Microsoft RSA SChannel Cryptographic Provider"), made in the
-    /// current user's personal store with Windows PowerShell and removed with its key on dispose.
+    /// A certificate whose key is a legacy CryptoAPI key (the "Microsoft RSA SChannel Cryptographic Provider", provider
+    /// type 12), made in the current user's personal store and removed with its key on dispose. No PowerShell: the key is a
+    /// persisted RSACryptoServiceProvider, and the setup asserts the case #8957 is about (the certificate names a CryptoAPI
+    /// provider, and .NET still hands back an RSACng for it), so the test fails loudly if the setup stops reproducing it.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private sealed class LegacyCertificate : IDisposable
     {
-        private LegacyCertificate(X509Certificate2 certificate) => Certificate = certificate;
+        private const string Provider = "Microsoft RSA SChannel Cryptographic Provider";
+        private readonly string _container;
+
+        private LegacyCertificate(X509Certificate2 certificate, string container)
+        {
+            Certificate = certificate;
+            _container = container;
+        }
 
         public X509Certificate2 Certificate { get; }
 
         public static LegacyCertificate Create()
         {
-            var name = $"darling-8957-{Guid.NewGuid():N}";
-            var thumbprint = RunPowerShell(
-                $"(New-SelfSignedCertificate -Subject 'CN={name}' -CertStoreLocation Cert:\\CurrentUser\\My "
-                + "-Provider 'Microsoft RSA SChannel Cryptographic Provider' -KeyExportPolicy NonExportable).Thumbprint");
+            var container = $"darling-8957-{Guid.NewGuid():N}";
+            var parameters = new CspParameters(12, Provider, container) { KeyNumber = (int)KeyNumber.Exchange };
+            X509Certificate2 stored;
+            using (var rsa = new RSACryptoServiceProvider(2048, parameters) { PersistKeyInCsp = true })
+            {
+                /* The SChannel provider cannot sign ("Invalid algorithm specified"), so a throwaway key signs the certificate
+                   and the CryptoAPI key is only attached to it as its private key. */
+                var subject = new X500DistinguishedName($"CN={container}");
+                var request = new CertificateRequest(subject, new PublicKey(rsa), HashAlgorithmName.SHA256);
+                using var signer = RSA.Create(2048);
+                using var unbound = request.Create(
+                    subject,
+                    X509SignatureGenerator.CreateForRSA(signer, RSASignaturePadding.Pkcs1),
+                    DateTimeOffset.UtcNow.AddDays(-1),
+                    DateTimeOffset.UtcNow.AddDays(1),
+                    Guid.NewGuid().ToByteArray());
+                using var generated = unbound.CopyWithPrivateKey(rsa);
+                using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+                store.Open(OpenFlags.ReadWrite);
+                store.Add(generated);
+                var found = store.Certificates.Find(X509FindType.FindByThumbprint, generated.Thumbprint, false);
+                Assert.Single(found);
+                stored = found[0];
+            }
 
-            using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
-            store.Open(OpenFlags.ReadOnly);
-            var found = store.Certificates.Find(X509FindType.FindByThumbprint, thumbprint, false);
-            Assert.Single(found);
-            return new LegacyCertificate(found[0]);
+            var created = new LegacyCertificate(stored, container);
+            try
+            {
+                var legacy = DarlingTlsKeyAccess.ReadLegacyProvider(stored);
+                Assert.NotNull(legacy);
+                Assert.Equal(12u, legacy!.ProviderType);
+                Assert.Equal(Provider, legacy.Provider);
+                using var key = stored.GetRSAPrivateKey();
+                Assert.IsType<RSACng>(key);
+                return created;
+            }
+            catch
+            {
+                created.Dispose();
+                throw;
+            }
         }
 
         public void Dispose()
         {
-            var thumbprint = Certificate.Thumbprint;
-            Certificate.Dispose();
-            RunPowerShell($"Remove-Item 'Cert:\\CurrentUser\\My\\{thumbprint}' -DeleteKey");
-        }
-
-        private static string RunPowerShell(string command)
-        {
-            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe")
+            try
             {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            start.ArgumentList.Add("-NoProfile");
-            start.ArgumentList.Add("-Command");
-            start.ArgumentList.Add(command);
-            using var process = System.Diagnostics.Process.Start(start)!;
-            var output = process.StandardOutput.ReadToEnd();
-            var errors = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-            Assert.True(process.ExitCode == 0, errors);
-            return output.Trim();
+                using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+                store.Open(OpenFlags.ReadWrite);
+                store.Remove(Certificate);
+            }
+            catch (CryptographicException)
+            {
+                /* Cleanup only: a certificate that is already gone is the state we wanted. */
+            }
+            finally
+            {
+                Certificate.Dispose();
+            }
+
+            try
+            {
+                /* Deleting the key container: a provider whose key is not persisted deletes it on dispose. */
+                using var rsa = new RSACryptoServiceProvider(new CspParameters(12, Provider, _container)
+                {
+                    KeyNumber = (int)KeyNumber.Exchange,
+                    Flags = CspProviderFlags.UseExistingKey,
+                })
+                {
+                    PersistKeyInCsp = false,
+                };
+            }
+            catch (CryptographicException)
+            {
+                /* Cleanup only: a key that is already gone is the state we wanted. */
+            }
         }
     }
 }
