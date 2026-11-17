@@ -45,6 +45,12 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "The per-day rates (inserts_per_day, updates_per_day, deletes_per_day, turnover_per_day) are null instead of a figure that "
         + "would be too high. The counters themselves are real. A statistics reset gives rates from the next read after it.";
 
+    /// <summary>The sentence every answer carries about the as-of fields: a part is read from the store at most once in
+    /// <see cref="DarlingStoreTableHealthCache.Lifetime"/>, so the answer says when each part it returns was read.</summary>
+    internal static readonly string AsOfNote = string.Create(CultureInfo.InvariantCulture,
+        $"Each part (tables, indexes, partition index coverage) is read from the store's catalogs at most once every {DarlingStoreTableHealthCache.Lifetime.TotalMinutes:0} minutes and held in memory between reads. ")
+        + "tables_as_of, indexes_as_of and partition_index_coverage_as_of are when the store answered that read (UTC), and the matching _age_seconds is how old it is as of this response. held_for_seconds is how long a read is held.";
+
     /// <summary>The sections the tool can return.</summary>
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
@@ -54,7 +60,9 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "autovacuum distance, change rates, whether plain VACUUM can give the space back, and rewrite_candidate (candidates first). "
         + "Per index: size, scans, bloat estimate, validity; plus index coverage for partitioned parents. "
         + "<<GUIDE>> Also per table: plain, partitioned, hypertable and continuous aggregate kinds, the size split (heap, index, toast), visibility map coverage, insert, update, delete and HOT rates since the statistics were reset, last vacuum and analyze, autovacuum off, 7-day growth where store_metrics records it. Per index: scans, index-to-heap ratio, larger_than_heap and rarely_used. Reads the catalogs of the "
-        + "monitoring store live. Hypertable chunks and the relations holding compressed data roll up to the hypertable "
+        + "monitoring store at most once every 5 minutes: each part (tables, indexes, partition index coverage) is held in memory between reads, "
+        + "and tables_as_of, indexes_as_of and partition_index_coverage_as_of say when the store answered it (UTC), with the matching _age_seconds as of this response. "
+        + "top, offset, candidates_only and section cut the held rows, so they never cause a store read. Hypertable chunks and the relations holding compressed data roll up to the hypertable "
         + "(chunk_count), a continuous aggregate to its view name, and a partitioned table's leaves to the parent (leaf_count); a "
         + "leaf or chunk is never its own row, and chunk or leaf indexes that are clones of one parent index are one index row. "
         + "estimated_empty_bytes / estimated_empty_share come from the same statistics estimate the PostgreSQL target table bloat "
@@ -82,7 +90,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "primary key or unique index. Index bloat is the extension-free estimate the target index bloat collector uses. "
         + "growth_bytes_7d is null for objects store_metrics does not record. The reply is also held to the 32,768-byte response budget, whole rows only, "
         + "the same number of rows from each section: budget_truncated = true says rows were left off the end for the budget, budget_note says how many "
-        + "fit, and has_more and next_offset read on (pass next_offset as offset). A live read of the catalogs: allow a second or two on a "
+        + "fit, and has_more and next_offset read on (pass next_offset as offset). A read that goes to the store sizes every relation and index: allow several seconds on a "
         + "store with many chunks. A part that runs past its read limit is left out and named in tables_left_out_note or indexes_left_out_note, "
         + "and the other part is still returned. When only the partition index coverage read runs past it, the index rows are still returned and coverage_left_out_note names the coverage that was left out. When every part asked for ran past the limit, status is timed_out.")]
     public static Task<string> GetStoreTableHealth(
@@ -98,11 +106,14 @@ public sealed class DarlingMcpStoreTableHealthTools
     /// The read with its response budget. The MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>. The web route passes null:
     /// the Store Health page asks for one section at a time and draws every row it asked for. <paramref name="indexSource"/> is the store
     /// the index reads use (the tool's own store when null): a test gives it a store whose statements trip the deadline. <paramref name="coverageSource"/> is
-    /// the same for the partition index coverage read alone (the index source when null).
+    /// the same for the partition index coverage read alone (the index source when null). <paramref name="cache"/> holds the reads
+    /// (#8924); null is the process's cache for the store each part reads (<see cref="DarlingStoreTableHealthCache.For"/>), and a test
+    /// hands in one over a clock it steps and reads that count their calls. top, offset, candidates_only and section cut the held rows,
+    /// so two calls that differ only in those share one store read.
     /// </summary>
     internal static async Task<string> GetStoreTableHealth(
         NpgsqlDataSource postgres, int top, bool candidates_only, string? section, int offset, int? responseByteBudget, CancellationToken cancellationToken,
-        NpgsqlDataSource? indexSource = null, NpgsqlDataSource? coverageSource = null)
+        NpgsqlDataSource? indexSource = null, NpgsqlDataSource? coverageSource = null, DarlingStoreTableHealthCache? cache = null)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
@@ -132,6 +143,8 @@ public sealed class DarlingMcpStoreTableHealthTools
                 ["section"] = chosen,
                 ["top"] = top,
                 ["offset"] = offset,
+                ["as_of_note"] = AsOfNote,
+                ["held_for_seconds"] = (int)DarlingStoreTableHealthCache.Lifetime.TotalSeconds,
             };
 
             IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow> tableRows = Array.Empty<DarlingStoreTableHealthReader.StoreTableHealthRow>();
@@ -144,16 +157,19 @@ public sealed class DarlingMcpStoreTableHealthTools
 
             if (wantTables)
             {
-                List<DarlingStoreTableHealthReader.StoreTableHealthRow> all;
+                IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow> all = Array.Empty<DarlingStoreTableHealthReader.StoreTableHealthRow>();
                 try
                 {
-                    all = await DarlingStoreTableHealthReader.GetAsync(postgres, cancellationToken);
+                    var held = cache ?? DarlingStoreTableHealthCache.For(postgres);
+                    var read = await held.GetTablesAsync(postgres, cancellationToken: cancellationToken);
+                    all = read.Rows;
+                    result["tables_as_of"] = read.ReadAtUtc;
+                    result["tables_age_seconds"] = read.AgeSeconds(held.UtcNow());
                 }
                 catch (StoreTableHealthTimeoutException ex)
                 {
                     /* The tables read ran past its limit. The index part may still answer, so the reply says the table part was left out. */
                     tablesTimeout = ex.Message;
-                    all = new List<DarlingStoreTableHealthReader.StoreTableHealthRow>();
                 }
 
                 if (tablesTimeout is not null)
@@ -197,7 +213,12 @@ public sealed class DarlingMcpStoreTableHealthTools
             {
                 try
                 {
-                    indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(indexSource ?? postgres, cancellationToken);
+                    var source = indexSource ?? postgres;
+                    var held = cache ?? DarlingStoreTableHealthCache.For(source);
+                    var read = await held.GetIndexesAsync(source, cancellationToken: cancellationToken);
+                    indexRows = read.Rows;
+                    result["indexes_as_of"] = read.ReadAtUtc;
+                    result["indexes_age_seconds"] = read.AgeSeconds(held.UtcNow());
                 }
                 catch (StoreTableHealthTimeoutException ex)
                 {
@@ -209,7 +230,12 @@ public sealed class DarlingMcpStoreTableHealthTools
                     /* The index rows are in hand. A coverage read that runs past its limit leaves out only the coverage part. */
                     try
                     {
-                        coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(coverageSource ?? indexSource ?? postgres, cancellationToken);
+                        var source = coverageSource ?? indexSource ?? postgres;
+                        var held = cache ?? DarlingStoreTableHealthCache.For(source);
+                        var read = await held.GetIndexCoverageAsync(source, cancellationToken: cancellationToken);
+                        coverageRows = read.Rows;
+                        result["partition_index_coverage_as_of"] = read.ReadAtUtc;
+                        result["partition_index_coverage_age_seconds"] = read.AgeSeconds(held.UtcNow());
                     }
                     catch (StoreTableHealthTimeoutException ex)
                     {

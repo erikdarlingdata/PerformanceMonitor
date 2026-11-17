@@ -104,6 +104,26 @@ public sealed class StoreHealthPageBehaviourTests
         Assert.Equal("75%", candidate[7]);
     }
 
+    /// <summary>#8924: the service holds each part of the read for a few minutes, so the page stamps an answer with the time the store
+    /// gave it (tables_as_of, indexes_as_of) and its age, never with the time the answer arrived. The scripted tables answer is 240 seconds
+    /// old and the indexes answer new.</summary>
+    [Fact]
+    public void ThePage_SaysWhenTheStoreAnsweredEachPart_AndHowOldAHeldAnswerIs()
+    {
+        var first = Result.Value.GetProperty("first");
+        var line = Assert.Single(first.GetProperty("readLine").EnumerateArray().Select(t => t.GetString()!));
+        Assert.StartsWith("Tables read ", line, StringComparison.Ordinal);
+        Assert.EndsWith(" (4 min ago)", line, StringComparison.Ordinal);
+        Assert.Contains("2026", line, StringComparison.Ordinal);
+        Assert.Equal(
+            "The store's tables and indexes are read at most once every 5 min. A refresh inside that time shows the same read.",
+            first.GetProperty("readLineTitle")[0].GetString());
+
+        var indexLines = Result.Value.GetProperty("afterIndexes").GetProperty("indexSummary").EnumerateArray().Select(t => t.GetString()!).ToArray();
+        var indexLine = Assert.Single(indexLines, t => t.StartsWith("Indexes read ", StringComparison.Ordinal));
+        Assert.DoesNotContain("ago", indexLine, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheHeader_ShowsTheCountsTheReasonsAndTheReadinessLine_AndTheNoteStatesItIsAnEstimate()
     {

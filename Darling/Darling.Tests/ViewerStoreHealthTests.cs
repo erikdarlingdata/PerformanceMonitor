@@ -281,7 +281,8 @@ public sealed class ViewerStoreHealthTests
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
         /* The two halves are separate reads, and the tables read alone returns the grid's rows. */
-        var tables = await viewer.GetStoreTableHealthAsync(ct);
+        var tablesRead = await viewer.GetStoreTableHealthAsync(cancellationToken: ct);
+        var tables = tablesRead.Rows;
         var rows = StoreHealthRows.Tables(tables);
         Assert.NotEmpty(rows);
         Assert.Equal(tables.Count, rows.Count);
@@ -295,9 +296,27 @@ public sealed class ViewerStoreHealthTests
             }
         }
 
-        var indexes = await viewer.GetStoreIndexHealthAsync(ct);
+        var indexes = await viewer.GetStoreIndexHealthAsync(cancellationToken: ct);
         Assert.NotEmpty(StoreHealthRows.Indexes(indexes.Indexes));
         StoreHealthRows.CoverageRows(indexes.Coverage);
+
+        /* #8924: a repeat is the held read itself (the same list, the same read time), so the tab's refresh timer sends the store
+           neither statement. The Refresh button's read is a new one. */
+        var tablesAgain = await viewer.GetStoreTableHealthAsync(cancellationToken: ct);
+        Assert.Same(tablesRead.Rows, tablesAgain.Rows);
+        Assert.Equal(tablesRead.ReadAtUtc, tablesAgain.ReadAtUtc);
+        var indexesAgain = await viewer.GetStoreIndexHealthAsync(cancellationToken: ct);
+        Assert.Same(indexes.Indexes, indexesAgain.Indexes);
+        Assert.Same(indexes.Coverage, indexesAgain.Coverage);
+        Assert.NotNull(indexes.ReadAtUtc);
+        Assert.Equal(indexes.ReadAtUtc, indexesAgain.ReadAtUtc);
+
+        var tablesFresh = await viewer.GetStoreTableHealthAsync(fresh: true, ct);
+        Assert.NotSame(tablesRead.Rows, tablesFresh.Rows);
+        Assert.Equal(tablesRead.Rows.Count, tablesFresh.Rows.Count);
+        var indexesFresh = await viewer.GetStoreIndexHealthAsync(fresh: true, ct);
+        Assert.NotSame(indexes.Indexes, indexesFresh.Indexes);
+        Assert.NotSame(indexes.Coverage, indexesFresh.Coverage);
 
         var readiness = await viewer.GetStoreMaintenanceReadinessAsync(ct);
         Assert.False(string.IsNullOrWhiteSpace(StoreHealthRows.ReadinessText(readiness)));
