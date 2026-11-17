@@ -554,9 +554,13 @@ OPTION(RECOMPILE);";
     /* One log is read per loop pass, each inside its own TRY/CATCH, so an archive that errors (or a refused current log) leaves the others
        readable and is reported in the first result set. The archive list is parsed with CHARINDEX rather than STRING_SPLIT, which needs
        database compatibility level 130 and master may be lower. sp_readerrorlog filters on its two search strings in the server, so only
-       the CHECKDB completion lines come back. The line is matched to a database by the exact text "DBCC CHECKDB (" + name + ")" read
-       as a prefix, binary collation: a name with brackets or spaces needs no escaping, and ")" after the name stops "db" matching "db old". */
-    private static string SupplementalQueryText(string exclusionClause) => $@"
+       the CHECKDB lines come back.
+       #8865: the lines are not matched to databases here. Matching every database against every line cost databases x lines (45 s for
+       2,000 databases and 56,000 lines, most of the 60 s budget). The server instead keeps the newest line per head (the text before
+       " executed by ": the database and the options, binary collation), which is at most a few lines per database however many days the
+       logs hold, and the collector matches those to its rows by name. A line of message 5235 ("... terminated abnormally due to error
+       state N") has the same head as the good line it would shadow, so it is dropped before the reduction. */
+    private const string SupplementalQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 5000;
 SET NOCOUNT ON;
@@ -666,24 +670,30 @@ ORDER BY
     s.archive;
 
 SELECT /* PerformanceMonitorLite */
-    database_name = d.name,
-    line_time_utc = DATEADD(MINUTE, @offset_minutes, x.log_date),
-    line_text = x.text
-FROM sys.databases AS d
-CROSS APPLY
+    line_time_utc = DATEADD(MINUTE, @offset_minutes, r.log_date),
+    line_text = r.text
+FROM
 (
-    SELECT TOP (1)
+    SELECT
         l.log_date,
-        l.text
+        l.text,
+        n =
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY
+                    CONVERT
+                    (
+                        nvarchar(1000),
+                        LEFT(l.text, ISNULL(NULLIF(CHARINDEX(N' executed by ', l.text), 0), 1000))
+                    ) COLLATE Latin1_General_100_BIN2
+                ORDER BY
+                    l.log_date DESC
+            )
     FROM @lines AS l
-    WHERE LEFT(l.text, LEN(N'DBCC CHECKDB (' + d.name + N')')) COLLATE Latin1_General_100_BIN2
-        = (N'DBCC CHECKDB (' + d.name + N')') COLLATE Latin1_General_100_BIN2
-    ORDER BY
-        l.log_date DESC
-) AS x
-WHERE d.database_id <> 2
-AND   d.source_database_id IS NULL
-" + exclusionClause + @"
+    WHERE l.text LIKE N'DBCC CHECKDB (%'
+    AND   l.text NOT LIKE N'% terminated abnormally due to error state %'
+) AS r
+WHERE r.n = 1
 OPTION(RECOMPILE);";
 
     /// <summary>
@@ -699,13 +709,12 @@ OPTION(RECOMPILE);";
             return null;
         }
 
-        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+        /* No exclusion list here: the lines are matched to the primary rows, which already left the excluded databases out. */
         var parameters = new List<CollectorParameter>
         {
             new("@archives", string.Join(',', plan.Read.Select(a => a.Archive.ToString(CultureInfo.InvariantCulture))), CollectorParameterType.NVarChar128),
         };
-        parameters.AddRange(exclusionParameters);
-        return new CollectorQuery(SupplementalQueryText(exclusionClause), parameters);
+        return new CollectorQuery(SupplementalQueryText, parameters);
     }
 
     /// <summary>
@@ -739,21 +748,41 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(3) ? null : reader.GetString(3));
         }
 
-        var seen = new Dictionary<string, DatabaseProtectionErrorLogState.StoredCheck>(StringComparer.Ordinal);
-        var unparsed = 0;
+        /* #8865: the newest line per database, matched here by name against the rows (the server returned the newest line per head). */
+        var names = new HashSet<string>(rows.Select(r => r.DatabaseName), StringComparer.Ordinal);
+        var newest = new Dictionary<string, (DateTime Time, string Text)>(StringComparer.Ordinal);
         if (await reader.NextResultAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                if (!reader.IsDBNull(1) && !reader.IsDBNull(2)
-                    && CheckDbErrorLogLine.TryParse(reader.GetString(2), out var options, out var errors))
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
                 {
-                    seen[reader.GetString(0)] = new DatabaseProtectionErrorLogState.StoredCheck(reader.GetDateTime(1), options, errors);
+                    continue;
                 }
-                else
+
+                var time = reader.GetDateTime(0);
+                var text = reader.GetString(1);
+                foreach (var name in CheckDbErrorLogLine.DatabaseNames(text, names))
                 {
-                    unparsed++;
+                    if (!newest.TryGetValue(name, out var held) || time > held.Time)
+                    {
+                        newest[name] = (time, text);
+                    }
                 }
+            }
+        }
+
+        var seen = new Dictionary<string, DatabaseProtectionErrorLogState.StoredCheck>(StringComparer.Ordinal);
+        var unparsed = 0;
+        foreach (var (name, line) in newest)
+        {
+            if (CheckDbErrorLogLine.TryParse(line.Text, out var options, out var errors))
+            {
+                seen[name] = new DatabaseProtectionErrorLogState.StoredCheck(line.Time, options, errors);
+            }
+            else
+            {
+                unparsed++;
             }
         }
 

@@ -531,7 +531,7 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     /* #8865: the supplemental's two result sets. The first is one row per log read (archive, ok, error_number, message), the second the newest
-       matching line per database (database_name, line_time_utc, line_text). */
+       line per head (line_time_utc, line_text). */
     private static DataTable StatusShape()
     {
         var table = new DataTable();
@@ -542,10 +542,10 @@ public sealed class DatabaseProtectionCollectorTests
         return table;
     }
 
+    /* The newest line per head the server kept (line_time_utc, line_text); the collector matches them to its rows by name. */
     private static DataTable LineShape()
     {
         var table = new DataTable();
-        table.Columns.Add("database_name", typeof(string));
         table.Columns.Add("line_time_utc", typeof(DateTime));
         table.Columns.Add("line_text", typeof(string));
         return table;
@@ -595,8 +595,50 @@ public sealed class DatabaseProtectionCollectorTests
 
         var query = DatabaseProtectionCollector.Instance.BuildSupplementalQuery(context)!;
 
-        Assert.Equal("0,1", Assert.Single(query.Parameters, p => p.Name == "@archives").Value);
-        Assert.Contains(query.Parameters, p => p.Name == "@excl_db_0");
+        /* The excluded list is not bound: the lines are matched to the primary rows, which already left those databases out. */
+        Assert.Equal("0,1", Assert.Single(query.Parameters).Value);
+    }
+
+    [Fact]
+    public async Task AnAbnormalTerminationLine_DoesNotShadowTheGoodLineBeforeIt_AndIsNotCountedAsUnparsed()
+    {
+        /* #8865 I5: message 5235 starts like an 8957 line, and before the fix it was taken as the newest check and counted as unparsed. */
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var context = ContextWith(SettledState());
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        var lines = LineShape();
+        lines.Rows.Add(Checked.AddDays(-3), CheckLine("A", 2));
+        lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB (A) WITH NO_INFOMSGS executed by someone terminated abnormally due to error state 5. Elapsed time: 0 hours 0 minutes 0 seconds.");
+
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+
+        Assert.Equal(Checked.AddDays(-3), rows[0].ErrorLogCheckDbTime);
+        Assert.Equal(2, rows[0].ErrorLogCheckDbErrors);
+        Assert.Equal(0, rows[0].ErrorLogUnparsedLines);
+    }
+
+    [Fact]
+    public async Task ANoIndexLine_IsMatched_AndTheNewestLineOfADatabaseWinsAcrossHeads()
+    {
+        /* #8865 I6: NOINDEX is logged inside the parentheses, "DBCC CHECKDB (A, noindex)", which the ")"-after-the-name match missed. The
+           server keeps one line per head, so a database can come back with several (here a full check and a later NOINDEX one). */
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        Add(table, "A, noindex", "FULL", null, Full, Log);
+        var context = ContextWith(SettledState());
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        var lines = LineShape();
+        lines.Rows.Add(Checked.AddDays(-4), CheckLine("A"));
+        lines.Rows.Add(Checked.AddDays(-2), "DBCC CHECKDB (A, noindex) WITH no_infomsgs executed by sa found 0 errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 0 seconds.");
+
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+
+        Assert.Equal(Checked.AddDays(-2), rows[0].ErrorLogCheckDbTime);
+        Assert.Equal("full,noindex", rows[0].ErrorLogCheckDbOptions);
+        /* A database really called "A, noindex" reads the same line: the log cannot tell the two apart. */
+        Assert.Equal(Checked.AddDays(-2), rows[1].ErrorLogCheckDbTime);
+        Assert.Equal(0, rows[0].ErrorLogUnparsedLines);
     }
 
     [Fact]
@@ -611,7 +653,7 @@ public sealed class DatabaseProtectionCollectorTests
         var context = ContextWith(state);
         var rows = await ReadWithAsync(context, table, Logs(1));
         var lines = LineShape();
-        lines.Rows.Add("A", Checked.AddDays(-1), CheckLine("A", 3));
+        lines.Rows.Add(Checked.AddDays(-1), CheckLine("A", 3));
 
         await ApplyAsync(context, rows, Status((0, true)), lines);
 
@@ -637,7 +679,7 @@ public sealed class DatabaseProtectionCollectorTests
         var rows = await ReadWithAsync(context, table, Logs(1));
         Assert.Empty(context.PendingState);
         var lines = LineShape();
-        lines.Rows.Add("A", Checked.AddDays(-1), CheckLine("A"));
+        lines.Rows.Add(Checked.AddDays(-1), CheckLine("A"));
 
         await ApplyAsync(context, rows, Status((0, true)), lines);
 
@@ -654,8 +696,8 @@ public sealed class DatabaseProtectionCollectorTests
         var context = ContextWith(SettledState());
         var rows = await ReadWithAsync(context, table, Logs(1));
         var lines = LineShape();
-        lines.Rows.Add("A", Checked.AddDays(-1), "DBCC CHECKDB (A) executed by someone, in a language we cannot read");
-        lines.Rows.Add("B", Checked.AddDays(-1), CheckLine("B"));
+        lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB (A) executed by someone, in a language we cannot read");
+        lines.Rows.Add(Checked.AddDays(-1), CheckLine("B"));
 
         await ApplyAsync(context, rows, Status((0, true)), lines);
 
@@ -1254,6 +1296,52 @@ INSERT #backupset VALUES
         {
             await DropDatabaseAsync(cs!, SpacedName, ct);
             await DropDatabaseAsync(cs!, LookalikeName, ct);
+        }
+    }
+
+    /// <summary>
+    /// #8865 I5 and I6, on a real log. <c>DBCC CHECKDB (db, NOINDEX)</c> logs <c>DBCC CHECKDB (db, noindex) WITH ...</c>, which the old
+    /// ")"-after-the-name match never found. A message 5235 line (planted with xp_logevent, the text SQL Server writes when a check ends
+    /// abnormally) shares the good line's head, so without dropping it the server's newest-line-per-head reduction would keep it and lose
+    /// the good line.
+    /// </summary>
+    [Fact]
+    public async Task ANoIndexCheck_IsFound_AndALaterAbnormalEndDoesNotHideTheGoodLine()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        const string NoIndexDatabase = "pm_8865_noindex";
+        const string AbnormalDatabase = "pm_8865_abnormal";
+
+        try
+        {
+            await ExecuteAsync(cs!, $"CREATE DATABASE [{NoIndexDatabase}]; CREATE DATABASE [{AbnormalDatabase}];", ct);
+            await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{NoIndexDatabase}', NOINDEX) WITH NO_INFOMSGS;", ct);
+            await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{AbnormalDatabase}') WITH NO_INFOMSGS;", ct);
+            await ExecuteAsync(
+                cs!,
+                $"EXECUTE master.dbo.xp_logevent 60000, N'DBCC CHECKDB ({AbnormalDatabase}) WITH no_infomsgs executed by sa terminated abnormally due to error state 5. Elapsed time: 0 hours 0 minutes 0 seconds.', informational;",
+                ct);
+
+            await using var connection = new SqlConnection(cs);
+            await connection.OpenAsync(ct);
+            var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+
+            var noIndex = rows.Single(r => r.DatabaseName == NoIndexDatabase);
+            Assert.NotNull(noIndex.ErrorLogCheckDbTime);
+            Assert.Equal("full,noindex", noIndex.ErrorLogCheckDbOptions);
+
+            var abnormal = rows.Single(r => r.DatabaseName == AbnormalDatabase);
+            Assert.NotNull(abnormal.ErrorLogCheckDbTime);
+            Assert.Equal(0, abnormal.ErrorLogCheckDbErrors);
+            Assert.Equal(0, abnormal.ErrorLogUnparsedLines);
+        }
+        finally
+        {
+            await DropDatabaseAsync(cs!, NoIndexDatabase, ct);
+            await DropDatabaseAsync(cs!, AbnormalDatabase, ct);
         }
     }
 
