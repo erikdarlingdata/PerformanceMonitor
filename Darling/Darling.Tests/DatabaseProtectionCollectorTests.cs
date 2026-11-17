@@ -54,13 +54,22 @@ public sealed class DatabaseProtectionCollectorTests
         return table;
     }
 
-    /* #8865: the second result set, the error logs the instance lists. A single (0, NULL, NULL) row means the listing was refused. */
+    /* #8865: the second result set, the error logs the instance lists. A single (0, NULL, NULL, error) row means the listing was refused or
+       failed, with the error it raised. */
     private static DataTable LogShape()
     {
         var table = new DataTable();
         table.Columns.Add("enumerate_ok", typeof(bool));
         table.Columns.Add("archive", typeof(int));
         table.Columns.Add("log_date", typeof(DateTime));
+        table.Columns.Add("enumerate_error", typeof(int));
+        return table;
+    }
+
+    private static DataTable RefusedList(int error = 27219)
+    {
+        var table = LogShape();
+        table.Rows.Add(false, DBNull.Value, DBNull.Value, error);
         return table;
     }
 
@@ -70,7 +79,7 @@ public sealed class DatabaseProtectionCollectorTests
         var table = LogShape();
         for (var archive = 0; archive < count; archive++)
         {
-            table.Rows.Add(true, archive, Checked.AddDays(-archive));
+            table.Rows.Add(true, archive, Checked.AddDays(-archive), DBNull.Value);
         }
 
         return table;
@@ -390,16 +399,115 @@ public sealed class DatabaseProtectionCollectorTests
     {
         var table = Shape();
         Add(table, "Sales", "FULL", Checked, Full, Log);
-        var refused = LogShape();
-        refused.Rows.Add(false, DBNull.Value, DBNull.Value);
         var context = ContextWith(new Dictionary<string, string>());
 
-        var row = Assert.Single(await ReadWithAsync(context, table, refused));
+        var row = Assert.Single(await ReadWithAsync(context, table, RefusedList()));
 
         var plan = context.DatabaseProtectionErrorLogPlan!;
         Assert.False(plan.EnumerateOk);
         Assert.Equal(new[] { 0 }, plan.Read.Select(a => a.Archive).ToArray());
         Assert.True(row.ErrorLogBackfillComplete);
+        Assert.Equal(new[] { DatabaseProtectionErrorLogState.InstanceKey }, context.PendingState.Keys.ToArray());
+    }
+
+    private static readonly string[] MarkerKeys =
+    {
+        DatabaseProtectionErrorLogState.NewestArchiveKey, DatabaseProtectionErrorLogState.BackfillBeforeKey, DatabaseProtectionErrorLogState.BackfillDoneKey,
+        DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.SkippedKey,
+    };
+
+    [Fact]
+    public async Task AListRefusedForSomeCycles_ThenReadable_StillBackfillsEveryArchiveNewestFirst()
+    {
+        /* #8865 I2: a refused list must not end the backfill. Before the fix the refused cycles stored the backfill as done with no steady
+           marker, so the first list that worked took its newest archive as already read and no retained archive was ever read. */
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log, role: "SECONDARY");
+        var state = new Dictionary<string, string>();
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            var refusedCycle = ContextWith(state);
+            var rows = await ReadWithAsync(refusedCycle, table, RefusedList());
+            await ApplyAsync(refusedCycle, rows, Status((0, true)), LineShape());
+
+            Assert.True(rows[0].ErrorLogBackfillComplete);
+            Assert.All(MarkerKeys, k => Assert.DoesNotContain(k, refusedCycle.PendingState.Keys));
+            state = Carry(refusedCycle, state);
+        }
+
+        var plans = new List<int[]>();
+        bool? complete = null;
+        for (var cycle = 0; cycle < 3 && complete != true; cycle++)
+        {
+            var context = ContextWith(state);
+            var rows = await ReadWithAsync(context, table, Logs(7));
+            var plan = context.DatabaseProtectionErrorLogPlan!;
+            plans.Add(plan.Read.Select(a => a.Archive).ToArray());
+            await ApplyAsync(context, rows, Status(plan.Read.Select(a => (a.Archive, true)).ToArray()), LineShape());
+            complete = rows[0].ErrorLogBackfillComplete;
+            state = Carry(context, state);
+        }
+
+        Assert.Equal(new[] { new[] { 0, 1, 2, 3 }, new[] { 0, 4, 5, 6 } }, plans);
+        Assert.True(complete);
+    }
+
+    [Fact]
+    public async Task AResetCycleWithARefusedList_StillOverwritesTheOldNodesMarkers()
+    {
+        /* R7 holds when the list is refused too: the old node's markers must not survive into the new node's first readable list. */
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var state = new Dictionary<string, string>
+        {
+            [DatabaseProtectionErrorLogState.InstanceKey] = "OLDNODE",
+            [DatabaseProtectionErrorLogState.NewestArchiveKey] = DatabaseProtectionErrorLogState.FormatDates(new[] { Checked }),
+            [DatabaseProtectionErrorLogState.BackfillDoneKey] = bool.TrueString,
+        };
+        var context = ContextWith(state);
+
+        await ReadWithAsync(context, table, RefusedList());
+
+        Assert.Equal(string.Empty, context.PendingState[DatabaseProtectionErrorLogState.NewestArchiveKey]);
+        Assert.Equal(bool.FalseString, context.PendingState[DatabaseProtectionErrorLogState.BackfillDoneKey]);
+    }
+
+    [Fact]
+    public async Task AListThatFailsForAnotherReason_IsNamedInTheMessage_AndARefusedListIsNot()
+    {
+        /* #8865 C1: the CATCH returns the error number, so a list that failed (8114, a date the session could not convert) is not read as a
+           refusal, which is the documented, silent current-log-only fallback. */
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+
+        var failed = ContextWith(SettledState());
+        var failedRows = await ReadWithAsync(failed, table, RefusedList(8114));
+        await ApplyAsync(failed, failedRows, Status((0, true)), LineShape());
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, failedRows[0].ErrorLogState);
+        Assert.Contains("8114", failedRows[0].ErrorLogMessage, StringComparison.Ordinal);
+
+        var refused = ContextWith(SettledState());
+        var refusedRows = await ReadWithAsync(refused, table, RefusedList());
+        await ApplyAsync(refused, refusedRows, Status((0, true)), LineShape());
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, refusedRows[0].ErrorLogState);
+        Assert.Null(refusedRows[0].ErrorLogMessage);
+    }
+
+    [Fact]
+    public async Task AListWithADateThatCouldNotBeConverted_IsUnreadable_AndMovesNoMarker()
+    {
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var logs = Logs(4);
+        logs.Rows[2]["log_date"] = DBNull.Value;
+        var context = ContextWith(new Dictionary<string, string>());
+
+        await ReadWithAsync(context, table, logs);
+
+        var plan = context.DatabaseProtectionErrorLogPlan!;
+        Assert.False(plan.EnumerateOk);
+        Assert.Equal(new[] { 0 }, plan.Read.Select(a => a.Archive).ToArray());
+        Assert.All(MarkerKeys, k => Assert.DoesNotContain(k, context.PendingState.Keys));
     }
 
     [Fact]
@@ -1202,6 +1310,47 @@ INSERT #backupset VALUES
         {
             await DropDatabaseAsync(cs!, Database, ct);
         }
+    }
+
+    /* The archives one cycle lists on a connection whose session language is set first; archive 0 is left out, because its date is the
+       current log's last write and moves while the test runs. */
+    private static async Task<(bool Ok, List<DatabaseProtectionErrorLogState.ArchiveInfo> Archives)> ListUnderAsync(
+        string connectionString, string language, int major, CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using (var set = new SqlCommand($"SET LANGUAGE {language};", connection))
+        {
+            await set.ExecuteNonQueryAsync(ct);
+        }
+
+        var (_, context) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+        var plan = context.DatabaseProtectionErrorLogPlan!;
+        return (plan.EnumerateOk, (plan.Enumerated ?? Array.Empty<DatabaseProtectionErrorLogState.ArchiveInfo>()).Where(a => a.Archive > 0).ToList());
+    }
+
+    /// <summary>
+    /// #8865 C1: sp_enumerrorlogs returns its dates as month/day/year text. Read into a datetime under a day/month/year language, the insert
+    /// failed on a day after the 12th (8114, and the list read as refused) and swapped day and month below it. The list must come back
+    /// whole, with the dates a us_english session reads.
+    /// </summary>
+    [Fact]
+    public async Task TheLogList_HasTheSameDates_UnderADayMonthYearLanguage()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        await ExecuteAsync(cs!, "EXECUTE sys.sp_cycle_errorlog;", ct);
+
+        var english = await ListUnderAsync(cs!, "us_english", major, ct);
+        var british = await ListUnderAsync(cs!, "British", major, ct);
+
+        Assert.True(english.Ok);
+        Assert.NotEmpty(english.Archives);
+        Assert.True(british.Ok, "the list must not read as refused under a dmy language");
+        Assert.Equal(english.Archives.OrderBy(a => a.Archive), british.Archives.OrderBy(a => a.Archive));
+        Assert.All(british.Archives, a => Assert.InRange(a.LogDate, DateTime.UtcNow.AddYears(-5), DateTime.UtcNow.AddMinutes(2)));
     }
 
     /// <summary>

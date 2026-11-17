@@ -107,7 +107,7 @@ public sealed class DatabaseProtectionCollector : CollectorDefinitionBase<Databa
     /* Result shape, both queries: name, state_desc, recovery_model_desc, create_date (UTC), replica_role, checkdb (raw datetime, local
        to the server), last_full (UTC), last_log (UTC), backups_readable (bit), instance_name (@@SERVERNAME, NULL on Azure SQL Database),
        replica_allow_connections (this replica's secondary-role setting, NULL outside an Availability Group). #8865: the on-premises
-       batch adds a second result set, the error logs the instance lists (enumerate_ok, archive, log_date UTC); a platform-managed
+       batch adds a second result set, the error logs the instance lists (enumerate_ok, archive, log_date UTC, enumerate_error); a platform-managed
        target has no readable error log and builds neither the listing nor the second set. */
     /* The server's Excluded Databases list is applied to the sys.databases read (#8775). The backups CTE joins to d.name, so a name left out of the
        catalog read is left out of the batch whole. The names are bound as parameters, so the text is built per call. */
@@ -195,16 +195,22 @@ OPTION(RECOMPILE);
     /* #8865: which error logs the instance holds, so ReadAsync can decide which of them the supplemental reads. The listing runs inside
        TRY/CATCH: a refused EXECUTE on sp_enumerrorlogs is a runtime error, and it must read as refused (a single (0, NULL, NULL) row),
        never as an error that fails the primary read of every database every cycle. The dates are the server's local clock, converted
-       to UTC with the offset the batch already took. */
+       to UTC with the offset the batch already took.
+       #8865: the procedure returns each date as text in month/day/year order (11/17/2026  10:16) whatever the session's language, so it
+       is staged as text and converted with style 101. Inserting it into a datetime column would parse it under the login's DATEFORMAT:
+       a dmy language (British, German, ...) fails the insert on a day after the 12th and swaps day and month below it. The CATCH returns
+       the error number, so a list that failed for another reason is not mistaken for a refusal. A date style 101 cannot read comes back
+       NULL, and the collector treats the whole list as unreadable. */
     private const string ErrorLogListing = @"
 DECLARE
-    @enumerate_ok bit = 1;
+    @enumerate_ok bit = 1,
+    @enumerate_error integer = NULL;
 
 DECLARE
     @error_logs table
 (
     archive integer NOT NULL,
-    log_date datetime NULL,
+    log_date nvarchar(30) NULL,
     log_size bigint NULL
 );
 
@@ -220,19 +226,22 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
     SET @enumerate_ok = 0;
+    SET @enumerate_error = ERROR_NUMBER();
 END CATCH;
 
 SELECT
     enumerate_ok = @enumerate_ok,
     archive = e.archive,
-    log_date = DATEADD(MINUTE, @offset_minutes, e.log_date)
+    log_date = DATEADD(MINUTE, @offset_minutes, TRY_CONVERT(datetime, e.log_date, 101)),
+    enumerate_error = @enumerate_error
 FROM @error_logs AS e
 WHERE @enumerate_ok = 1
 UNION ALL
 SELECT
     enumerate_ok = @enumerate_ok,
     archive = CONVERT(integer, NULL),
-    log_date = CONVERT(datetime, NULL)
+    log_date = CONVERT(datetime, NULL),
+    enumerate_error = @enumerate_error
 WHERE @enumerate_ok = 0;";
 
     /* The backups read runs in sp_executesql inside TRY/CATCH: a refused VIEW DATABASE STATE is a compile-time permission error of the
@@ -447,6 +456,7 @@ OPTION(RECOMPILE);";
     {
         var enumerated = new List<DatabaseProtectionErrorLogState.ArchiveInfo>();
         var enumerateOk = false;
+        int? enumerateError = null;
         if (await reader.NextResultAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -454,21 +464,29 @@ OPTION(RECOMPILE);";
                 if (!Convert.ToBoolean(reader.GetValue(0), CultureInfo.InvariantCulture))
                 {
                     enumerateOk = false;
+                    enumerateError = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+                    enumerated.Clear();
+                    break;
+                }
+
+                /* #8865: an archive whose date the batch could not convert has no identity the markers can use; planning around a hole
+                   would mark it read, so the list as a whole counts as unreadable and moves nothing this cycle. */
+                if (reader.IsDBNull(1) || reader.IsDBNull(2))
+                {
+                    enumerateOk = false;
                     enumerated.Clear();
                     break;
                 }
 
                 enumerateOk = true;
-                if (!reader.IsDBNull(1) && !reader.IsDBNull(2))
-                {
-                    enumerated.Add(new DatabaseProtectionErrorLogState.ArchiveInfo(reader.GetInt32(1), reader.GetDateTime(2)));
-                }
+                enumerated.Add(new DatabaseProtectionErrorLogState.ArchiveInfo(reader.GetInt32(1), reader.GetDateTime(2)));
             }
         }
 
         var state = context.State;
         var loaded = DatabaseProtectionErrorLogState.Load(state, instance);
-        var plan = DatabaseProtectionErrorLogState.PlanArchives(loaded, enumerated, enumerateOk, DatabaseProtectionErrorLogState.ArchivesPerCycle);
+        var plan = DatabaseProtectionErrorLogState.PlanArchives(
+            loaded, enumerated, enumerateOk, DatabaseProtectionErrorLogState.ArchivesPerCycle, enumerateError);
         context.DatabaseProtectionErrorLogPlan = plan;
 
         var attempts = new Dictionary<DateTime, int>(plan.Before.Attempts);
@@ -492,13 +510,13 @@ OPTION(RECOMPILE);";
             }
         }
 
-        StageText(context, DatabaseProtectionErrorLogState.NewestArchiveKey, markers.NewestArchive is { } newest ? DatabaseProtectionErrorLogState.FormatDates(new[] { newest }) : string.Empty);
-        StageText(context, DatabaseProtectionErrorLogState.BackfillBeforeKey, markers.BackfillBefore is { } before ? DatabaseProtectionErrorLogState.FormatDates(new[] { before }) : string.Empty);
-        StageText(context, DatabaseProtectionErrorLogState.BackfillDoneKey, markers.BackfillDone ? bool.TrueString : bool.FalseString);
-        StageText(context, DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.FormatAttempts(attempts));
-        StageText(context, DatabaseProtectionErrorLogState.SkippedKey, DatabaseProtectionErrorLogState.FormatDates(skipped));
+        if (StagesMarkers(plan))
+        {
+            StageMarkers(context, StageText, markers, attempts, skipped);
+        }
 
         var skippedText = skipped.Count > 0 ? DatabaseProtectionErrorLogState.FormatDates(skipped) : null;
+        var backfillComplete = BackfillCompleteFor(plan, markers);
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
@@ -508,7 +526,7 @@ OPTION(RECOMPILE);";
             {
                 ErrorLogState = ErrorLogFailed,
                 ErrorLogMessage = ErrorLogDidNotComplete,
-                ErrorLogBackfillComplete = markers.BackfillDone,
+                ErrorLogBackfillComplete = backfillComplete,
                 ErrorLogSkippedArchives = skippedText,
                 ErrorLogCheckDbTime = check?.TimeUtc,
                 ErrorLogCheckDbOptions = check?.Options,
@@ -766,15 +784,15 @@ OPTION(RECOMPILE);";
         }
 
         var skipped = plan.Before.Skipped.Union(plan.NewlySkipped).ToList();
-        Overwrite(context, DatabaseProtectionErrorLogState.NewestArchiveKey, markers.NewestArchive is { } newest ? DatabaseProtectionErrorLogState.FormatDates(new[] { newest }) : string.Empty);
-        Overwrite(context, DatabaseProtectionErrorLogState.BackfillBeforeKey, markers.BackfillBefore is { } before ? DatabaseProtectionErrorLogState.FormatDates(new[] { before }) : string.Empty);
-        Overwrite(context, DatabaseProtectionErrorLogState.BackfillDoneKey, markers.BackfillDone ? bool.TrueString : bool.FalseString);
-        Overwrite(context, DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.FormatAttempts(attempts));
-        Overwrite(context, DatabaseProtectionErrorLogState.SkippedKey, DatabaseProtectionErrorLogState.FormatDates(skipped));
+        if (StagesMarkers(plan))
+        {
+            StageMarkers(context, Overwrite, markers, attempts, skipped);
+        }
 
         var (logState, message) = ErrorLogOutcome(status, plan);
         var grant = logState == ErrorLogRefused ? ErrorLogGrantStatement : null;
         var skippedText = skipped.Count > 0 ? DatabaseProtectionErrorLogState.FormatDates(skipped) : null;
+        var backfillComplete = BackfillCompleteFor(plan, markers);
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
@@ -791,7 +809,7 @@ OPTION(RECOMPILE);";
                 ErrorLogState = logState,
                 ErrorLogMessage = message,
                 ErrorLogGrant = grant,
-                ErrorLogBackfillComplete = markers.BackfillDone,
+                ErrorLogBackfillComplete = backfillComplete,
                 ErrorLogSkippedArchives = skippedText,
                 ErrorLogUnparsedLines = unparsed,
                 ErrorLogCheckDbTime = check?.TimeUtc,
@@ -817,10 +835,40 @@ OPTION(RECOMPILE);";
                 : (ErrorLogFailed, "The current error log could not be read: " + (current.Message ?? "unknown error") + ".");
         }
 
+        /* #8865: a list refused for want of a grant is the documented current-log-only fallback and says nothing; one that failed for
+           another reason is a fault, named so it is not silent while the older logs wait. */
+        if (!plan.EnumerateOk && !IsPermissionError(plan.EnumerateError))
+        {
+            return (ErrorLogRead, plan.EnumerateError is { } number
+                ? string.Create(CultureInfo.InvariantCulture, $"The list of older error logs could not be read (error {number}); only the current log was read, and the older ones are read once the list works.")
+                : "The list of older error logs could not be read; only the current log was read, and the older ones are read once the list works.");
+        }
+
         var failedArchives = plan.Read.Count(a => a.Archive > 0 && !(status.TryGetValue(a.Archive, out var s) && s.Ok));
         return failedArchives > 0
             ? (ErrorLogRead, string.Create(CultureInfo.InvariantCulture, $"{failedArchives} older error log(s) could not be read; they are retried in the next cycle."))
             : (ErrorLogRead, null);
+    }
+
+    /* #8865: a list that was refused or failed says nothing about which archives exist, so the markers, attempts and skips stay as they
+       were: staging them would end the backfill before any archive was read. An instance reset is the exception: the old node's values
+       must still be overwritten with the empty ones the reset loaded (R7). */
+    private static bool StagesMarkers(DatabaseProtectionErrorLogState.ErrorLogPlan plan) => plan.EnumerateOk || plan.Before.Reset;
+
+    /* With no readable list nothing older than the current log can be read this cycle, so the rows do not wait on the backfill (no
+       `pending`) even though the markers say it is unfinished; the next cycle whose list works carries on from them. */
+    private static bool BackfillCompleteFor(DatabaseProtectionErrorLogState.ErrorLogPlan plan, DatabaseProtectionErrorLogState.Markers markers)
+        => !plan.EnumerateOk || markers.BackfillDone;
+
+    private static void StageMarkers(
+        CollectorContext context, Action<CollectorContext, string, string> stage, DatabaseProtectionErrorLogState.Markers markers,
+        IReadOnlyDictionary<DateTime, int> attempts, IReadOnlyCollection<DateTime> skipped)
+    {
+        stage(context, DatabaseProtectionErrorLogState.NewestArchiveKey, markers.NewestArchive is { } newest ? DatabaseProtectionErrorLogState.FormatDates(new[] { newest }) : string.Empty);
+        stage(context, DatabaseProtectionErrorLogState.BackfillBeforeKey, markers.BackfillBefore is { } before ? DatabaseProtectionErrorLogState.FormatDates(new[] { before }) : string.Empty);
+        stage(context, DatabaseProtectionErrorLogState.BackfillDoneKey, markers.BackfillDone ? bool.TrueString : bool.FalseString);
+        stage(context, DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.FormatAttempts(attempts));
+        stage(context, DatabaseProtectionErrorLogState.SkippedKey, DatabaseProtectionErrorLogState.FormatDates(skipped));
     }
 
     /* Replaces whatever ReadAsync staged for the key with the post-read value, staging it only when it differs from state. The staged entry

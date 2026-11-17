@@ -109,13 +109,16 @@ public static class DatabaseProtectionErrorLogState
     /// What to read this cycle, what was newly given up on, and the state the plan was made from.
     /// <see cref="Enumerated"/> is every archive the instance listed (not only those read), kept so the markers can be
     /// recomputed after the read: <see cref="MarkersAfter"/> needs the whole list to know whether the backfill finished.
+    /// <see cref="EnumerateError"/> is the error number the list raised when it could not be read (null when it was read, or when
+    /// it came back with a date that could not be parsed).
     /// </summary>
     public sealed record ErrorLogPlan(
         IReadOnlyList<ArchiveInfo> Read,
         IReadOnlyList<DateTime> NewlySkipped,
         LoadedState Before,
         bool EnumerateOk,
-        IReadOnlyList<ArchiveInfo>? Enumerated = null);
+        IReadOnlyList<ArchiveInfo>? Enumerated = null,
+        int? EnumerateError = null);
 
     /// <summary>
     /// Loads the markers, attempts and skips. A stored <see cref="InstanceKey"/> that differs from
@@ -178,20 +181,23 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>
     /// Picks the archives to read. The current log is always read. Then, up to <paramref name="perCycle"/>
     /// archives: new ones past the steady marker oldest first, then the backfill below its marker newest first.
-    /// An archive at <see cref="MaxArchiveAttempts"/> is skipped instead. A refused enumeration reads the
-    /// current log only and counts the backfill as done (#8865: nothing older can be read, so there is
-    /// nothing to wait for).
+    /// An archive at <see cref="MaxArchiveAttempts"/> is skipped instead.
+    ///
+    /// <para>#8865: a list that was refused or failed (<paramref name="enumerateOk"/> false) reads the current log only and
+    /// leaves the loaded state exactly as it was. It says nothing about which archives exist, so it must not move a marker:
+    /// marking the backfill done here would make the first list that works set the steady marker to its newest archive with the
+    /// backfill already finished, and no retained archive would ever be read. Whether the rows wait on the backfill meanwhile is
+    /// the collector's call (they do not: nothing older can be read in that cycle).</para>
     /// </summary>
     public static ErrorLogPlan PlanArchives(
-        LoadedState loaded, IReadOnlyList<ArchiveInfo> enumerated, bool enumerateOk, int perCycle)
+        LoadedState loaded, IReadOnlyList<ArchiveInfo> enumerated, bool enumerateOk, int perCycle, int? enumerateError = null)
     {
         var current = enumerated.Where(a => a.Archive == 0).Select(a => (ArchiveInfo?)a).FirstOrDefault()
             ?? new ArchiveInfo(0, default);
 
         if (!enumerateOk)
         {
-            var refused = loaded with { Markers = loaded.Markers with { BackfillDone = true } };
-            return new ErrorLogPlan(new[] { current }, Array.Empty<DateTime>(), refused, false);
+            return new ErrorLogPlan(new[] { current }, Array.Empty<DateTime>(), loaded, false, null, enumerateError);
         }
 
         var before = loaded;
@@ -236,7 +242,7 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>
     /// The markers after a cycle. Each marker moves over the contiguous run, in walk order, of archives that
     /// are done (read, or skipped) and stops at the first that is neither, so an archive that failed in the
-    /// middle is retried next cycle and never jumped over.
+    /// middle is retried next cycle and never jumped over. A list that was not read moves nothing (#8865).
     /// </summary>
     public static Markers MarkersAfter(
         ErrorLogPlan plan, IReadOnlyCollection<DateTime> readOk, IReadOnlyList<ArchiveInfo> enumerated)
@@ -244,7 +250,7 @@ public static class DatabaseProtectionErrorLogState
         var before = plan.Before.Markers;
         if (!plan.EnumerateOk)
         {
-            return before with { BackfillDone = true };
+            return before;
         }
 
         var archives = enumerated.Where(a => a.Archive > 0).ToList();

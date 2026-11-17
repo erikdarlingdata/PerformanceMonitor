@@ -218,17 +218,22 @@ public sealed class DatabaseProtectionErrorLogStateTests
     }
 
     [Fact]
-    public void ARefusedEnumeration_ReadsTheCurrentLogOnly_AndTheBackfillIsDone()
+    public void ARefusedEnumeration_ReadsTheCurrentLogOnly_AndMovesNoMarker()
     {
-        var plan = S.PlanArchives(Empty(), new List<S.ArchiveInfo>(), false, S.ArchivesPerCycle);
+        /* #8865 I2: the list says nothing about which archives exist, so nothing it implies may be stored: not even "the backfill is done". */
+        var midway = new S.Markers(LogDate(1), LogDate(3), false);
+        var attempts = new Dictionary<DateTime, int> { [LogDate(4)] = 1 };
+        foreach (var loaded in new[] { Empty(), WithMarkers(midway, attempts) })
+        {
+            var plan = S.PlanArchives(loaded, new List<S.ArchiveInfo>(), false, S.ArchivesPerCycle, 27219);
 
-        Assert.Equal(new[] { 0 }, Numbers(plan));
-        Assert.False(plan.EnumerateOk);
-        Assert.Empty(plan.NewlySkipped);
-
-        var after = S.MarkersAfter(plan, new[] { default(DateTime) }, new List<S.ArchiveInfo>());
-        Assert.True(after.BackfillDone);
-        Assert.Null(after.NewestArchive);
+            Assert.Equal(new[] { 0 }, Numbers(plan));
+            Assert.False(plan.EnumerateOk);
+            Assert.Equal(27219, plan.EnumerateError);
+            Assert.Empty(plan.NewlySkipped);
+            Assert.Same(loaded, plan.Before);
+            Assert.Equal(loaded.Markers, S.MarkersAfter(plan, new[] { default(DateTime) }, new List<S.ArchiveInfo>()));
+        }
     }
 
     [Fact]
