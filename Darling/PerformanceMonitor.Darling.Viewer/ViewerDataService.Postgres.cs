@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -167,6 +168,15 @@ public sealed partial class ViewerDataService
     /// permanent engine gap is nothing to do, a collector that should be running and has no rows in the
     /// window is something to chase, and a collector that ran and failed carries its own error text.</para>
     /// </summary>
+    /// <summary>
+    /// #8918: the sentence for a collector the target's PostgreSQL version cannot run, or null. Today that is <c>pg_io_stats</c> below
+    /// PostgreSQL 16, asked of the same copy the MCP reads use (<see cref="DarlingPgIoReader.NotCollectedForVersionMessage"/>).
+    /// </summary>
+    internal static string? PostgresVersionGap(DarlingServer server, string collectorName) =>
+        string.Equals(collectorName, "pg_io_stats", StringComparison.Ordinal)
+            ? DarlingPgIoReader.NotCollectedForVersionMessage(server.DisplayName, server.PostgresMajorVersion)
+            : null;
+
     public static List<PostgresCollectorHealthRow> BuildPostgresCollectorHealth(
         DarlingServer server,
         IReadOnlyList<ICollectorSchemaInfo> postgresCollectors,
@@ -181,8 +191,10 @@ public sealed partial class ViewerDataService
 
         foreach (var definition in postgresCollectors)
         {
-            var gap = CollectorEngineCapability.NotCollectedMessage(
+            var engineGap = CollectorEngineCapability.NotCollectedMessage(
                 server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None);
+            /* #8918: a PostgreSQL 15 target has no pg_stat_io, so pg_io_stats never runs there. That is a gap, not a collector that should have run. */
+            var gap = engineGap ?? PostgresVersionGap(server, definition.Name);
 
             byName.TryGetValue(definition.Name, out var facts);
 
@@ -190,7 +202,7 @@ public sealed partial class ViewerDataService
             var isFault = false;
             if (gap is not null)
             {
-                status = "Not collected on this engine";
+                status = engineGap is not null ? "Not collected on this engine" : "Not collected on this version";
             }
             else if (facts is null)
             {
@@ -303,6 +315,43 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgDatabaseReader.PgDatabaseRow>> GetPgDatabaseStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgDatabaseReader.GetPgDatabaseStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>
+    /// #8919: the target's own <c>TimeZone</c> setting from the newest <c>pg_server_config</c> snapshot that holds a server-scoped one:
+    /// no per-database or per-role override, and not a setting the collector's own session set. The same rule the analysis baselines
+    /// read the target's clock by (<c>PgTargetBaselineProvider.PgTargetClockSql</c>). <c>server_properties</c> is the SQL Server
+    /// collectors' table and a PostgreSQL target has no row there.
+    /// </summary>
+    public const string PgServerClockSql = @"
+SELECT c.setting
+FROM pg_server_config AS c
+WHERE c.server_id = $1
+AND   c.name = 'TimeZone'
+AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL
+AND   c.setting IS NOT NULL
+ORDER BY c.collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #8919: a PostgreSQL target's clock, from the time zone it records (<see cref="PgServerClockSql"/>), or null when the store holds
+    /// none or the name does not resolve on this machine. Null is not a clock: the caller says so instead of showing this machine's offset
+    /// as the server's.
+    /// </summary>
+    public async Task<(ServerClock? Clock, string? ZoneName)> GetPgServerClockAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(PgServerClockSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        if (await command.ExecuteScalarAsync(cancellationToken) is not string setting || string.IsNullOrWhiteSpace(setting))
+        {
+            return (null, null);
+        }
+
+        var name = setting.Trim();
+        return TimeZoneInfo.TryFindSystemTimeZoneById(name, out _) ? (ServerClock.Resolve(name, null), name) : (null, null);
+    }
 
     /// <summary>Storage tab, panel 1 - the per-table bloat ESTIMATE with its measured sizes and the trust
     /// signals that decide whether the estimate may be rendered at all.</summary>

@@ -226,7 +226,7 @@ public sealed class StoreLogPageNote8813LiveTests
 /// <summary>Writes one hourly capture the way the sweep does: the classifier's groups, then the capture row.</summary>
 internal static class StoreLogTestCapture
 {
-    public static async Task WriteAsync(NpgsqlDataSource postgres, DateTime captureUtc, string slab, CancellationToken ct)
+    public static async Task WriteAsync(NpgsqlDataSource postgres, DateTime captureUtc, string slab, CancellationToken ct, long bytesPending = 0)
     {
         var census = StoreLogClassifier.Classify(slab);
         var captureTime = DateTime.SpecifyKind(captureUtc, DateTimeKind.Unspecified);
@@ -247,7 +247,7 @@ internal static class StoreLogTestCapture
         capture.Parameters.AddWithValue(captureTime);
         capture.Parameters.AddWithValue("postgresql-Tue.log");
         capture.Parameters.AddWithValue((long)Encoding.UTF8.GetByteCount(slab));
-        capture.Parameters.AddWithValue(0L);
+        capture.Parameters.AddWithValue(bytesPending);
         capture.Parameters.AddWithValue(census.LinesRead);
         capture.Parameters.AddWithValue(census.EntriesRead);
         capture.Parameters.AddWithValue(false);

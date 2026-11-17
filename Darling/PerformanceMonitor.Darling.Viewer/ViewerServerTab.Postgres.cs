@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -49,6 +50,26 @@ public partial class ViewerServerTab
     /// DataGrid asked to realise all of them is a hung UI thread rather than a slow one.
     /// </summary>
     private const int PgGridRowLimit = 200;
+
+    /// <summary>#8919: reads this PostgreSQL server's recorded time zone and applies it. The shared clock refresh calls it only for a PostgreSQL tab.</summary>
+    private async Task RefreshPgServerClockAsync()
+    {
+        var (pgClock, zoneName) = await _dataService.GetPgServerClockAsync(_server.ServerId);
+        ApplyPgServerClock(pgClock, zoneName);
+    }
+
+    /// <summary>
+    /// #8919: a PostgreSQL target's clock is the time zone its <c>pg_server_config</c> snapshot records (<paramref name="zoneName"/>). Where the
+    /// store records none, Server Time reads UTC, as the fleet-wide views do, and the time display box says so: this machine's offset was
+    /// shown as the server's. Local Time and UTC are the same either way.
+    /// </summary>
+    internal void ApplyPgServerClock(ServerClock? clock, string? zoneName)
+    {
+        _serverClock = clock ?? ServerClock.Utc;
+        TimeDisplayModeBox.ToolTip = clock is null
+            ? "How timestamps are displayed. This server's time zone is not recorded, so Server Time shows UTC."
+            : $"How timestamps are displayed. Server Time is this server's own time zone ({zoneName}).";
+    }
 
     /// <summary>
     /// Picks the engine's tab set, once, in the constructor. Only a POSITIVE PostgreSQL claim switches:
@@ -132,8 +153,7 @@ public partial class ViewerServerTab
     /// </summary>
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
-        var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+        var gap = PgCollectorGap(collectorName);
 
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
@@ -144,8 +164,7 @@ public partial class ViewerServerTab
     /// </summary>
     private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
     {
-        var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+        var gap = PgCollectorGap(collectorName);
 
         return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText, cleared);
     }
@@ -259,9 +278,13 @@ public partial class ViewerServerTab
 
     /// <summary>True when a panel's collector cannot run here — used to skip the read entirely rather than
     /// spend a round trip proving a permanent gap is still permanent.</summary>
-    private bool PgCollectorIsGatedOff(string collectorName) =>
+    private bool PgCollectorIsGatedOff(string collectorName) => PgCollectorGap(collectorName) is not null;
+
+    /// <summary>The sentence for a collector this target can never run: the engine's gap, else (#8918) the PostgreSQL version's, else null.</summary>
+    private string? PgCollectorGap(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None)
+        ?? ViewerDataService.PostgresVersionGap(_server, collectorName);
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders
@@ -1261,9 +1284,13 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        /* #8918: PostgreSQL 15 has no pg_stat_io, so there is nothing to read and the note says so instead of calling the window idle. */
+        var ioGatedOff = PgCollectorIsGatedOff("pg_io_stats");
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var dataStartTask = StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
-        var rowsTask = _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        var dataStartTask = ioGatedOff ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
+        var rowsTask = ioGatedOff
+            ? Task.FromResult(new List<DarlingPgIoReader.PgIoRow>())
+            : _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL I/O Stats");
         var rows = rowsTask.Result;
         readFanOut.Release();
@@ -1425,10 +1452,7 @@ public partial class ViewerServerTab
         var flapping = rows.Count(r => r.TotalSamples > 0 && r.Samples < r.TotalSamples);
 
         PgReplicationStatsNote.Text = rows.Count == 0
-            ? "No standby was streaming from this server in this window. On a REPLICA that is the expected "
-              + "answer: pg_stat_replication is the primary-side view and reports nothing unless this "
-              + "server is cascading to a downstream of its own. On a primary it means nothing is "
-              + "replicating from it, which is either correct or the finding."
+            ? PgDisplay.ReplicationStatsEmptyNote(_server.EngineKind)
             : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
               + $"{PgDisplay.Bytes(worst)} of unapplied WAL - that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "

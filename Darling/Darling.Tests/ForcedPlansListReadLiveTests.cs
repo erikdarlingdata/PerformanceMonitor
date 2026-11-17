@@ -183,7 +183,7 @@ LIMIT 2001";
 
             await using (var inside = await dataSource.OpenConnectionAsync(ct))
             {
-                await using (var transaction = await DarlingForcedPlanStateReader.BeginForcesTransactionAsync(inside, 30, ct))
+                await using (var transaction = await NoNestLoopRead.BeginAsync(inside, 30, ct))
                 {
                     Assert.Equal(("off", "on"), await SettingsAsync(inside, transaction));
                 }

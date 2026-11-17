@@ -844,6 +844,8 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     footNoteKey: opts.footNoteKey,
     /* #8881: the answer's field holding one plain sentence drawn under the chart whenever it has text (the tempdb chart's log holder line); absent on every other line. */
     captionKey: opts.captionKey,
+    /* #8927: the chart kind chartNote takes ("summed", "level"): what a point covers, and the trailing-hours sentence when the answer's `source` is "hourly". */
+    noteKind: opts.noteKind,
     /* #5644 W16: the page's one sentence replaces the read's own empty message. */
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */

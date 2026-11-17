@@ -119,7 +119,7 @@ export const PG_INDEX_USAGE_COLUMNS = [
      too-early-to-say must not look like a finding. */
   { key: "severity", label: "Severity", sevKey: "severity" },
   { key: "index_bytes", label: "Size", format: "bytes" },
-  { key: "scans_in_window", label: "Scans in Window", format: "int" },
+  { key: "scans_in_window", label: "Scans in Window", format: "int", hint: "Scans of the index across the window, counted from the difference between its samples. A dash means this index has only one sample so far: it needs two samples before a windowed count exists." },
   { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },
   { key: "last_scan", label: "Last Scan", format: "time" },
   detailColumn("last_scan_note", "Last Scan Note", lastScanNoteWord,
