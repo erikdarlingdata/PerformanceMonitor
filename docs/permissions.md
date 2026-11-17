@@ -190,17 +190,20 @@ Adding all three grants eliminates both. See issue [#915](https://github.com/eri
 
 ### Column selectivity (per-database SELECT, optional)
 
-Darling only. Applies to SQL Server targets. Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. Darling copies into its store only statistic and column names, densities, row and sample counts and update times; it never copies column values, and it never reads histograms or filter expressions.
+Darling only. Applies to SQL Server and Azure SQL Database targets. Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. Darling copies into its store only statistic and column names, densities, row and sample counts and update times; it never copies column values, and it never reads histograms or filter expressions.
 
 The collector is off by default, and so is this grant: nothing in the base script or the FinOps block gives it. It needs `SELECT` because `DBCC SHOW_STATISTICS` requires it on the table's columns, and SQL Server has no narrower grant that also covers tables created later. Give it only in the databases where you turn the collector on. The grant is never made in every database by default: an empty database list for the collector means "every database" for collection, but the script leaves the block out when you list no database, and the connection test checks nothing for it.
 
-For each database you list:
+For each database you list (the user is created only when the login has none there; a bare `GRANT SELECT` fails with error 15151 then):
 
 ```sql
 USE [YourTargetDatabase];
-CREATE USER [YourLogin] FOR LOGIN [YourLogin];
+IF DATABASE_PRINCIPAL_ID(N'YourLogin') IS NULL
+    CREATE USER [YourLogin] FOR LOGIN [YourLogin];
 GRANT SELECT TO [YourLogin];
 ```
+
+On Azure SQL Database there are no server logins and the monitoring user is a contained user of each database, so the grant is `GRANT SELECT TO [YourUser];` run in each listed database. `--grant-script --azure --column-stats-databases <db1,db2>` adds that statement to the Azure script, which you run in each of them.
 
 Or let Darling print the block. `--column-stats-databases <db1,db2>` adds one guarded block for each listed database to the script from `--grant-script`. It creates the login's user in the database when it is missing and grants `SELECT` there, and it skips a database that does not exist with a message. With no list the script has no such block:
 
@@ -208,7 +211,7 @@ Or let Darling print the block. `--column-stats-databases <db1,db2>` adds one gu
 PerformanceMonitor.Darling.Service.exe --grant-script <server-name> --column-stats-databases SalesDb,Hr
 ```
 
-The connection test checks the grant only when `column_stats` is enabled for that server with an explicit database list. It then names each listed database where the login has no `SELECT`, with the statement that adds it. The Viewer's Add Server dialog does not check it, because it has no collector settings yet.
+The service's connection test (`test_connect`) checks the grant only when `column_stats` is enabled for that server with an explicit database list, and only on SQL Server targets. It then names each listed database where the login has no `SELECT`, with the statements that add it. The CLI's `--test-connection` does not check it, because it reads no collector settings, and neither does the Viewer's Add Server dialog, which has none yet.
 
 ### Azure SQL Database (Lite / Darling)
 
