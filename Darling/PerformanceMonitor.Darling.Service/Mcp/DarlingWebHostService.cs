@@ -212,6 +212,36 @@ public sealed class DarlingWebHostService : BackgroundService
         init => _personalSnapshot = value;
     }
 
+    /* #8737: the host's stopping token, set when the supervisor starts. A sign-in's revoke is not tied to the request's token: once it has
+       committed, the snapshot refresh must run, or a client that disconnects mid-callback would leave a revoked token live for MCP. A host
+       built outside the service (a test) never runs the supervisor and keeps None. */
+    private CancellationToken _hostStopping = CancellationToken.None;
+
+    /// <summary>True once the start sweep of the personal-token settings has succeeded, or had nothing to do (#8737).</summary>
+    internal bool PersonalStartSweepDone { get; private set; }
+
+    /// <summary>
+    /// The start sweep of the personal-token settings (#8737, R8): on each supervisor tick until it has succeeded once, which is after the
+    /// worker has published the owner connection and the store has the table. Lowered settings (<c>adminRole: reader</c>, a lower
+    /// <c>maxLifetimeDays</c>) then reach tokens that were made under the old ones.
+    /// </summary>
+    internal async Task RunPersonalStartSweepAsync(PersonalTokenSettings? settings, CancellationToken cancellationToken)
+    {
+        if (PersonalStartSweepDone)
+        {
+            return;
+        }
+
+        if (settings is null || _personalSnapshot is null || _ownerSource is null)
+        {
+            PersonalStartSweepDone = true;
+            return;
+        }
+
+        PersonalStartSweepDone = await DarlingPersonalTokenSignIn.ApplySettingsAtStartAsync(
+            settings, _ownerSource, _personalSnapshot, _logger, cancellationToken);
+    }
+
     public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, IServiceProvider? services = null)
     {
         _services = services;
@@ -265,6 +295,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _hostStopping = stoppingToken;
         /* Config load lives INSIDE the supervisor loop, on the failed-start backoff (#2038). It used to be a
            single front-loaded Load() whose failure stood this host down for the process LIFETIME, logged only
            at Debug — so one transient darling.json read failure at boot (an AV pass over the file mid service
@@ -385,6 +416,11 @@ public sealed class DarlingWebHostService : BackgroundService
 
             if (_app is not null && _managedGroups is not null)
                 await _managedGroups.RefreshAsync(stoppingToken);
+
+            if (_app is not null && !PersonalStartSweepDone)
+            {
+                await RunPersonalStartSweepAsync(DarlingMcpHostService.PersonalTokensFor(config), stoppingToken);
+            }
 
             lastEnabled = toggle.Enabled;
 
@@ -1916,7 +1952,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null, tokenSignIn: tokenSignIn);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null, tokenSignIn: tokenSignIn, personalTokens: personalTokens);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -2476,7 +2512,8 @@ public sealed class DarlingWebHostService : BackgroundService
         IReadOnlyList<string>? mcpTokens,
         DarlingWebTokenSet? webTokens, DarlingWebGroupTokens? managedGroups,
         bool frontDoor = false,
-        TokenSignInMode tokenSignIn = TokenSignInMode.On)
+        TokenSignInMode tokenSignIn = TokenSignInMode.On,
+        PersonalTokenSettings? personalTokens = null)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
@@ -2696,6 +2733,9 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
+        /* #8737: the owner key is read before the seat is decided, so a refusal can drop the person's personal tokens too. It is null when
+           the ID token has no sub. The refusals above this point revoke nothing: a token that failed validation proves nothing about the person. */
+        var ownerKey = DarlingWebOidc.ResolveOwnerKey(payload!);
         var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
             oidcClient.Options.RoleClaim is null
                 ? Array.Empty<string>()
@@ -2709,15 +2749,18 @@ public sealed class DarlingWebHostService : BackgroundService
             _logger.LogWarning(
                 "OIDC sign-in refused: {Subject} authenticated at the provider but matches neither adminRoles nor viewerRoles in claim '{RoleClaim}'.",
                 DarlingHttpRefusalLog.Sanitize(subject, DarlingWebSeat.MaxSubjectLength), oidcClient.Options.RoleClaim);
+            await DropPersonalTokensAtSignInAsync(personalTokens, ownerKey, role);
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "Your account is not granted a seat on this dashboard. Ask your administrator to add you to a mapped role.");
             return;
         }
 
+        await DropPersonalTokensAtSignInAsync(personalTokens, ownerKey, role);
+
         /* #6214: the owner key (issuer + sub, hashed) rides in the signed cookie, so a personal view follows the person's provider
            identity and not the display name, which can change and can be reissued. */
         AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(
-            subject, role, DarlingWebOidc.ResolveOwnerKey(payload!),
+            subject, role, ownerKey,
             DarlingWebSeat.CapDisplayField(DarlingWebOidc.DisplayNameClaim(payload!)), DarlingWebSeat.CapDisplayField(grantedBy)));
 
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
@@ -2727,6 +2770,28 @@ public sealed class DarlingWebHostService : BackgroundService
             role == WebOidcRole.Admin ? "admin (edit)" : "viewer (read-only)", remote);
 
         await WriteSignedInLandingAsync(context, transaction.ReturnPath);
+    }
+
+    /// <summary>
+    /// #8737: drops the personal MCP tokens the sign-in's seat no longer allows. Best-effort and never changing the sign-in's outcome: the
+    /// helper logs a store failure as a warning. It runs on the host's stopping token, not the request's, so a client that disconnects
+    /// mid-callback cannot leave a revoked token live for MCP; only a host shutdown cuts it short, and that is not a sign-in failure.
+    /// </summary>
+    private async Task DropPersonalTokensAtSignInAsync(PersonalTokenSettings? personalTokens, string? ownerKey, WebOidcRole role)
+    {
+        if (personalTokens is null || _ownerSource is null || _personalSnapshot is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await DarlingPersonalTokenSignIn.OnOidcSignInAsync(personalTokens, _ownerSource, _personalSnapshot, ownerKey, role, _logger, _hostStopping);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("MCP personal token revoke at sign-in was cut short by the host stopping.");
+        }
     }
 
     /// <summary>
