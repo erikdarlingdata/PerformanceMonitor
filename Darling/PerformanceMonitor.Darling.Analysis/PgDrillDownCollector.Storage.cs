@@ -150,6 +150,17 @@ LIMIT 50";
             finding.DrillDown!["autogrowth_percent_files"] = items;
     }
 
+    /// <summary>#8883: tempdb's files with their size and growth, from the same collection the TEMPDB_FILE_SETUP fact read.</summary>
+    private async Task CollectTempDbSetupFiles(AnalysisFinding finding, AnalysisContext context)
+    {
+        /* A no-op in the pass, whose fact collector stamped the bounds on this context already. */
+        await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
+
+        var files = await PgTempDbFileSetupReader.ReadFilesAsync(_postgres, context, DrillDownCommandTimeoutSeconds);
+        if (files.Count > 0)
+            finding.DrillDown!["tempdb_files"] = TempDbFileSetup.DrillDownRows(files);
+    }
+
     public const string TempDbBreakdownSql = @"
 SELECT collection_time, user_object_reserved_mb, internal_object_reserved_mb,
        version_store_reserved_mb, unallocated_mb

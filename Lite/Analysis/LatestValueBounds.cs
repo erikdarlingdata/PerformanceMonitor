@@ -41,6 +41,7 @@ internal static class LatestValueBounds
         MemoryClerksCollector.Instance,
         PlanCacheStatsCollector.Instance,
         MemoryStatsCollector.Instance,
+        CpuSchedulerStatsCollector.Instance,
     };
 
     /// <summary>An on-load collector's newest capture at or before the window's end, hot or archived ($1
