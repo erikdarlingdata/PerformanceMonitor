@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>One database of the Database Protection tab: the three facts as text, in the web page's words.</summary>
 public sealed record ViewerDatabaseProtectionRow(
     string Database, string State, string FullBackup, string LogBackup, string CheckDb, string Platform, string NotJudgedBecause, bool Overdue,
-    string CheckDbSource = "", string CheckDbOptions = "", string CheckDbNote = "");
+    string CheckDbSource = "", string CheckDbOptions = "", string? CheckDbNote = null);
 
 /// <summary>
 /// The words of the Database Protection tab (#6873), as functions of <see cref="ViewerDatabaseProtectionRead"/>. They match the Health Checks
@@ -111,12 +111,13 @@ public static class ViewerDatabaseProtectionText
     }
 
     /// <summary>#8865: the tooltip of the CHECKDB cell: the band's own sentence (a backfill still running, a replica that is not readable), or the
-    /// not-readable sentence for a replica that refuses connections whatever its CHECKDB reads.</summary>
-    public static string CheckDbNote(DatabaseProtectionFact fact, DatabaseProtectionFactBand checkDb)
+    /// not-readable sentence for a replica that refuses connections whatever its CHECKDB reads. Null when there is none: WPF shows an empty tooltip box
+    /// for an empty string, and none for null.</summary>
+    public static string? CheckDbNote(DatabaseProtectionFact fact, DatabaseProtectionFactBand checkDb)
     {
         ArgumentNullException.ThrowIfNull(fact);
         ArgumentNullException.ThrowIfNull(checkDb);
-        return checkDb.Detail ?? (fact.ReplicaReadable == false ? DatabaseProtectionBands.DetailNotReadable : "");
+        return checkDb.Detail ?? (fact.ReplicaReadable == false ? DatabaseProtectionBands.DetailNotReadable : null);
     }
 
     /// <summary>

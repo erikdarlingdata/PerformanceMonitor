@@ -399,6 +399,8 @@ public sealed class DatabaseProtectionPerReplicaSurfacesTests
         var tooltips = web.GetProperty("tooltips").EnumerateArray().Select(t => t.GetString()!).ToArray();
         Assert.Contains(viewer["Wait"].CheckDbNote, tooltips);
         Assert.Contains("still being read", viewer["Wait"].CheckDbNote, StringComparison.Ordinal);
+        /* #8865 M2: a cell with nothing to say has no tooltip: null, because WPF draws an empty box for "". */
+        Assert.Null(viewer["Plain"].CheckDbNote);
 
         /* The server-level sentence: failed with the message, a skipped archive and unparsed lines. */
         var viewerNote = ViewerDatabaseProtectionText.ErrorLogNote(new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Overdue, null, Now, banded, DatabaseProtectionBands.Summarize(banded)));
