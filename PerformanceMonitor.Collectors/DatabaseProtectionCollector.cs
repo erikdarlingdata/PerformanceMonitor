@@ -189,7 +189,9 @@ SELECT
     last_full = b.last_full,
     last_log = b.last_log,
     backups_readable = CONVERT(bit, 1),
-    instance_name = CONVERT(sysname, @@SERVERNAME),
+    /* #8865: @@SERVERNAME is NULL on a renamed host with no sys.servers row; the fallback keeps the error-log read on rather than reading
+       not_applicable. */
+    instance_name = COALESCE(CONVERT(sysname, @@SERVERNAME), CONVERT(sysname, SERVERPROPERTY('ServerName'))),
     replica_allow_connections = " + (platformManaged ? "CONVERT(nvarchar(60), NULL)" : "ar.secondary_role_allow_connections_desc") + @"
 FROM sys.databases AS d
 LEFT JOIN backups AS b
@@ -242,7 +244,8 @@ DECLARE
 );
 
 BEGIN TRY
-    INSERT
+    /* #8865: the marker sits inside the statement, so a self-exclusion reading the statement text sees it. */
+    INSERT /* PerformanceMonitorLite */
         @error_logs
     (
         archive,
@@ -636,7 +639,7 @@ BEGIN
     BEGIN TRY
         DELETE @one;
 
-        INSERT
+        INSERT /* PerformanceMonitorLite */
             @one
         (
             log_date,
