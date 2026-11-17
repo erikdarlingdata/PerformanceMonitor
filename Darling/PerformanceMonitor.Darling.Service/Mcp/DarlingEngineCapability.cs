@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -85,7 +86,10 @@ WHERE server_id = $1";
             return null;
         }
 
-        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
+        /* #8913: an Aurora server's stored extension census says whether it offers the optional extension this collector reads. Asked only
+           for the two collectors that can use the answer, on an Aurora target, so no other read pays for it. */
+        var notOffered = await NotOfferedExtensionsAsync(postgres, serverId, engineKind, collectorName, cancellationToken);
+        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind, notOffered);
         if (engineEnvelope is not null || !IsReadableSecondaryGated(collectorName))
         {
             return engineEnvelope;
@@ -93,6 +97,23 @@ WHERE server_id = $1";
 
         /* #6554: the collectors skip every readable-secondary database, so on a secondary these reads are empty by design. */
         return await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken);
+    }
+
+    /// <summary>
+    /// #8913: the optional extensions the newest census shows as absent on this server, read only for an Aurora target and a collector in
+    /// <see cref="CollectorEngineCapability.AuroraOptionalExtensionCollectors"/>. Null when no read applies or the read fails, which makes
+    /// no claim.
+    /// </summary>
+    internal static async Task<System.Collections.Generic.IReadOnlyCollection<string>?> NotOfferedExtensionsAsync(
+        NpgsqlDataSource postgres, int serverId, string? engineKind, string collectorName, CancellationToken cancellationToken)
+    {
+        if (!MonitoredEngineKind.IsAurora(engineKind) || !CollectorEngineCapability.AuroraOptionalExtensionCollectors.Contains(collectorName))
+        {
+            return null;
+        }
+
+        var byServer = await ExtensionsNotOffered.ReadAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        return byServer.TryGetValue(serverId, out var names) ? names : null;
     }
 
     /// <summary>
@@ -227,9 +248,11 @@ WHERE server_id = ANY($1)";
     /// when the collector's own gate is closed on that kind of RDS target, and NULL (never stamped, or a PostgreSQL target) reads as
     /// <see cref="AwsRdsKind.None"/>: no RDS claim.
     /// </summary>
-    private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
+    private static string? Envelope(
+        string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind,
+        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind, extensionsNotOffered);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 

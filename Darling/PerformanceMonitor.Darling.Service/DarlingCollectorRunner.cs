@@ -1264,7 +1264,7 @@ public sealed partial class DarlingCollectorRunner
         }
 
         var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
-            pg, collector, CollectorFaultDatabase.For(pg, server.ConnectedDatabase), server.PgStatStatementsExtension, server.Target.IsAurora);
+            pg, collector, CollectorFaultDatabase.For(pg, server.ConnectedDatabase), server.PgStatStatementsExtension, server.Target.IsAurora, server.ConnectedDatabase);
         return status is "ERROR" or "YIELDED" ? null : $"{status}|{pg.SqlState}|{explanation}";
     }
 

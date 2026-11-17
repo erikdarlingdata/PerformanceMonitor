@@ -133,7 +133,7 @@ public partial class ViewerServerTab
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None, _extensionsNotOffered);
 
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
@@ -145,7 +145,7 @@ public partial class ViewerServerTab
     private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None, _extensionsNotOffered);
 
         return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText, cleared);
     }
@@ -241,8 +241,21 @@ public partial class ViewerServerTab
     /// calls this server Offline; read before each PostgreSQL tab loads, and false when the read fails.</summary>
     private bool _pgOffline;
 
+    /// <summary>
+    /// #8913: the optional extensions this server's newest census shows as absent (an Aurora server does not offer them), so a panel for
+    /// the collector that reads one says the engine limit instead of a setup step. Null until read, and when the read fails, which makes
+    /// no claim. Read with <see cref="_pgOffline"/> before each PostgreSQL tab loads.
+    /// </summary>
+    private System.Collections.Generic.IReadOnlyCollection<string>? _extensionsNotOffered;
+
     private async Task RefreshPgOfflineAsync()
     {
+        if (MonitoredEngineKind.IsAurora(_server.EngineKind))
+        {
+            var notOffered = await _dataService.GetExtensionsNotOfferedAsync(_server.ServerId);
+            _extensionsNotOffered = notOffered;
+        }
+
         try
         {
             var freshness = await _dataService.GetServerCollectionStateAsync();
@@ -261,7 +274,7 @@ public partial class ViewerServerTab
     /// spend a round trip proving a permanent gap is still permanent.</summary>
     private bool PgCollectorIsGatedOff(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None, _extensionsNotOffered) is not null;
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders

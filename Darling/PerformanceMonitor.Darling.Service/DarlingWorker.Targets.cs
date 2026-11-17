@@ -2447,12 +2447,16 @@ LIMIT 1";
     /// nothing was observed, and every arm treats that as "no answer" rather than as "no row".</param>
     /// <param name="isAurora">#3830: whether the target is Aurora, which decides what an ABSENT extension
     /// costs a collector that declares an Aurora-native alternative.</param>
+    /// <param name="serverEntryDatabase">#8913: the database the server entry connects to. A missing-extension sentence names it, so a collector that runs in one
+    /// database and one that fans out to every database send the operator to the same place, instead of the fan-out one naming whichever database
+    /// failed first.</param>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
         PostgresException ex,
         string collectorName,
         string? connectedDatabase = null,
         PgExtensionRowObservation extensionRow = default,
-        bool isAurora = false)
+        bool isAurora = false,
+        string? serverEntryDatabase = null)
     {
         var fault = PostgresTargetProvider.Instance.Classify(
             ex, CollectorCatalog.YieldsOnLockTimeout(collectorName));
@@ -2533,7 +2537,7 @@ LIMIT 1";
 
             CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
                 (CollectorRuntimePrecondition.ExtensionMissingStatus,
-                    ExtensionMissingExplanation(ex, required, connectedDatabase)),
+                    ExtensionMissingExplanation(ex, required, serverEntryDatabase ?? connectedDatabase)),
 
             /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
                never created in the connected database rather than anything to do with privileges. */
@@ -3688,7 +3692,8 @@ LIMIT 1";
                 collectorName,
                 CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase),
                 runtime.PgStatStatementsExtension,
-                runtime.Target.IsAurora)
+                runtime.Target.IsAurora,
+                runtime.ConnectedDatabase)
                 is { Status: not "ERROR" } outcome)
         {
             /* PostgreSQL faults classified by SQLSTATE through the same ITargetProvider.Classify the

@@ -93,7 +93,12 @@ public partial class ViewerServerTab
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
-        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
+        if (MonitoredEngineKind.IsAurora(_server.EngineKind))
+        {
+            _extensionsNotOffered = await _dataService.GetExtensionsNotOfferedAsync(_server.ServerId);
+        }
+
+        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered);
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
@@ -176,9 +181,11 @@ public partial class ViewerServerTab
     /// FAILING, and a collector that does not run can never replace it. The set is <see cref="FleetEngineGatedCollectors.For"/>, the gate
     /// the status bar, the Overview card and the fleet card count with. An engine not read yet makes no claim, so those rows stand.
     /// </summary>
-    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind)
+    internal static void ApplyEngineGate(
+        List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind,
+        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null)
     {
-        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind);
+        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind, extensionsNotOffered);
         if (gated.Count == 0)
         {
             return;
@@ -189,7 +196,7 @@ public partial class ViewerServerTab
             if (gated.Contains(row.CollectorName))
             {
                 row.EngineGated = true;
-                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind);
+                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind, extensionsNotOffered);
             }
         }
     }
@@ -204,7 +211,7 @@ public partial class ViewerServerTab
         try
         {
             /* #6912: the same gate get_collection_health leaves the gated collectors' runs out with, so the panel and the tool name the same peak collector. */
-            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
+            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered);
             ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId, engineGated: engineGated));
         }
         catch (OperationCanceledException)

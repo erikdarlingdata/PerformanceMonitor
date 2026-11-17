@@ -477,6 +477,16 @@ public sealed partial class ViewerDataService
         DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(_dataSource, serverId, cancellationToken);
 
     /// <summary>
+    /// #8913: the optional extensions this server's newest census shows as absent, the fact that turns an Aurora server's kernel and
+    /// predicate collectors into an engine limit. Null when the census says none, and when the read fails (no claim).
+    /// </summary>
+    public async Task<IReadOnlyCollection<string>?> GetExtensionsNotOfferedAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var byServer = await ExtensionsNotOffered.ReadAsync(_dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return byServer.TryGetValue(serverId, out var names) ? names : null;
+    }
+
+    /// <summary>
     /// The kernel's own CPU and disk per query (#2603). Deltas and reset detection live in the reader.
     /// </summary>
     public Task<List<DarlingPgKernelStatsReader.PgKernelStatRow>> GetPgKernelStatsAsync(
