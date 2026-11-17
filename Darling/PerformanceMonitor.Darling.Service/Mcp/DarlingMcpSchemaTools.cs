@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -144,7 +145,7 @@ public sealed class DarlingMcpSchemaTools
     }
 
     [McpServerTool(Name = "get_object_definition"), Description(
-        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database. Each column carries selectivity and the table carries column_combinations (leading column combinations of a statistic): distinct_estimate, rows_per_value and selectivity from the statistics density vectors the opt-in column_stats collector reads, numbers only, with unique only from a unique index or constraint covering exactly those columns; selectivity_status says whether they are current, not_collected, not_read_yet, not_read (no SELECT grant for a database outside the collector's own list), a precondition with the grant, current_only (an as_of before the stored read shows no numbers), or unavailable (the store read failed; the definition is still returned).")]
+        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database. Each column carries selectivity and the table carries column_combinations (leading column combinations of a statistic): distinct_estimate, rows_per_value and selectivity from the statistics density vectors the opt-in column_stats collector reads, numbers only, with unique only from a unique index or constraint covering exactly those columns; selectivity_status says whether they are current, not_collected, not_read_yet, not_read (no SELECT grant for a database outside the collector's own list), a precondition with the grant, current_only (an as_of before the stored read shows no numbers), or unavailable (the store read failed; the definition is still returned). Where column_stats is off for the server, only selectivity_status (not_collected) is added: no per-column selectivity and no column_combinations. stats_updated_at is UTC: exact on SQL Server 2022 and later and on Azure, which report their time zone; on earlier versions it is moved by the server's current UTC offset, so it can be an hour off for a statistic updated on the other side of a daylight saving change.")]
     public static Task<string> GetObjectDefinition(
         NpgsqlDataSource postgres,
         [Description("Database name.")] string database_name,
@@ -262,7 +263,7 @@ public sealed class DarlingMcpSchemaTools
                 var cut = n < page.Count;
                 var combinationsCut = selectivity.View is not null && shownCombinations < combinations.Count;
                 var more = hasMoreByLimit || cut;
-                return JsonSerializer.Serialize(new
+                var answer = JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     database_name = version.DatabaseName,
@@ -381,6 +382,7 @@ public sealed class DarlingMcpSchemaTools
                     trigger_count = definition.Triggers.Count,
                     triggers = definition.Triggers.Select(g => new { name = g.Name, is_instead_of = g.IsInsteadOf, events = g.Events }),
                 }, McpHelpers.JsonOptions);
+                return selectivity.OptedIn ? answer : WithoutSelectivityFields(answer);
             }
 
             /* The combinations are cut before any column: the columns are the definition, the combinations an addition to it. */
@@ -508,6 +510,38 @@ public sealed class DarlingMcpSchemaTools
         {
             return McpHelpers.FormatError("get_schema_changes", ex);
         }
+    }
+
+    /* #8798: the fields column selectivity adds to get_object_definition, apart from selectivity_status. */
+    private static readonly string[] s_selectivityAnswerFields =
+        ["selectivity_checked_at", "selectivity_note", "column_combinations_returned", "column_combinations_has_more", "column_combinations"];
+
+    private static readonly string[] s_selectivityColumnFields = ["selectivity", "selectivity_note"];
+
+    /// <summary>
+    /// #8798: the answer of a server where column_stats is off, without the selectivity fields (top level and per column) except
+    /// <c>selectivity_status</c>, so a server that never opted in gets the answer it got before the collector existed plus that one field.
+    /// </summary>
+    internal static string WithoutSelectivityFields(string json)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        foreach (var field in s_selectivityAnswerFields)
+        {
+            root.Remove(field);
+        }
+
+        if (root["columns"] is JsonArray columns)
+        {
+            foreach (var column in columns.OfType<JsonObject>())
+            {
+                foreach (var field in s_selectivityColumnFields)
+                {
+                    column.Remove(field);
+                }
+            }
+        }
+
+        return root.ToJsonString(McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "find_schema_objects"), Description(

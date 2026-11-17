@@ -875,16 +875,18 @@ public sealed class MonitoringGrantScriptTests
     [Fact]
     public void Cli_ParsesColumnStatsDatabases()
     {
+        /* One name per occurrence, taken whole: a name may hold a comma or a space; a repeat is kept once. */
         Assert.True(DarlingCliCommands.TryParseGrantScriptArgs(
-            new[] { "--host", "sql01", "--column-stats-databases", "SalesDb, Hr,,Hr" }, out var parsed, out _));
-        Assert.Equal(new[] { "SalesDb", "Hr" }, parsed!.ColumnStatsDatabases);
+            new[] { "--host", "sql01", "--column-stats-databases", "SalesDb", "--column-stats-databases", "Sales, Archive", "--column-stats-databases", "salesdb" },
+            out var parsed, out _));
+        Assert.Equal(new[] { "SalesDb", "Sales, Archive" }, parsed!.ColumnStatsDatabases);
 
         Assert.True(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01" }, out var none, out _));
         Assert.Null(none!.ColumnStatsDatabases);
 
         Assert.False(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01", "--column-stats-databases" }, out _, out var error));
         Assert.Contains("needs a value", error);
-        Assert.False(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01", "--column-stats-databases", " , " }, out _, out var empty));
+        Assert.False(DarlingCliCommands.TryParseGrantScriptArgs(new[] { "--host", "sql01", "--column-stats-databases", " " }, out _, out var empty));
         Assert.Contains("--column-stats-databases", empty);
         Assert.Contains("--column-stats-databases", DarlingCliCommands.GrantScriptUsageText());
     }

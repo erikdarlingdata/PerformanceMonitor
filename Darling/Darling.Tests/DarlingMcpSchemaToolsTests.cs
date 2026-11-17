@@ -359,6 +359,12 @@ public sealed class DarlingMcpSchemaToolsTests
         Assert.Contains("CREATE USER", named.Note, StringComparison.Ordinal);
         Assert.Contains("--column-stats-databases", named.Note, StringComparison.Ordinal);
         Assert.Contains("[Sales]]Db]", named.Note, StringComparison.Ordinal);
+        /* The CLI hint passes the name as one quoted argument, so a name with a space or a comma survives the command line. */
+        Assert.Contains("--column-stats-databases \"Sales]Db\"", named.Note, StringComparison.Ordinal);
+        Assert.Contains(
+            "--column-stats-databases \"Sales, \\\"Archive\\\" Db\"",
+            ColumnSelectivity.Decide(Facts(inOwnList: true, run: new SelectivityRun(s_read, "no_select"), rows: 0), "Sales, \"Archive\" Db", null).Note,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("9485", named.Note, StringComparison.Ordinal);
 
         /* No database in scope had the grant on the newest run, though this one is not in the own list. */

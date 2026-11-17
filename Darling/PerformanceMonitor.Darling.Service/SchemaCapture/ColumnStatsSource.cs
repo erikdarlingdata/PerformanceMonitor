@@ -45,8 +45,12 @@ internal interface IColumnStatsConnection : IAsyncDisposable
     /// <summary>Whether the login holds SELECT on the database, which DBCC SHOW_STATISTICS needs.</summary>
     Task<bool> HasSelectAsync(string database, CancellationToken cancellationToken);
 
-    /// <summary>The candidate statistics, largest tables first, and the counts of those left out.</summary>
-    Task<(IReadOnlyList<StatCandidate> Candidates, SkipCounts Skipped)> ReadCandidatesAsync(string database, CancellationToken cancellationToken);
+    /// <summary>
+    /// The candidate statistics, largest tables first, and the counts of those left out. Over the cap, <c>AllIds</c> holds the ids of every
+    /// candidate (the capped list is not the whole database); otherwise it is empty.
+    /// </summary>
+    Task<(IReadOnlyList<StatCandidate> Candidates, SkipCounts Skipped, IReadOnlyList<(int ObjectId, int StatsId)> AllIds)> ReadCandidatesAsync(
+        string database, CancellationToken cancellationToken);
 
     /// <summary>The header and density vector of each named statistic, and an error row for each one that could not be read.</summary>
     Task<(IReadOnlyList<ColumnStatsReadRow> Rows, IReadOnlyList<StatError> Errors)> ReadStatisticsAsync(
@@ -101,7 +105,8 @@ internal sealed class SqlColumnStatsSource : IColumnStatsSource
             return value is not null && value is not DBNull && Convert.ToInt32(value, CultureInfo.InvariantCulture) == 1;
         }
 
-        public async Task<(IReadOnlyList<StatCandidate> Candidates, SkipCounts Skipped)> ReadCandidatesAsync(string database, CancellationToken cancellationToken)
+        public async Task<(IReadOnlyList<StatCandidate> Candidates, SkipCounts Skipped, IReadOnlyList<(int ObjectId, int StatsId)> AllIds)> ReadCandidatesAsync(
+            string database, CancellationToken cancellationToken)
         {
             await using var command = Command(InDatabase(database, ColumnStatsQueries.CandidatesSql));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -128,7 +133,17 @@ internal sealed class SqlColumnStatsSource : IColumnStatsSource
                 skipped = new SkipCounts(Int(reader, 0), Int(reader, 1), Int(reader, 2), Int(reader, 3), Int(reader, 4));
             }
 
-            return (candidates, skipped);
+            /* Set 3: every candidate's ids, only over the cap. */
+            var allIds = new List<(int ObjectId, int StatsId)>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    allIds.Add((reader.GetInt32(0), reader.GetInt32(1)));
+                }
+            }
+
+            return (candidates, skipped, allIds);
         }
 
         public async Task<(IReadOnlyList<ColumnStatsReadRow> Rows, IReadOnlyList<StatError> Errors)> ReadStatisticsAsync(

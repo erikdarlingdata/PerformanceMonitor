@@ -39,53 +39,104 @@ public static class ColumnStatsQueries
     /// (heap or clustered partitions), stat_columns (the statistic's columns in order), clustered_key_columns (the clustering key
     /// columns of the table, only for a nonclustered index statistic, where SQL Server appends them to the density vector),
     /// stats_date_utc. stats_date is <c>STATS_DATE</c> in the server's local time, kept as it is for the change check; stats_date_utc is
-    /// the same instant moved to UTC by the server's current offset from UTC, for display. Both lists
+    /// the same instant in UTC, for display: converted with <c>AT TIME ZONE</c> from the server's own time zone where SQL Server reports
+    /// it (<c>CURRENT_TIMEZONE_ID()</c>: SQL Server 2022 and later, Azure SQL Database and Managed Instance), else moved by the server's
+    /// current offset from UTC, which is an hour off for a statistic updated on the other side of a daylight saving change. Both lists
     /// are comma-joined with a backslash escaping <c>\</c> and <c>,</c> inside a name, as SchemaCatalogQueries writes its lists, and
-    /// NULL when empty. Candidates are user tables and indexed views.
+    /// NULL when empty. Candidates are user tables and indexed views. The cap is applied to ids before any name or column list is
+    /// resolved, so a database over the cap pays for the names of the capped statistics only.
     /// Result set 2: one row of counts of statistics left out, each in exactly one bucket, first match winning: filtered,
     /// memory_optimized, xml_spatial_columnstore (the statistic belongs to an XML, spatial, or clustered or nonclustered columnstore
     /// index), never_updated (STATS_DATE is NULL), and over_cap (candidates beyond the cap). Priority: memory_optimized, then
     /// xml_spatial_columnstore, then filtered, then never_updated.
+    /// Result set 3: object_id, stats_id of EVERY candidate, only when the database is over the cap (empty otherwise): set 1 is then not
+    /// the whole database, and the caller needs every id to tell a dropped statistic from one beyond the cap.
     /// </summary>
-    public static readonly string CandidatesSql = Prologue + CandidatesBody.Replace(
-        "{CAP}", ColumnStatsModel.MaxStatisticsPerDatabase.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    public static readonly string CandidatesSql = BuildCandidatesSql(ColumnStatsModel.MaxStatisticsPerDatabase);
+
+    /// <summary><see cref="CandidatesSql"/> with another cap, so a test can put a small database over it.</summary>
+    public static string BuildCandidatesSql(int cap) =>
+        Prologue + CandidatesBody.Replace("{CAP}", cap.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
     private const string CandidatesBody = """
 IF OBJECT_ID(N'tempdb..#pm_cs_base') IS NOT NULL DROP TABLE #pm_cs_base;
+IF OBJECT_ID(N'tempdb..#pm_cs_top') IS NOT NULL DROP TABLE #pm_cs_top;
 
+/* Every user statistic, as ids and the facts the buckets and the order need: no names and no column lists yet. */
 SELECT
     s.object_id,
-    SCHEMA_NAME(o.schema_id) AS schema_name,
-    o.name AS object_name,
     s.stats_id,
-    s.name AS stats_name,
-    CASE WHEN i.index_id IS NOT NULL THEN N'index' WHEN s.auto_created = 1 THEN N'auto' ELSE N'user' END AS origin,
     s.has_filter,
     CONVERT(bit, ISNULL(t.is_memory_optimized, 0)) AS is_memory_optimized,
     CONVERT(bit, CASE WHEN i.type IN (3, 4, 5, 6) THEN 1 ELSE 0 END) AS excluded_index_type,
     STATS_DATE(s.object_id, s.stats_id) AS stats_date,
-    DATEADD(MINUTE, DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()), STATS_DATE(s.object_id, s.stats_id)) AS stats_date_utc,
     CONVERT(bigint, ISNULL(ps.table_rows, 0)) AS table_rows
 INTO #pm_cs_base
 FROM sys.stats AS s
 JOIN sys.objects AS o ON o.object_id = s.object_id
 LEFT JOIN sys.tables AS t ON t.object_id = o.object_id
 LEFT JOIN sys.indexes AS i ON i.object_id = s.object_id AND i.index_id = s.stats_id
-OUTER APPLY
+LEFT JOIN
 (
-    SELECT SUM(p.row_count) AS table_rows
+    SELECT p.object_id, SUM(p.row_count) AS table_rows
     FROM sys.dm_db_partition_stats AS p
-    WHERE p.object_id = s.object_id AND p.index_id IN (0, 1)
-) AS ps
+    WHERE p.index_id IN (0, 1)
+    GROUP BY p.object_id
+) AS ps ON ps.object_id = s.object_id
 WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0;
+
+DECLARE @candidates int =
+(
+    SELECT COUNT(*) FROM #pm_cs_base AS b
+    WHERE b.has_filter = 0 AND b.is_memory_optimized = 0 AND b.excluded_index_type = 0 AND b.stats_date IS NOT NULL
+);
 
 SELECT TOP ({CAP})
     b.object_id,
-    b.schema_name,
-    b.object_name,
     b.stats_id,
-    b.stats_name,
-    b.origin,
+    b.stats_date,
+    b.table_rows,
+    DATEADD(MINUTE, DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()), b.stats_date) AS stats_date_utc
+INTO #pm_cs_top
+FROM #pm_cs_base AS b
+WHERE b.has_filter = 0
+  AND b.is_memory_optimized = 0
+  AND b.excluded_index_type = 0
+  AND b.stats_date IS NOT NULL
+ORDER BY b.table_rows DESC, b.object_id, b.stats_id;
+
+/* The exact instant where the server names its time zone. CURRENT_TIMEZONE_ID() and AT TIME ZONE are in dynamic SQL, so an older build
+   that knows neither still compiles this batch and keeps the current offset above. */
+DECLARE @tz nvarchar(256) = NULL;
+IF CONVERT(int, SERVERPROPERTY('EngineEdition')) IN (5, 8) OR CONVERT(int, SERVERPROPERTY('ProductMajorVersion')) >= 16
+BEGIN
+    BEGIN TRY
+        EXECUTE sys.sp_executesql N'SET @z = CURRENT_TIMEZONE_ID();', N'@z nvarchar(256) OUTPUT', @z = @tz OUTPUT;
+        IF NOT EXISTS (SELECT 1 FROM sys.time_zone_info AS z WHERE z.name = @tz)
+        BEGIN
+            SET @tz = NULL;
+        END;
+
+        IF @tz IS NOT NULL
+        BEGIN
+            EXECUTE sys.sp_executesql
+                N'UPDATE #pm_cs_top SET stats_date_utc = CONVERT(datetime, CONVERT(datetime2(3), stats_date) AT TIME ZONE @z AT TIME ZONE N''UTC'');',
+                N'@z nvarchar(256)',
+                @z = @tz;
+        END;
+    END TRY
+    BEGIN CATCH
+        SET @tz = NULL;
+    END CATCH;
+END;
+
+SELECT
+    b.object_id,
+    SCHEMA_NAME(o.schema_id) AS schema_name,
+    o.name AS object_name,
+    b.stats_id,
+    s.name AS stats_name,
+    CASE WHEN i.index_id IS NOT NULL THEN N'index' WHEN s.auto_created = 1 THEN N'auto' ELSE N'user' END AS origin,
     b.stats_date,
     b.table_rows,
     STUFF((
@@ -95,7 +146,7 @@ SELECT TOP ({CAP})
         WHERE sc.object_id = b.object_id AND sc.stats_id = b.stats_id
         ORDER BY sc.stats_column_id
         FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 1, N'') AS stat_columns,
-    CASE WHEN b.origin = N'index' AND b.stats_id > 1 THEN STUFF((
+    CASE WHEN i.index_id IS NOT NULL AND b.stats_id > 1 THEN STUFF((
         SELECT N',' + REPLACE(REPLACE(c.name, N'\', N'\\'), N',', N'\,')
         FROM sys.index_columns AS ic
         JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -103,11 +154,10 @@ SELECT TOP ({CAP})
         ORDER BY ic.key_ordinal
         FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 1, N'') END AS clustered_key_columns,
     b.stats_date_utc
-FROM #pm_cs_base AS b
-WHERE b.has_filter = 0
-  AND b.is_memory_optimized = 0
-  AND b.excluded_index_type = 0
-  AND b.stats_date IS NOT NULL
+FROM #pm_cs_top AS b
+JOIN sys.objects AS o ON o.object_id = b.object_id
+JOIN sys.stats AS s ON s.object_id = b.object_id AND s.stats_id = b.stats_id
+LEFT JOIN sys.indexes AS i ON i.object_id = b.object_id AND i.index_id = b.stats_id
 ORDER BY b.table_rows DESC, b.object_id, b.stats_id;
 
 SELECT
@@ -115,11 +165,18 @@ SELECT
     ISNULL(SUM(CASE WHEN b.is_memory_optimized = 1 THEN 1 ELSE 0 END), 0) AS memory_optimized,
     ISNULL(SUM(CASE WHEN b.is_memory_optimized = 0 AND b.excluded_index_type = 1 THEN 1 ELSE 0 END), 0) AS xml_spatial_columnstore,
     ISNULL(SUM(CASE WHEN b.is_memory_optimized = 0 AND b.excluded_index_type = 0 AND b.has_filter = 0 AND b.stats_date IS NULL THEN 1 ELSE 0 END), 0) AS never_updated,
-    ISNULL(CASE WHEN COUNT(CASE WHEN b.is_memory_optimized = 0 AND b.excluded_index_type = 0 AND b.has_filter = 0 AND b.stats_date IS NOT NULL THEN 1 END) > {CAP}
-                THEN COUNT(CASE WHEN b.is_memory_optimized = 0 AND b.excluded_index_type = 0 AND b.has_filter = 0 AND b.stats_date IS NOT NULL THEN 1 END) - {CAP}
-                ELSE 0 END, 0) AS over_cap
+    CASE WHEN @candidates > {CAP} THEN @candidates - {CAP} ELSE 0 END AS over_cap
 FROM #pm_cs_base AS b;
 
+SELECT b.object_id, b.stats_id
+FROM #pm_cs_base AS b
+WHERE @candidates > {CAP}
+  AND b.has_filter = 0
+  AND b.is_memory_optimized = 0
+  AND b.excluded_index_type = 0
+  AND b.stats_date IS NOT NULL;
+
+DROP TABLE #pm_cs_top;
 DROP TABLE #pm_cs_base;
 """;
 
@@ -153,6 +210,9 @@ DROP TABLE #pm_cs_base;
     /// Header shape contract: the header call fails with error 213 (column count mismatch) when the chosen shape is wrong for the
     /// server. That is systematic, so the loop stops at the first such failure, records it as an errors row with error_number 213, and
     /// returns what it has; the caller sees 213 and runs the batch again with the other value of the flag.
+    /// Lock contract: after a lock timeout (1222) on one statistic, every later statistic of the same object_id in the batch is not tried
+    /// and gets its own errors row with error_number 1222, so a table under a schema lock costs one LOCK_TIMEOUT wait, not one per
+    /// statistic.
     /// </summary>
     public static string BuildReadBatch(IReadOnlyList<(int ObjectId, int StatsId)> stats, bool headerHasPersistedSamplePercent)
     {
@@ -169,7 +229,7 @@ DROP TABLE #pm_cs_base;
             + "[Filter Expression] nvarchar(max) NULL, [Unfiltered Rows] bigint NULL"
             + (headerHasPersistedSamplePercent ? ", [Persisted Sample Percent] float NULL" : string.Empty)
             + ");\r\n");
-        sb.Append("CREATE TABLE #dv (ord int IDENTITY(1, 1) NOT NULL, object_id int NULL, stats_id int NULL, all_density float NULL, average_length float NULL, columns nvarchar(4000) NULL);\r\n");
+        sb.Append("CREATE TABLE #dv (ord int IDENTITY(1, 1) NOT NULL, object_id int NULL, stats_id int NULL, all_density float NULL, average_length float NULL, columns nvarchar(max) NULL);\r\n");
         sb.Append("CREATE TABLE #errs (object_id int NOT NULL, stats_id int NOT NULL, error_number int NOT NULL, error_message nvarchar(4000) NULL);\r\n");
 
         for (var offset = 0; offset < stats.Count; offset += IdsPerInsert)
@@ -216,6 +276,12 @@ WHILE @i <= @n
 BEGIN
     SELECT @oid = object_id, @sid = stats_id FROM #todo WHERE ord = @i;
     SET @i += 1;
+    IF EXISTS (SELECT 1 FROM #errs WHERE object_id = @oid AND error_number = 1222)
+    BEGIN
+        INSERT #errs (object_id, stats_id, error_number, error_message)
+        VALUES (@oid, @sid, 1222, N'Not tried: an earlier statistic of this table hit the lock timeout in this batch.');
+        CONTINUE;
+    END;
     SET @target = NULL;
     SET @sname = NULL;
     SET @stage = 0;

@@ -464,6 +464,119 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
         }
     }
 
+    [Fact]
+    public async Task CandidateRead_OverASmallCap_CapsBeforeTheNames_AndListsEveryId()
+    {
+        await RunAsync(async r =>
+        {
+            /* The candidates the read must find: every statistic of a user table or indexed view, unfiltered, not columnstore, updated. */
+            var expected = Convert.ToInt32(await SqlScalarAsync(r.Db, """
+SELECT COUNT(*)
+FROM sys.stats AS s
+JOIN sys.objects AS o ON o.object_id = s.object_id
+LEFT JOIN sys.indexes AS i ON i.object_id = s.object_id AND i.index_id = s.stats_id
+WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 AND s.has_filter = 0 AND ISNULL(i.type, 0) NOT IN (3, 4, 5, 6)
+  AND STATS_DATE(s.object_id, s.stats_id) IS NOT NULL
+""", r.Ct), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(expected > 3, "The setup holds more than three candidate statistics.");
+
+            await using var connection = new SqlConnection(r.Db);
+            await connection.OpenAsync(r.Ct);
+            await using var command = new SqlCommand(ColumnStatsQueries.BuildCandidatesSql(2), connection);
+            await using var reader = await command.ExecuteReaderAsync(r.Ct);
+            var capped = new List<(int ObjectId, int StatsId, long Rows)>();
+            while (await reader.ReadAsync(r.Ct))
+            {
+                capped.Add((reader.GetInt32(0), reader.GetInt32(3), reader.GetInt64(7)));
+            }
+
+            Assert.True(await reader.NextResultAsync(r.Ct) && await reader.ReadAsync(r.Ct));
+            var overCap = Convert.ToInt32(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(await reader.NextResultAsync(r.Ct));
+            var all = new List<(int ObjectId, int StatsId)>();
+            while (await reader.ReadAsync(r.Ct))
+            {
+                all.Add((reader.GetInt32(0), reader.GetInt32(1)));
+            }
+
+            /* Two rows, largest tables first; the rest counted over the cap; every candidate's id listed beside them. */
+            Assert.Equal(2, capped.Count);
+            Assert.True(capped[0].Rows >= capped[1].Rows);
+            Assert.Equal(expected - 2, overCap);
+            Assert.Equal(expected, all.Count);
+            Assert.All(capped, c => Assert.Contains((c.ObjectId, c.StatsId), all));
+        });
+    }
+
+    [Fact]
+    public async Task CandidateRead_UnderTheCap_ListsNoIds()
+    {
+        await RunAsync(
+            async r =>
+            {
+                var source = new SqlColumnStatsSource(r.Runner);
+                await using var connection = await source.OpenAsync(r.Server, null, r.Ct);
+                var (candidates, skipped, allIds) = await connection.ReadCandidatesAsync(r.Database, r.Ct);
+
+                Assert.NotEmpty(candidates);
+                Assert.Equal(0, skipped.OverCap);
+                Assert.Empty(allIds);
+            },
+            schemaPass: false);
+    }
+
+    [Fact]
+    public async Task ReadBatch_TableUnderASchemaLock_CostsOneLockWait_ForAllItsStatistics()
+    {
+        await RunAsync(
+            async r =>
+            {
+                var ids = new List<(int ObjectId, int StatsId)>();
+                await using (var catalog = new SqlConnection(r.Db))
+                {
+                    await catalog.OpenAsync(r.Ct);
+                    await using var list = new SqlCommand(
+                        "SELECT s.object_id, s.stats_id FROM sys.stats AS s WHERE s.object_id = OBJECT_ID(N'dbo.Orders') AND s.has_filter = 0 ORDER BY s.stats_id", catalog);
+                    await using var reader = await list.ExecuteReaderAsync(r.Ct);
+                    while (await reader.ReadAsync(r.Ct))
+                    {
+                        ids.Add((reader.GetInt32(0), reader.GetInt32(1)));
+                    }
+                }
+
+                Assert.True(ids.Count >= 3, "dbo.Orders holds at least three unfiltered statistics.");
+
+                /* An open ALTER TABLE holds a schema modification lock on the table until it commits. */
+                await using var holder = new SqlConnection(r.Db);
+                await holder.OpenAsync(r.Ct);
+                await using var transaction = (SqlTransaction)await holder.BeginTransactionAsync(r.Ct);
+                await using (var ddl = new SqlCommand("ALTER TABLE dbo.Orders ADD Extra int NULL;", holder, transaction))
+                {
+                    await ddl.ExecuteNonQueryAsync(r.Ct);
+                }
+
+                try
+                {
+                    var source = new SqlColumnStatsSource(r.Runner);
+                    await using var connection = await source.OpenAsync(r.Server, null, r.Ct);
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    var (rows, errors) = await connection.ReadStatisticsAsync(r.Database, ids, headerHasPersistedSamplePercent: true, r.Ct);
+                    clock.Stop();
+
+                    Assert.Empty(rows);
+                    Assert.Equal(ids.Count, errors.Count);
+                    Assert.All(errors, e => Assert.Equal(1222, e.Number));
+                    /* LOCK_TIMEOUT is 5 seconds: one wait for the table, not one per statistic. */
+                    Assert.InRange(clock.Elapsed.TotalSeconds, 4.5, 9.0);
+                }
+                finally
+                {
+                    await transaction.RollbackAsync(CancellationToken.None);
+                }
+            },
+            schemaPass: false);
+    }
+
     /// <summary>
     /// A server with <c>MEMORY_OPTIMIZED TEMPDB_METADATA = ON</c> raises error 41317 on set-based reads of the statistics DMVs; the per-statistic
     /// DBCC read must not. Skipped unless <c>DARLING_TEST_SQL_MEMOPT_TEMPDB</c> names such a server (host[,port]); the credentials are the

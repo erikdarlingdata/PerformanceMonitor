@@ -32,12 +32,13 @@ public static partial class DarlingCliCommands
     /// <summary>The grammar <c>--grant-script</c> prints when its arguments are wrong. Pure ASCII.</summary>
     public static string GrantScriptUsageText() =>
         "Usage:" + Environment.NewLine +
-        "  --grant-script <server-name> [--finops] [--azure] [--rds] [--column-stats-databases <db1,db2>] [--service-account <account>] [--config <path>]" + Environment.NewLine +
+        "  --grant-script <server-name> [--finops] [--azure] [--rds] [--column-stats-databases <db>]... [--service-account <account>] [--config <path>]" + Environment.NewLine +
         "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
         "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
         "  --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--service-account <account>]" + Environment.NewLine +
         "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
         "  --column-stats-databases adds database-level SELECT, only in the databases you list, for the optional column_stats collector (column selectivity)." + Environment.NewLine +
+        "      One database per option, repeated for each: the value is taken whole, so a name with a comma or a space works (quote it)." + Environment.NewLine +
         "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
         "  prints the Azure SQL Database form: a contained user and database-scoped grants." + Environment.NewLine +
         "  --rds (implied by a *.rds.amazonaws.com host) prints the Amazon RDS for SQL Server form: no CONNECT ANY DATABASE, ALTER SETTINGS or" + Environment.NewLine +
@@ -98,12 +99,17 @@ public static partial class DarlingCliCommands
                             serviceAccount = value;
                             break;
                         case "--column-stats-databases":
-                            columnStatsDatabases = value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                            if (columnStatsDatabases.Count == 0)
+                            /* One name per occurrence, taken whole: a database name can hold a comma, so a list cannot be split on one. */
+                            if (string.IsNullOrWhiteSpace(value))
                             {
-                                errorMessage = "--column-stats-databases needs at least one database name.";
+                                errorMessage = "--column-stats-databases needs a database name.";
                                 return false;
+                            }
+
+                            columnStatsDatabases ??= [];
+                            if (!columnStatsDatabases.Contains(value, StringComparer.OrdinalIgnoreCase))
+                            {
+                                columnStatsDatabases.Add(value);
                             }
 
                             break;

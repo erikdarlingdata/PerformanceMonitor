@@ -20,7 +20,11 @@ using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
-/// <summary>What one statistic says about a column or a column list: numbers and where they came from, never a value.</summary>
+/// <summary>
+/// What one statistic says about a column or a column list: numbers and where they came from, never a value. <c>stats_updated_at</c> is
+/// UTC: exact where the server reports its time zone (SQL Server 2022 and later, Azure SQL Database and Managed Instance), otherwise moved
+/// by the server's current offset from UTC, so an hour off for a statistic updated on the other side of a daylight saving change.
+/// </summary>
 internal sealed record SelectivityItem(
     [property: JsonPropertyName("selectivity")] double? Selectivity,
     [property: JsonPropertyName("distinct_estimate")] double? DistinctEstimate,
@@ -63,8 +67,12 @@ internal sealed record SelectivityFacts(
 
 internal sealed record SelectivityStatus(string Status, string Note, DateTime? CheckedAt);
 
-/// <summary>#8798: what <c>get_object_definition</c> shows beside a definition: per-column and per-combination selectivity, and the status that says why it is or is not there.</summary>
-internal sealed record SelectivityResult(SelectivityStatus Status, ColumnSelectivityView? View);
+/// <summary>
+/// #8798: what <c>get_object_definition</c> shows beside a definition: per-column and per-combination selectivity, and the status that says
+/// why it is or is not there. <paramref name="OptedIn"/> is false when the column_stats collector is off for the server: the answer then
+/// adds only <c>selectivity_status</c>, so a server that never turned it on gets the definition it got before the collector existed.
+/// </summary>
+internal sealed record SelectivityResult(SelectivityStatus Status, ColumnSelectivityView? View, bool OptedIn = true);
 
 /// <summary>
 /// #8798: column selectivity in <c>get_object_definition</c>. The shape (<see cref="Shape"/>) and the status (<see cref="Decide"/>) are pure;
@@ -78,6 +86,9 @@ internal sealed record SelectivityResult(SelectivityStatus Status, ColumnSelecti
 internal static class ColumnSelectivity
 {
     internal const string NoLeadingStatisticNote = "no statistic leads with this column";
+
+    /* The store's own message stays in the warning log: it can name store details the MCP caller has no business seeing. */
+    internal const string UnavailableNote = "Column selectivity could not be read from the store; the definition is complete without it.";
 
     /// <summary>The one sentence for trace flag 9485, in the run note and in the status note.</summary>
     internal const string TraceFlagSentence =
@@ -271,9 +282,12 @@ LIMIT 1";
     /// </summary>
     internal static string GrantStatement(string database) =>
         $"USE {QuoteName(database)}; IF DATABASE_PRINCIPAL_ID(N'<monitoring login>') IS NULL CREATE USER [<monitoring login>] FOR LOGIN [<monitoring login>]; GRANT SELECT TO [<monitoring login>]; "
-        + $"(or print the block with --grant-script <server> --column-stats-databases {database})";
+        + $"(or print the block with --grant-script <server> --column-stats-databases {QuoteArgument(database)})";
 
     private static string QuoteName(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
+
+    /* One command-line argument, whatever the name holds (a space, a comma): double quotes, an inner double quote escaped. */
+    internal static string QuoteArgument(string value) => "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
 
     private static string Utc(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
@@ -305,7 +319,7 @@ LIMIT 1";
         if (!columnStatsOn || !schemaOn || !inScope)
         {
             var off = Decide(new SelectivityFacts(columnStatsOn, schemaOn, inScope, inOwnList, null, false, false, 0, null, null), askedDatabase, at);
-            return new SelectivityResult(off, null);
+            return new SelectivityResult(off, null, OptedIn: columnStatsOn);
         }
 
         var keyTexts = keys.Select(DarlingSchemaCapture.KeyText).Distinct(StringComparer.Ordinal).ToArray();
@@ -343,8 +357,9 @@ LIMIT 1";
         {
             ReadScope.Warn($"get_object_definition could not read column selectivity for {askedDatabase}; the definition is returned without it.", ex);
             return new SelectivityResult(
-                new SelectivityStatus("unavailable", "Column selectivity could not be read from the store (" + ex.Message + "); the definition is complete without it.", null),
-                null);
+                new SelectivityStatus("unavailable", UnavailableNote, null),
+                null,
+                OptedIn: true);
         }
     }
 

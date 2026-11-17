@@ -65,6 +65,11 @@ public static class DarlingColumnStatsCapture
     private const string GrantSentence =
         "DBCC SHOW_STATISTICS needs SELECT in the database: GRANT SELECT TO the monitoring login there (the column_stats block of the grant script)";
 
+    /* A server message kept in a run row (the sample error, a failed read's note) is cut here, with McpHelpers.Truncate's marker. */
+    internal const int MaxStoredMessageChars = 500;
+
+    private const string NoSelectRefusal = "no_select";
+
     private const int LockTimeoutError = 1222;
     private const int HeaderShapeError = 213;
 
@@ -345,12 +350,20 @@ public static class DarlingColumnStatsCapture
                 if (!await TimedSql(() => connection.HasSelectAsync(database, token)))
                 {
                     _noSelect.Add(database);
-                    _rows.Add(Row(database, key, kind, 0, tally, SkipCounts.None, "no_select", complete: false, "The login has no SELECT in this database; nothing was read."));
+
+                    /* One run row per refusal, not one per run: while the newest row already says no_select the answer has not changed,
+                       and that row stays the newest, so the status in get_object_definition still reads the refusal from it. */
+                    var previous = await TimedStore(() => ColumnStatsStore.LoadNewestRefusedAsync(Store, _server.ServerId, keyText, database, _ct));
+                    if (previous != NoSelectRefusal)
+                    {
+                        _rows.Add(Row(database, key, kind, 0, tally, SkipCounts.None, NoSelectRefusal, complete: false, "The login has no SELECT in this database; nothing was read."));
+                    }
+
                     return;
                 }
 
                 _granted++;
-                var (listed, skippedByRead) = await TimedSql(() => connection.ReadCandidatesAsync(database, token));
+                var (listed, skippedByRead, allIds) = await TimedSql(() => connection.ReadCandidatesAsync(database, token));
                 var candidates = listed.OrderByDescending(c => c.TableRows).Take(ColumnStatsModel.MaxStatisticsPerDatabase).ToList();
                 skipped = skippedByRead with { OverCap = skippedByRead.OverCap + listed.Count - candidates.Count };
                 candidateCount = candidates.Count;
@@ -372,10 +385,14 @@ public static class DarlingColumnStatsCapture
                 var stored = await TimedStore(() => ColumnStatsStore.LoadStoredAsync(Store, keyText, database, _ct));
                 var byId = candidates.ToDictionary(c => (c.ObjectId, c.StatsId));
 
-                /* Over the cap the list is not the whole database, so a statistic missing from it is not known to be gone. */
-                if (skipped.OverCap == 0)
+                /* Over the cap the read list is not the whole database: a statistic is gone when it is missing from the list of every
+                   candidate's ids the read returned beside it. Without that list (none came back) nothing is known to be gone. */
+                var existing = skippedByRead.OverCap == 0
+                    ? listed.Select(c => (c.ObjectId, c.StatsId)).ToHashSet()
+                    : allIds.Count > 0 ? allIds.ToHashSet() : null;
+                if (existing is not null)
                 {
-                    var gone = stored.Keys.Where(k => !byId.ContainsKey(k)).ToList();
+                    var gone = stored.Keys.Where(k => !existing.Contains(k)).ToList();
                     await TimedStore(() => ColumnStatsStore.DeleteStatisticsAsync(Store, keyText, database, gone, _ct));
                     tally.Deleted = gone.Count;
                 }
@@ -417,7 +434,7 @@ public static class DarlingColumnStatsCapture
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not NpgsqlException)
             {
                 complete = false;
-                note = "The read failed: " + ex.Message;
+                note = "The read failed: " + McpHelpers.Truncate(ex.Message, MaxStoredMessageChars);
                 _failed.Add(database);
                 _runner.Logger?.LogWarning("[{Server}] [{Database}] The column_stats read failed: {Message}", _server.Config.DisplayName, database, ex.Message);
             }
@@ -488,7 +505,7 @@ public static class DarlingColumnStatsCapture
                 var name = byId.TryGetValue((error.ObjectId, error.StatsId), out var stat)
                     ? stat.SchemaName + "." + stat.ObjectName + " (" + stat.StatsName + ")"
                     : "a statistic";
-                tally.SampleError ??= string.Create(CultureInfo.InvariantCulture, $"{name}: error {error.Number}: {error.Message}");
+                tally.SampleError ??= string.Create(CultureInfo.InvariantCulture, $"{name}: error {error.Number}: {McpHelpers.Truncate(error.Message, MaxStoredMessageChars)}");
             }
         }
 

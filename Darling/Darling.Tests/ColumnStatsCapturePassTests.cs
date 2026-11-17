@@ -41,6 +41,12 @@ public sealed class ColumnStatsCapturePassTests
         public HashSet<string> NoSelect { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, List<StatCandidate>> Candidates { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, SkipCounts> Skipped { get; } = new(StringComparer.Ordinal);
+
+        /* The ids of every candidate, which the read returns only over the cap. */
+        public Dictionary<string, List<(int ObjectId, int StatsId)>> AllIds { get; } = new(StringComparer.Ordinal);
+
+        /* When set, the candidate read of every database throws with this message. */
+        public string? CandidatesFailure { get; set; }
         public Dictionary<(int ObjectId, int StatsId), (int Number, string Message)> Errors { get; } = new();
         public List<(string Database, List<(int ObjectId, int StatsId)> Stats, bool Shape)> Reads { get; } = new();
         public Version Version { get; set; } = new(16, 0, 4135);
@@ -74,10 +80,14 @@ public sealed class ColumnStatsCapturePassTests
             public Task<bool> HasSelectAsync(string database, CancellationToken cancellationToken) =>
                 Task.FromResult(!_source.NoSelect.Contains(database));
 
-            public Task<(IReadOnlyList<StatCandidate> Candidates, SkipCounts Skipped)> ReadCandidatesAsync(string database, CancellationToken cancellationToken) =>
-                Task.FromResult<(IReadOnlyList<StatCandidate>, SkipCounts)>((
-                    _source.Candidates.TryGetValue(database, out var list) ? list.ToList() : new List<StatCandidate>(),
-                    _source.Skipped.TryGetValue(database, out var skipped) ? skipped : SkipCounts.None));
+            public Task<(IReadOnlyList<StatCandidate> Candidates, SkipCounts Skipped, IReadOnlyList<(int ObjectId, int StatsId)> AllIds)> ReadCandidatesAsync(
+                string database, CancellationToken cancellationToken) =>
+                _source.CandidatesFailure is { } failure
+                    ? throw new InvalidOperationException(failure)
+                    : Task.FromResult<(IReadOnlyList<StatCandidate>, SkipCounts, IReadOnlyList<(int, int)>)>((
+                        _source.Candidates.TryGetValue(database, out var list) ? list.ToList() : new List<StatCandidate>(),
+                        _source.Skipped.TryGetValue(database, out var skipped) ? skipped : SkipCounts.None,
+                        _source.AllIds.TryGetValue(database, out var all) ? all.ToList() : new List<(int, int)>()));
 
             public Task<(IReadOnlyList<ColumnStatsReadRow> Rows, IReadOnlyList<StatError> Errors)> ReadStatisticsAsync(
                 string database, IReadOnlyList<(int ObjectId, int StatsId)> stats, bool headerHasPersistedSamplePercent, CancellationToken cancellationToken)
@@ -738,6 +748,106 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
             Assert.Equal("baseline|3|3|0|0|7|0|-|true", await rig.LastRunAsync(Sales, ct));
             Assert.Equal("1|2|3|4", await rig.ScalarAsync(
                 "SELECT skipped_filtered || '|' || skipped_memory_optimized || '|' || skipped_xml_spatial_columnstore || '|' || skipped_never_updated FROM collect.column_stats_runs", ct));
+        });
+    }
+
+    [Fact]
+    public async Task OverCap_AStatisticGoneFromTheFullIdList_IsDeleted()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            rig.Source.Probes.Add(Probe(Sales, 5));
+            rig.Source.Candidates[Sales] = [Stat(30, 1, s_t0, 3000), Stat(20, 1, s_t0, 200), Stat(10, 1, s_t0, 10)];
+            var server = rig.Server();
+            await rig.RunAsync(server, ct);
+            Assert.Equal("3", await rig.StoredStatsAsync(Sales, ct));
+
+            /* The database is now over the cap: the read list holds the largest table only, (10, 1) was dropped, and (20, 1) is still
+               there beyond the cap. */
+            rig.Source.Candidates[Sales] = [Stat(30, 1, s_t0, 3000)];
+            rig.Source.Skipped[Sales] = new SkipCounts(0, 0, 0, 0, 1);
+            rig.Source.AllIds[Sales] = [(30, 1), (20, 1)];
+            await rig.RunAsync(server, ct);
+
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats WHERE object_id = 10", ct));
+            Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats WHERE object_id = 20", ct));
+            Assert.Equal("incremental|1|0|1|0|1|0|-|true", await rig.LastRunAsync(Sales, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ServerMessages_AreCutBeforeTheyAreStored()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.Source.Errors[(100, 2)] = (2601, new string('x', 20_000));
+            var server = rig.Server();
+            await rig.RunAsync(server, ct);
+
+            var sample = int.Parse(await rig.ScalarAsync("SELECT max(length(sample_error)) FROM collect.column_stats_runs", ct), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.InRange(sample, DarlingColumnStatsCapture.MaxStoredMessageChars, DarlingColumnStatsCapture.MaxStoredMessageChars + 200);
+
+            rig.Source.CandidatesFailure = new string('y', 20_000);
+            await rig.RunAsync(server, ct);
+            var note = int.Parse(await rig.ScalarAsync("SELECT length(note) FROM collect.column_stats_runs WHERE note LIKE 'The read failed%'", ct), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.InRange(note, DarlingColumnStatsCapture.MaxStoredMessageChars, DarlingColumnStatsCapture.MaxStoredMessageChars + 100);
+        });
+    }
+
+    [Fact]
+    public async Task NoSelect_WritesOneRunRowUntilTheAnswerChanges()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.Source.Probes.Add(Probe(Reports, 6));
+            rig.Source.Candidates[Reports] = [Stat(600, 1, s_t0)];
+            rig.Source.NoSelect.Add(Reports);
+            var server = rig.Server();
+
+            for (var run = 0; run < 3; run++)
+            {
+                var result = await rig.RunAsync(server, ct);
+                Assert.Contains(Reports, result.HostNote);
+            }
+
+            /* One refusal row for ReportsDb, and it is still the newest, so the status still reads the refusal; SalesDb has a row per run. */
+            Assert.Equal("1", await rig.ScalarAsync($"SELECT count(*) FROM collect.column_stats_runs WHERE database_name = '{Reports}'", ct));
+            Assert.Equal("3", await rig.ScalarAsync($"SELECT count(*) FROM collect.column_stats_runs WHERE database_name = '{Sales}'", ct));
+            Assert.EndsWith("|no_select|false", await rig.LastRunAsync(Reports, ct), StringComparison.Ordinal);
+
+            /* The grant arrives: the answer changed, a row says so. Then it is revoked: a new refusal row. */
+            rig.Source.NoSelect.Clear();
+            await rig.RunAsync(server, ct);
+            Assert.EndsWith("|-|true", await rig.LastRunAsync(Reports, ct), StringComparison.Ordinal);
+            rig.Source.NoSelect.Add(Reports);
+            await rig.RunAsync(server, ct);
+            await rig.RunAsync(server, ct);
+            Assert.Equal("2", await rig.ScalarAsync($"SELECT count(*) FROM collect.column_stats_runs WHERE database_name = '{Reports}' AND refused = 'no_select'", ct));
+            Assert.EndsWith("|no_select|false", await rig.LastRunAsync(Reports, ct), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task NoDatabaseHasGrant_RepeatedRuns_TheNewestServerRunStillShowsEveryRefusal()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.Source.Probes.Add(Probe(Reports, 6));
+            rig.Source.NoSelect.Add(Sales);
+            rig.Source.NoSelect.Add(Reports);
+            var server = rig.Server();
+
+            await rig.RunAsync(server, ct);
+            var second = await rig.RunAsync(server, ct);
+
+            Assert.Equal(0, second.Rows);
+            Assert.Contains("precondition", second.HostNote, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("2|2", await rig.ScalarAsync(
+                "SELECT count(*) || '|' || count(*) FILTER (WHERE refused = 'no_select') FROM collect.column_stats_runs WHERE server_id = " + server.ServerId
+                + " AND collection_time = (SELECT max(collection_time) FROM collect.column_stats_runs WHERE server_id = " + server.ServerId + ")", ct));
         });
     }
 

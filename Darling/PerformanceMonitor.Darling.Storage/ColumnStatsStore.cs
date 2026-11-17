@@ -238,6 +238,26 @@ WHERE server_id = $1 AND database_name = $2", c) { CommandTimeout = CommandTimeo
             reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
 
+    /// <summary>
+    /// The <c>refused</c> value of the newest run row this server wrote for the (history key, database), or null when that row was not a
+    /// refusal or there is none. A run that is refused for the same reason again writes no new row (#8798), so the newest row keeps
+    /// saying why until the answer changes.
+    /// </summary>
+    internal static async Task<string?> LoadNewestRefusedAsync(NpgsqlConnection c, int serverId, string historyKey, string database, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        await using var cmd = new NpgsqlCommand(@"
+SELECT refused
+FROM collect.column_stats_runs
+WHERE database_name = $1 AND history_key = $2 AND server_id = $3
+ORDER BY collection_time DESC, collection_id DESC
+LIMIT 1", c) { CommandTimeout = CommandTimeoutSeconds };
+        Param(cmd, NpgsqlDbType.Text, database);
+        Param(cmd, NpgsqlDbType.Text, historyKey);
+        Param(cmd, NpgsqlDbType.Integer, serverId);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
+
     /// <summary>Every state row of one server: the databases its runs have stamped or read.</summary>
     internal static async Task<IReadOnlyList<ColumnStatsStateRow>> LoadServerStatesAsync(NpgsqlConnection c, int serverId, CancellationToken ct)
     {

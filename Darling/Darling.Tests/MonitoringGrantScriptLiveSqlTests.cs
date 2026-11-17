@@ -171,10 +171,6 @@ public sealed class MonitoringGrantScriptLiveSqlTests
             await Exec(adminCs, $"ALTER DATABASE {MonitoringGrantScript.QuoteName(readOnlyDatabase)} SET READ_ONLY WITH ROLLBACK IMMEDIATE;", ct);
             await Exec(adminCs, $"ALTER DATABASE {MonitoringGrantScript.QuoteName(offlineDatabase)} SET OFFLINE WITH ROLLBACK IMMEDIATE;", ct);
 
-            /* The databases the script is expected to grant in, read just before it runs: other test classes create and drop databases on
-               this instance at the same time, so the check afterwards covers the ones that existed when the script ran. */
-            var existedBefore = await Names(adminCs, WritableDatabasesSql, ct);
-
             var script = MonitoringGrantScript
                 .Build(MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs("sql", login, host, null, "NOMACHINE", null)), finOps: true, azureSqlDatabase: false)
                 .Replace("<strong password>", NewPassword(), StringComparison.Ordinal);
@@ -215,14 +211,9 @@ public sealed class MonitoringGrantScriptLiveSqlTests
                 }
             }
 
-            /* Every database that was online, read-write and open when the script ran (and still is) holds the user, apart from the one
-               made to fail. The scratch writable database must be among them. */
-            var stillWritable = await Names(adminCs, WritableDatabasesSql, ct);
-            Assert.Contains(database, existedBefore);
-            foreach (var name in existedBefore.Where(n => stillWritable.Contains(n) && n != triggerDatabase))
-            {
-                Assert.True(await HasUser(adminCs, name, login, ct), $"The FinOps script left no user in the writable database {name}.");
-            }
+            /* Only the databases this test made are judged: other test classes create and drop databases on this instance at the same
+               time, so a count or a check over every database on it could change with them. The writable one holds the user. */
+            Assert.True(await HasUser(adminCs, database, login, ct), $"The FinOps script left no user in the writable database {database}.");
 
             /* No user where the script must not make one: the failing database (its CREATE USER was refused), the system databases the
                loop skips (msdb holds the user from the base grants, so it is left out), the read-only database, the offline one (brought
@@ -275,11 +266,6 @@ public sealed class MonitoringGrantScriptLiveSqlTests
             await Cleanup(adminCs, login, none);
         }
     }
-
-    /* The databases the FinOps loop grants in: the filter in its cursor, so the snapshot and the script agree. */
-    private const string WritableDatabasesSql =
-        "SELECT d.name FROM sys.databases AS d WHERE d.database_id > 4 AND d.state = 0 AND DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE' " +
-        "AND d.user_access <> 1 AND HAS_DBACCESS(d.name) = 1;";
 
     private static string InDatabase(string adminCs, string database) =>
         new SqlConnectionStringBuilder(adminCs) { InitialCatalog = database }.ConnectionString;

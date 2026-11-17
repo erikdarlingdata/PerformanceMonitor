@@ -1066,7 +1066,9 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             var answer = await Parse(Definition(s, ct, "dbo.Orders"));
 
             Assert.Equal("unavailable", answer.GetProperty("selectivity_status").GetString());
-            Assert.Contains("could not be read", answer.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+            /* The fixed note: the store's own message (here 'relation ... does not exist') stays in the log. */
+            Assert.Equal(ColumnSelectivity.UnavailableNote, answer.GetProperty("selectivity_note").GetString());
+            Assert.DoesNotContain("relation", answer.GetRawText(), StringComparison.OrdinalIgnoreCase);
             Assert.Equal(new[] { "Id", "Total" }, Names(answer.GetProperty("columns"), "name"));
             Assert.Equal(JsonValueKind.Null, answer.GetProperty("column_combinations").ValueKind);
         });
@@ -1083,9 +1085,41 @@ public sealed class DarlingMcpSchemaToolsLiveTests
 
             var answer = await Parse(Definition(s, ct, "dbo.Orders"));
 
+            /* Not opted in: the answer is the one get_object_definition gave before column selectivity existed, plus selectivity_status
+               only. No per-column field and no combinations, not even as nulls. */
             Assert.Equal("not_collected", answer.GetProperty("selectivity_status").GetString());
-            Assert.Contains("column_stats", answer.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(
+                new[]
+                {
+                    "server", "database_name", "ag_name", "resolved_from_ag", "as_of", "state", "dropped_at", "note", "object", "version", "versions_kept",
+                    "history_starts_at", "properties", "column_count", "column_offset", "columns_returned", "columns_has_more", "next_column_offset", "truncated",
+                    "budget_note", "selectivity_status", "columns", "index_count", "indexes", "constraint_count", "constraints", "trigger_count", "triggers",
+                },
+                answer.EnumerateObject().Select(p => p.Name).ToArray());
+            var columnKeys = new[]
+            {
+                "ordinal", "name", "type_name", "max_length", "precision", "scale", "is_nullable", "identity_seed", "identity_increment",
+                "computed_definition", "is_persisted", "default_name", "default_definition", "collation_name", "is_sparse", "is_rowguidcol",
+            };
+            Assert.All(answer.GetProperty("columns").EnumerateArray(), c => Assert.Equal(columnKeys, c.EnumerateObject().Select(p => p.Name).ToArray()));
             Assert.Equal(new[] { "Id", "Total" }, Names(answer.GetProperty("columns"), "name"));
+        });
+    }
+
+    [Fact]
+    public async Task SchemaObjectsOff_ColumnStatsOn_KeepsTheSelectivityFields()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            await DarlingMcpTestData.ExecAsync(
+                s.Connection, ct, "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ($1, 'column_stats', true)", s_serverId);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            /* Opted in, but schema_objects is off: the full shape, with the note that says why there are no numbers. */
+            Assert.Equal("not_collected", answer.GetProperty("selectivity_status").GetString());
+            Assert.Contains("schema_objects", answer.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
             Assert.Equal(JsonValueKind.Null, answer.GetProperty("columns")[0].GetProperty("selectivity").ValueKind);
             Assert.Equal(JsonValueKind.Null, answer.GetProperty("column_combinations").ValueKind);
         });
