@@ -271,3 +271,16 @@ Never expose this dashboard to the internet.
 The sidebar shows the session as one line in its top block, and at 768 px and narrower in the top bar. The line is hidden while the sidebar is collapsed. Select it to open a panel with these rows: Name (for an `oidc` sign-in that sent one), Signed in as, Seat, Signed in with and Session ends. For an `oidc` sign-in the Seat row names the value that granted it, for example `admin (granted by dba-admins)`. That value is a group or a role, whichever `roleClaim` reads. `admin (no role mapping set)` appears only when `role_mapping` is `false`: OpenID Connect is on with no `adminRoles` or `viewerRoles`, so every signed-in user is an admin. With a mapping set and no grant to name, the row is the bare seat word. A shared-token session reads `shared token · admin`, or `shared token · read-only` when its token is under the length floor or a front door lowered it for a viewer; `method` is `shared_token` for any session that has a cookie, and `reads_only` only for a request with no cookie (tokenless loopback). Sign out appears only for a session that has a sign-in cookie. Escape closes the panel.
 
 `/api/session` carries no name and no owner key, and on a store's dashboard a scoped reader can read `/api/me` as well (a front door refuses a scoped reader every `/api` path).
+
+#### My MCP tokens
+
+When the service serves [personal MCP tokens](configuration-mcp.md#personal-tokens), `/api/me` reports `personal_tokens: true` and the account menu links to **My MCP tokens** (`#/mcp-tokens`). On this page a person makes a token (a name, a lifetime and a role), sees the value once, and lists and revokes their own tokens. An admin seat can also list and revoke everyone's tokens, whatever method that admin signed in with.
+
+| Seat | Can make | Can list and revoke |
+|---|---|---|
+| Read-only, signed in with OpenID Connect | `reader` tokens | Their own |
+| Admin, signed in with OpenID Connect | Up to `mcp.personalTokens.adminRole` | Everyone's |
+| Admin, signed in another way (a token, a managed group) | None | Everyone's |
+| Any other seat | None | None |
+
+The routes are `/api/mcp-tokens` and `/api/mcp-tokens/{id}/revoke`. They are not behind `web.allowAdminWrites`: a read-only OpenID Connect seat may POST exactly these two routes, with the same Host, SameSite and JSON checks as every other write. A front door answers `/api/mcp-tokens*` itself with 404 and never forwards it, and its `/api/me` reports `personal_tokens: false`.

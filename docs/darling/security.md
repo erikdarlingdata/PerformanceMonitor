@@ -216,6 +216,28 @@ A front door (see [The front door](front-door.md)) keeps the MCP token, the agen
 
 The roles that count at a store are the roles of the tokens the front door holds, not the roles of the person at the front door. Every web call reaches a store through the front door's shared-token sign-in, and every MCP call from an operator reaches it with the operator token. A change a person makes through the front door is attributed at the store to that shared sign-in, and the front door logs who made it: one Information line per change with the signed-in name and role, the store, the method, the path without its query string, and the store's status code (never the body, a token, a cookie or the query string). So give a person who must not change things a read-only role at the front door. For that person the front door sends each call with a header that makes the store answer it as a read-only caller, for that one call: the store refuses the reads it refuses a viewer and reports a viewer's flags. The header can only lower what the session may do, and it names nobody. Every store must run a build that reads it: the front door refuses a read-only person's call to a store that does not confirm it. Give an agent the `agent` role, which the front door forwards with the store's agent-role token only. Behind a front door, every agent that uses that store reaches it with the same agent-role token, so a mute or digest rule written without a claim (see Agent Changes below) is journaled as `agent:<that token's name>` for all of them, and the journal cannot tell those agents apart. A change made with a claim names its agent in `agent_action.agent_id`, which the caller sets. A token with no name configured is journaled as `agent:legacy-token`. Give the front door only the tokens that its users need.
 
+## Personal MCP tokens
+
+With [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) on, a person signed in with OpenID Connect makes their own MCP token. This section says how it is held and when it stops working.
+
+**Format and storage.** A token is `dpt1_`, a 16-hex id, `_` and a 43-character secret. The value is shown once, at creation. No route, log or journal row shows it again. The store keeps the id and the SHA-256 of the secret in `config.mcp_personal_token`. The table is owner-only: nothing is granted to the admin, viewer, web or mcp logins, and owner-only write and truncate triggers guard it. Every read and write runs on the service's owner connection, so no request login can read the hashes. The journal events `mcp_personal_token_created`, `mcp_personal_token_revoked` and `mcp_personal_token_expiry_cut` are written only by the service. If a person's subject is not a valid login name, journal rows written through the person-scoped MCP tools use `person:mcp` instead.
+
+**Lifetime and cap.** A token lives at most `maxLifetimeDays` (30 by default) and a person holds at most `maxTokensPerPerson` (5 by default). Dead tokens, expired or revoked, are deleted 30 days later.
+
+**What revokes a token.**
+
+- The person, or any admin, revokes it.
+- A sign-in that drops the seat. A person whose sign-in is refused loses all their tokens. A person who now signs in read-only loses their operator tokens. An admin who signs in under `adminRole: reader` loses their operator tokens.
+- The start sweep, for lowered settings. A lower `maxLifetimeDays` cuts the expiries, and `adminRole: reader` revokes operator tokens. Until the sweep runs, an operator token under `adminRole: reader` is already served as `reader`.
+
+**The delay.** A revoke takes effect at once for this service's own dashboard and sign-ins. Anywhere else it takes at most 5 seconds: another service on the same store, or a direct edit of the store.
+
+**When the store is down.** While the store does not answer, or has not been upgraded to V269, every personal token is refused until the store answers again. File tokens keep working and remain the break-glass credential. A file token that happens to have the exact `dpt1_` shape is refused too during such an outage.
+
+**Leavers.** The service learns that a person lost access only when that person signs in. Someone who is removed at the identity provider and never signs in again keeps their tokens until they expire or an admin revokes them. The 30-day default caps the exposure. Revoke a leaver's tokens on offboarding. A browser session that is already open keeps its seat until the session cookie ends (12 hours), so a person who is demoted mid-session can make tokens until then.
+
+**The throttle.** A refused personal token gets the same 401 as any wrong token. A genuine token that is expired or revoked (the secret is right) does not count toward the wrong-token wait, and is logged once per hour per token. A wrong secret counts.
+
 ## Agent Changes: List, Undo and the Switch
 
 When a notification route is set to Level 2, an investigating agent may change monitoring settings (a mute rule, a custom alert rule, a threshold override) through the gate. Every call is journaled, so every change can be seen and taken back.

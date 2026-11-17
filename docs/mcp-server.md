@@ -175,6 +175,18 @@ The write tools and the investigation tools need the token, and every request mu
 
 With `mcp.tokens` set, each named token is served the tools of its role, and the switches above do not change that. A named `operator` token gets the write tools while `mcp.allowWrites` is `false`. It gets the four server administration tools only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. A named `agent` token gets the investigation tools and the agent action tools while `mcp.allowInvestigations` is `false`. A named `reader` token gets the read tools and nothing else. The token floor applies to each named token. See [Named tokens](darling-agent-dispatch.md#named-tokens-an-operator-agents-and-readers-on-one-service).
 
+#### Personal tokens
+
+With `mcp.personalTokens` on, a person signed in to the Darling web dashboard with OpenID Connect makes their own MCP token on the **My MCP tokens** page. It looks like `dpt1_` followed by a 16-hex id, an underscore and a 43-character secret. The page shows the value once, at creation, and never again.
+
+- A person with a read-only seat makes `reader` tokens. An admin seat makes tokens up to `mcp.personalTokens.adminRole` (`operator` by default). A personal token never has the `agent` role and never gets the investigation tools.
+- A token has a name of 1 to 64 of `A-Za-z0-9._:-`. The name cannot be `web`, `mcp`, `cli` or `viewer`, is case-sensitive, and is unique per person among their live tokens.
+- A token lives at most `maxLifetimeDays` (30 by default) and a person holds at most `maxTokensPerPerson` (5 by default).
+- The slow-read and latency records and the journal name the caller as `personal token <name> of <subject>`, for example `personal token ci of alice@example.com`.
+- The token goes in the same `Authorization: Bearer` header as any other. A refused personal token gets the same 401 as a wrong token.
+
+The service still needs a file token (`mcp.network` or `mcp.tokens`) to start the MCP server, and that file token keeps working when the identity provider or the store is down. See [Personal tokens](darling/configuration-mcp.md#personal-tokens) for the settings and [Personal MCP tokens](darling/security.md#personal-mcp-tokens) for storage and revocation.
+
 #### Where Lite and Darling differ
 
 Four differences are intended. Do not assume the two products match on them.
