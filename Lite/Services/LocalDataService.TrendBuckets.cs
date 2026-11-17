@@ -669,7 +669,9 @@ SELECT
     MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
     MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
     (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
-    MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+    MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb,
+    MAX(log_used_percent) AS peak_log_used_percent,
+    MAX(log_used_mb) AS peak_log_used_mb
 FROM v_tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -697,7 +699,9 @@ ORDER BY 1";
                 ToDouble(reader.GetValue(7)),
                 ToInt64(reader.GetValue(8)),
                 (int)ToInt64(reader.GetValue(9)),
-                ToDouble(reader.GetValue(10))));
+                ToDouble(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : ToDouble(reader.GetValue(12))));
         }
 
         return items;

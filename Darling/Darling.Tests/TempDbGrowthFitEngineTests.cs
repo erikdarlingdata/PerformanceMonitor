@@ -222,4 +222,69 @@ public sealed class TempDbGrowthFitEngineTests
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
     }
+
+    /* Review of #8887: the collection is hourly and the sweep is far more frequent, so the gate keeps the incident open on every
+       sweep. The cooldown alone paged the same rows again each time it expired. */
+    [Fact]
+    public async Task TheSameCollectionReadAgainAfterTheCooldown_DoesNotPageAgain_ButANewBreachingCollectionDoes()
+    {
+        var h = new AlertEngineTests.Harness();
+        var engine = h.Build();
+
+        var at = await DriveAsync(engine, h, AlertEngineTests.Harness.SampleBase, t => Data(1, 20_000, 4_096, 1_000, at: t));
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The cooldown (5 minutes) has passed twice over and the engine reads the same rows. */
+        h.Now = h.Now.AddMinutes(11);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(11);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next hourly collection still does not fit: that is news, and it pages once the cooldown has passed. */
+        h.Now = h.Now.AddMinutes(11);
+        await DriveAsync(engine, h, at, t => Data(1, 20_000, 4_096, 1_000, at: t));
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ACollectionPagedBeforeARestart_IsNotPagedAgainAfterTheCooldown_ButTheNextOneIs()
+    {
+        var h = new AlertEngineTests.Harness();
+        var at = await DriveAsync(h.Build(), h, AlertEngineTests.Harness.SampleBase, t => Data(1, 20_000, 4_096, 1_000, at: t));
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The history holds the open page the first process sent; the gate's Firing bit was persisted with it. */
+        var pagedAt = at.AddMinutes(1);
+        h.OpenFireReader = (_, _) => Task.FromResult(new AlertHistoryStanding(
+            new[] { new AlertHistoryFire(pagedAt, 1_000, AlertContextSerializer.Serialize(new AlertContext())) },
+            Array.Empty<AlertHistoryClear>()));
+        var restarted = h.Build();
+
+        h.Now = h.Now.AddMinutes(11);
+        h.Adapter.TempDbFiles = new List<TempDbFileInfo> { Data(1, 20_000, 4_096, 1_000, at: at) };
+        await restarted.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(11);
+        await restarted.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await DriveAsync(restarted, h, at, t => Data(1, 20_000, 4_096, 1_000, at: t));
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AfterTheIncidentResolves_TheSameCollectionTimeBreachingAgain_IsANewEpisodeAndPages()
+    {
+        var h = new AlertEngineTests.Harness();
+        var engine = h.Build();
+
+        var at = await DriveAsync(engine, h, AlertEngineTests.Harness.SampleBase, t => Data(1, 20_000, 4_096, 1_000, at: t));
+        h.Now = h.Now.AddMinutes(11);
+        at = await DriveAsync(engine, h, at, t => Data(1, 20_000, 4_096, 50_000, at: t));
+        Assert.Single(h.Resolutions);
+
+        h.Now = h.Now.AddMinutes(11);
+        await DriveAsync(engine, h, at, t => Data(1, 20_000, 4_096, 1_000, at: t));
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
 }

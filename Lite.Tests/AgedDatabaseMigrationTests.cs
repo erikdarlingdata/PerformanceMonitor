@@ -161,7 +161,7 @@ public class AgedDatabaseMigrationTests : IDisposable
                 physical_name VARCHAR NOT NULL,
                 total_size_mb DECIMAL(19,2) NOT NULL
             )");
-            await ExecAsync(seed, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'master', 1, 1, 'ROWS', 'data_0', 'data_0.mdf', 4.00)");
+            await ExecAsync(seed, "INSERT INTO database_size_stats (server_id, collection_time, database_name, database_id, file_id, file_type_desc, file_name, physical_name, total_size_mb) VALUES (1, current_timestamp, 'master', 1, 1, 'ROWS', 'data_0', 'data_0.mdf', 4.00)");
             /* The real dependent object: DuckDbSchemaGenerator.CreateIndex's default case for
                database_size_stats is exactly this index/column shape. */
             await ExecAsync(seed, "CREATE INDEX idx_database_size_stats_time ON database_size_stats(server_id, collection_time)");
@@ -176,7 +176,7 @@ public class AgedDatabaseMigrationTests : IDisposable
         /* The real assertion: a sibling-shaped row (NULL database_id / file_id / physical_name, real
            name and size) must actually be insertable now — this is what the appender writes the moment
            sys.resource_stats has rows for a master-connected Azure target. */
-        await ExecAsync(verify, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'testdb1', NULL, NULL, 'ROWS', '(whole database)', NULL, 23.00)");
+        await ExecAsync(verify, "INSERT INTO database_size_stats (server_id, collection_time, database_name, database_id, file_id, file_type_desc, file_name, physical_name, total_size_mb) VALUES (1, current_timestamp, 'testdb1', NULL, NULL, 'ROWS', '(whole database)', NULL, 23.00)");
 
         using var countCmd = verify.CreateCommand();
         countCmd.CommandText = "SELECT COUNT(*) FROM database_size_stats WHERE database_id IS NULL AND file_id IS NULL AND physical_name IS NULL";
@@ -209,7 +209,7 @@ public class AgedDatabaseMigrationTests : IDisposable
                 physical_name VARCHAR,
                 total_size_mb DECIMAL(19,2) NOT NULL
             )");
-            await ExecAsync(seed, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'hsdb', 5, 1, 'ROWS', 'hsdb_data', 'hsdb.mdf', 10240.00)");
+            await ExecAsync(seed, "INSERT INTO database_size_stats (server_id, collection_time, database_name, database_id, file_id, file_type_desc, file_name, physical_name, total_size_mb) VALUES (1, current_timestamp, 'hsdb', 5, 1, 'ROWS', 'hsdb_data', 'hsdb.mdf', 10240.00)");
             await ExecAsync(seed, "CREATE INDEX idx_database_size_stats_time ON database_size_stats(server_id, collection_time)");
         }
 
@@ -220,7 +220,7 @@ public class AgedDatabaseMigrationTests : IDisposable
         await verify.OpenAsync();
 
         /* The real assertion: the Hyperscale log row (real name, NULL size) must be insertable now. */
-        await ExecAsync(verify, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'hsdb', 5, 2, 'LOG', 'hsdb_log', 'hsdb.ldf', NULL)");
+        await ExecAsync(verify, "INSERT INTO database_size_stats (server_id, collection_time, database_name, database_id, file_id, file_type_desc, file_name, physical_name, total_size_mb) VALUES (1, current_timestamp, 'hsdb', 5, 2, 'LOG', 'hsdb_log', 'hsdb.ldf', NULL)");
 
         using var countCmd = verify.CreateCommand();
         countCmd.CommandText = "SELECT COUNT(*) FROM database_size_stats WHERE total_size_mb IS NULL";

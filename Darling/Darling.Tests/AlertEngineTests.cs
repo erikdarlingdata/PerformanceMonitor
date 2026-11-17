@@ -84,6 +84,8 @@ public sealed class AlertEngineTests
         public IReadOnlyList<string> LongRunningQueryExcludedProgramNamePrefixes => LongRunningQueryExcludedProgramNamePrefixesList;
         public IReadOnlyList<string> LongRunningQueryExcludedLogins => LongRunningQueryExcludedLoginsList;
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
+        public bool TempDbLogSpaceEnabled { get; set; }
+        public int TempDbLogSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
         /* #2107: the previously-hardcoded knobs, at their shipped defaults. */
@@ -5623,6 +5625,8 @@ public sealed class AlertEngineTests
             Task.FromResult(new List<DatabaseFileGrowthInfo>());
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
+        public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<TempDbFileInfo>());
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>

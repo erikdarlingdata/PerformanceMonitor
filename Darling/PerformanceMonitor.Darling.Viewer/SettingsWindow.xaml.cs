@@ -928,6 +928,9 @@ public partial class SettingsWindow : Window
         AlertExcludedVolumesBox.Text = SettingsListText.Join(r.ExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = r.TempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = r.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
+        AlertTempDbLogSpaceCheckBox.IsChecked = r.TempDbLogSpaceEnabled;
+        AlertTempDbLogSpaceThresholdBox.Text = r.TempDbLogSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
+        AlertTempDbGrowthFitCheckBox.IsChecked = r.TempDbGrowthFitEnabled;
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = r.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskThresholdGbBox.Text = r.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
@@ -1082,6 +1085,8 @@ public partial class SettingsWindow : Window
             LongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList(),
             LongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList(),
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
+            TempDbLogSpaceEnabled = AlertTempDbLogSpaceCheckBox.IsChecked == true,
+            TempDbGrowthFitEnabled = AlertTempDbGrowthFitCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
             FileGrowthEnabled = AlertFileGrowthCheckBox.IsChecked == true,
@@ -1194,6 +1199,8 @@ public partial class SettingsWindow : Window
             row.LongRunningQueryMaxResults = lrqMax;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb is > 0 and <= 100)
             row.TempDbSpaceThresholdPercent = tempDb;
+        if (int.TryParse(AlertTempDbLogSpaceThresholdBox.Text, out var tempDbLog) && tempDbLog is > 0 and <= 100)
+            row.TempDbLogSpaceThresholdPercent = tempDbLog;
         if (int.TryParse(AlertLowDiskThresholdPercentBox.Text, out var lowDiskPct) && lowDiskPct is >= 0 and <= 100)
             row.LowDiskThresholdPercent = lowDiskPct;
         if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
@@ -1424,6 +1431,7 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);
         AlertTempDbSpaceThresholdBox.Text = "80";
+        AlertTempDbLogSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
         /* #2107: the previously-hardcoded knobs reset to the constants they replaced. */
@@ -1601,6 +1609,10 @@ public partial class SettingsWindow : Window
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
+        if (AlertTempDbLogSpaceCheckBox.IsChecked == true)
+            parts.Add($"tempdb log > {AlertTempDbLogSpaceThresholdBox.Text}%");
+        if (AlertTempDbGrowthFitCheckBox.IsChecked == true)
+            parts.Add("tempdb growth will not fit");
         if (AlertLowDiskCheckBox.IsChecked == true)
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
@@ -1705,6 +1717,9 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedLoginsBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbLogSpaceCheckBox.IsEnabled = enabled;
+        AlertTempDbLogSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbGrowthFitCheckBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertPvsCheckBox.IsEnabled = enabled;

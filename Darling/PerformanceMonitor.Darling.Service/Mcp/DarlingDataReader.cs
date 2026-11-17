@@ -931,7 +931,14 @@ internal static class DarlingDataReader
             CAST(unallocated_mb AS double precision),
             total_sessions_using_tempdb,
             top_session_id,
-            CAST(top_session_tempdb_mb AS double precision)
+            CAST(top_session_tempdb_mb AS double precision),
+            CAST(log_total_mb AS double precision) AS log_total_mb,
+            CAST(log_used_percent AS double precision) AS log_used_percent,
+            log_reuse_wait_desc,
+            log_truncation_holdup_reason,
+            holder_session_id,
+            holder_login_name,
+            CAST(log_used_mb AS double precision) AS log_used_mb
         FROM v_tempdb_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -985,7 +992,9 @@ internal static class DarlingDataReader
             MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
             MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
             (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
-            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb,
+            MAX(log_used_percent) AS peak_log_used_percent,
+            MAX(log_used_mb) AS peak_log_used_mb
         FROM (
         {TempDbTrendSql}
         ) AS samples
@@ -1018,10 +1027,63 @@ internal static class DarlingDataReader
                 Convert.ToDouble(reader.GetValue(7)),
                 Convert.ToInt64(reader.GetValue(8)),
                 Convert.ToInt32(reader.GetValue(9)),
-                Convert.ToDouble(reader.GetValue(10))));
+                Convert.ToDouble(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12))));
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The newest tempdb collection in the window, as far as the log's holder goes (#8881): the row the chart's last point comes from, so the
+    /// web page can say who holds the oldest open tempdb transaction. The holder columns are NULL below 50 percent of the log used. $1 server_id,
+    /// $2/$3 the window (naive UTC).
+    /// </summary>
+    public const string TempDbLogHolderSql = """
+        SELECT
+            collection_time,
+            holder_session_id,
+            holder_login_name,
+            holder_program_name,
+            holder_begin_time,
+            holder_log_bytes_used,
+            log_truncation_holdup_reason,
+            log_total_mb,
+            log_reuse_wait_desc
+        FROM v_tempdb_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="TempDbLogHolderSql"/>; null when the window has no collection.</summary>
+    public static async Task<TempDbLogHolder?> GetNewestTempDbLogHolderAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TempDbLogHolderSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new TempDbLogHolder(
+            DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+            reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
+            reader.IsDBNull(5) ? null : reader.GetInt64(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)),
+            reader.IsDBNull(8) ? null : reader.GetString(8));
     }
 
     /* ─────────────────────────── perfmon ─────────────────────────── */

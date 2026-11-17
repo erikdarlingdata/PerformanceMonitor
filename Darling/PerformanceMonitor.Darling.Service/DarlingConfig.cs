@@ -1038,7 +1038,20 @@ public sealed class AlertsConfig
     [JsonPropertyName("tempDbSpaceThresholdPercent")]
     public int TempDbSpaceThresholdPercent { get; set; } = 80;
 
-    /// <summary>The TempDB Growth Won't Fit alert (#8882): on by default.</summary>
+    /// <summary>The TempDB Log Space alert (#8881): on by default. Stored as <c>config_alert_settings.tempdb_log_space_enabled</c> (V269); the service
+    /// replaces this from the store at every start, so the file only seeds a new store.</summary>
+    [JsonPropertyName("tempDbLogSpaceEnabled")]
+    public bool TempDbLogSpaceEnabled { get; set; } = true;
+
+    /// <summary>Fire when the tempdb log is at or above this percent used (#8881). Stored as
+    /// <c>config_alert_settings.tempdb_log_space_threshold_percent</c> (V269).</summary>
+    [JsonPropertyName("tempDbLogSpaceThresholdPercent")]
+    public int TempDbLogSpaceThresholdPercent { get; set; } = 80;
+    /// <summary>
+    /// The TempDB Growth Won't Fit alert (#8882): on by default. Kept in <c>config_alert_settings.tempdb_growth_fit_enabled</c> (V270),
+    /// so the stored value governs once the row exists and this one seeds a new store.
+    /// </summary>
+    [JsonPropertyName("tempDbGrowthFitEnabled")]
     public bool TempDbGrowthFitEnabled { get; set; } = true;
 
     [JsonPropertyName("lowDiskEnabled")]

@@ -38,6 +38,8 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `longRunningQueryThresholdMinutes` | `30` | |
 | `tempDbSpaceEnabled` | `true` | |
 | `tempDbSpaceThresholdPercent` | `80` | |
+| `tempDbLogSpaceEnabled` | `true` | The TempDB Log Space alert: fires when the tempdb log is at or above the threshold percent used on 3 consecutive collections. The message names the holdup reason and, from 50 percent used, the oldest open tempdb transaction (session, login, program, age, log bytes). If you set the threshold below 50, an alert that fires under 50 percent used says the holder is read at 50% log used and above, because it was not looked up. |
+| `tempDbLogSpaceThresholdPercent` | `80` | Also a per-server override key, `tempdb_log_space.threshold_percent`. |
 | `tempDbGrowthFitEnabled` | `true` | The TempDB Growth Fit alert (`tempdb Growth Fit`): fires when a tempdb file's next autogrowth is larger than the free space on its volume, on the first hourly collection. A file that cannot grow does not fire it, and the count of such files is in this alert's detail and in the TempDB Space alert's detail. |
 | `lowDiskEnabled` | `true` | Volume free space; graded CRITICAL when critically low |
 | `lowDiskThresholdPercent` | `10` | Fire below X% free; `0` disables this dimension (clamped 0–100) |

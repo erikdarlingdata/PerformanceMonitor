@@ -1446,11 +1446,13 @@ INSERT INTO config_alert_settings (
     blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
     blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
     daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours)
+    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+    tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+    tempdb_growth_fit_enabled)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1596,6 +1598,10 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(a.BackupOverdueThresholdHours);
         command.Parameters.AddWithValue(a.LogBackupOverdueThresholdMinutes);
         command.Parameters.AddWithValue(a.CheckDbOverdueThresholdHours);
+        command.Parameters.AddWithValue(a.TempDbLogSpaceEnabled);
+        command.Parameters.AddWithValue(a.TempDbLogSpaceThresholdPercent);
+        /* #8882 (V270), bound last in the order the column was appended. The switch seeds TRUE (darling.json's default): the alert ships on. */
+        command.Parameters.AddWithValue(a.TempDbGrowthFitEnabled);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -2281,7 +2287,9 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
        blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
        daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+       tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+       tempdb_growth_fit_enabled
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2468,6 +2476,11 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             BackupOverdueThresholdHours = reader.GetInt32(96),
             LogBackupOverdueThresholdMinutes = reader.GetInt32(97),
             CheckDbOverdueThresholdHours = reader.GetInt32(98),
+            /* #8881 (V269): the TempDB Log Space switch and bar at 99-100. */
+            TempDbLogSpaceEnabled = reader.GetBoolean(99),
+            TempDbLogSpaceThresholdPercent = reader.GetInt32(100),
+            /* #8882 (V270): the TempDB Growth Fit switch at 101 (same reachability rule as every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected but not read here would reset the switch to on at every worker start). */
+            TempDbGrowthFitEnabled = reader.GetBoolean(101),
         };
         var analysis = new AnalysisConfig
         {

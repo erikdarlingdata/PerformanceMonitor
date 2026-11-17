@@ -914,7 +914,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 21, 9),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 23, 10),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
            not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
            rollup's catch, a write after the deadlock read, which counts its own failure. */
@@ -1070,8 +1070,10 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTY-SEVENTH since #8302: the read that closes a stale-rollup episode that ended while the service was down ("stale rollup ended-episode close self-alert"), counted because a swallowed failure leaves the old row open.
     /// And a FIFTY-SIXTH and FIFTY-SEVENTH since #7295: the blocking and deadlock count watermark seed ("blocking and deadlock count watermark seed") and the CPU incident opened-time seed ("CPU incident opened-time seed"), counted because a swallowed read there leaves the key seeded at 0 and pages again what a page already carried, or reads an open incident as opened at its first sweep.
     /// And a FIFTY-EIGHTH since #7368: the Store Autovacuum Behind read ("store autovacuum self-alert"), in <c>DarlingSelfAlertEvaluator.cs</c>.
+    /// And a FIFTY-NINTH since #8881: the TempDB Log Space alert's snapshot read ("TempDB log space"), in <c>AlertEngine.cs</c>, counted on its own name and its own clock like the data-file check beside it.
+    /// And a SIXTIETH since #8882: the TempDB Growth Won't Fit alert's file read ("TempDB growth fit"), in <c>AlertEngine.cs</c>, counted on its own name and its own clock beside the log-space check.
     /// </summary>
-    private const int CountedSites = 60;
+    private const int CountedSites = 62;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1086,6 +1088,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["The deadlock rollup failed for {Server}: {Message}"] = "#6005: the daily signature rollup, a write (and its own bookkeeping read) after the deadlock read it counts, which is counted where it is made; the alert is judged on that read, not on this",
         ["Could not persist the {Metric} persistence gate"] = "a write (#3282; one save path for every gated built-in since #3653 A5 put tempdb Space behind the same gate as High CPU); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOADs beside it are the reads, and they are counted",
         ["Could not save the High CPU incident's opening instant"] = "a write (#7085): the opened-at instant a restart bounds its seed with; a failed save costs the restart bound (the seed then reads unbounded, as for a legacy incident) and never the opening page",
+        ["The tempdb file read for the TempDB Space context failed for {Server}: {Message}"] = "#8882: a footnote read that runs only when the TempDB Space alert is about to fire, after the condition was read and counted; a failure leaves the alert context as it was",
         ["Alert resolution callback failed"] = "the delivery path",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
@@ -1330,8 +1333,8 @@ public sealed class AlertReadFailureSurfaceTests
            at the next restart and never a delivery. 46th since #7085: the High CPU incident's opened-at save, a write whose
            loss costs the restart bound and never the opening page. 47th since #7082: the Poison Wait detail read, the text of a page whose
            condition was already read and counted. 48th since #7368: the Store Autovacuum Behind apply and deliver half, whose
-           read is counted just above it. 49th since #8549: the job history category summary pass's catch, a maintenance write. */
-        Assert.Equal(49, totalExempt);
+           read is counted just above it. 49th since #8549: the job history category summary pass's catch, a maintenance write. 50th since #8882: the TempDB Space context's tempdb file read, a footnote read after the alert's condition was counted. */
+        Assert.Equal(50, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

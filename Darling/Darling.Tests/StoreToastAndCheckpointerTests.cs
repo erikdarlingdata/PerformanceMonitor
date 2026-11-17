@@ -1501,6 +1501,7 @@ public sealed class StoreToastAndCheckpointerTests
         public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
+        public bool TempDbGrowthFitEnabled { get; set; } = true;
         public bool LowDiskEnabled { get; set; }
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }
