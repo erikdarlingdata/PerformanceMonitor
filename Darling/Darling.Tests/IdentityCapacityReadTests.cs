@@ -575,6 +575,59 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
         });
     }
 
+    [Fact]
+    public async Task ACriticalColumnWithValuesLeft_IsNearItAndNotAtItsLimit_OnTheFleetCardAndTheViewerCard()
+    {
+        var now = DateTime.UtcNow;
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            /* 92.8 percent used with 153,994,682 values left: in the critical band, and an insert still works. */
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1993488965", "1", "1", 92.8, newAt);
+        }, async (postgres, ct) =>
+        {
+            var fleet = Assert.Single(await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct)).Value;
+            Assert.Equal(1, fleet.CriticalColumns);
+            Assert.Equal(0, fleet.ExhaustedColumns);
+            Assert.Equal("153994682", fleet.WorstValuesRemaining);
+            Assert.Equal("Identity capacity critical (1 column near it)", ServerHealthClassifier.IdentityCapacityReason(fleet.ColumnsAtBar, fleet.CriticalColumns, fleet.ExhaustedColumns));
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
+            var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
+            Assert.Equal(0, viewerCard!.ExhaustedColumns);
+            Assert.Equal(fleet.ExhaustedColumns, viewerCard.ExhaustedColumns);
+        });
+    }
+
+    [Fact]
+    public async Task AFullColumnBesideACriticalOneWithValuesLeft_IsCountedAtItsLimit_OnTheFleetCardAndTheViewerCard()
+    {
+        var now = DateTime.UtcNow;
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            /* No value left: the next insert fails. */
+            await Column(c, ct, "Sales", "Full", "int", 10, "2147483647", "1", "1", 100.0, newAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1993488965", "1", "1", 92.8, newAt);
+            await Column(c, ct, "Sales", "Warm", "int", 10, "1600000000", "1", "1", 74.5, newAt);
+        }, async (postgres, ct) =>
+        {
+            var fleet = Assert.Single(await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct)).Value;
+            Assert.Equal(3, fleet.ColumnsAtBar);
+            Assert.Equal(2, fleet.CriticalColumns);
+            Assert.Equal(1, fleet.ExhaustedColumns);
+            Assert.Equal("Identity capacity critical (1 column at its limit, 2 near it)", ServerHealthClassifier.IdentityCapacityReason(fleet.ColumnsAtBar, fleet.CriticalColumns, fleet.ExhaustedColumns));
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
+            var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
+            Assert.Equal(3, viewerCard!.ColumnsAtBar);
+            Assert.Equal(2, viewerCard.CriticalColumns);
+            Assert.Equal(1, viewerCard.ExhaustedColumns);
+        });
+    }
+
     private static Task ConfigRow(NpgsqlConnection c, CancellationToken ct, string database, string state, DateTime at) =>
         DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, state_desc) VALUES ($1,$2,$3,$4,$5,$6)",

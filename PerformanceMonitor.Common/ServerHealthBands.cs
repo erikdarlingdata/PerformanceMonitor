@@ -1658,20 +1658,34 @@ namespace PerformanceMonitor.Common
             return tiles;
         }
 
-        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. A column at the
-        /// critical bar is at its limit and a column at the warning bar is near it, and each count is its own, so one critical and four warning columns read
-        /// "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/> counts both kinds.</summary>
-        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns)
+        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. Only a column with
+        /// no values left is at its limit (#8928: a column at the critical bar with values left is near it, like a column at the warning bar), and each count is its
+        /// own, so one exhausted column and four near ones read "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/>
+        /// counts every column at either bar, <paramref name="criticalColumns"/> those at the critical bar, and <paramref name="exhaustedColumns"/> those with no
+        /// values left (a subset of the critical ones).</summary>
+        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns, int exhaustedColumns)
         {
             var critical = Math.Clamp(criticalColumns, 0, columnsAtBar);
-            var warning = columnsAtBar - critical;
             if (critical == 0)
             {
-                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {warning} column{(warning == 1 ? "" : "s")} at the warning bar");
+                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {columnsAtBar} column{(columnsAtBar == 1 ? "" : "s")} at the warning bar");
             }
 
-            var text = string.Create(CultureInfo.InvariantCulture, $"Identity capacity critical ({critical} column{(critical == 1 ? " at its" : "s at their")} limit");
-            return warning == 0 ? text + ")" : string.Create(CultureInfo.InvariantCulture, $"{text}, {warning} near it)");
+            var atLimit = Math.Clamp(exhaustedColumns, 0, critical);
+            var near = columnsAtBar - atLimit;
+            var parts = new List<string>(2);
+            if (atLimit > 0)
+            {
+                parts.Add(string.Create(CultureInfo.InvariantCulture, $"{atLimit} column{(atLimit == 1 ? " at its" : "s at their")} limit"));
+            }
+
+            if (near > 0)
+            {
+                var noun = atLimit == 0 ? (near == 1 ? " column" : " columns") : "";
+                parts.Add(string.Create(CultureInfo.InvariantCulture, $"{near}{noun} near it"));
+            }
+
+            return "Identity capacity critical (" + string.Join(", ", parts) + ")";
         }
 
         /// <summary>#7561: the Needs attention reason clause for overdue backups and CHECKDBs, the service's words on every surface that prints it.</summary>
