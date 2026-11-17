@@ -340,7 +340,7 @@ public static class SchemaWorkPlanner
         return serverState.TotalEventsProcessed is { } storedTotal && batch.TotalEventsProcessed - storedTotal > fresh.Count;
     }
 
-    private static string? NotWritableReason(SchemaDatabaseProbe p)
+    internal static string? NotWritableReason(SchemaDatabaseProbe p)
     {
         if (p.SourceDatabaseId is not null)
         {
@@ -375,7 +375,7 @@ public static class SchemaWorkPlanner
         return null;
     }
 
-    private static SchemaHistoryKey KeyFor(int serverId, SchemaDatabaseProbe p) =>
+    internal static SchemaHistoryKey KeyFor(int serverId, SchemaDatabaseProbe p) =>
         p.AgGroupId is { } group ? new SchemaHistoryKey(null, group, p.AgName) : new SchemaHistoryKey(serverId, null, null);
 
     private static SchemaDatabasePlan Make(SchemaDatabaseProbe p, SchemaDatabaseWork work, string? reason, SchemaHistoryKey key) =>

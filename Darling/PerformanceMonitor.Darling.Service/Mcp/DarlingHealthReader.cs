@@ -460,12 +460,20 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// server/range again through the same store object is testing THAT contract, not a product bug, unless it
     /// calls this between the mutation and the re-read to force the re-read to hit the store. Never call this
     /// from product code -- only <c>Darling.Tests</c> can even see it (Service's own <c>InternalsVisibleTo</c>).</summary>
-    internal static void ResetRangeCacheForTests() => RangeCache = new();
+    internal static void ResetRangeCacheForTests()
+    {
+        RangeCache = new();
+        ComposeStoreAvailability.ResetStoreGatesForTests(); // #8824: the store-keyed gate is state a test must not carry over
+    }
 
     /// <summary>#6809: test-only. Replaces <see cref="RangeCache"/> with an empty one that reads <paramref name="clock"/>,
     /// so a live test can move time past the sub-horizon bound without a sleep. <see cref="ResetRangeCacheForTests"/>
     /// puts the wall clock back.</summary>
-    internal static void UseRangeCacheClockForTests(Func<DateTime> clock) => RangeCache = new(clock);
+    internal static void UseRangeCacheClockForTests(Func<DateTime> clock)
+    {
+        RangeCache = new(clock);
+        ComposeStoreAvailability.ResetStoreGatesForTests();
+    }
 
     /// <summary>Test-only. The clock behind the reader's own wall-clock reads: the retention horizon and the default
     /// summary date. Null reads <see cref="DateTime.UtcNow"/>. A live test that seeds from one instant sets this to that
@@ -509,7 +517,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            would print 0 for every day raw has purged, so the measured accessor probes again rather than route
            on it, and a probe that fails again fails this call as it always did. The viewer's calendar has
            cached the same gate for the same interval all along (ViewerDataService.GetRollupAvailabilityAsync). */
-        var (rollups, coverage) = await ComposeStoreAvailability.GetMeasuredRollupsAsync(postgres, cancellationToken);
+        var (rollups, coverage) = await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(DailySummaryRangeCache.StoreKeyFor(postgres), postgres, cancellationToken); // #8824: per store, not per pool
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));

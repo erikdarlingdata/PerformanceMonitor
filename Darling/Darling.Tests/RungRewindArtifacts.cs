@@ -836,9 +836,18 @@ CREATE OR REPLACE VIEW collect.v_database_size_stats AS SELECT * FROM collect.da
         // (the probe's sentinel is the Memory Dumps one) and the re-run of V271 adds them back on. Safe on a store that never had them.
         new(271, "hasInstanceEventAlertSwitches",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS instance_restarted_enabled, DROP COLUMN IF EXISTS memory_dumps_enabled;"),
-        // V272 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
-        // last one, replica_readable; the rewind drops all ten and a re-run of V272 adds them back. Safe on a store that never had them.
-        new(272, "hasDatabaseProtectionErrorLog",
+        // V272 (#8798): the column statistics store. Three new tables; the probe's sentinel is the state table. A re-run of V272 makes them again.
+        new(272, "hasColumnStats",
+            @"DROP TABLE IF EXISTS collect.column_stats;
+DROP TABLE IF EXISTS collect.column_stats_state;
+DROP TABLE IF EXISTS collect.column_stats_runs;"),
+        // V273 (#8824): the hourly wait totals. The probe's sentinel is the relation itself, a continuous aggregate or the plain view, so the
+        // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V273 or the ensure sweep makes it
+        // again. Safe on a store that never had it.
+        new(273, "hasWaitStatsHourly", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsHourlyView)),
+        // V274 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
+        // last one, replica_readable; the rewind drops all ten and a re-run of V274 adds them back. Safe on a store that never had them.
+        new(274, "hasDatabaseProtectionErrorLog",
             @"ALTER TABLE IF EXISTS collect.database_protection
     DROP COLUMN IF EXISTS errorlog_state, DROP COLUMN IF EXISTS errorlog_message, DROP COLUMN IF EXISTS errorlog_grant,
     DROP COLUMN IF EXISTS errorlog_backfill_complete, DROP COLUMN IF EXISTS errorlog_skipped_archives, DROP COLUMN IF EXISTS errorlog_unparsed_lines,

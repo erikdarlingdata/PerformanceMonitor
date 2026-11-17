@@ -454,6 +454,35 @@ public sealed partial class ViewerDataService
         DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
             _dataSource, serverId, startUtc, endUtc, limit, cancellationToken: cancellationToken);
 
+    /// <summary>The database a PostgreSQL server entry connects to: <c>config_monitored_servers.database</c>, a non-secret column. Null
+    /// when the entry names none, or the server has no entry.</summary>
+    public const string PgEntryDatabaseSql = "SELECT database FROM config.config_monitored_servers WHERE server_id = $1";
+
+    /// <summary>The Overview extension panel's rows (#8914): the extension rows of the database the server entry connects to, with that
+    /// database's name. <c>pg_extension</c> is per database, and the collector stores one row per extension for every database on the
+    /// server, so the cluster-wide read tells an operator to run CREATE EXTENSION for an extension that exists where the entry connects
+    /// whenever it is missing from some other database (typically the <c>postgres</c> maintenance database). Other databases are in
+    /// the Extension Install Census beside it. An entry that names no database gets every database's rows, as before.</summary>
+    public async Task<PgExtensionPanelData> GetPgExtensionPanelAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 200, CancellationToken cancellationToken = default)
+    {
+        string? entryDatabase;
+        await using (var command = _dataSource.CreateCommand(PgEntryDatabaseSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            entryDatabase = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(
+                await command.ExecuteScalarAsync(cancellationToken) as string);
+        }
+
+        var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
+            _dataSource, serverId, startUtc, endUtc, limit, entryDatabase, cancellationToken);
+        return new PgExtensionPanelData(entryDatabase, rows);
+    }
+
+    /// <summary>The extension panel's rows and the database they are scoped to (null: every database).</summary>
+    public sealed record PgExtensionPanelData(string? EntryDatabase, List<DarlingPgExtensionAvailabilityReader.PgExtensionRow> Rows);
+
     /// <summary>Activity tab - lock state by mode, type and relation over the window (#2544). Every row
     /// carries the capture denominator, because these are SAMPLES: three ungranted rows means something
     /// different in 60 captures than in 4. Ungranted sorts first, then by the worst wait anyone served.</summary>

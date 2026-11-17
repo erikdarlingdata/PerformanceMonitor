@@ -206,7 +206,7 @@ public sealed class DarlingMcpPlanCorrectionTools
                     tuning.Count > 0
                         ? QueryStoreSnapshotStaleness.Note(
                             DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
-                            tuningSchedule.Enabled, tuningSchedule.IntervalMinutes)
+                            tuningSchedule.Enabled, tuningSchedule.IntervalMinutes, "the as_of on each automatic_tuning row")
                         : null),
                 /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
                    the window's tail, so the oldest stamp IS the reach; null when the window held no

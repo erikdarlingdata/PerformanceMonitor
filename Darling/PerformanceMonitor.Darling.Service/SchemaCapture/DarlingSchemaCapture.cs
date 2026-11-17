@@ -138,7 +138,7 @@ public static class DarlingSchemaCapture
             .ToList();
     }
 
-    private static string KeyText(SchemaHistoryKey key) =>
+    internal static string KeyText(SchemaHistoryKey key) =>
         key.AgGroupId is { } group
             ? "ag:" + group.ToString("D", CultureInfo.InvariantCulture)
             : "server:" + (key.ServerId ?? 0).ToString(CultureInfo.InvariantCulture);

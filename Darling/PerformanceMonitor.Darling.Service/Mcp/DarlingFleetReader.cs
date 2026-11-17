@@ -2087,7 +2087,7 @@ AND   {SqlServerCollectedTargetSql}";
                 DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
                 bool? Flag(int i) => reader.IsDBNull(i) ? null : reader.GetBoolean(i);
                 int? Count(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
-                /* #8865: the error log facts (V272), NULL on a row written before it. */
+                /* #8865: the error log facts (V274), NULL on a row written before it. */
                 capture.Facts.Add(new DatabaseProtectionFact(
                     Text(2) ?? string.Empty, Text(3), Text(4), Time(5), Text(6), Text(7),
                     Time(8), Text(9), Time(10), Text(11), Time(12), Text(13),

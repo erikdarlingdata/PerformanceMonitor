@@ -88,7 +88,7 @@ The principal is the SQL login that the server entry uses. With Windows authenti
 - For a SQL Server on the same machine, it is `NT SERVICE\PerformanceMonitor Darling`.
 - For a remote SQL Server, it is the machine account (`DOMAIN\MACHINE$`).
 
-`--finops` adds the FinOps per-database grants. `--azure` prints the Azure SQL Database form, and a `name.database.windows.net` host does too. An Azure SQL Managed Instance host has a zone label before `database.windows.net`, so it gets the on-premises form. The script has no password, only a placeholder. You can run it a second time with no harm.
+`--finops` adds the FinOps per-database grants. `--column-stats-databases <db>`, once per database, adds the optional per-database `SELECT` for the column_stats collector, in the databases you list (see [Column selectivity](#column-selectivity-per-database-select-optional)). `--azure` prints the Azure SQL Database form, and a `name.database.windows.net` host does too. An Azure SQL Managed Instance host has a zone label before `database.windows.net`, so it gets the on-premises form. The script has no password, only a placeholder. You can run it a second time with no harm.
 
 The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. On Amazon RDS it checks the other three, because RDS refuses `CONNECT ANY DATABASE`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
 
@@ -187,6 +187,31 @@ DEALLOCATE database_cursor;
 - *User is mapped with `VIEW DATABASE STATE` + `VIEW DEFINITION` but no `SELECT` on `sys.sql_expression_dependencies`* — fails fast with `Msg 229, Level 14, State 5: The SELECT permission was denied on the object 'sql_expression_dependencies'` the moment a database with a UDF-bound computed column or check constraint is reached.
 
 Adding all three grants eliminates both. See issue [#915](https://github.com/erikdarlingdata/PerformanceMonitor/issues/915) for the full diagnosis.
+
+### Column selectivity (per-database SELECT, optional)
+
+Darling only. Applies to SQL Server and Azure SQL Database targets. Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. Darling copies into its store only statistic and column names, densities, row and sample counts and update times; it never copies column values, and it never reads histograms or filter expressions.
+
+The collector is off by default, and so is this grant: nothing in the base script or the FinOps block gives it. It needs `SELECT` because `DBCC SHOW_STATISTICS` requires it on the table's columns, and SQL Server has no narrower grant that also covers tables created later. Give it only in the databases where you turn the collector on. The grant is never made in every database by default: an empty database list for the collector means "every database" for collection, but the script leaves the block out when you list no database, and the connection test checks nothing for it.
+
+For each database you list (the user is created only when the login has none there; a bare `GRANT SELECT` fails with error 15151 then):
+
+```sql
+USE [YourTargetDatabase];
+IF DATABASE_PRINCIPAL_ID(N'YourLogin') IS NULL
+    CREATE USER [YourLogin] FOR LOGIN [YourLogin];
+GRANT SELECT TO [YourLogin];
+```
+
+On Azure SQL Database there are no server logins and the monitoring user is a contained user of each database, so the grant is `GRANT SELECT TO [YourUser];` run in each listed database. `--grant-script --azure --column-stats-databases <db>` adds that statement to the Azure script, which you run in each of them.
+
+Or let Darling print the block. `--column-stats-databases <db>`, given once for each database, adds one guarded block for each listed database to the script from `--grant-script`. It creates the login's user in the database when it is missing and grants `SELECT` there, and it skips a database that does not exist with a message. Each value is one database name taken whole, so a name that holds a comma or a space works when you quote it; a comma does not separate names. With no list the script has no such block:
+
+```
+PerformanceMonitor.Darling.Service.exe --grant-script <server-name> --column-stats-databases SalesDb --column-stats-databases Hr
+```
+
+The service's connection test (`test_connect`) checks the grant only when `column_stats` is enabled for that server with an explicit database list, and only on SQL Server targets. It then names each listed database where the login has no `SELECT`, with the statements that add it. The CLI's `--test-connection` does not check it, because it reads no collector settings, and neither does the Viewer's Add Server dialog, which has none yet.
 
 ### Error log read (CHECKDB)
 

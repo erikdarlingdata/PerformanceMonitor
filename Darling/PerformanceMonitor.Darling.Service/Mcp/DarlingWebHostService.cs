@@ -1309,7 +1309,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             _managedGroups = frontDoorProxy is null && _ownerSource is not null && postgres is not null
                 ? new DarlingWebGroupTokens(() => _ownerSource.Read(), postgres, () => DarlingPasswordKey.Current,
-                    accessToken, webTokens, mcpTokens, _logger)
+                    accessToken, webTokens, mcpTokens, _logger,
+                    () => _collectorState.Read()?.Phase == CollectorRuntimeState.CollectorPhase.Collecting)
                 : null;
             ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups, tokenSignIn: tokenSignIn);
 
