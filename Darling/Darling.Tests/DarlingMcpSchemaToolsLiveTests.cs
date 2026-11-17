@@ -1144,4 +1144,55 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             Assert.Equal(answer.GetProperty("column_combinations_returned").GetInt32(), answer.GetProperty("column_combinations").GetArrayLength());
         });
     }
+
+    private static async Task<SchemaHistoryKey> SeedAgDefinitionAsync(Store s, CancellationToken ct)
+    {
+        var secondary = ServerIdHelper.GetDeterministicHashCode("schema-secondary");
+        await DarlingMcpTestData.RegisterServerAsync(s.Connection, secondary, "schema-secondary", ct);
+        var group = Guid.NewGuid();
+        var agKey = new SchemaHistoryKey(null, group, "SalesAg");
+        await SchemaVersionStore.ApplyAsync(s.Connection, Write(new[] { Table(10, "Orders", new[] { "Id", "Total" }) }, s_t0, baseline: true, by: "baseline", key: agKey), ct);
+        await SchemaCaptureStateStore.SaveAsync(s.Connection, new SchemaCaptureStateRow { ServerId = secondary, DatabaseName = string.Empty, LastSeenInScopeAt = s_t0 }, ct);
+        await DarlingMcpTestData.ExecAsync(
+            s.Connection, ct,
+            "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, group_id) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), secondary, "schema-secondary", "SalesAg", Db, group.ToString("D"));
+        return agKey;
+    }
+
+    [Fact]
+    public async Task Selectivity_ThroughASecondary_UsesTheWritingServersSwitches()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var agKey = await SeedAgDefinitionAsync(s, ct);
+            /* Only the primary, which wrote the rows, has the collectors on; the secondary has no schedule row at all. */
+            await EnableSelectivityAsync(s, ct);
+            await ColumnStatsStore.ReplaceStatisticsAsync(
+                s.Connection, s_serverId, agKey, Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+            await SeedRunAsync(s, ct, agKey, null);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, null, agKey.AgGroupId, null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+
+            var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.Equal("current", viaSecondary.GetProperty("selectivity_status").GetString());
+            Assert.Equal("unique", viaSecondary.GetProperty("columns")[0].GetProperty("selectivity").GetProperty("label").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task PreconditionStatus_ThroughASecondary_UsesThePrimarysOwnList()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var agKey = await SeedAgDefinitionAsync(s, ct);
+            await EnableSelectivityAsync(s, ct, ownList: new[] { Db });
+            await SeedRunAsync(s, ct, agKey, "no_select");
+
+            var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.Equal("precondition", viaSecondary.GetProperty("selectivity_status").GetString());
+            Assert.Contains("GRANT SELECT", viaSecondary.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+        });
+    }
 }

@@ -109,6 +109,17 @@ FROM collect.column_stats_state
 WHERE database_name = $1
   AND (history_ag_group_id = ANY($2) OR (history_ag_group_id IS NULL AND history_server_id = ANY($3)))";
 
+    private const string WriterSql = @"
+SELECT server_id FROM (
+    SELECT server_id, collection_time AS t, 1 AS p FROM collect.column_stats_runs WHERE database_name = $1 AND history_key = ANY($2)
+    UNION ALL
+    SELECT server_id, read_at, 2 FROM collect.column_stats WHERE database_name = $1 AND history_ag_group_id = ANY($3)
+    UNION ALL
+    SELECT server_id, last_seen_in_scope_at, 3 FROM collect.column_stats_state WHERE database_name = $1 AND history_ag_group_id = ANY($3)
+) w
+ORDER BY p, t DESC NULLS LAST
+LIMIT 1";
+
     internal static ColumnSelectivityView Shape(SchemaObjectDefinition definition, IReadOnlyList<StoredPrefix> stored)
     {
         ArgumentNullException.ThrowIfNull(definition);
@@ -261,6 +272,12 @@ WHERE database_name = $1
         NpgsqlDataSource postgres, NpgsqlConnection connection, int serverId, string askedDatabase, string database, IReadOnlyList<SchemaHistoryKey> keys,
         SchemaObjectDefinition definition, DateTime? at, CancellationToken cancellationToken)
     {
+        /* A database of an availability group is read by the server that wrote its rows, whichever replica the caller named: that server's
+           switches, scope, exclusions, runs and trace flags decide the status. A server key stays the named server. */
+        var writerId = await ReadWritingServerAsync(postgres, keys, database, cancellationToken) ?? serverId;
+        var scopeDatabase = writerId == serverId ? askedDatabase : database;
+        serverId = writerId;
+        askedDatabase = scopeDatabase;
         var overrides = await ReadOverridesAsync(postgres, serverId, cancellationToken);
         var excluded = await ReadExcludedAsync(postgres, serverId, cancellationToken);
         var columnStatsOn = StoreConfigProvider.ResolveSchedule(ColumnStatsCollector.Instance.Name, serverId, overrides).Enabled;
@@ -294,6 +311,27 @@ WHERE database_name = $1
         var status = Decide(facts, askedDatabase, at);
         var showNumbers = status.Status == "current" || (stored.Count > 0 && status.Status is "precondition" or "not_read");
         return new SelectivityResult(status, showNumbers ? Shape(definition, stored) : null);
+    }
+
+    /// <summary>
+    /// The server that wrote the rows of an availability group's database: the newest run row's, else the newest current-rows or state row's.
+    /// Null for a server key (the named server is the writer) or when nothing exists under the group's key.
+    /// </summary>
+    private static async Task<int?> ReadWritingServerAsync(NpgsqlDataSource postgres, IReadOnlyList<SchemaHistoryKey> keys, string database, CancellationToken ct)
+    {
+        var groups = keys.Where(k => k.AgGroupId is not null).Select(k => k.AgGroupId!.Value).Distinct().ToArray();
+        if (groups.Length == 0)
+        {
+            return null;
+        }
+
+        await using var cmd = postgres.CreateCommand(WriterSql);
+        cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = groups.Select(g => "ag:" + g.ToString("D", CultureInfo.InvariantCulture)).ToArray() });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid, Value = groups });
+        var value = await cmd.ExecuteScalarAsync(ct);
+        return value is int id ? id : null;
     }
 
     private static bool Allowed(IReadOnlyList<string> scope, IReadOnlyList<string> excluded, string database) =>
