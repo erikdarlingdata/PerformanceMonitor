@@ -1536,6 +1536,11 @@ public partial class ViewerServerTab
         var bloatRows = bloat.Select(PgDisplay.TableBloat).ToList();
         PgTableBloatGrid.ItemsSource = bloatRows;
 
+        /* #8943: both collectors are gated off on a read replica, so an empty panel there is not the healthy answer. The collection_log runs
+           say which empty panels come from a collector that ran (a primary with nothing over the floor) and which from one that never did. */
+        var storageEmpty = StorageEmptyTexts(
+            bloatRows.Count == 0 || indexes.Count == 0 ? await ReadStorageCollectorRunsAsync(startUtc, endUtc) : null, _pgOffline);
+
         /* The suppression count is stated ON THE PANEL rather than left to the per-row Confidence column,
            because the usual cause is a single instance-wide permissions gap: every row is suppressed for
            the same reason, and saying it once above the grid is what gets it fixed. Counted from the
@@ -1545,9 +1550,7 @@ public partial class ViewerServerTab
         PgTableBloatNote.Text = PgCollectorIsGatedOff("pg_table_bloat_stats")
             ? PanelNote("pg_table_bloat_stats", 0, string.Empty)
             : bloatRows.Count == 0
-                ? "No table of at least 1 MB was measured on this server in this window. Below that floor "
-                  + "bloat is not an actionable amount of space, so zero rows here is the healthy answer "
-                  + "rather than a missing read."
+                ? storageEmpty.TableBloat
                 : suppressed == 0
                     ? "Bloat figures are ESTIMATES computed from column-width statistics - the table itself "
                       + "is never read. Confirm one with pgstattuple before rewriting anything."
@@ -1562,9 +1565,7 @@ public partial class ViewerServerTab
         PgIndexUsageNote.Text = PgCollectorIsGatedOff("pg_index_usage_stats")
             ? PanelNote("pg_index_usage_stats", 0, string.Empty)
             : indexes.Count == 0
-                ? "No index of at least 64 KB was recorded on this server in this window. Below that floor "
-                  + "an index costs effectively nothing to keep, so zero rows here is the healthy answer "
-                  + "rather than a missing read."
+                ? storageEmpty.IndexUsage
                 : "Scans are cumulative since each database's statistics were last reset. An index with no "
                   + "scans is a CANDIDATE, never a conclusion: check the Can It Go? column, and widen the "
                   + "window past the slowest scheduled job you have before acting - a monthly report looks "
@@ -1575,6 +1576,63 @@ public partial class ViewerServerTab
         await LoadPgColumnStatsAsync(startUtc, endUtc);
         await LoadPgIndexBloatAsync(startUtc, endUtc);
         await LoadPgPredicateStatsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>The empty-panel sentence for the 1 MB table bloat panel when its collector ran for this server in the window.</summary>
+    internal const string TableBloatHealthyEmptyText =
+        "No table of at least 1 MB was measured on this server in this window. Below that floor "
+        + "bloat is not an actionable amount of space, so zero rows here is the healthy answer "
+        + "rather than a missing read.";
+
+    /// <summary>The empty-panel sentence for the 64 KB index usage panel when its collector ran for this server in the window.</summary>
+    internal const string IndexUsageHealthyEmptyText =
+        "No index of at least 64 KB was recorded on this server in this window. Below that floor "
+        + "an index costs effectively nothing to keep, so zero rows here is the healthy answer "
+        + "rather than a missing read.";
+
+    /// <summary>
+    /// #8943: the sentence for a Storage panel whose collector has no run for this server in the window. The collector is gated off on a
+    /// read replica and is collected on the writer only, the same fact the MCP reads state. The store does not record which monitored server is the
+    /// writer, so the sentence says "the writer" without a name. It also covers a primary whose collection is off, so it says what to check.
+    /// </summary>
+    internal static string WriterOnlyEmptyText(string collectorName, string panel) =>
+        $"No {collectorName} run is recorded for this server in this window, so this panel was not measured. "
+        + $"The {panel} collector is gated off on a read replica, so it is collected on the writer only: "
+        + "if this server is a replica, read these figures from the writer. "
+        + "If it is not a replica, check Collection Health on the Overview tab.";
+
+    /// <summary>
+    /// #8943: the two Storage empty-panel sentences. <paramref name="runs"/> is the collection_log facts for the two collectors over the
+    /// window, or null when no read was made or it failed (no claim is made then: the healthy sentences stay). A collector with no run
+    /// gets <see cref="WriterOnlyEmptyText"/>, except on an offline server, where nothing has arrived from any collector and the
+    /// existing empty text keeps the field.
+    /// </summary>
+    internal static (string TableBloat, string IndexUsage) StorageEmptyTexts(IReadOnlyList<ViewerDataService.PostgresCollectorLogFacts>? runs, bool offline)
+    {
+        if (runs is null || offline)
+        {
+            return (TableBloatHealthyEmptyText, IndexUsageHealthyEmptyText);
+        }
+
+        bool Ran(string name) => runs.Any(r => string.Equals(r.CollectorName, name, StringComparison.Ordinal) && r.Runs > 0);
+
+        return (
+            Ran("pg_table_bloat_stats") ? TableBloatHealthyEmptyText : WriterOnlyEmptyText("pg_table_bloat_stats", "table bloat"),
+            Ran("pg_index_usage_stats") ? IndexUsageHealthyEmptyText : WriterOnlyEmptyText("pg_index_usage_stats", "index usage"));
+    }
+
+    /// <summary>#8943: the collection_log facts for the two Storage collectors, or null when the read fails.</summary>
+    private async Task<IReadOnlyList<ViewerDataService.PostgresCollectorLogFacts>?> ReadStorageCollectorRunsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        try
+        {
+            return await _dataService.GetPostgresCollectorLogFactsAsync(
+                _server.ServerId, startUtc, endUtc, new[] { "pg_table_bloat_stats", "pg_index_usage_stats" });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
