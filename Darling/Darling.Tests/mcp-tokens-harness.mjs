@@ -12,7 +12,7 @@
    <json> is { me, own, all, create, revoke, fill, times }: the /api/me answer, and for each route { status, body } (a route left out
    answers 200 with {}). The DOM is a small tree that records every innerHTML assignment, so a test can tell text from markup.
    Scenarios: render (draw the page), create (fill the form with json.fill and click Create, then draw the page again),
-   revoke (click the first Revoke). */
+   leave (create, then the address changes), revoke (click the first Revoke; json.confirm false declines the confirmation). */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -64,7 +64,10 @@ globalThis.location = { hash: "", pathname: "/", search: "", href: "http://local
 const store = { getItem: () => null, setItem: noop, removeItem: noop };
 globalThis.localStorage = store;
 globalThis.sessionStorage = store;
-globalThis.addEventListener = noop;
+const windowListeners = {};
+globalThis.addEventListener = (t, f) => { (windowListeners[t] = windowListeners[t] || []).push(f); };
+const confirms = [];
+globalThis.confirm = (m) => { confirms.push(m); return cfg.confirm !== false; };
 globalThis.removeEventListener = noop;
 let copied = null;
 Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { copied = t; } } }, configurable: true });
@@ -132,7 +135,7 @@ try {
   out.requestsOnLoad = requests.slice();
   out.local = Object.fromEntries((cfg.times || []).map((t) => [t, new Date(t).toLocaleString()]));
 
-  if (scenario === "create") {
+  if (scenario === "create" || scenario === "leave") {
     const [name, days, role] = find(host, (n) => n.tag === "input" || n.tag === "select");
     name.value = cfg.fill.name;
     days.value = cfg.fill.lifetime_days;
@@ -148,6 +151,11 @@ try {
       out.copied = copied;
       out.copyText = flat(copy);
     }
+    if (scenario === "leave") {
+      (windowListeners.hashchange || []).forEach((f) => f({}));
+      out.afterLeave = snap(host);
+      out.copyButtonsAfterLeave = find(host, (n) => n.tag === "button" && flat(n) === "Copy").length;
+    }
     const again = new Node("div");
     await page.renderMcpTokens(again, cfg.me);
     out.afterReload = snap(again);
@@ -155,6 +163,7 @@ try {
     const before = requests.length;
     await find(host, (n) => n.tag === "button" && flat(n) === "Revoke")[0].listeners.click[0]();
     out.revokeRequests = requests.slice(before);
+    out.confirms = confirms;
     out.afterRevoke = snap(host);
   } else if (scenario !== "render") {
     throw new Error("unknown scenario " + scenario);

@@ -23,6 +23,11 @@ const COPY_NOTE = "This is the only time this token is shown. Copy it now; it ca
 
 /* The value just created, or null. Reset by every fresh draw of the page, so it never outlives a visit. */
 let shown = null;
+/* Clears the value of the page now drawn, when the address changes. Registered once, below. */
+let leave = null;
+window.addEventListener("hashchange", () => {
+  if (leave) leave();
+});
 
 function messageOf(result, fallback) {
   if (result.body && typeof result.body.message === "string" && result.body.message) return result.body.message;
@@ -66,6 +71,7 @@ function tokenTable(rows, withSubject, onRevoke) {
  */
 export function renderMcpTokens(host, me) {
   shown = null;
+  leave = null;
   if (!me || me.personal_tokens !== true) {
     mount(host, [el("h2", { text: "My MCP tokens" }), emptyStrip("Personal MCP tokens are not available for this sign-in or on this host.")]);
     return Promise.resolve();
@@ -97,25 +103,28 @@ export function renderMcpTokens(host, me) {
       mount(valueHost, []);
       return;
     }
+    const value = shown;
     const copy = el("button", { class: "btn", type: "button", text: "Copy" });
     copy.addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(shown.token);
+        await navigator.clipboard.writeText(value.token);
         copy.textContent = "Copied";
       } catch (e) {
         copy.textContent = "Copy failed: select the value and copy it by hand";
       }
     });
     mount(valueHost, el("div", { class: "token-value-panel card", role: "status" }, [
-      el("div", { class: "token-value-name", text: shown.record.name }),
+      el("div", { class: "token-value-name", text: value.record.name }),
       el("div", { class: "token-value-note", text: COPY_NOTE }),
-      el("code", { class: "token-value", text: shown.token }),
+      el("code", { class: "token-value", text: value.token }),
       copy,
     ]));
   };
 
-  const revoke = async (row) => {
+  const revoke = async (row, withSubject) => {
     if (busy) return;
+    const whose = withSubject && row.subject ? " (belonging to " + row.subject + ")" : "";
+    if (!window.confirm("Revoke the token \"" + row.name + "\"" + whose + "? Any MCP client using it stops working at once, and it cannot be undone.")) return;
     busy = true;
     say(null);
     const res = await apiSend("POST", ROUTE + "/" + encodeURIComponent(row.id) + "/revoke");
@@ -135,7 +144,7 @@ export function renderMcpTokens(host, me) {
       mount(target, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message || emptyText));
       return;
     }
-    mount(target, res.data.tokens.length === 0 ? emptyStrip(emptyText) : tokenTable(res.data.tokens, withSubject, revoke));
+    mount(target, res.data.tokens.length === 0 ? emptyStrip(emptyText) : tokenTable(res.data.tokens, withSubject, (row) => revoke(row, withSubject)));
   };
 
   const drawForm = () => {
@@ -145,9 +154,15 @@ export function renderMcpTokens(host, me) {
     const create = el("button", { class: "btn primary", type: "button", text: "Create token" });
     create.addEventListener("click", async () => {
       if (busy) return;
-      busy = true;
       say(null);
-      const res = await apiWrite("POST", ROUTE, { name: String(name.value || "").trim(), lifetime_days: Number.parseInt(days.value, 10) || 0, role: role.value });
+      const typed = String(days.value == null ? "" : days.value).trim();
+      const lifetime = /^[0-9]+$/.test(typed) ? Number(typed) : 0;
+      if (lifetime < 1 || lifetime > policy.maxLifetimeDays) {
+        say(errorStrip("The lifetime must be a whole number of days from 1 to " + policy.maxLifetimeDays + "."));
+        return;
+      }
+      busy = true;
+      const res = await apiWrite("POST", ROUTE, { name: String(name.value || "").trim(), lifetime_days: lifetime, role: role.value });
       busy = false;
       if (res.expired) return;
       if (res.status === 201 && res.body && typeof res.body.token === "string" && res.body.record) {
@@ -180,6 +195,10 @@ export function renderMcpTokens(host, me) {
     if (everyone) drawRows(everyoneHost, everyone, true, "Nobody has a token yet.");
   };
 
+  leave = () => {
+    shown = null;
+    mount(valueHost, []);
+  };
   mount(ownHost, loadingStrip("Loading your tokens…"));
   mount(everyoneHost, loadingStrip("Loading every token…"));
   return load();

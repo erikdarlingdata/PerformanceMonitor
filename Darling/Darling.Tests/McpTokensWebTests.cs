@@ -160,6 +160,55 @@ public sealed class McpTokensWebTests
         Assert.DoesNotContain(token, r.GetProperty("afterReload").ToString());
     }
 
+    [Theory]
+    [InlineData("91")]
+    [InlineData("0")]
+    [InlineData("30.5")]
+    [InlineData("")]
+    public void Create_LifetimeNotAWholeNumberUpToTheMax_SendsNothing(string lifetime)
+    {
+        var fill = "\"fill\":{\"name\":\"ci\",\"lifetime_days\":\"" + lifetime + "\",\"role\":\"reader\"}";
+        var r = Run("create", Config(OidcReader, own: Listing(""), create: "{\"status\":201,\"body\":{}}", extra: fill));
+
+        Assert.DoesNotContain(r.GetProperty("createRequests").EnumerateArray(), q => q.GetProperty("method").GetString() == "POST");
+        Assert.Contains("The lifetime must be a whole number of days from 1 to 90.", r.GetProperty("afterCreate").GetProperty("strips").EnumerateArray().Select(s => s.GetString()));
+    }
+
+    [Fact]
+    public void Create_ValueIsGoneOnceTheAddressChanges()
+    {
+        var created = "{\"status\":201,\"body\":{\"token\":\"dmcp_x\",\"record\":" + Row("n1", "ci", "live") + "}}";
+        var r = Run("leave", Config(OidcReader, own: Listing(""), create: created, extra: Fill));
+
+        Assert.Single(r.GetProperty("afterCreate").GetProperty("valuePanel").EnumerateArray());
+        Assert.Empty(r.GetProperty("afterLeave").GetProperty("valuePanel").EnumerateArray());
+        Assert.Equal(0, r.GetProperty("copyButtonsAfterLeave").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Revoke_AsksFirst_AndSendsOnlyWhenAccepted(bool accept)
+    {
+        var r = Run("revoke", Config(OidcReader, own: Listing(Row("abc123", "laptop", "live")), revoke: "{\"status\":204}", extra: "\"confirm\":" + (accept ? "true" : "false")));
+
+        var confirm = Assert.Single(r.GetProperty("confirms").EnumerateArray()).GetString()!;
+        Assert.Contains("\"laptop\"", confirm);
+        Assert.Equal(accept, r.GetProperty("revokeRequests").EnumerateArray().Any(q => q.GetProperty("method").GetString() == "POST"));
+    }
+
+    [Fact]
+    public void Revoke_InEveryone_NamesThePerson()
+    {
+        var r = Run("revoke", Config("{\"method\":\"shared_token\",\"seat\":\"admin\",\"personal_tokens\":true}",
+            all: Listing(Row("z1", "theirs", "live", subject: "z@b.c")), revoke: "{\"status\":204}"));
+
+        var confirm = Assert.Single(r.GetProperty("confirms").EnumerateArray()).GetString()!;
+        Assert.Contains("\"theirs\"", confirm);
+        Assert.Contains("z@b.c", confirm);
+        Assert.Contains(r.GetProperty("revokeRequests").EnumerateArray(), q => q.GetProperty("url").GetString() == "/api/mcp-tokens/z1/revoke");
+    }
+
     [Fact]
     public void RolePicker_LimitedToAllowedRoles_AndLifetimeToTheMax()
     {
