@@ -141,6 +141,23 @@ public sealed class WebPlainTextTests
     }
 
     [Fact]
+    public void AnErrorCellThatQuotesTheTable_OrAPrefixedField_KeepsTheName_WhileTheStripSaysItInWords()
+    {
+        // #8929: a Last Error or collector Error cell reads plainTextNamed, and a real error quotes the relation or column it failed on.
+        string[] inputs =
+        [
+            "ERROR: relation \"collect.query_store_stats\" does not exist",
+            "column effective_hours_back does not exist; also baseline_hours_back and trend_hours_back",
+        ];
+        var doc = RunDoc(inputs, out _);
+
+        Assert.Equal(inputs, doc.Named);
+        Assert.Contains("collect.query_store_stats", doc.Named[0], StringComparison.Ordinal);
+        Assert.Contains("raw query statistics", doc.Out[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("effective_hours_back", doc.Out[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheHealthOutputSentence_NamesNoField()
     {
         var o = Run(

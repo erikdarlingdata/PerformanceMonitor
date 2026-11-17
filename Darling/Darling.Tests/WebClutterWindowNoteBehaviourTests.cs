@@ -84,6 +84,39 @@ public sealed class WebClutterWindowNoteBehaviourTests
         Assert.Contains("covers the last 30 hours, not the whole time range", notice);
     }
 
+    [Theory]
+    [InlineData("47", "the last 47 hours")]
+    [InlineData("48", "the last 2 days")]
+    [InlineData("1", "the last 1 hour")]
+    [InlineData("1.5", "the last 1.5 hours")]
+    [InlineData("24", "the last 24 hours")]
+    public void TheSpanText_SwitchesToDaysAtTwoDays_AndSaysOneInTheSingular(string effective, string span)
+    {
+        var notice = Assert.Single(NoticesOf(effective, "Query Store Clutter"));
+
+        Assert.Contains("covers " + span + ", not the whole time range", notice);
+        Assert.DoesNotContain("1 hours", notice);
+        Assert.DoesNotContain("1 days", notice);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-5")]
+    [InlineData("null")]
+    [InlineData("true")]
+    [InlineData("\"72\"")]
+    public void AValueThatIsNoPositiveNumber_SaysNoSpan_AndStillNamesNoField(string effective)
+    {
+        var notice = Assert.Single(NoticesOf(effective, "Query Store Clutter"));
+
+        if (effective == "\"72\"")
+            Assert.Contains("covers the last 3 days", notice);
+        else
+            Assert.DoesNotContain("the last ", notice);
+        Assert.DoesNotContain("hours_back", notice);
+        Assert.DoesNotContain("query_store_stats", notice);
+    }
+
     [Fact]
     public void AReplyWithNoSpan_StillNamesNoFieldOrTable()
     {

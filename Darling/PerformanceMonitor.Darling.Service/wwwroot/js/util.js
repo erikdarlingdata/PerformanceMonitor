@@ -669,19 +669,7 @@ export function leftOutNoteStrip(data) {
 }
 
 /**
- * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
- * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
- * read reaches here: readTool composes it with windowNoteText). Null for any other response,
- * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid or a stat
- * tile draws the note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
- * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. A stat is safe to draw: a tile over a
- * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
- * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
- * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
- * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
- */
-/**
- * #8929: the span a read's window floor reaches back, in the page's words ("the last 72 hours" under two days, "the last 3 days" from
+ * #8929: the span a read's window floor reaches back, in the page's words ("the last 30 hours" under two days, "the last 3 days" from
  * two days), from the reply's `effective_hours_back`. Null when the value is not a positive number.
  */
 export function effectiveSpanText(hours) {
@@ -696,6 +684,18 @@ export function effectiveSpanText(hours) {
   return "the last " + h + (h === "1" ? " hour" : " hours");
 }
 
+/**
+ * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
+ * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
+ * read reaches here: readTool composes it with windowNoteText). Null for any other response,
+ * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid or a stat
+ * tile draws the note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
+ * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. A stat is safe to draw: a tile over a
+ * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
+ * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
+ * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
+ * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
+ */
 export function windowFloorStrip(data, desc) {
   if (!desc || desc.windowNote === false) return null;
   const chart = desc.viz === "line";

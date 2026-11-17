@@ -106,7 +106,8 @@ const settle = async () => {
 /* The note exactly as DarlingMcpQueryStoreClutterTools writes it, for an MCP caller. */
 const NOTE = "The window reaches further back than this server's raw query_store_stats retains, so the plan-churn arm (and the wait arm, which reads the same raw tier) covers effective_hours_back, not hours_back. The read-cost and config arms read tables with longer retention and cover the whole window.";
 const window = { start: "2026-01-01T00:00:00Z", end: "2026-01-08T00:00:00Z", effective_start: "2026-01-05T00:00:00Z", window_truncated: true, truncation_note: NOTE };
-if (effective !== "none") window.effective_hours_back = Number(effective);
+/* `effective` is a JSON literal ("72", "null", "true"), so a null or a boolean reaches the page as one. */
+if (effective !== "none") window.effective_hours_back = JSON.parse(effective);
 const body = {
   window,
   databases: [{ database_name: "db1", verdict: "ok" }],
