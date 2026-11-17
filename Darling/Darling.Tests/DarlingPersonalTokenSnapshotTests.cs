@@ -232,7 +232,7 @@ public sealed class DarlingPersonalTokenSnapshotTests
         Assert.Equal(5, rig.Loads);
         Assert.Single(rig.Log.Lines);
         Assert.Equal(1, rig.Log.CountAtLevel(LogLevel.Information));
-        Assert.Contains("V269", rig.Log.Joined);
+        Assert.Contains($"has not reached V{PersonalTokenSchema.Version}", rig.Log.Joined);
     }
 
     [Fact]

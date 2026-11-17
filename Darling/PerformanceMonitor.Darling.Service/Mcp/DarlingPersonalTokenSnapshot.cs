@@ -27,7 +27,7 @@ internal readonly record struct PersonalTokenCheck(PersonalTokenOutcome Outcome,
 /// <summary>
 /// The in-memory copy of every personal token row (#8737) the MCP bearer gate checks, refreshed from the store over the owner
 /// connection. It is either available (an immutable dictionary from the last successful load, swapped by reference) or unavailable,
-/// and it starts unavailable. A failed refresh, an unpublished owner connection and a store that has not reached V269 all make it
+/// and it starts unavailable. A failed refresh, an unpublished owner connection and a store that has not reached the personal token rung all make it
 /// unavailable: it refuses every personal token until a refresh succeeds and never keeps serving the last good copy, so a revocation
 /// that cannot be read is never silently ignored.
 /// </summary>
@@ -135,7 +135,7 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
 
                 if (first)
                 {
-                    logger.LogInformation("The store has not reached V269 yet; personal tokens are refused until it does");
+                    logger.LogInformation("The store has not reached V{Version} yet; personal tokens are refused until it does", PersonalTokenSchema.Version);
                 }
 
                 return;

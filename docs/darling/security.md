@@ -232,7 +232,7 @@ With [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) on, a person s
 
 **The delay.** A revoke takes effect at once for this service's own dashboard and sign-ins. Anywhere else it takes at most 5 seconds: another service on the same store, or a direct edit of the store.
 
-**When the store is down.** While the store does not answer, or has not been upgraded to V269, every personal token is refused until the store answers again. File tokens keep working and remain the break-glass credential. A file token that happens to have the exact `dpt1_` shape is refused too during such an outage.
+**When the store is down.** While the store does not answer, or has not been upgraded to V272, every personal token is refused until the store answers again. File tokens keep working and remain the break-glass credential. A file token that happens to have the exact `dpt1_` shape is refused too during such an outage.
 
 **Leavers.** The service learns that a person lost access only when that person signs in. Someone who is removed at the identity provider and never signs in again keeps their tokens until they expire or an admin revokes them. The 30-day default caps the exposure. Revoke a leaver's tokens on offboarding. A browser session that is already open keeps its seat until the session cookie ends (12 hours), so a person who is demoted mid-session can make tokens until then.
 

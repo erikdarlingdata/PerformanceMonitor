@@ -311,7 +311,7 @@ WHERE t.token_id = v.token_id";
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Whether the exception is the store saying the table does not exist: a store below V269. Callers branch on this one code.</summary>
+    /// <summary>Whether the exception is the store saying the table does not exist: a store below V272. Callers branch on this one code.</summary>
     public static bool IsMissingTable(Exception ex) => ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable };
 
     private static async Task<T> RunAsync<T>(NpgsqlDataSource owner, string actor,

@@ -48,7 +48,7 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>E1: the store as V268 leaves it (the V269 table and its trigger function dropped). The host starts, a personal token gets 401,
+    /// <summary>E1: the store as V271 leaves it (the V272 table and its trigger function dropped). The host starts, a personal token gets 401,
     /// the file tokens work, and several ticks log the missing table once.</summary>
     [Fact]
     public async Task Personal_StoreOneRungBehind_401_FileTokensWork()
@@ -77,7 +77,7 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         Assert.Equal(StatusCodes.Status200OK, (await rig.PostAsync(PersonalMcpRig.Legacy, PersonalMcpRig.ToolsListJson)).Status);
         Assert.Equal(StatusCodes.Status200OK, (await rig.PostAsync(PersonalMcpRig.ReaderToken, PersonalMcpRig.ToolsListJson)).Status);
 
-        Assert.Single(rig.Log.Lines, l => l.Contains("has not reached V269", StringComparison.Ordinal));
+        Assert.Single(rig.Log.Lines, l => l.Contains($"has not reached V{PersonalTokenSchema.Version}", StringComparison.Ordinal));
     }
 
     /// <summary>A personal operator's write: the tool answers with the person and the token as its author, and the journal row's actor

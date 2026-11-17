@@ -22,7 +22,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8737: <see cref="PersonalTokenStore"/> on a live store migrated to V269, on the owner connection: create under the cap, the name rule and the
+/// #8737: <see cref="PersonalTokenStore"/> on a live store migrated to V272, on the owner connection: create under the cap, the name rule and the
 /// advisory lock, the lists without the hash, revoke, the settings sweep, the last-use stamp, the journal, the retention purge and the missing table.
 /// </summary>
 [Collection("live-postgres")]
@@ -331,11 +331,11 @@ public sealed class PersonalTokenStoreLiveTests
             await ScalarAsync(connection, "SELECT string_agg(token_id, ',' ORDER BY token_id) FROM config.mcp_personal_token", ct));
     });
 
-    /// <summary>E1: below V269 the table is absent, and the store says so with the one code callers branch on.</summary>
+    /// <summary>E1: below V272 the table is absent, and the store says so with the one code callers branch on.</summary>
     [Fact]
     public Task MissingTable_SurfacesAsTypedError() => WithStoreAsync(async (connection, owner, ct) =>
     {
-        /* The store as V268 leaves it: the V269 table and its trigger function are gone. */
+        /* The store as V271 leaves it: the V272 table and its trigger function are gone. */
         await ExecAsync(connection, "DROP TABLE config.mcp_personal_token; DROP FUNCTION config.mcp_personal_token_owner_only()", ct);
 
         var list = await Assert.ThrowsAsync<PostgresException>(() => PersonalTokenStore.ListAsync(owner, null, ct));

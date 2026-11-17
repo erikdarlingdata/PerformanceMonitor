@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: each test mints its own database through ScratchPostgres and so cannot race the shared one. */
-/// <summary>V269 (#8737): the personal MCP token table, its checks and the Viewer's schema probe.</summary>
+/// <summary>V272 (#8737): the personal MCP token table, its checks and the Viewer's schema probe.</summary>
 public sealed class PersonalTokenRungTests
 {
     private const string InsertSql = "INSERT INTO config.mcp_personal_token (token_id, secret_sha256, owner_key, subject, token_name, role, created_at, expires_at) VALUES (@id, @hash, 'owner', 'subject', 'name', @role, @created, @expires)";
@@ -92,7 +92,7 @@ public sealed class PersonalTokenRungTests
     }
 
     [Fact]
-    public async Task Probe_ReportsV269()
+    public async Task Probe_ReportsTheRung()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct, emptyStore: true);
@@ -101,7 +101,7 @@ public sealed class PersonalTokenRungTests
         await PgMigrations.MigrateAsync(owner, ct);
 
         /* The store's own sentinel, not the ladder's top: a later rung's sentinel may be on too, so this maps the probed row with every
-           sentinel after hasPersonalTokens forced off, and asserts the rung 269 and, with its own sentinel off, 268. */
+           sentinel after hasPersonalTokens forced off, and asserts the rung and, with its own sentinel off, the rung below it. */
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         var ordinal = Array.FindIndex(parameters, p => p.Name == "hasPersonalTokens");
