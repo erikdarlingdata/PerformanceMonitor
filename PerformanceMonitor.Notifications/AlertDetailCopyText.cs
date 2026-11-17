@@ -212,7 +212,7 @@ public static class AlertChainLink
             "Database State" or "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" or "Identity Capacity" or "Agent Alert Gaps" => AlertServerTab.Configuration,
             "Failed Agent Job" or "Long-Running Job" or "Agent Not Running" => AlertServerTab.RunningJobs,
             "Collection Stopped" or "Collection Gap At Start" or "Collection Gaps In History" => AlertServerTab.CollectionHealth,
-            "Server Unreachable" or "Server Restored" or "AG Failover" or "AG Replica Disconnected" or "AG Replica Reconnected"
+            "Server Unreachable" or "Server Restored" or "Instance Restarted" or "Memory Dumps" or "AG Failover" or "AG Replica Disconnected" or "AG Replica Reconnected"
                 or "AG Sync Fell Behind" or "AG Database Suspended" => AlertServerTab.Overview,
             _ => AlertServerTab.None
         };

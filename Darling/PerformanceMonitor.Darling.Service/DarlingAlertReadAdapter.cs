@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -2536,6 +2537,40 @@ AND   qs.collection_time > $2";
     internal static List<ForcePlanFailureInfo> ReuseForWindow(
         IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
         rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
+
+    /// <summary>The restart and memory dump rise the store holds (#8884): the shared <see cref="InstanceEvents.StateSql"/> over this server's
+    /// <c>collector_state</c> rows, judged by the shared <see cref="InstanceEvents"/> functions. Lite's twin is
+    /// <c>LocalDataService.GetInstanceEventsAsync</c>.</summary>
+    public Task<InstanceEventInfo> GetInstanceEventsAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetInstanceEventsCoreAsync(serverKey, ct),
+            serverKey,
+            "instance events",
+            cancellationToken);
+    }
+
+    private async Task<InstanceEventInfo> GetInstanceEventsCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(InstanceEvents.StateSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        var state = new List<BaselineDiscontinuities.StateRow>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            state.Add(new BaselineDiscontinuities.StateRow(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetDateTime(3)));
+        }
+
+        return InstanceEventInfoMapper.ToInstanceEventInfo(state);
+    }
 
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)

@@ -321,6 +321,16 @@
                                     <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
+                                <!-- #8884: on by default. Instance Restarted fires when the instance start time moves later under the same server name.
+                                     Memory Dumps fires when a new memory dump file appears. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertInstanceRestartedCheckBox" Content="Instance restarted" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertMemoryDumpsCheckBox" Content="Memory dump created" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertTempDbLogSpaceCheckBox" Content="tempdb log used over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>

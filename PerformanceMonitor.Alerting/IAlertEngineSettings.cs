@@ -108,6 +108,20 @@ public interface IAlertEngineSettings
     /// </summary>
     bool ForcePlanFailureEnabled { get; }
 
+    /// <summary>
+    /// The Instance Restarted alert (#8884). Default ON: it is an EVENT, raised once when the instance start time moves later between two
+    /// collections, so a server that does not restart is silent by construction. A default interface member, so a host that predates the
+    /// alert keeps compiling and gets it on.
+    /// </summary>
+    bool InstanceRestartedEnabled => true;
+
+    /// <summary>
+    /// The Memory Dumps alert (#8884). Default ON: it is an EVENT, raised when the dump count or the newest dump time rises between two
+    /// collections, so a server that writes no dump is silent by construction. A default interface member, like
+    /// <see cref="InstanceRestartedEnabled"/>.
+    /// </summary>
+    bool MemoryDumpsEnabled => true;
+
     /* Thresholds. */
 
     /// <summary>Fire when the selected CPU metric (see <see cref="CpuAlertMode"/>) is at/above this %.</summary>

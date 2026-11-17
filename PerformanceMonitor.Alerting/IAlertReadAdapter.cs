@@ -314,4 +314,16 @@ public interface IAlertReadAdapter
     /// </summary>
     Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The restart and the memory dump rise the store holds for the Instance Restarted and Memory Dumps alerts (#8884). One read of the server's
+    /// <c>collector_state</c> rows the identity carriers and <c>cpu_utilization</c> persisted: nothing new is collected for the restart, and the dump stamp
+    /// rides the CPU collector's existing round trip. A restart is a start time that moved later while the server name did not (a failover or a
+    /// rename is not one). A memory dump rise is a newest dump time later than the previous stamp's. Both are events, so a member is null when the store holds
+    /// none. The adapter does not judge age or repeats: the engine does, so the two hosts cannot disagree on them.
+    ///
+    /// <para>Never throws for an absent row. An engine without the dump view leaves no stamp, and the engine skips Azure SQL Database without reading.</para>
+    /// </summary>
+    Task<InstanceEventInfo> GetInstanceEventsAsync(
+        string serverKey, CancellationToken cancellationToken = default);
 }

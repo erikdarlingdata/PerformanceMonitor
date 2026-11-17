@@ -389,6 +389,10 @@ public sealed class AlertEngine
        re-fire once for an observation still in the window — which is exactly what the cooldown clock,
        also emptied, already did before #3579, so the guard never makes a restart noisier than it was. */
     private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanActivePlan>> _activeForcePlanAlerts = new();
+
+    /// <summary>#8884: per server, the newest restart and memory dump the Instance Restarted and Memory Dumps checks fired for, seeded once from
+    /// <see cref="IAlertStateStore"/> so a host restart cannot repeat an alert.</summary>
+    private readonly ConcurrentDictionary<string, InstanceEventFired> _instanceEventFired = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastForcePlanAlert = new();
 
     /// <summary>#7086: how long after a plan's FIRST failure a second failure of the same plan counts as a repeat and pages.</summary>
@@ -736,6 +740,7 @@ public sealed class AlertEngine
         bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckDatabaseStateAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckForcePlanFailuresAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckInstanceEventsAsync(snapshot, key, serverName, snapshot.ServerId, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -4891,6 +4896,221 @@ public sealed class AlertEngine
                 }
             }
         }
+    }
+
+    /// <summary>The metric name of the Instance Restarted alert (#8884). A webhook automation key like every metric name.</summary>
+    public const string InstanceRestartedMetric = "Instance Restarted";
+
+    /// <summary>The metric name of the Memory Dumps alert (#8884).</summary>
+    public const string MemoryDumpsMetric = "Memory Dumps";
+
+    /// <summary>How old, in minutes, the collectors' persisted change may be and still fire (#8884). A restart or a dump the store recorded longer ago than this is
+    /// history, so turning an alert on later, or starting the host, never announces an old event.</summary>
+    public const int InstanceEventFreshMinutes = 15;
+
+    /// <summary>Dumps created inside <see cref="MemoryDumpBurstMinutes"/> that make the Memory Dumps alert Critical (#8884).</summary>
+    public const int MemoryDumpBurstCount = 3;
+
+    /// <summary>The window, in minutes, the collector counts recent dumps in (#8884). It is <c>InstanceEvents.RecentWindowMinutes</c> in the collector project, which this
+    /// project does not reference, so a test holds the two equal.</summary>
+    public const int MemoryDumpBurstMinutes = 10;
+
+    /// <summary>The edge-trigger watermark row that remembers the newest start time the Instance Restarted alert fired for (#8884), so a host restart does not repeat it.</summary>
+    public const string InstanceRestartedFiredMetric = "Instance Restarted fired start";
+
+    /// <summary>The edge-trigger watermark row that remembers the newest dump time the Memory Dumps alert fired for (#8884).</summary>
+    public const string MemoryDumpsFiredMetric = "Memory Dumps fired newest";
+
+    /* The watermark is an int, so the two instants are kept as whole seconds since this base. It reaches into 2088, where Unix seconds stop at 2038. */
+    private static readonly DateTime InstanceEventMarkBase = new(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    internal static int InstanceEventMark(DateTime instant) => (int)Math.Floor((instant - InstanceEventMarkBase).TotalSeconds);
+
+    /// <summary>Per-server memory of what the instance-event checks fired for (#8884), as <see cref="InstanceEventMark"/> values.</summary>
+    private sealed class InstanceEventFired
+    {
+        public bool Seeded;
+        public int? RestartMark;
+        public int? DumpMark;
+    }
+
+    /// <summary>
+    /// The Instance Restarted and Memory Dumps alerts (#8884). Both are EVENTS the collectors already recorded in <c>collector_state</c>: the instance identity
+    /// pair <c>wait_stats</c> and <c>cpu_utilization</c> keep (a start time that moved later, the name unchanged, is a restart), and the memory dump stamp
+    /// <c>cpu_utilization</c> keeps (a newest dump time that moved later is a dump). The adapter reads the rows and says what they hold. This check decides, for
+    /// both hosts alike:
+    /// <list type="bullet">
+    /// <item>the record must be no older than <see cref="InstanceEventFreshMinutes"/>, so a late switch-on or a host restart never fires an old event;</item>
+    /// <item>it fires once per new start time and once per new newest dump time. The mark of what fired is saved through <see cref="IAlertStateStore"/>, so a host
+    /// restart inside the window does not repeat it;</item>
+    /// <item>a failover or rename never reaches here (the adapter does not call it a restart), and the first observation has no previous record, so it never fires.</item>
+    /// </list>
+    /// There is no standing condition, so no resolution and no cooldown. A muted event is still recorded as muted, like every other family. Azure SQL Database is
+    /// skipped. A failed read, or a failed seed read, logs and skips the pass, and the next pass judges the same record.
+    /// </summary>
+    private async Task CheckInstanceEventsAsync(
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, bool suppressed, CancellationToken ct)
+    {
+        bool restartOn = _settings.InstanceRestartedEnabled;
+        bool dumpsOn = _settings.MemoryDumpsEnabled;
+        if ((!restartOn && !dumpsOn) || snapshot.IsAzureSqlDb)
+        {
+            return;
+        }
+
+        InstanceEventInfo info;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            info = await _readAdapter.GetInstanceEventsAsync(key, ct);
+            _checkFailures.Succeeded((key, "instance events"));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogCheckFailure(key, "instance events", ex, "Failed to check instance restart and memory dumps for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "instance events", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        var now = _utcNow();
+        var fresh = TimeSpan.FromMinutes(InstanceEventFreshMinutes);
+        var restartDue = restartOn && !suppressed && info.Restart is { } r0 && now - r0.ObservedAtUtc <= fresh;
+        var dumpsDue = dumpsOn && !suppressed && info.MemoryDumps is { } d0 && now - d0.ObservedAtUtc <= fresh;
+        if (!restartDue && !dumpsDue)
+        {
+            return;
+        }
+
+        /* What fired is read only when a fresh record is in hand, which is rare: an ordinary sweep reads the record and nothing else. */
+        var fired = _instanceEventFired.GetOrAdd(key, _ => new InstanceEventFired());
+        if (!fired.Seeded)
+        {
+            var seedClock = Stopwatch.StartNew();
+            try
+            {
+                fired.RestartMark = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, InstanceRestartedFiredMetric);
+                seedClock.Restart();
+                fired.DumpMark = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, MemoryDumpsFiredMetric);
+                fired.Seeded = true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LogCheckFailure(key, "instance events seed", ex, "Failed to read what the restart and memory dump alerts fired for {Server} after {ElapsedMs} ms: {Message}", serverName, seedClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "instance events seed", seedClock.ElapsedMilliseconds);
+                return;
+            }
+        }
+
+        if (restartDue
+            && info.Restart is { } restart)
+        {
+            var mark = InstanceEventMark(restart.NewStartTime);
+            if (fired.RestartMark is not { } lastMark || mark > lastMark)
+            {
+                await FireInstanceRestartedAsync(key, serverName, serverId, restart, now, ct);
+                fired.RestartMark = mark;
+                await SaveInstanceEventMarkAsync(key, InstanceRestartedFiredMetric, mark, ct);
+            }
+        }
+
+        if (dumpsDue
+            && info.MemoryDumps is { } dumps)
+        {
+            var mark = InstanceEventMark(dumps.NewestDumpUtc);
+            if (fired.DumpMark is not { } lastMark || mark > lastMark)
+            {
+                await FireMemoryDumpsAsync(key, serverName, serverId, dumps, now, ct);
+                fired.DumpMark = mark;
+                await SaveInstanceEventMarkAsync(key, MemoryDumpsFiredMetric, mark, ct);
+            }
+        }
+    }
+
+    /// <summary>Saves what an instance-event alert fired for. A failed save is logged and does not undo the alert: the in-memory mark still stops a repeat in this process,
+    /// and a host restart inside the window is the only way the alert can then repeat.</summary>
+    private async Task SaveInstanceEventMarkAsync(string key, string metric, int mark, CancellationToken ct)
+    {
+        try
+        {
+            await _stateStore.SaveEdgeTriggerWatermarkAsync(key, metric, mark);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Could not save what the {Metric} alert fired for on {ServerKey}: {Message}", metric, key, ex.Message);
+        }
+    }
+
+    private async Task FireInstanceRestartedAsync(
+        string key, string serverName, int? serverId, InstanceRestartInfo restart, DateTime now, CancellationToken ct)
+    {
+        const string format = "yyyy-MM-dd HH:mm:ss";
+        string oldStart = restart.PreviousStartTime.ToString(format, CultureInfo.InvariantCulture);
+        string newStart = restart.NewStartTime.ToString(format, CultureInfo.InvariantCulture);
+        var context = new AlertContext { SeverityOverride = AlertSeverityLevel.Warning };
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Instance restarted",
+            Fields = new()
+            {
+                ("Previous Start Time", oldStart + " (server clock)"),
+                ("New Start Time", newStart + " (server clock)"),
+            }
+        });
+        AlertSampleAge.Stamp(context, "instance identity", restart.ObservedAtUtc, now);
+        var mute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = InstanceRestartedMetric });
+        await FireAsync(new AlertOutcome(
+            key, serverName, InstanceRestartedMetric,
+            $"Restarted at {newStart} (was up since {oldStart}), server clock",
+            "Start time later than the last collection",
+            context, AlertContextBuilders.ContextToDetailText(context),
+            NumericCurrentValue: null, NumericThresholdValue: null,
+            Muted: mute.Muted, Severity: AlertSeverityLevel.Warning,
+            ShortMessage: $"Instance restarted at {newStart} (server clock), was up since {oldStart}",
+            Hold: mute.Hold), ct);
+    }
+
+    private async Task FireMemoryDumpsAsync(
+        string key, string serverName, int? serverId, MemoryDumpInfo dumps, DateTime now, CancellationToken ct)
+    {
+        const string format = "yyyy-MM-dd HH:mm:ss";
+        var severity = dumps.RecentCount >= MemoryDumpBurstCount ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+        string newest = dumps.NewestDumpUtc.ToString(format, CultureInfo.InvariantCulture) + " UTC";
+        string total = dumps.TotalCount.ToString(CultureInfo.InvariantCulture);
+        string recent = dumps.RecentCount.ToString(CultureInfo.InvariantCulture);
+        var context = new AlertContext { SeverityOverride = severity };
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Memory dumps",
+            Fields = new()
+            {
+                ("Dump Count", total),
+                ("Newest Dump Time", newest),
+                ("Dumps In The Last 10 Minutes", recent),
+            }
+        });
+        AlertSampleAge.Stamp(context, "memory dump record", dumps.ObservedAtUtc, now);
+        var mute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = MemoryDumpsMetric });
+        await FireAsync(new AlertOutcome(
+            key, serverName, MemoryDumpsMetric,
+            $"{total} dumps, newest {newest}, {recent} in the last {MemoryDumpBurstMinutes} minutes",
+            $"{MemoryDumpBurstCount} dumps in {MemoryDumpBurstMinutes} minutes is Critical",
+            context, AlertContextBuilders.ContextToDetailText(context),
+            NumericCurrentValue: dumps.RecentCount, NumericThresholdValue: MemoryDumpBurstCount,
+            Muted: mute.Muted, Severity: severity,
+            ShortMessage: $"New memory dump, {total} in total, newest {newest}, {recent} in the last {MemoryDumpBurstMinutes} minutes",
+            Hold: mute.Hold), ct);
     }
 
     /// <summary>

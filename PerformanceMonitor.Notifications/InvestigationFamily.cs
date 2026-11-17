@@ -82,6 +82,9 @@ public static class InvestigationFamily
         ["Identity Capacity"] = Resources,
 
         ["Database State"] = Availability,
+        /* #8884: an instance that restarted, or wrote a dump, is an availability question first. */
+        ["Instance Restarted"] = Availability,
+        ["Memory Dumps"] = Availability,
         /* Not in the draft: a missing backup or CHECKDB is a restorability gap, which sits beside Database State. */
         ["Backup Overdue"] = Availability,
         ["Log Backup Overdue"] = Availability,

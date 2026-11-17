@@ -247,6 +247,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetDatabaseStateDeviationsAsync(serverId), cancellationToken);
     }
 
+    /// <summary>#8884: the restart and memory dump rise the store holds, from <c>collector_state</c>.</summary>
+    public async Task<InstanceEventInfo> GetInstanceEventsAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetInstanceEventsAsync(serverId), cancellationToken);
+    }
+
     /// <summary>
     /// #2157. Off the WPF dispatcher via Task.Run for the same reason as its siblings here (#1202).
     /// </summary>

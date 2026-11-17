@@ -257,6 +257,9 @@
     "tempDbLogSpaceThresholdPercent": 80,
     // TempDB Growth Won't Fit: alert when the next autogrowth of a tempdb file will not fit on its volume. Default true.
     "tempDbGrowthFitEnabled": true,
+    // Instance Restarted and Memory Dumps: alert when the instance start time moves later, and when a new memory dump file appears. Default true. The file seeds a new store only.
+    "instanceRestartedEnabled": true,
+    "memoryDumpsEnabled": true,
     "cpuThresholdPercent": 80,
     "cpuMode": "total", // "total" (SQL + other processes) or "sql" (SQL process only)
     // Blocking pages on blocked WAIT TIME, not on one event. "blockingCountThreshold" (default 3) pages when

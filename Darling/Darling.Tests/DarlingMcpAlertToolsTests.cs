@@ -1441,7 +1441,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #8881 (V269): deliberately NOT the shipped true / 80, so a payload that dropped the columns would not match. */
         TempDbLogSpaceEnabled: false, TempDbLogSpaceThresholdPercent: 65,
         /* #8882 (V270): deliberately NOT the shipped true. */
-        TempDbGrowthFitEnabled: false);
+        TempDbGrowthFitEnabled: false,
+        /* #8884 (V271): the Instance Restarted and Memory Dumps switches, shipped on. */
+        InstanceRestartedEnabled: true, MemoryDumpsEnabled: true);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

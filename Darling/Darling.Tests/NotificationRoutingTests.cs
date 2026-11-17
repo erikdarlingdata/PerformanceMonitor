@@ -516,6 +516,7 @@ public sealed class NotificationRoutingTests
             PostgresAlertEvaluator.WraparoundMetric, PostgresAlertEvaluator.XminHorizonMetric,
             PostgresAlertEvaluator.SlotRetentionMetric, PostgresAlertEvaluator.PoisonWaitMetric,
             ForcePlanTokens.MetricName, DatabaseStateTokens.MetricName,
+            AlertEngine.InstanceRestartedMetric, AlertEngine.MemoryDumpsMetric,
             AgAlertPolicy.FailoverMetric, AgAlertPolicy.ReplicaDisconnectedMetric, AgAlertPolicy.ReplicaReconnectedMetric,
             AgAlertPolicy.SyncFellBehindMetric, AgAlertPolicy.DatabaseSuspendedMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,

@@ -931,6 +931,8 @@ public partial class SettingsWindow : Window
         AlertTempDbLogSpaceCheckBox.IsChecked = r.TempDbLogSpaceEnabled;
         AlertTempDbLogSpaceThresholdBox.Text = r.TempDbLogSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertTempDbGrowthFitCheckBox.IsChecked = r.TempDbGrowthFitEnabled;
+        AlertInstanceRestartedCheckBox.IsChecked = r.InstanceRestartedEnabled;
+        AlertMemoryDumpsCheckBox.IsChecked = r.MemoryDumpsEnabled;
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = r.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskThresholdGbBox.Text = r.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
@@ -1087,6 +1089,8 @@ public partial class SettingsWindow : Window
             TempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true,
             TempDbLogSpaceEnabled = AlertTempDbLogSpaceCheckBox.IsChecked == true,
             TempDbGrowthFitEnabled = AlertTempDbGrowthFitCheckBox.IsChecked == true,
+            InstanceRestartedEnabled = AlertInstanceRestartedCheckBox.IsChecked == true,
+            MemoryDumpsEnabled = AlertMemoryDumpsCheckBox.IsChecked == true,
             LowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true,
             PvsEnabled = AlertPvsCheckBox.IsChecked == true,
             FileGrowthEnabled = AlertFileGrowthCheckBox.IsChecked == true,
@@ -1617,6 +1621,10 @@ public partial class SettingsWindow : Window
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
+        if (AlertInstanceRestartedCheckBox.IsChecked == true)
+            parts.Add("instance restarted");
+        if (AlertMemoryDumpsCheckBox.IsChecked == true)
+            parts.Add("memory dumps");
         if (AlertAgentAlertGapsCheckBox.IsChecked == true)
             parts.Add("Agent alert setup gaps");
         if (AlertBackupOverdueCheckBox.IsChecked == true)
@@ -1720,6 +1728,8 @@ public partial class SettingsWindow : Window
         AlertTempDbLogSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbLogSpaceThresholdBox.IsEnabled = enabled;
         AlertTempDbGrowthFitCheckBox.IsEnabled = enabled;
+        AlertInstanceRestartedCheckBox.IsEnabled = enabled;
+        AlertMemoryDumpsCheckBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertPvsCheckBox.IsEnabled = enabled;

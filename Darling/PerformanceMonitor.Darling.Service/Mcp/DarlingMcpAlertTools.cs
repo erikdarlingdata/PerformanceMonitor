@@ -690,6 +690,9 @@ public sealed partial class DarlingMcpAlertTools
         backup_overdue = new { enabled = s.BackupOverdueEnabled, threshold_hours = s.BackupOverdueThresholdHours },
         log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled, threshold_minutes = s.LogBackupOverdueThresholdMinutes },
         checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled, threshold_hours = s.CheckDbOverdueThresholdHours },
+        /* #8884: the Instance Restarted and Memory Dumps alerts. On by default. */
+        instance_restarted = new { enabled = s.InstanceRestartedEnabled },
+        memory_dumps = new { enabled = s.MemoryDumpsEnabled },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -3772,6 +3775,28 @@ public sealed partial class DarlingMcpAlertTools
                             case "excluded_program_name_prefixes": AddStringArray("long_running_query_excluded_program_name_prefixes", n, "long_running_query.excluded_program_name_prefixes", LongRunningQueryExclusions.Normalize); break;
                             case "excluded_logins": AddStringArray("long_running_query_excluded_logins", n, "long_running_query.excluded_logins", LongRunningQueryExclusions.Normalize); break;
                             default: error = $"Unknown field 'long_running_query.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "instance_restarted":
+                    Group(prop.Value, "instance_restarted", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("instance_restarted_enabled", n, "instance_restarted.enabled"); break;
+                            default: error = $"Unknown field 'instance_restarted.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "memory_dumps":
+                    Group(prop.Value, "memory_dumps", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("memory_dumps_enabled", n, "memory_dumps.enabled"); break;
+                            default: error = $"Unknown field 'memory_dumps.{k}'."; break;
                         }
                     });
                     break;

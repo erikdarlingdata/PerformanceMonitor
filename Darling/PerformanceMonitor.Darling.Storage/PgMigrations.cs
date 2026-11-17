@@ -3488,6 +3488,8 @@ $rung$;";
            expanded again. Nothing is backfilled: a row stored before this rung never read the flag, so NULL is the honest value, and the next hourly pass
            writes it. The same rung adds the TempDB Growth Fit switch column to the alert settings row (default on). */
         new Migration(270, "database-size-autogrow-all-files", V270Sql),
+        /* V271 (#8884): the Instance Restarted and Memory Dumps alert switches on the alert settings. Two catalog-only boolean columns that default on. */
+        new Migration(271, "instance-event-alert-switches", V271Sql),
     };
 
     /// <summary>
@@ -3545,6 +3547,17 @@ CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_st
 ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
 CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
 ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V271 (#8884): the two switches of the Instance Restarted and Memory Dumps alerts on <c>config.config_alert_settings</c>, each
+    /// <c>boolean NOT NULL DEFAULT TRUE</c> so an existing store keeps both alerts on. Catalog-only adds, idempotent, no backfill (the DEFAULT fills the
+    /// singleton row). <c>memory_dumps_enabled</c> is the probe's sentinel and is added LAST. An older build never reads the columns and keeps both
+    /// alerts on, so before rolling back past this rung switch both off by hand if you want them off.
+    /// </summary>
+    private const string V271Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS instance_restarted_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS memory_dumps_enabled boolean NOT NULL DEFAULT TRUE;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.
