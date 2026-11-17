@@ -407,7 +407,50 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         }
 
         return string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase)
-            || (seat.OwnerKey is not null && IsProposalPressPath(path));
+            || (seat.OwnerKey is not null && (IsProposalPressPath(path) || IsPersonalTokenWritePath(path)));
+    }
+
+    /// <summary>True for exactly <c>/api/mcp-tokens</c> or <c>/api/mcp-tokens/{id}/revoke</c>, the id 16 lowercase hex characters, with no
+    /// other segment and no trailing slash (#8737). A person signed in with an owner key makes and revokes their own personal MCP tokens whatever
+    /// the role of their sign-in; the route, not this gate, decides which role a token may take and whose token may be revoked.</summary>
+    internal static bool IsPersonalTokenWritePath(string path)
+    {
+        const string Route = "/api/mcp-tokens";
+        if (string.Equals(path, Route, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        const string Suffix = "/revoke";
+        if (!path.StartsWith(Route + "/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(Suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var start = Route.Length + 1;
+        var length = path.Length - Suffix.Length - start;
+        return length == PersonalTokenIdLength && IsPersonalTokenId(path.Substring(start, length));
+    }
+
+    private const int PersonalTokenIdLength = 16;
+
+    /// <summary>True for a personal token id: 16 lowercase hex characters.</summary>
+    internal static bool IsPersonalTokenId(string? id)
+    {
+        if (id is null || id.Length != PersonalTokenIdLength)
+        {
+            return false;
+        }
+
+        foreach (var c in id)
+        {
+            if (!(c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>True for exactly <c>/api/proposals/{id}/first-press</c> or <c>/api/proposals/{id}/confirm</c>, the id a GUID in its hyphenated

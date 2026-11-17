@@ -201,9 +201,21 @@ public sealed class DarlingWebHostService : BackgroundService
        DarlingFrontDoorWebProxy). */
     private readonly IServiceProvider? _services;
 
+    /* #8737: the process's personal-token snapshot, the one the MCP host's gate checks. The routes refresh it after each create or revoke. Null in
+       a host built outside the service's DI unless a test sets PersonalSnapshot; with none, the routes answer 404. */
+    private DarlingPersonalTokenSnapshot? _personalSnapshot;
+
+    /// <summary>The personal-token snapshot the <c>/api/mcp-tokens</c> routes refresh after a write (#8737). A test sets it.</summary>
+    internal DarlingPersonalTokenSnapshot? PersonalSnapshot
+    {
+        get => _personalSnapshot;
+        init => _personalSnapshot = value;
+    }
+
     public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, IServiceProvider? services = null)
     {
         _services = services;
+        _personalSnapshot = services?.GetService<DarlingPersonalTokenSnapshot>();
         _pseudonymKeys = pseudonymKeys;
         _ownerSource = ownerSource;
         _slowReads = slowReads;
@@ -1311,7 +1323,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 ? new DarlingWebGroupTokens(() => _ownerSource.Read(), postgres, () => DarlingPasswordKey.Current,
                     accessToken, webTokens, mcpTokens, _logger)
                 : null;
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups, tokenSignIn: tokenSignIn);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups, tokenSignIn: tokenSignIn, personalTokens: DarlingMcpHostService.PersonalTokensFor(config));
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1576,7 +1588,8 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingWebTokenSet? webTokens = null,
         Uri? publicOrigin = null,
         DarlingWebGroupTokens? managedGroups = null,
-        TokenSignInMode tokenSignIn = TokenSignInMode.On)
+        TokenSignInMode tokenSignIn = TokenSignInMode.On,
+        PersonalTokenSettings? personalTokens = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -2070,7 +2083,7 @@ public sealed class DarlingWebHostService : BackgroundService
         }
         else
         {
-            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient));
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient), personalTokenSnapshot: _personalSnapshot, personalTokens: personalTokens);
         }
 
         app.UseDefaultFiles();

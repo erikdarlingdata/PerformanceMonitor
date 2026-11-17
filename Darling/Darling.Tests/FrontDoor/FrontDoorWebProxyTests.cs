@@ -355,6 +355,7 @@ public sealed class FrontDoorWebProxyTests
         Assert.Equal("shared_token", (string?)json["method"]);
         Assert.Equal("admin", (string?)json["seat"]);
         Assert.Null(json["subject"]);
+        Assert.False((bool?)json["personal_tokens"]);
         Assert.Empty(a.Api);
         Assert.Empty(b.Api);
 
@@ -366,6 +367,7 @@ public sealed class FrontDoorWebProxyTests
         Assert.Equal("oidc", (string?)viewerJson["method"]);
         Assert.Equal("viewer@example.test", (string?)viewerJson["subject"]);
         Assert.Null(viewerJson["role_mapping"]);
+        Assert.False((bool?)viewerJson["personal_tokens"]);
         Assert.Empty(a.Api);
         Assert.Empty(b.Api);
     }
@@ -415,6 +417,7 @@ public sealed class FrontDoorWebProxyTests
     [InlineData("/api/me")]
     [InlineData("/api/front-door")]
     [InlineData("/api/front-door/locate?server=sql-east-1")]
+    [InlineData("/api/mcp-tokens")]
     [InlineData("/api/fleet")]
     public async Task ASignedOutRequest_ToEachLocalRoute_Is401(string url)
     {
@@ -428,6 +431,48 @@ public sealed class FrontDoorWebProxyTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Empty(a.Api);
         Assert.Empty(a.Logins);
+    }
+
+    /// <summary>#8737 (E5): the front door forwards every /api/* route it does not answer itself, so the personal-token paths are local routes
+    /// that answer 404 and reach no store, whatever the method, the query, the case or a trailing slash.</summary>
+    [Theory(Timeout = 60_000)]
+    [InlineData("GET", "/api/mcp-tokens")]
+    [InlineData("GET", "/api/mcp-tokens?all=1")]
+    [InlineData("POST", "/api/mcp-tokens")]
+    [InlineData("GET", "/api/mcp-tokens/0123456789abcdef")]
+    [InlineData("POST", "/api/mcp-tokens/0123456789abcdef/revoke")]
+    [InlineData("POST", "/api/mcp-tokens/")]
+    [InlineData("POST", "/API/MCP-Tokens")]
+    [InlineData("DELETE", "/api/mcp-tokens/0123456789abcdef")]
+    public async Task McpTokens_AnsweredLocally404_NeverForwarded(string method, string url)
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var (response, body) = await door.SendAsync(door.Request(new HttpMethod(method), url, store: "use1", body: method == "GET" ? null : "{}"));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("personal_tokens_unavailable", (string?)Json(body)["error"]);
+        Assert.Empty(a.Api);
+        Assert.Empty(b.Api);
+        Assert.Empty(a.Logins);
+        Assert.Empty(b.Logins);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AnotherPathThatOnlyStartsLikeMcpTokens_IsStillForwarded()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var (response, _) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/mcp-tokens-other", store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Single(a.Api);
     }
 
     [Theory(Timeout = 60_000)]
