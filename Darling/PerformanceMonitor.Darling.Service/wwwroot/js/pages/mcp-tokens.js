@@ -16,7 +16,7 @@
  * fresh draw, and this route is never re-drawn by the poll), so leaving the page drops it. Every value is drawn through el() as text.
  */
 
-import { el, mount, apiGet, apiSend, apiWrite, localTime, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { el, mount, apiGet, apiSend, apiWrite, localTime, loadingStrip, errorStrip, emptyStrip, noticeStrip } from "../util.js";
 
 const ROUTE = "/api/mcp-tokens";
 const COPY_NOTE = "This is the only time this token is shown. Copy it now; it cannot be shown again.";
@@ -161,7 +161,7 @@ export function renderMcpTokens(host, me) {
     }
     const table = tokenTable(res.data.tokens, withSubject, (row) => revoke(row, withSubject));
     mount(target, res.data.truncated === true
-      ? [emptyStrip("Only the newest " + res.data.tokens.length + " tokens are shown; older ones are left out."), table]
+      ? [noticeStrip("Only the newest " + res.data.tokens.length + " tokens are shown; older ones are left out."), table]
       : table);
   };
 

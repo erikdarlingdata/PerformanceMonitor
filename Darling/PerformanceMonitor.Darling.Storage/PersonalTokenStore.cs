@@ -81,8 +81,9 @@ SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, l
 FROM config.mcp_personal_token
 ORDER BY created_at, token_id";
 
-    /* Whose row it is decides who revoked it and why, not the caller's seat: the caller's own row is the owner revoking it ($4, $6, $8),
-       anyone else's an administrator ($5, $7). A null $4 matches no row, so it is always the administrator's arm. */
+    /* Whose row it is decides who revoked it and why, not the caller's seat: a row whose owner_key is the caller's ($4) is the owner revoking
+       it (revoked_by $5, reason $7), anyone else's an administrator (revoked_by $6, reason $8). A null $4 matches no row, so it is always the
+       administrator's arm. */
     private const string RevokeSql = @"
 UPDATE config.mcp_personal_token
 SET revoked_at = $2,

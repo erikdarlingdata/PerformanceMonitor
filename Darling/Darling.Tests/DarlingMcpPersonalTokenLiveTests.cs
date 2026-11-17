@@ -165,7 +165,44 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         Assert.True(createdBy!.Length <= 256, $"{createdBy.Length} characters");
         var prefix = "mcp:personal token " + tokenName + " of ";
         Assert.StartsWith(prefix + Family, createdBy, StringComparison.Ordinal);
-        var kept = createdBy[prefix.Length..createdBy.IndexOf(", client says: ", StringComparison.Ordinal)].TrimEnd('\u2026');
+        var kept = createdBy[prefix.Length..createdBy.IndexOf(", client says: ", StringComparison.Ordinal)].TrimEnd('.');
         Assert.Equal(string.Empty, kept.Replace(Family, string.Empty, StringComparison.Ordinal));
+    }
+
+    /// <summary>N3: a long subject that is a valid login is shortened with an ASCII marker, so the person-scoped journal actor keeps the
+    /// person and the token (<c>person:mcp personal token ci of ...</c>) instead of falling back to <c>person:mcp</c>.</summary>
+    [Fact]
+    public async Task Personal_LongSubject_JournalActorKeepsTheIdentity()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the personal token live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var subject = new string('a', 190) + "@corp";
+        await using (var owner = NpgsqlDataSource.Create(scratch.ConnectionString))
+        {
+            var minted = PersonalTokenFormat.Mint();
+            Assert.Equal(PersonalTokenCreateOutcome.Created, await PersonalTokenStore.CreateAsync(
+                owner, minted.TokenId, minted.SecretSha256, "owner-long-login", subject, "ci", McpTokenEntry.OperatorRole,
+                DateTimeOffset.UtcNow, 30, 5, "person:long", ct));
+
+            await using var rig = await PersonalMcpRig.StartAsync(Personal(), storeConnection: scratch.ConnectionString);
+            rig.Now = DateTime.UtcNow;
+            await rig.RefreshAsync();
+
+            var response = await rig.PostAsync(minted.Value, PersonalMcpRig.ToolsCallJson(
+                "write_investigation_note", "{\"note_text\":\"A note from a long subject.\"}"));
+            Assert.Equal(StatusCodes.Status200OK, response.Status);
+        }
+
+        var actor = await ScalarAsync(connection, "SELECT actor FROM config.investigation_journal WHERE event = 'note_written'", ct);
+        Assert.NotNull(actor);
+        Assert.StartsWith("person:mcp personal token ci of " + new string('a', 40), actor, StringComparison.Ordinal);
+        Assert.EndsWith("...", actor, StringComparison.Ordinal);
     }
 }

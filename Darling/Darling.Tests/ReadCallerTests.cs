@@ -311,7 +311,7 @@ public sealed class ReadCallerTests
 
         Assert.StartsWith("personal token " + longestName + " of " + Family, rendered, StringComparison.Ordinal);
         Assert.True(stored.Length <= 256, $"{stored.Length} characters");
-        var kept = rendered[("personal token " + longestName + " of ").Length..].TrimEnd('\u2026');
+        var kept = rendered[("personal token " + longestName + " of ").Length..].TrimEnd('.');
         Assert.Equal(string.Empty, kept.Replace(Family, string.Empty, StringComparison.Ordinal));
 
         /* A subject that fits is kept as it is. */
