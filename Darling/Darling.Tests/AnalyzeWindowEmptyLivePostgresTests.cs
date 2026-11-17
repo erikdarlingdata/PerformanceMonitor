@@ -312,6 +312,17 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
             Assert.Contains("Collection may have stopped or broken", young, StringComparison.Ordinal);
             Assert.False(service.WindowEmptyRemovedByRetention);
 
+            /* ── a store whose purge has stalled: its oldest row sits ten days BEFORE the horizon, so a window before that row
+               was never held by a store that has been removing rows. Retention did not remove it either. */
+            await DeleteWaitRowsAsync(connection, ct);
+            await PlantWaitAsync(connection, Naive(now.AddDays(-(retentionDays + 10))), StaleWait, 60_000L, ct);
+            await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
+
+            var stalled = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 48, as_of: AsOf(retentionDays + 20));
+            Assert.DoesNotContain("Retention removed it", stalled, StringComparison.Ordinal);
+            Assert.Contains("Collection may have stopped or broken", stalled, StringComparison.Ordinal);
+            Assert.False(service.WindowEmptyRemovedByRetention);
+
             bodySucceeded = true;
         }
         finally

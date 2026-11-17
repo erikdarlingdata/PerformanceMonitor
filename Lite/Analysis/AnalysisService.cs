@@ -1321,9 +1321,16 @@ WHERE server_id = $1";
             if (result is not DateTime oldest)
                 return null;
 
+            /* The archive purge deletes a whole month's file once the month start passes the cutoff, so after a purge the oldest
+               row sits at the first month start at or after the cutoff, not at the cutoff (RetentionService.OldestRetainedInstant,
+               the rule the purge itself follows). The daily purge can lag the cutoff by one interval, which is how far before it
+               the oldest row can sit while the purge is running. */
+            var now = DateTime.UtcNow;
             return new RetentionBoundary(
                 DateTime.SpecifyKind(oldest, DateTimeKind.Utc),
-                DateTime.UtcNow.AddMonths(-RetentionService.ArchiveRetentionMonths),
+                now.AddMonths(-RetentionService.ArchiveRetentionMonths),
+                DateTime.SpecifyKind(RetentionService.OldestRetainedInstant(now), DateTimeKind.Utc) + RetentionBoundary.HorizonSlack,
+                now.AddMonths(-RetentionService.ArchiveRetentionMonths) - CollectionBackgroundService.RetentionInterval,
                 "wait_stats",
                 $"{RetentionService.ArchiveRetentionMonths} months of retention for wait_stats");
         }

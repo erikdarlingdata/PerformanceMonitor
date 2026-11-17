@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -74,7 +75,7 @@ public sealed class AnalyzeServerWordingTests
     {
         var context = ContextWith(0, null, null);
         var oldest = End.AddDays(30).AddHours(-1);
-        var retention = new RetentionBoundary(oldest, oldest, "wait_stats", "30 days of retention for wait_stats");
+        var retention = Boundary(oldest, oldest);
 
         var message = WindowEmptyText.Compose(context, dataSpanHours: 731.3, pointInTimeFacts, retention);
 
@@ -100,8 +101,7 @@ public sealed class AnalyzeServerWordingTests
     public void AWindowInsideTheSpan_OrBeforeAYoungStoresFirstRow_KeepsTheCollectionText(int oldestDaysFromWindowEnd, int horizonDaysFromWindowEnd)
     {
         var context = ContextWith(0, null, null);
-        var retention = new RetentionBoundary(
-            End.AddDays(oldestDaysFromWindowEnd), End.AddDays(horizonDaysFromWindowEnd), "wait_stats", "30 days of retention for wait_stats");
+        var retention = Boundary(End.AddDays(oldestDaysFromWindowEnd), End.AddDays(horizonDaysFromWindowEnd));
 
         var message = WindowEmptyText.Compose(context, dataSpanHours: 216.0, factCount: 0, retention);
 
@@ -114,11 +114,51 @@ public sealed class AnalyzeServerWordingTests
     public void TheOldestRowMayBeADayPastTheHorizon_AndNoMore_ForRetentionToOwnTheWindow()
     {
         var horizon = End.AddDays(30);
-        Assert.True(new RetentionBoundary(horizon.AddHours(-3), horizon, "wait_stats", "x").RemovedWindow(End));
-        Assert.True(new RetentionBoundary(horizon.AddHours(23), horizon, "wait_stats", "x").RemovedWindow(End));
-        Assert.False(new RetentionBoundary(horizon.AddHours(25), horizon, "wait_stats", "x").RemovedWindow(End));
-        Assert.False(new RetentionBoundary(horizon, horizon, "wait_stats", "x").RemovedWindow(horizon.AddHours(1)));
+        Assert.True(Boundary(horizon.AddHours(-3), horizon).RemovedWindow(End));
+        Assert.True(Boundary(horizon.AddHours(23), horizon).RemovedWindow(End));
+        Assert.False(Boundary(horizon.AddHours(25), horizon).RemovedWindow(End));
+        Assert.False(Boundary(horizon, horizon).RemovedWindow(horizon.AddHours(1)));
     }
+
+    /// <summary>
+    /// #8910: a purge that has stalled leaves the oldest row far BEFORE the horizon. A window before the server was first
+    /// monitored then ends before that row too, but the store never held it, and the text keeps the collection wording. A row a
+    /// chunk or a purge interval before the horizon is where a running purge leaves it, and still counts as removed.
+    /// </summary>
+    [Fact]
+    public void AStoreWhosePurgeStalled_KeepsTheCollectionText_ForAWindowBeforeItsFirstRow()
+    {
+        var horizon = End.AddDays(30);
+        var stalled = Boundary(horizon.AddDays(-10), horizon);
+        Assert.False(stalled.RemovedWindow(End));
+
+        var message = WindowEmptyText.Compose(ContextWith(0, null, null), dataSpanHours: 960.0, factCount: 0, stalled);
+        Assert.Contains("No collection landed inside it", message, StringComparison.Ordinal);
+        Assert.Contains("Collection may have stopped or broken", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Retention removed it", message, StringComparison.Ordinal);
+
+        Assert.True(Boundary(horizon.AddHours(-40), horizon).RemovedWindow(End));
+        Assert.False(Boundary(horizon.AddHours(-50), horizon).RemovedWindow(End));
+    }
+
+    /// <summary>
+    /// #8910: each product states the latest instant its own purge leaves the oldest row at. Lite's archive purge deletes whole
+    /// months, so the oldest row sits up to a month past the cutoff, and that boundary keeps the claim there. The horizon plus
+    /// a slack, the one rule Darling's chunk purge needs, would not.
+    /// </summary>
+    [Fact]
+    public void AProductWithALaterPurgeRule_OwnsTheWindow_WhereTheHorizonPlusSlackWouldNot()
+    {
+        var horizon = End.AddDays(30);
+        var monthLater = horizon.AddDays(20);
+        var lite = new RetentionBoundary(monthLater, horizon, monthLater + RetentionBoundary.HorizonSlack, horizon - TimeSpan.FromDays(1), "wait_stats", "x");
+        Assert.True(lite.RemovedWindow(End));
+        Assert.False(Boundary(monthLater, horizon).RemovedWindow(End));
+    }
+
+    /// <summary>A Darling-shaped boundary: the horizon plus the slack above it, one chunk and one purge interval below it.</summary>
+    private static RetentionBoundary Boundary(DateTime oldest, DateTime horizon) => new(
+        oldest, horizon, horizon + RetentionBoundary.HorizonSlack, horizon.AddDays(-(TimescaleSupport.ChunkIntervalDays + 1)), "wait_stats", "30 days of retention for wait_stats");
 
     private static AnalysisStory StoryFor(string key, string hash) => new()
     {

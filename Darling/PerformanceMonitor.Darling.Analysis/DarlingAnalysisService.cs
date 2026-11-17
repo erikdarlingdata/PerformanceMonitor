@@ -1189,9 +1189,15 @@ WHERE server_id = $1";
 
             var oldest = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
             var days = Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+            /* drop_chunks drops a chunk only once its whole range is past the cutoff, so a purge leaves up to one chunk of rows
+               BEFORE the horizon, and a daily sweep can lag it by a day more. A first row later than the horizon by the slack is a
+               store that never held the window. */
+            var horizon = DateTime.UtcNow.AddDays(-days);
             return new RetentionBoundary(
                 oldest,
-                DateTime.UtcNow.AddDays(-days),
+                horizon,
+                horizon + RetentionBoundary.HorizonSlack,
+                horizon.AddDays(-(TimescaleSupport.ChunkIntervalDays + 1)),
                 coverageTable,
                 string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{days} days of retention for {coverageTable}"));
         }
