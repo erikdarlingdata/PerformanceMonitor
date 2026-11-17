@@ -2930,7 +2930,7 @@ LIMIT 1";
            future third collector needs only its own IsXCollector check added to this one condition,
            never a second one to keep in sync. */
         using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName)
-            || IsSchemaObjectsCollector(collectorName) || detachedDaily
+            || IsSchemaObjectsCollector(collectorName) || IsColumnStatsCollector(collectorName) || detachedDaily
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
             : DetachedCollectorGate.NotGated;
 
@@ -4073,6 +4073,8 @@ LIMIT 1";
         ["object_inventory"] = (r, s, ct) => r.RunAsync(ObjectInventoryCollector.Instance, s, ct),
         /* #7643: the schema pass has its own run (events, probe, per-database catalog reads, versioned store), not the one-query path. */
         ["schema_objects"] = (r, s, ct) => DarlingSchemaCapture.RunAsync(r, s, ct),
+        /* #8798: the column selectivity run has its own body, not the one-query path. */
+        ["column_stats"] = (r, s, ct) => DarlingColumnStatsCapture.RunAsync(r, s, ct),
         ["agent_alerts"] = (r, s, ct) => r.RunAsync(AgentAlertsCollector.Instance, s, ct),
         ["database_protection"] = (r, s, ct) => r.RunAsync(DatabaseProtectionCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),

@@ -59,11 +59,11 @@ namespace Darling.Tests;
 public sealed class SweepBodyDetachPolicyTests
 {
     /// <summary>The collectors #2700/#2717 detach, by the criterion documented on this class.</summary>
-    private static readonly string[] ExpectedDetached = { "query_store", "plan_correction", "pg_wait_sampling", "schema_objects" };
+    private static readonly string[] ExpectedDetached = { "query_store", "plan_correction", "pg_wait_sampling", "schema_objects", "column_stats" };
 
     private static bool IsDetached(string name) =>
         DarlingWorker.IsQueryStoreCollector(name) || DarlingWorker.IsPlanCorrectionCollector(name)
-        || DarlingWorker.IsPgWaitSamplingCollector(name) || DarlingWorker.IsSchemaObjectsCollector(name);
+        || DarlingWorker.IsPgWaitSamplingCollector(name) || DarlingWorker.IsSchemaObjectsCollector(name) || DarlingWorker.IsColumnStatsCollector(name);
 
     /// <summary>
     /// The invariant that makes detaching safe, and the one that GENERALISES: a detached collector runs
