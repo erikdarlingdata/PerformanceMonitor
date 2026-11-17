@@ -48,13 +48,14 @@ public sealed class DarlingMcpDatabaseProtectionTools
 
     /* #8865: the CHECKDB fact also says where its time came from, the options and error count of the error-log line, why it reads as it does (a
        backfill still running, a replica that is not readable) and, on an AG database, the boot-page time kept for reference. R11: a band with no
-       source is the boot page, because that is the time the old path shows. */
-    internal static object CheckDbFact(DateTime? lastTime, DatabaseProtectionFactBand band, string storedState) => new
+       source is the boot page, because that is the time the old path shows. last_time is the time the band judged (I7): the error-log check
+       when the source is error_log, else the boot page, so it always agrees with age and state. */
+    private static object CheckDbFact(DatabaseProtectionFact fact, DatabaseProtectionFactBand band) => new
     {
         state = band.State,
         overdue = band.Overdue,
-        stored_state = storedState,
-        last_time = Format(lastTime),
+        stored_state = fact.CheckDbState ?? "",
+        last_time = Format(band.Source == DatabaseProtectionBands.SourceErrorLog ? fact.ErrorLogCheckDbTime : fact.LastGoodCheckDbTime),
         age_minutes = band.Age is { } a ? (long)a.TotalMinutes : (long?)null,
         age = band.Age is { } t ? Describe(t) : null,
         threshold_minutes = (long)band.Threshold.TotalMinutes,
@@ -86,6 +87,22 @@ public sealed class DarlingMcpDatabaseProtectionTools
             unparsed_lines = first?.ErrorLogUnparsedLines,
         };
     }
+
+    /// <summary>One database as <c>get_database_protection</c> lists it: the tool and its tests build the reply through this one projection.</summary>
+    internal static object DatabaseEntry(DatabaseProtectionFact fact, DatabaseProtectionBand band) => new
+    {
+        database = fact.DatabaseName,
+        state = fact.StateDesc,
+        recovery_model = fact.RecoveryModelDesc,
+        replica_role = fact.ReplicaRole,
+        platform = fact.Platform,
+        created = Format(fact.CreateDate),
+        excluded_reason = band.ExcludedReason,
+        replica_readable = fact.ReplicaReadable,
+        checkdb = CheckDbFact(fact, band.CheckDb),
+        full_backup = Fact(fact.LastFullBackupTime, band.FullBackup, fact.FullBackupState ?? ""),
+        log_backup = Fact(fact.LastLogBackupTime, band.LogBackup, fact.LogBackupState ?? ""),
+    };
 
     /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units.</summary>
     internal static string Describe(TimeSpan age) => DatabaseProtectionBands.Describe(age);
@@ -177,20 +194,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
                 },
                 error_log = ErrorLogBlock(read.Databases.Count > 0 ? read.Databases[0] : null),
                 databases_listed = listed.Count,
-                databases = listed.Select(b => new
-                {
-                    database = b.Fact.DatabaseName,
-                    state = b.Fact.StateDesc,
-                    recovery_model = b.Fact.RecoveryModelDesc,
-                    replica_role = b.Fact.ReplicaRole,
-                    platform = b.Fact.Platform,
-                    created = Format(b.Fact.CreateDate),
-                    excluded_reason = b.Band.ExcludedReason,
-                    replica_readable = b.Fact.ReplicaReadable,
-                    checkdb = CheckDbFact(b.Fact.LastGoodCheckDbTime, b.Band.CheckDb, b.Fact.CheckDbState ?? ""),
-                    full_backup = Fact(b.Fact.LastFullBackupTime, b.Band.FullBackup, b.Fact.FullBackupState ?? ""),
-                    log_backup = Fact(b.Fact.LastLogBackupTime, b.Band.LogBackup, b.Fact.LogBackupState ?? ""),
-                }),
+                databases = listed.Select(b => DatabaseEntry(b.Fact, b.Band)),
                 note = "All times are UTC. A threshold is the global setting (get_alert_settings) unless a server or database override (set_alert_threshold_override) replaces it; each fact's threshold_minutes is the one its database was judged against. last_time is null when there is no time to show (never, none_in_window, unknown, unavailable). " +
                     "Backups are read from the last 60 days of msdb, so none_in_window means none in 60 days, not never. " +
                     "An excluded database and a platform-managed target are never overdue. A native-only (Amazon RDS) target's backups are not judged, but its CHECKDB is. A secondary's backups are not judged (they run on the primary), but its CHECKDB is, from its own error log.",

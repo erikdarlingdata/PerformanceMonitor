@@ -242,14 +242,7 @@ public sealed class DatabaseProtectionPerReplicaSurfacesTests
         var reply = new
         {
             error_log = DarlingMcpDatabaseProtectionTools.ErrorLogBlock(facts.FirstOrDefault()),
-            databases = banded.Select(b => new
-            {
-                database = b.Fact.DatabaseName,
-                replica_role = b.Fact.ReplicaRole,
-                excluded_reason = b.Band.ExcludedReason,
-                replica_readable = b.Fact.ReplicaReadable,
-                checkdb = DarlingMcpDatabaseProtectionTools.CheckDbFact(b.Fact.LastGoodCheckDbTime, b.Band.CheckDb, b.Fact.CheckDbState ?? ""),
-            }),
+            databases = banded.Select(b => DarlingMcpDatabaseProtectionTools.DatabaseEntry(b.Fact, b.Band)),
         };
         return JsonDocument.Parse(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions)).RootElement.Clone();
     }
@@ -259,6 +252,27 @@ public sealed class DatabaseProtectionPerReplicaSurfacesTests
 
     private static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    [Fact]
+    public void TheToolsLastTime_IsTheTimeTheBandJudged_AndTheBootPageStaysSeparate()
+    {
+        /* #8865 I7: last_time was always the boot page, so an error-log judgement showed an age and a state the time beside it did not explain. */
+        static string Iso(DateTime t) => t.ToString("o", CultureInfo.InvariantCulture);
+        var reply = ToolReply(
+            Logged("AgDb", "SECONDARY", TimeSpan.FromDays(2)) with { LastGoodCheckDbTime = Now.AddDays(-30) },
+            Logged("LogNewer", null, TimeSpan.FromDays(1)) with { LastGoodCheckDbTime = Now.AddDays(-9) },
+            Logged("BootNewer", null, TimeSpan.FromDays(9)) with { LastGoodCheckDbTime = Now.AddDays(-1) });
+
+        var ag = Db(reply, "AgDb").GetProperty("checkdb");
+        Assert.Equal(Iso(Now.AddDays(-2)), Str(ag, "last_time"));
+        Assert.Equal(Iso(Now.AddDays(-30)), Str(ag, "boot_page_time"));
+
+        var logNewer = Db(reply, "LogNewer").GetProperty("checkdb");
+        Assert.Equal(("error_log", Iso(Now.AddDays(-1))), (Str(logNewer, "source"), Str(logNewer, "last_time")));
+
+        var bootNewer = Db(reply, "BootNewer").GetProperty("checkdb");
+        Assert.Equal(("boot_page", Iso(Now.AddDays(-1))), (Str(bootNewer, "source"), Str(bootNewer, "last_time")));
+    }
 
     [Fact]
     public void TheTool_ShowsSourceOptionsAndErrors_AndTheErrorLogBlock()
