@@ -410,6 +410,7 @@ public sealed class DatabaseProtectionCollectorTests
         Add(table, "ReadOnly", "FULL", Checked, Full, Log, role: "SECONDARY", allowConnections: "READ_ONLY");
         Add(table, "AllConn", "FULL", Checked, Full, Log, role: "SECONDARY", allowConnections: "ALL");
         Add(table, "Standalone", "FULL", Checked, Full, Log);
+        Add(table, "PrimaryNoConn", "FULL", Checked, Full, Log, role: "PRIMARY", allowConnections: "NO");
 
         var rows = await ReadWithAsync(ContextWith(new Dictionary<string, string>()), table, Logs(1));
 
@@ -417,6 +418,8 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.True(rows[1].ReplicaReadable);
         Assert.True(rows[2].ReplicaReadable);
         Assert.Null(rows[3].ReplicaReadable);
+        /* R8: the setting is the secondary role's, so a replica that is primary right now says nothing. */
+        Assert.Null(rows[4].ReplicaReadable);
     }
 
     [Fact]

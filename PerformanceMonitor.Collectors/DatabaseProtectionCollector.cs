@@ -513,7 +513,7 @@ OPTION(RECOMPILE);";
                 ErrorLogCheckDbTime = check?.TimeUtc,
                 ErrorLogCheckDbOptions = check?.Options,
                 ErrorLogCheckDbErrors = check?.Errors,
-                ReplicaReadable = ReplicaReadableFor(allowConnections[i]),
+                ReplicaReadable = string.Equals(row.ReplicaRole, "SECONDARY", StringComparison.Ordinal) ? ReplicaReadableFor(allowConnections[i]) : null,
             };
         }
     }
@@ -529,7 +529,8 @@ OPTION(RECOMPILE);";
         DatabaseProtectionErrorLogState.StageIfChanged(context.PendingState, context.State, key, value);
     }
 
-    /* NO means the replica takes no read connections, so its error log cannot be read through one. NULL: not in an Availability Group. */
+    /* NO means the replica takes no read connections, so its error log cannot be read through one. The caller asks only for a SECONDARY row (#8865
+       R8): the secondary-role setting says nothing about a replica that is primary right now. NULL: not in an Availability Group. */
     private static bool? ReplicaReadableFor(string? allowConnections) =>
         allowConnections is null ? null : !string.Equals(allowConnections, "NO", StringComparison.OrdinalIgnoreCase);
 
