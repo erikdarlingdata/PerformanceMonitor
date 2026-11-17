@@ -82,6 +82,22 @@ public class OrphanStatePruneTests
         }
     }
 
+    /// <summary>#8865: the database_protection collector keeps one checkdb:&lt;database&gt; key per database, and
+    /// a server with Query Store collection off never runs the query_store cycle that prunes them. The prune
+    /// therefore also runs from the database_protection cycle, through the same per-server throttle.</summary>
+    [Fact]
+    public void Darling_PrunesFromTheDatabaseProtectionCycleToo_UnderTheSameGate()
+    {
+        var darling = RepoFile.ReadRepoFile(Path.Combine(FindRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+
+        var call = darling.IndexOf("await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(server.ServerId,", StringComparison.Ordinal);
+        Assert.True(call >= 0);
+
+        var guard = darling.Substring(Math.Max(0, call - 400), Math.Min(400, call));
+        Assert.Contains("DatabaseProtectionCollector.Instance.Name", guard, StringComparison.Ordinal);
+        Assert.Contains("DatabaseStateCollector.Instance.AppliesTo(", guard, StringComparison.Ordinal);
+    }
+
     private static string FindRoot()
     {
         var dir = AppContext.BaseDirectory;

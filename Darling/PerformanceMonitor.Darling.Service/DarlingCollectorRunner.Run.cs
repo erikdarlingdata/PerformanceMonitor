@@ -539,8 +539,13 @@ public sealed partial class DarlingCollectorRunner
            Gated on the SAME AppliesTo that decides whether database_states is collected at all, rather than
            leaning on the statement's own empty-snapshot guard to no-op: on Azure SQL DB there is no snapshot
            by design, so this would otherwise run three guaranteed-no-op deletes on every cycle forever and
-           #2191's boundary would be emergent rather than stated. */
-        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+           #2191's boundary would be emergent rather than stated.
+
+           #8865: also from the database_protection cycle, because its checkdb:<database> keys orphan the
+           same way and a server with query_store collection off never runs the cycle above. Same per-server
+           hourly throttle, so a server running both collectors prunes once an hour, not twice. */
+        if ((string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+             || string.Equals(definition.Name, DatabaseProtectionCollector.Instance.Name, StringComparison.Ordinal))
             && DatabaseStateCollector.Instance.AppliesTo(server.Target))
         {
             await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(server.ServerId, cancellationToken);
