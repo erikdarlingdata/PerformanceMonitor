@@ -3482,7 +3482,7 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
-        /* V269 (#8881): the tempdb log on tempdb_stats, and what holds it. Eleven nullable columns, no DEFAULT, no backfill. */
+        /* V269 (#8881): the tempdb log on tempdb_stats, and what holds it. Eleven nullable columns, no DEFAULT, no backfill, plus the alert's switch and bar on config_alert_settings (NOT NULL with a DEFAULT). */
         new Migration(269, "tempdb-log-space", V269Sql),
     };
 
@@ -3503,6 +3503,11 @@ $rung$;";
     /// holder below the bar. <b>Appended LAST</b> after <c>max_size_mb</c>, in the collector's payload order, because the writer is positional: a
     /// fresh store (the generated table carries the columns, and this ALTER no-ops there) and an upgraded one share one physical column order.
     /// The <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_tempdb_stats</c>' pinned <c>SELECT *</c>, the V81 lesson.</para>
+    ///
+    /// <para>The alert's switch and bar are two more columns, on <c>config.config_alert_settings</c>: <c>tempdb_log_space_enabled</c> (boolean NOT NULL
+    /// DEFAULT TRUE) and <c>tempdb_log_space_threshold_percent</c> (integer NOT NULL DEFAULT 80), V20's shape. The service replaces its alert settings from
+    /// that row at every start, so a switch or bar that lived only in darling.json read its default whatever the file said. Both defaults match the
+    /// engine's, so a store upgraded to this rung behaves as it did.</para>
     /// </summary>
     private const string V269Sql = @"
 ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_total_mb numeric(18,2);
@@ -3516,6 +3521,8 @@ ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_program_name te
 ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_begin_time timestamp;
 ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_used bigint;
 ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_reserved bigint;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_log_space_enabled boolean NOT NULL DEFAULT TRUE;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_log_space_threshold_percent integer NOT NULL DEFAULT 80;
 CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
 
     /// <summary>

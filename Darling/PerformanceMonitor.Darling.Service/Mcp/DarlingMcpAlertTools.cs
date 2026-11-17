@@ -625,6 +625,8 @@ public sealed partial class DarlingMcpAlertTools
             excluded_logins = s.LongRunningQueryExcludedLogins
         },
         tempdb_space = new { enabled = s.TempDbSpaceEnabled, threshold_percent = s.TempDbSpaceThresholdPercent },
+        /* #8881 (V269): the TempDB Log Space alert's switch and bar. */
+        tempdb_log_space = new { enabled = s.TempDbLogSpaceEnabled, threshold_percent = s.TempDbLogSpaceThresholdPercent },
         low_disk = new
         {
             enabled = s.LowDiskEnabled,
@@ -3781,6 +3783,18 @@ public sealed partial class DarlingMcpAlertTools
                             case "enabled": AddBool("tempdb_space_enabled", n, "tempdb_space.enabled"); break;
                             case "threshold_percent": AddInt("tempdb_space_threshold_percent", n, "tempdb_space.threshold_percent", 1, 100); break;
                             default: error = $"Unknown field 'tempdb_space.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "tempdb_log_space":
+                    Group(prop.Value, "tempdb_log_space", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("tempdb_log_space_enabled", n, "tempdb_log_space.enabled"); break;
+                            case "threshold_percent": AddInt("tempdb_log_space_threshold_percent", n, "tempdb_log_space.threshold_percent", 1, 100); break;
+                            default: error = $"Unknown field 'tempdb_log_space.{k}'."; break;
                         }
                     });
                     break;

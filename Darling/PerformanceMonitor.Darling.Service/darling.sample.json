@@ -251,6 +251,10 @@
     // Deliver the Server-Unreachable / Server-Restored alerts when a monitored server's reachability flips
     // (the headless twin of Lite's connection-change toasts). Default true; gated together with "enabled".
     "notifyConnectionChanges": true,
+    // The TempDB Log Space alert: fires when the tempdb LOG is at or above this percent used (default 80) for three samples in a row.
+    // The file seeds a new store only; after that the store's value governs, and the Viewer's Settings window edits it.
+    "tempDbLogSpaceEnabled": true,
+    "tempDbLogSpaceThresholdPercent": 80,
     "cpuThresholdPercent": 80,
     "cpuMode": "total", // "total" (SQL + other processes) or "sql" (SQL process only)
     // Blocking pages on blocked WAIT TIME, not on one event. "blockingCountThreshold" (default 3) pages when

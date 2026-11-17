@@ -823,6 +823,8 @@ ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_reuse_wait_
 ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_used_percent;
 ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_used_mb;
 ALTER TABLE IF EXISTS collect.tempdb_stats DROP COLUMN IF EXISTS log_total_mb;
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS tempdb_log_space_threshold_percent;
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS tempdb_log_space_enabled;
 CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;"),
     ];
 

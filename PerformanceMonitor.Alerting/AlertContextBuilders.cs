@@ -1420,6 +1420,21 @@ public static class AlertContextBuilders
                 sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesReserved / 1048576.0:F0} MB reserved");
             }
         }
+        else if (tempDb.HolderBeginTimeUtc is not null || tempDb.HolderLogBytesUsed is not null)
+        {
+            /* The collector keeps the oldest open tempdb transaction even when no session owns it, so a begin time or log bytes without a session
+               id is a real holder: a system or orphaned transaction. Saying "none captured" for it would be false. */
+            sb.Append(", the oldest open tempdb transaction has no session (a system or orphaned transaction)");
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                sb.Append(", open ").Append(FormatHolderAge(age));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesUsed / 1048576.0:F0} MB of log used");
+            }
+        }
         else if (tempDb.HolderLoginName is null)
         {
             sb.Append(", no holding transaction captured");
@@ -1468,6 +1483,19 @@ public static class AlertContextBuilders
             if (tempDb.HolderLogBytesReserved is { } bytesReserved)
             {
                 fields.Add(("Holder Log Reserved", System.FormattableString.Invariant($"{bytesReserved / 1048576.0:F0} MB")));
+            }
+        }
+        else if (tempDb.HolderBeginTimeUtc is not null || tempDb.HolderLogBytesUsed is not null)
+        {
+            fields.Add(("Holder", "Oldest open tempdb transaction has no session (a system or orphaned transaction)"));
+            if (TempDbHolderAge(tempDb, now) is { } age)
+            {
+                fields.Add(("Transaction Age", FormatHolderAge(age)));
+            }
+
+            if (tempDb.HolderLogBytesUsed is { } bytesUsed)
+            {
+                fields.Add(("Holder Log Used", System.FormattableString.Invariant($"{bytesUsed / 1048576.0:F0} MB")));
             }
         }
         else

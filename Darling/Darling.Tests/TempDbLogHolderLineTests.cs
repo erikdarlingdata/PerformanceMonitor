@@ -35,6 +35,14 @@ public sealed class TempDbLogHolderLineTests
     }
 
     [Fact]
+    public void ASessionlessHolder_IsSaidToHaveNoSession_NotDropped()
+    {
+        var line = TempDbLogHolderLine.Build(Holder(session: null, login: null, program: null, open: TimeSpan.FromMinutes(14)));
+
+        Assert.Equal("Oldest open tempdb transaction has no session (a system or orphaned transaction), open 14 minutes, 3.2 GB of log used.", line);
+    }
+
+    [Fact]
     public void NoHolder_MeansNoLine()
     {
         Assert.Null(TempDbLogHolderLine.Build(null));
@@ -155,7 +163,7 @@ public sealed class TempDbLogHolderLineTests
     {
         var points = new List<TempDbBucketPoint> { new(AsOf.AddMinutes(-5), 1, 2, 3, 6, 100, 7, 4, 5, 51, 1.5) };
 
-        using var noHolder = JsonDocument.Parse(TrendPayloads.TempDbTrend("server-a", 24, points, 5, requested: false, autoBudget: 100, newestHolder: Holder(session: null)));
+        using var noHolder = JsonDocument.Parse(TrendPayloads.TempDbTrend("server-a", 24, points, 5, requested: false, autoBudget: 100, newestHolder: Holder(session: null, login: null, program: null, bytes: null)));
         using var neverRead = JsonDocument.Parse(TrendPayloads.TempDbTrend("server-a", 24, points, 5, requested: false, autoBudget: 100));
 
         Assert.Equal(JsonValueKind.Null, noHolder.RootElement.GetProperty("log_holder_note").ValueKind);

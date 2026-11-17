@@ -135,4 +135,42 @@ public sealed class TempDbLogSpaceAlertTests
         var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
         Assert.True(fired.Muted);
     }
+
+    private static TempDbSpaceInfo LogInfo(DateTime now, bool sessionless) => new()
+    {
+        TotalReservedMb = 100,
+        UnallocatedMb = 900,
+        CollectionTimeUtc = now,
+        LogTotalMb = 1000,
+        LogUsedMb = 900,
+        LogUsedPercent = 90,
+        LogReuseWaitDesc = "ACTIVE_TRANSACTION",
+        LogTruncationHoldupReason = "ACTIVE_TRANSACTION",
+        HolderBeginTimeUtc = sessionless ? now.AddMinutes(-42) : null,
+        HolderLogBytesUsed = sessionless ? 734003200 : null,
+    };
+
+    [Fact]
+    public void ASessionlessHolder_IsNamedAsASystemOrOrphanedTransaction_NotSaidToBeMissing()
+    {
+        var now = new DateTime(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
+
+        var message = AlertContextBuilders.TempDbLogSpaceMessage(LogInfo(now, sessionless: true), now);
+        Assert.Contains("the oldest open tempdb transaction has no session (a system or orphaned transaction), open 42 min 0 s, 700 MB of log used", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no holding transaction captured", message, StringComparison.Ordinal);
+
+        var card = AlertContextBuilders.BuildTempDbLogSpaceContext(LogInfo(now, sessionless: true), now)!.Details.Single().Fields;
+        Assert.Contains(card, f => f.Item1 == "Holder" && f.Item2.Contains("no session (a system or orphaned transaction)", StringComparison.Ordinal));
+        Assert.DoesNotContain(card, f => f.Item2 == "None captured");
+    }
+
+    [Fact]
+    public void NoHolderAtAll_StillSaysNoHoldingTransactionWasCaptured()
+    {
+        var now = new DateTime(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.EndsWith(", no holding transaction captured", AlertContextBuilders.TempDbLogSpaceMessage(LogInfo(now, sessionless: false), now), StringComparison.Ordinal);
+        var card = AlertContextBuilders.BuildTempDbLogSpaceContext(LogInfo(now, sessionless: false), now)!.Details.Single().Fields;
+        Assert.Contains(card, f => f.Item1 == "Holder" && f.Item2 == "None captured");
+    }
 }

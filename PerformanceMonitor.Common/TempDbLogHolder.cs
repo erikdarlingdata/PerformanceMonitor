@@ -42,15 +42,29 @@ internal static class TempDbLogHolderLine
     /// </summary>
     public static string? Build(TempDbLogHolder? holder)
     {
-        if (holder?.SessionId is not { } session)
+        if (holder is null)
         {
             return null;
         }
 
-        var sb = new StringBuilder("Oldest tempdb log transaction: ");
-        sb.Append(CultureInfo.InvariantCulture, $"session {session}");
-        sb.Append(", login ").Append(string.IsNullOrWhiteSpace(holder.LoginName) ? "unknown" : holder.LoginName);
-        sb.Append(", program ").Append(string.IsNullOrWhiteSpace(holder.ProgramName) ? "unknown" : holder.ProgramName);
+        var sb = new StringBuilder();
+        if (holder.SessionId is { } session)
+        {
+            sb.Append("Oldest tempdb log transaction: ");
+            sb.Append(CultureInfo.InvariantCulture, $"session {session}");
+            sb.Append(", login ").Append(string.IsNullOrWhiteSpace(holder.LoginName) ? "unknown" : holder.LoginName);
+            sb.Append(", program ").Append(string.IsNullOrWhiteSpace(holder.ProgramName) ? "unknown" : holder.ProgramName);
+        }
+        else if (holder.BeginTimeUtc is not null || holder.LogBytesUsed is not null)
+        {
+            /* The collector keeps the oldest open tempdb transaction even when no session owns it: a system or orphaned transaction. */
+            sb.Append("Oldest open tempdb transaction has no session (a system or orphaned transaction)");
+        }
+        else
+        {
+            return null;
+        }
+
         if (holder.BeginTimeUtc is { } begin)
         {
             var age = holder.AsOfUtc > begin ? holder.AsOfUtc - begin : TimeSpan.Zero;

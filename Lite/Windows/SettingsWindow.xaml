@@ -322,6 +322,13 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertTempDbLogSpaceCheckBox" Content="tempdb log used over" VerticalAlignment="Center"
+                                              Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertTempDbLogSpaceCheckBox}" x:Name="AlertTempDbLogSpaceThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLowDiskCheckBox" Content="Volume free space under" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLowDiskCheckBox}" x:Name="AlertLowDiskThresholdPercentBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
