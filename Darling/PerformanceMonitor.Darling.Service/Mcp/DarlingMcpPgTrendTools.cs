@@ -426,6 +426,7 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
+                        ?? await DarlingMcpPgIoTools.VersionGapStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
                         ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             (askedBackend ?? askedContext) is null
@@ -453,6 +454,7 @@ public sealed class DarlingMcpPgTrendTools
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
+                    ?? await DarlingMcpPgIoTools.VersionGapStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No I/O samples for '{chosenBackend}' in the '{chosenContext}' context on "
