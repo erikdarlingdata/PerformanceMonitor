@@ -2802,13 +2802,6 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// The answer a timed-out run is recorded under in the repeat-failure backoff (#8891). Fixed, because the timeout's own
-    /// message carries the run's elapsed time and would read as a new answer on every run, so the streak would never build.
-    /// The leading control character keeps it apart from any refusal text a server returns.
-    /// </summary>
-    internal const string TimedOutBackoffAnswer = "\u0001command timeout";
-
-    /// <summary>
     /// Whether a fault that reached <see cref="RunOneAsync"/>'s general catch counts as a timeout for the repeat-failure
     /// backoff (#8891): a SQL Server command timeout (number -2) on a connection that stays. A timeout that dropped the
     /// connection is not this collector's statement (a fresh login failed too), so it does not count.
@@ -2835,7 +2828,11 @@ LIMIT 1";
         var interval = TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes));
         var timeout = timedOut && status == "ERROR";
         var streak = server.RefusedBackoff.Record(
-            collectorName, status == "PERMISSIONS" || timeout, timeout ? TimedOutBackoffAnswer : message, DateTime.UtcNow, interval);
+            collectorName,
+            status == "PERMISSIONS" || timeout,
+            timeout ? RefusedCollectorBackoff.TimedOutAnswer : message,
+            DateTime.UtcNow,
+            interval);
         if (streak != RefusedCollectorBackoff.FreeRefusals + 1)
         {
             return;
