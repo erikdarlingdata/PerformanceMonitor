@@ -1684,6 +1684,22 @@ internal static class PgDisplay
         public DateTime? BackendStartUtc { get; init; }
     }
 
+    /// <summary>
+    /// #8920: the sentence under an empty standby grid. Aurora readers read the shared storage volume and never
+    /// appear in <c>pg_stat_replication</c>, so on an Aurora target an empty grid is the permanent answer and must
+    /// not invite a search for a replication fault. Reader lag would need <c>aurora_replica_status()</c>, which no
+    /// collector reads yet.
+    /// </summary>
+    internal static string ReplicationStatsEmptyNote(bool isAurora) => isAurora
+        ? "No standby was streaming from this server in this window. Aurora readers use the shared storage "
+          + "volume instead of streaming replication, so they never appear in pg_stat_replication and this "
+          + "grid is always empty on an Aurora writer. That is not a replication fault. Reader lag would "
+          + "need aurora_replica_status(), which Performance Monitor does not read."
+        : "No standby was streaming from this server in this window. On a REPLICA that is the expected "
+          + "answer: pg_stat_replication is the primary-side view and reports nothing unless this "
+          + "server is cascading to a downstream of its own. On a primary it means nothing is "
+          + "replicating from it, which is either correct or the finding.";
+
     internal static List<ReplicationStatRow> ReplicationStatRows(IReadOnlyList<DarlingPgReplicationStatsReader.PgReplicationStatRow> rows)
     {
         ArgumentNullException.ThrowIfNull(rows);
