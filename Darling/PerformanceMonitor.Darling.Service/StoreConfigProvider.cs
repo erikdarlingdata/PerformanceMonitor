@@ -3360,6 +3360,51 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     }
 
     /// <summary>
+    /// The LARGEST frequency, in minutes, a collector may run at on any server (#8798): the shipped default (it applies to every server no
+    /// row sets a frequency for, unless the fleet row sets one), the fleet row's and every per-server row's. Retention sizes the stamp window of
+    /// a shared table by it. 0 when any of those is 0 (run once when the server loads): the caller has no interval to measure a stamp against.
+    /// Pure.
+    /// </summary>
+    public static int ResolveLargestFrequencyMinutes(string collectorName, IReadOnlyList<ScheduleOverride>? overrides)
+    {
+        var fleetSet = false;
+        var largest = 0;
+        var any = false;
+        if (overrides is not null)
+        {
+            foreach (var o in overrides)
+            {
+                if (o.FrequencyMinutes is not { } minutes || !string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (minutes <= 0)
+                {
+                    return 0;
+                }
+
+                fleetSet |= o.ServerId is null;
+                largest = Math.Max(largest, minutes);
+                any = true;
+            }
+        }
+
+        var defaultMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+        if (!any || !fleetSet)
+        {
+            if (defaultMinutes <= 0)
+            {
+                return 0;
+            }
+
+            largest = Math.Max(largest, defaultMinutes);
+        }
+
+        return largest;
+    }
+
+    /// <summary>
     /// The effective FLEET-WIDE retention horizon for a collector (a per-server override can't apply to a
     /// shared-table purge): the fleet override (<c>server_id</c> NULL) <c>retention_days</c> if set, else the
     /// <see cref="CollectorScheduleDefaults"/> default. Pure. Feeds <see cref="DarlingRetention"/>.

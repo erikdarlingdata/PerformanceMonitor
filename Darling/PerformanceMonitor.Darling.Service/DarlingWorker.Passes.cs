@@ -1324,7 +1324,8 @@ public sealed partial class DarlingWorker
             config.PlanContentRetentionDays,
             paceWal: true,
             collectionPressure: _collectionPressure,
-            queryTextPruneGate: _queryTextPruneGate);
+            queryTextPruneGate: _queryTextPruneGate,
+            largestFrequencyMinutesFor: name => StoreConfigProvider.ResolveLargestFrequencyMinutes(name, overrides));
 
         /* #5592: a pass the wall budget stopped brings the next scheduled pass forward to within the hour. */
         NotePurgePassEnded(purgeSummary, DateTime.UtcNow);
@@ -1488,7 +1489,8 @@ public sealed partial class DarlingWorker
                 config.PlanContentRetentionDays,
                 paceWal: true,
                 runLabel: runLabel,
-                collectionPressure: _collectionPressure);
+                collectionPressure: _collectionPressure,
+                largestFrequencyMinutesFor: name => StoreConfigProvider.ResolveLargestFrequencyMinutes(name, overrides));
 
             _logger.LogInformation(
                 "{Label} purged {Tables} table(s), {Rows} row(s)/chunk(s)",

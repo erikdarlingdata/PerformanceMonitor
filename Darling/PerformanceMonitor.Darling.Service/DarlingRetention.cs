@@ -422,7 +422,7 @@ public static class DarlingRetention
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
         string? runLabel = null, ICollectionPressure? collectionPressure = null, TimeSpan? wallBudget = null,
-        QueryTextPruneGate? queryTextPruneGate = null)
+        QueryTextPruneGate? queryTextPruneGate = null, Func<string, int>? largestFrequencyMinutesFor = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
@@ -437,7 +437,7 @@ public static class DarlingRetention
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
-            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate);
+            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate, largestFrequencyMinutesFor);
     }
 
     /// <summary>
@@ -449,7 +449,7 @@ public static class DarlingRetention
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
-        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null)
+        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null, Func<string, int>? largestFrequencyMinutesFor = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -1291,36 +1291,40 @@ public static class DarlingRetention
                collect.column_stats_state row of ANY server points at their (history key, database) with a last_seen_in_scope_at inside
                the window: a dropped database, a removed or switched-off server, a database that left the collector's scope. An
                availability group's rows stay while any of its servers still sees the database. The window is twice the collector's
-               interval, never under a day (ColumnStatsStaleCutoff), so a removed server's rows age out within a day. Retention has no
-               access to the resolved schedule, so the interval is the shipped default. The rows first, then the state rows, so a failed
-               row purge is retried by the next sweep (the state still points at them). collect.column_stats_runs is a catalogue table
-               and is purged by the loop above. */
-            var columnStatsCutoff = ColumnStatsStaleCutoff(utcNow);
-            var staleColumnStatsDeleted = await PurgeOneAsync(
-                postgres, "collect.column_stats", StaleColumnStatsDeleteSql, columnStatsCutoff, logger, cancellationToken,
-                batchSize: SingleShotStatement, pacer: walPacer);
-            if (staleColumnStatsDeleted is not null)
+               interval, never under a day (ColumnStatsStaleCutoff), so a removed server's rows age out within a day. The interval is the
+               largest configured one (largestFrequencyMinutesFor, from the resolved schedules); a collector set to run once on load has
+               no interval, so nothing goes by stamp age then. The rows go first, then the state rows: a failed row purge is retried by
+               the next sweep, because the keep list counts only state stamped inside the window, so the stale state still leaves those
+               rows unkept. collect.column_stats_runs is a catalogue table and is purged by the loop above. */
+            var columnStatsCutoff = ColumnStatsStaleCutoff(utcNow, largestFrequencyMinutesFor?.Invoke("column_stats"));
+            if (columnStatsCutoff is { } columnStatsCutoffAt)
             {
-                tablesPurged++;
-                totalRowsDeleted += staleColumnStatsDeleted.Value;
-            }
-            else
-            {
-                tablesFailed++;
-            }
+                var staleColumnStatsDeleted = await PurgeOneAsync(
+                    postgres, "collect.column_stats", StaleColumnStatsDeleteSql, columnStatsCutoffAt, logger, cancellationToken,
+                    batchSize: SingleShotStatement, pacer: walPacer);
+                if (staleColumnStatsDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += staleColumnStatsDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
 
-            var staleColumnStatsStateDeleted = await PurgeOneAsync(
-                postgres, "collect.column_stats_state",
-                "DELETE FROM collect.column_stats_state WHERE last_seen_in_scope_at IS NULL OR last_seen_in_scope_at < $1",
-                columnStatsCutoff, logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
-            if (staleColumnStatsStateDeleted is not null)
-            {
-                tablesPurged++;
-                totalRowsDeleted += staleColumnStatsStateDeleted.Value;
-            }
-            else
-            {
-                tablesFailed++;
+                var staleColumnStatsStateDeleted = await PurgeOneAsync(
+                    postgres, "collect.column_stats_state",
+                    "DELETE FROM collect.column_stats_state WHERE last_seen_in_scope_at IS NULL OR last_seen_in_scope_at < $1",
+                    columnStatsCutoffAt, logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+                if (staleColumnStatsStateDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += staleColumnStatsStateDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
             }
 
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
@@ -1796,11 +1800,25 @@ WHERE NOT EXISTS
 )";
 
     /// <summary>
-    /// #8798: <c>$1</c> for the column statistics sweep: now less the larger of twice the <c>column_stats</c> collector's default interval
-    /// and one day. A database no pass stamped since then is out of every server's scope.
+    /// #8798: <c>$1</c> for the column statistics sweep: now less the larger of twice the LARGEST configured <c>column_stats</c> interval
+    /// (<see cref="StoreConfigProvider.ResolveLargestFrequencyMinutes"/>: the shipped default, the fleet row and every per-server row)
+    /// and one day. A database no pass stamped since then is out of every server's scope. An interval under 12 hours therefore gives the
+    /// one-day floor, and a larger one (every 2 days, a week) gives twice that interval, so a server that collects that rarely is not aged
+    /// out between two stamps. Frequency 0 means the collector runs once when the server loads: there is no interval to measure a stamp
+    /// against, so the result is null and NOTHING is purged by stamp age while any server is set that way. The rows then go only through
+    /// the collector's own run (a dropped database, one that left scope) or the removal of the server. A caller that supplies no frequency
+    /// (null) gets the shipped default.
     /// </summary>
-    internal static DateTime ColumnStatsStaleCutoff(DateTime utcNow) =>
-        utcNow.AddMinutes(-Math.Max(2 * CollectorScheduleDefaults.All["column_stats"].FrequencyMinutes, 24 * 60));
+    internal static DateTime? ColumnStatsStaleCutoff(DateTime utcNow, int? largestFrequencyMinutes)
+    {
+        var minutes = largestFrequencyMinutes ?? CollectorScheduleDefaults.All["column_stats"].FrequencyMinutes;
+        if (minutes <= 0)
+        {
+            return null;
+        }
+
+        return utcNow.AddMinutes(-Math.Max(2L * minutes, 24 * 60));
+    }
 
     /// <summary>
     /// #8798: every current column statistics row of a (history key, database) that no <c>collect.column_stats_state</c> row of any server

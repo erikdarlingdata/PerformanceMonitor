@@ -157,4 +157,52 @@ VALUES (1, $1, 1, 's', 'SalesDb'), (2, $2, 1, 's', 'SalesDb')", c);
             Assert.Equal(1L, await CountAsync(c, "collect.column_stats_runs", ct));
         });
     }
+
+    [Fact]
+    public async Task StampWindow_KeepsTwelveHoursOld_DropsThirtyHoursOld_AtTheDefaultInterval()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedStateAsync(c, 1, "FreshDb", s_now.AddHours(-12), ct);
+            await SeedRowAsync(c, 1, "FreshDb", 10, ct);
+            await SeedStateAsync(c, 2, "StaleDb", s_now.AddHours(-30), ct);
+            await SeedRowAsync(c, 2, "StaleDb", 11, ct);
+
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct);
+
+            await using var remaining = new NpgsqlCommand("SELECT string_agg(database_name, ',') FROM collect.column_stats", c);
+            Assert.Equal("FreshDb", (string)(await remaining.ExecuteScalarAsync(ct))!);
+            Assert.Equal(1L, await CountAsync(c, "collect.column_stats_state", ct));
+        });
+    }
+
+    [Fact]
+    public async Task RunOnLoadCollector_NothingGoesByStampAge()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-40), ct);
+            await SeedRowAsync(c, 1, "SalesDb", 10, ct);
+
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct, largestFrequencyMinutesFor: _ => 0);
+
+            Assert.Equal(1L, await CountAsync(c, "collect.column_stats", ct));
+            Assert.Equal(1L, await CountAsync(c, "collect.column_stats_state", ct));
+        });
+    }
+
+    [Fact]
+    public async Task WeeklyCollector_KeepsRowsStampedSixDaysAgo()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-6), ct);
+            await SeedRowAsync(c, 1, "SalesDb", 10, ct);
+
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct, largestFrequencyMinutesFor: _ => 7 * 24 * 60);
+
+            Assert.Equal(1L, await CountAsync(c, "collect.column_stats", ct));
+            Assert.Equal(1L, await CountAsync(c, "collect.column_stats_state", ct));
+        });
+    }
 }
