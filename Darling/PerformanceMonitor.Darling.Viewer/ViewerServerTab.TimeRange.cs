@@ -344,10 +344,18 @@ public partial class ViewerServerTab
     {
         try
         {
-            var clock = await _dataService.GetServerClockAsync(_server.ServerId);
-            if (clock is not null)
+            if (_server.IsPostgres)
             {
-                _serverClock = clock;
+                var (pgClock, zoneName) = await _dataService.GetPgServerClockAsync(_server.ServerId);
+                ApplyPgServerClock(pgClock, zoneName);
+            }
+            else
+            {
+                var clock = await _dataService.GetServerClockAsync(_server.ServerId);
+                if (clock is not null)
+                {
+                    _serverClock = clock;
+                }
             }
         }
         catch
@@ -360,6 +368,19 @@ public partial class ViewerServerTab
            first read after a range was applied from another tab, or a server that moved zone), so draw it again. A
            range that slides with now is redrawn from the clock too (#4766, #5562). */
         RefreshRangePicker();
+    }
+
+    /// <summary>
+    /// #8919: a PostgreSQL target's clock is the time zone its <c>pg_server_config</c> snapshot records (<paramref name="zoneName"/>). Where the
+    /// store records none, Server Time reads UTC, as the fleet-wide views do, and the time display box says so: this machine's offset was
+    /// shown as the server's. Local Time and UTC are the same either way.
+    /// </summary>
+    internal void ApplyPgServerClock(ServerClock? clock, string? zoneName)
+    {
+        _serverClock = clock ?? ServerClock.Utc;
+        TimeDisplayModeBox.ToolTip = clock is null
+            ? "How timestamps are displayed. This server's time zone is not recorded, so Server Time shows UTC."
+            : $"How timestamps are displayed. Server Time is this server's own time zone ({zoneName}).";
     }
 
     private DateTime? _serverDataStartUtc;

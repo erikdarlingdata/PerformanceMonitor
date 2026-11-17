@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -303,6 +304,43 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgDatabaseReader.PgDatabaseRow>> GetPgDatabaseStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgDatabaseReader.GetPgDatabaseStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>
+    /// #8919: the target's own <c>TimeZone</c> setting from the newest <c>pg_server_config</c> snapshot that holds a server-scoped one:
+    /// no per-database or per-role override, and not a setting the collector's own session set. The same rule the analysis baselines
+    /// read the target's clock by (<c>PgTargetBaselineProvider.PgTargetClockSql</c>). <c>server_properties</c> is the SQL Server
+    /// collectors' table and a PostgreSQL target has no row there.
+    /// </summary>
+    public const string PgServerClockSql = @"
+SELECT c.setting
+FROM pg_server_config AS c
+WHERE c.server_id = $1
+AND   c.name = 'TimeZone'
+AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL
+AND   c.setting IS NOT NULL
+ORDER BY c.collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #8919: a PostgreSQL target's clock, from the time zone it records (<see cref="PgServerClockSql"/>), or null when the store holds
+    /// none or the name does not resolve on this machine. Null is not a clock: the caller says so instead of showing this machine's offset
+    /// as the server's.
+    /// </summary>
+    public async Task<(ServerClock? Clock, string? ZoneName)> GetPgServerClockAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(PgServerClockSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        if (await command.ExecuteScalarAsync(cancellationToken) is not string setting || string.IsNullOrWhiteSpace(setting))
+        {
+            return (null, null);
+        }
+
+        var name = setting.Trim();
+        return TimeZoneInfo.TryFindSystemTimeZoneById(name, out _) ? (ServerClock.Resolve(name, null), name) : (null, null);
+    }
 
     /// <summary>Storage tab, panel 1 - the per-table bloat ESTIMATE with its measured sizes and the trust
     /// signals that decide whether the estimate may be rendered at all.</summary>
