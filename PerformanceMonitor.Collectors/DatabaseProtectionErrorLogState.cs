@@ -235,11 +235,16 @@ public static class DatabaseProtectionErrorLogState
         {
             /* #8865: with no archives yet the marker is the minimum date, not null: a null marker would make the
                first archive that later appears look like a first run and be taken as already read, losing every
-               CHECKDB line written between the last current-log read and that roll. */
+               CHECKDB line written between the last current-log read and that roll.
+               #8865: the backfill is not done on a first run. A store an earlier build wrote marked it done on a refused list with no
+               steady marker; kept, that store would never read a retained archive. */
             var newest = archives.Count > 0 ? archives.Max(a => a.LogDate) : DateTime.MinValue;
             before = before with
             {
-                Markers = before.Markers with { NewestArchive = newest, NewestArchiveCount = archives.Count(a => a.LogDate == newest) },
+                Markers = before.Markers with
+                {
+                    NewestArchive = newest, NewestArchiveCount = archives.Count(a => a.LogDate == newest), BackfillDone = false,
+                },
             };
         }
 

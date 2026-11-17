@@ -270,6 +270,24 @@ public sealed class DatabaseProtectionErrorLogStateTests
     }
 
     [Fact]
+    public void AStoreWithTheBackfillDoneButNoSteadyMarker_BackfillsOnItsFirstReadableList()
+    {
+        /* #8865: an earlier build marked the backfill done on a refused list and set no steady marker. Taken as it stands, that store
+           would set the steady marker to the newest archive with the backfill already done, and no retained archive would ever be read. */
+        var state = new Dictionary<string, string>
+        {
+            [S.InstanceKey] = "instance-a",
+            [S.BackfillDoneKey] = bool.TrueString,
+        };
+
+        var plan = S.PlanArchives(S.Load(state, "instance-a"), Logs(5), true, S.ArchivesPerCycle);
+
+        Assert.False(plan.Before.Markers.BackfillDone);
+        Assert.Equal(new[] { 0, 1, 2, 3 }, Numbers(plan));
+        Assert.False(S.MarkersAfter(plan, ReadWhole(plan), Logs(5)).BackfillDone);
+    }
+
+    [Fact]
     public void AMinuteHoldingMoreArchivesThanTheListCarries_IsReadInPart_ThenSkipped_RatherThanFailingEveryCycle()
     {
         /* #8865: a date read alone had no size cap, and the archive list is bound as nvarchar(128). Sixty archives in one minute made a
