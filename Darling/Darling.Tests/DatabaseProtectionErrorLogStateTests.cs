@@ -247,6 +247,16 @@ public sealed class DatabaseProtectionErrorLogStateTests
     }
 
     [Fact]
+    public void AnEmptyStoredValue_IsNoCheck()
+    {
+        /* #8865: an instance reset stages an empty value over each old check, which must read as none rather than as garbage. */
+        var state = new Dictionary<string, string> { [S.CheckKeyPrefix + "sales"] = string.Empty };
+
+        Assert.False(S.StoredCheck.TryParse(string.Empty, out _));
+        Assert.Null(S.StoredFor(state, "sales", false));
+    }
+
+    [Fact]
     public void ANameLikeAnother_KeepsItsOwnKey()
     {
         /* A database may be called like a server-scoped key, or be a prefix of another database's name. */

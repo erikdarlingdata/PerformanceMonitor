@@ -870,6 +870,16 @@ public sealed class CollectorContext
     public List<ProcPlaceholderId> ProcPlaceholderIds { get; } = new();
 
     /// <summary>
+    /// #8865: the SQL Server error log read <c>database_protection</c> decided on, set by its <c>ReadAsync</c> and drained by its
+    /// <c>BuildSupplementalQuery</c>, so the supplemental reads exactly the logs the primary pass planned. Null when there is
+    /// nothing to read: a platform-managed target (Azure SQL Database, Managed Instance), or a pass that listed no databases.
+    ///
+    /// <para>Like <see cref="ProcPlaceholderIds"/> it lives on the single-connection path only: the Azure SQL DB per-database loops
+    /// never set it, so no supplemental runs there and the rows keep the state the read gave them.</para>
+    /// </summary>
+    public DatabaseProtectionErrorLogState.ErrorLogPlan? DatabaseProtectionErrorLogPlan { get; set; }
+
+    /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
     /// set by the host around the open. Splits a batch's server time into the part the client cannot
     /// influence and the part it can:

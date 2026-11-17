@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -104,10 +105,13 @@ public sealed class DatabaseProtectionCollector : CollectorDefinitionBase<Databa
         bool? ReplicaReadable);
 
     /* Result shape, both queries: name, state_desc, recovery_model_desc, create_date (UTC), replica_role, checkdb (raw datetime, local
-       to the server), last_full (UTC), last_log (UTC), backups_readable (bit). */
+       to the server), last_full (UTC), last_log (UTC), backups_readable (bit), instance_name (@@SERVERNAME, NULL on Azure SQL Database),
+       replica_allow_connections (this replica's secondary-role setting, NULL outside an Availability Group). #8865: the on-premises
+       batch adds a second result set, the error logs the instance lists (enumerate_ok, archive, log_date UTC); a platform-managed
+       target has no readable error log and builds neither the listing nor the second set. */
     /* The server's Excluded Databases list is applied to the sys.databases read (#8775). The backups CTE joins to d.name, so a name left out of the
        catalog read is left out of the batch whole. The names are bound as parameters, so the text is built per call. */
-    private static string OnPremQuery(string exclusionClause) => $@"
+    private static string OnPremQuery(string exclusionClause, bool platformManaged) => $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 5000;
 SET NOCOUNT ON;
@@ -168,20 +172,68 @@ SELECT
         END,
     last_full = b.last_full,
     last_log = b.last_log,
-    backups_readable = CONVERT(bit, 1)
+    backups_readable = CONVERT(bit, 1),
+    instance_name = CONVERT(sysname, @@SERVERNAME),
+    replica_allow_connections = CONVERT(nvarchar(60), ar.secondary_role_allow_connections_desc)
 FROM sys.databases AS d
 LEFT JOIN backups AS b
   ON b.database_name = d.name
 LEFT JOIN sys.dm_hadr_database_replica_states AS rs
   ON  rs.database_id = d.database_id
   AND rs.is_local = 1
+LEFT JOIN sys.availability_replicas AS ar
+  ON ar.replica_id = rs.replica_id
 WHERE d.database_id <> 2
 AND   d.source_database_id IS NULL
 " + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
 " + exclusionClause + @"
 ORDER BY
     d.name
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+" + (platformManaged ? string.Empty : ErrorLogListing);
+
+    /* #8865: which error logs the instance holds, so ReadAsync can decide which of them the supplemental reads. The listing runs inside
+       TRY/CATCH: a refused EXECUTE on sp_enumerrorlogs is a runtime error, and it must read as refused (a single (0, NULL, NULL) row),
+       never as an error that fails the primary read of every database every cycle. The dates are the server's local clock, converted
+       to UTC with the offset the batch already took. */
+    private const string ErrorLogListing = @"
+DECLARE
+    @enumerate_ok bit = 1;
+
+DECLARE
+    @error_logs table
+(
+    archive integer NOT NULL,
+    log_date datetime NULL,
+    log_size bigint NULL
+);
+
+BEGIN TRY
+    INSERT
+        @error_logs
+    (
+        archive,
+        log_date,
+        log_size
+    )
+    EXECUTE sys.sp_enumerrorlogs;
+END TRY
+BEGIN CATCH
+    SET @enumerate_ok = 0;
+END CATCH;
+
+SELECT
+    enumerate_ok = @enumerate_ok,
+    archive = e.archive,
+    log_date = DATEADD(MINUTE, @offset_minutes, e.log_date)
+FROM @error_logs AS e
+WHERE @enumerate_ok = 1
+UNION ALL
+SELECT
+    enumerate_ok = @enumerate_ok,
+    archive = CONVERT(integer, NULL),
+    log_date = CONVERT(datetime, NULL)
+WHERE @enumerate_ok = 0;";
 
     /* The backups read runs in sp_executesql inside TRY/CATCH: a refused VIEW DATABASE STATE is a compile-time permission error of the
        inner batch, which a CATCH in the outer batch catches. backup_finish_date there is already UTC. */
@@ -224,7 +276,9 @@ SELECT
     last_good_checkdb_time = CONVERT(datetime, DATABASEPROPERTYEX(DB_NAME(), N'LastGoodCheckDbTime')),
     last_full = @last_full,
     last_log = @last_log,
-    backups_readable = @readable
+    backups_readable = @readable,
+    instance_name = CONVERT(sysname, NULL),
+    replica_allow_connections = CONVERT(nvarchar(60), NULL)
 FROM sys.databases AS d
 WHERE d.name = DB_NAME()
 OPTION(RECOMPILE);";
@@ -247,6 +301,8 @@ OPTION(RECOMPILE);";
     /* AppliesTo stays true on every SQL Server shape: Azure SQL Database, Managed Instance and RDS all have rows to show, labelled by
        platform, so none of them reads as "not collected". */
 
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { DatabaseProtectionErrorLogState.InstanceKey };
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -258,7 +314,7 @@ OPTION(RECOMPILE);";
         }
 
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
-        return new CollectorQuery(OnPremQuery(exclusionClause), exclusionParameters);
+        return new CollectorQuery(OnPremQuery(exclusionClause, context.Target.IsAzureManagedInstance), exclusionParameters);
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -299,6 +355,9 @@ OPTION(RECOMPILE);";
         return target.IsAwsRds ? PlatformNativeOnly : PlatformNative;
     }
 
+    /// <summary>The message a row carries until the supplemental read of the error logs succeeds and replaces it.</summary>
+    public const string ErrorLogDidNotComplete = "The error log read did not complete in this cycle (timeout or error).";
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(reader);
@@ -306,6 +365,8 @@ OPTION(RECOMPILE);";
 
         var platform = PlatformFor(context.Target);
         var rows = new List<Row>();
+        string? instance = null;
+        var allowConnections = new List<string?>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -335,6 +396,8 @@ OPTION(RECOMPILE);";
             }
 
             var simple = string.Equals(recovery, "SIMPLE", StringComparison.OrdinalIgnoreCase);
+            instance ??= reader.IsDBNull(9) ? null : reader.GetString(9);
+            allowConnections.Add(reader.IsDBNull(10) ? null : reader.GetString(10));
 
             rows.Add(new Row(
                 reader.GetString(0),
@@ -361,8 +424,114 @@ OPTION(RECOMPILE);";
                 null));
         }
 
+        if (platform != PlatformManaged && instance is not null)
+        {
+            await PlanErrorLogReadAsync(reader, context, rows, allowConnections, instance, cancellationToken);
+        }
+
         return rows;
     }
+
+    /// <summary>
+    /// #8865: reads the error log list (the second result set), decides which logs the supplemental will read, and gives every row what
+    /// is already known without reading a log: the check remembered from earlier cycles. Each row says <c>failed</c> until the
+    /// supplemental succeeds and overwrites it, so a read that never completes is visible rather than silent.
+    ///
+    /// <para>The state staged here assumes the supplemental never applies: every planned archive gets an attempt, and the markers
+    /// move past the archives given up on. A successful supplemental overwrites these values with what the read found. That is what
+    /// bounds the backfill on a server whose current log times out every cycle: the archives are skipped after
+    /// <see cref="DatabaseProtectionErrorLogState.MaxArchiveAttempts"/> tries even though none was ever read.</para>
+    /// </summary>
+    private static async Task PlanErrorLogReadAsync(
+        DbDataReader reader, CollectorContext context, List<Row> rows, List<string?> allowConnections, string instance, CancellationToken cancellationToken)
+    {
+        var enumerated = new List<DatabaseProtectionErrorLogState.ArchiveInfo>();
+        var enumerateOk = false;
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!Convert.ToBoolean(reader.GetValue(0), CultureInfo.InvariantCulture))
+                {
+                    enumerateOk = false;
+                    enumerated.Clear();
+                    break;
+                }
+
+                enumerateOk = true;
+                if (!reader.IsDBNull(1) && !reader.IsDBNull(2))
+                {
+                    enumerated.Add(new DatabaseProtectionErrorLogState.ArchiveInfo(reader.GetInt32(1), reader.GetDateTime(2)));
+                }
+            }
+        }
+
+        var state = context.State;
+        var loaded = DatabaseProtectionErrorLogState.Load(state, instance);
+        var plan = DatabaseProtectionErrorLogState.PlanArchives(loaded, enumerated, enumerateOk, DatabaseProtectionErrorLogState.ArchivesPerCycle);
+        context.DatabaseProtectionErrorLogPlan = plan;
+
+        var attempts = new Dictionary<DateTime, int>(plan.Before.Attempts);
+        foreach (var archive in plan.Read.Where(a => a.Archive > 0))
+        {
+            attempts[archive.LogDate] = attempts.GetValueOrDefault(archive.LogDate) + 1;
+        }
+
+        var skipped = plan.Before.Skipped.Union(plan.NewlySkipped).ToList();
+        var markers = DatabaseProtectionErrorLogState.MarkersAfter(plan, Array.Empty<DateTime>(), enumerated);
+
+        var pending = context.PendingState;
+        DatabaseProtectionErrorLogState.StageIfChanged(pending, state, DatabaseProtectionErrorLogState.InstanceKey, instance);
+        if (loaded.Reset)
+        {
+            /* The old instance's checks must not come back once the instance key matches again, so each is overwritten with nothing. */
+            foreach (var pair in state.Where(p => p.Key.StartsWith(DatabaseProtectionErrorLogState.CheckKeyPrefix, StringComparison.Ordinal)
+                                                  && p.Value.Length > 0))
+            {
+                pending[pair.Key] = string.Empty;
+            }
+        }
+
+        StageText(context, DatabaseProtectionErrorLogState.NewestArchiveKey, markers.NewestArchive is { } newest ? DatabaseProtectionErrorLogState.FormatDates(new[] { newest }) : string.Empty);
+        StageText(context, DatabaseProtectionErrorLogState.BackfillBeforeKey, markers.BackfillBefore is { } before ? DatabaseProtectionErrorLogState.FormatDates(new[] { before }) : string.Empty);
+        StageText(context, DatabaseProtectionErrorLogState.BackfillDoneKey, markers.BackfillDone ? bool.TrueString : bool.FalseString);
+        StageText(context, DatabaseProtectionErrorLogState.AttemptsKey, DatabaseProtectionErrorLogState.FormatAttempts(attempts));
+        StageText(context, DatabaseProtectionErrorLogState.SkippedKey, DatabaseProtectionErrorLogState.FormatDates(skipped));
+
+        var skippedText = skipped.Count > 0 ? DatabaseProtectionErrorLogState.FormatDates(skipped) : null;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            var stored = DatabaseProtectionErrorLogState.StoredFor(state, row.DatabaseName, loaded.Reset);
+            var check = DatabaseProtectionErrorLogState.Effective(stored, null, row.CreateDate);
+            rows[i] = row with
+            {
+                ErrorLogState = ErrorLogFailed,
+                ErrorLogMessage = ErrorLogDidNotComplete,
+                ErrorLogBackfillComplete = markers.BackfillDone,
+                ErrorLogSkippedArchives = skippedText,
+                ErrorLogCheckDbTime = check?.TimeUtc,
+                ErrorLogCheckDbOptions = check?.Options,
+                ErrorLogCheckDbErrors = check?.Errors,
+                ReplicaReadable = ReplicaReadableFor(allowConnections[i]),
+            };
+        }
+    }
+
+    /* Stages a text value only when it differs from what state holds; an empty value for a key state never held is no change. */
+    private static void StageText(CollectorContext context, string key, string value)
+    {
+        if (value.Length == 0 && !context.State.ContainsKey(key))
+        {
+            return;
+        }
+
+        DatabaseProtectionErrorLogState.StageIfChanged(context.PendingState, context.State, key, value);
+    }
+
+    /* NO means the replica takes no read connections, so its error log cannot be read through one. NULL: not in an Availability Group. */
+    private static bool? ReplicaReadableFor(string? allowConnections) =>
+        allowConnections is null ? null : !string.Equals(allowConnections, "NO", StringComparison.OrdinalIgnoreCase);
 
     private static string BackupStateFor(DateTime? time, bool readable, bool notExpected)
     {

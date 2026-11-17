@@ -49,15 +49,73 @@ public sealed class DatabaseProtectionCollectorTests
         table.Columns.Add("last_full", typeof(DateTime));
         table.Columns.Add("last_log", typeof(DateTime));
         table.Columns.Add("backups_readable", typeof(bool));
+        table.Columns.Add("instance_name", typeof(string));
+        table.Columns.Add("replica_allow_connections", typeof(string));
         return table;
     }
 
-    private static void Add(DataTable table, string name, string recovery, DateTime? checkDb, DateTime? full, DateTime? log, bool readable = true, string state = "ONLINE", string? role = null) =>
-        table.Rows.Add(name, state, recovery, Checked.AddYears(-1), (object?)role ?? DBNull.Value,
-            (object?)checkDb ?? DBNull.Value, (object?)full ?? DBNull.Value, (object?)log ?? DBNull.Value, readable);
+    /* #8865: the second result set, the error logs the instance lists. A single (0, NULL, NULL) row means the listing was refused. */
+    private static DataTable LogShape()
+    {
+        var table = new DataTable();
+        table.Columns.Add("enumerate_ok", typeof(bool));
+        table.Columns.Add("archive", typeof(int));
+        table.Columns.Add("log_date", typeof(DateTime));
+        return table;
+    }
 
-    private static async Task<List<DatabaseProtectionCollector.Row>> ReadAsync(DataTable table, CollectorTargetInfo? target = null) =>
-        await DatabaseProtectionCollector.Instance.ReadAsync(table.CreateDataReader(), Context(target), TestContext.Current.CancellationToken);
+    /* Archive n is dated n days before Checked, so a higher archive number is an older log, as on a real instance. */
+    private static DataTable Logs(int count)
+    {
+        var table = LogShape();
+        for (var archive = 0; archive < count; archive++)
+        {
+            table.Rows.Add(true, archive, Checked.AddDays(-archive));
+        }
+
+        return table;
+    }
+
+    private static string CheckValue(DateTime time, string options = "NO_INFOMSGS", int errors = 0) =>
+        new DatabaseProtectionErrorLogState.StoredCheck(time, options, errors).Format();
+
+    private static CollectorContext ContextWith(IReadOnlyDictionary<string, string> state, CollectorTargetInfo? target = null) => new()
+    {
+        CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "s",
+        Target = target ?? new CollectorTargetInfo(),
+        Deltas = new CollectorDeltaCalculator(),
+        State = state,
+    };
+
+    private static Dictionary<string, string> Carry(CollectorContext context, IReadOnlyDictionary<string, string> state)
+    {
+        var next = new Dictionary<string, string>(state, StringComparer.Ordinal);
+        foreach (var pair in context.PendingState)
+        {
+            next[pair.Key] = pair.Value;
+        }
+
+        return next;
+    }
+
+    private static async Task<List<DatabaseProtectionCollector.Row>> ReadWithAsync(CollectorContext context, DataTable primary, DataTable? logs)
+    {
+        using var reader = logs is null ? primary.CreateDataReader() : new DataTableReader(new[] { primary, logs });
+        return await DatabaseProtectionCollector.Instance.ReadAsync(reader, context, TestContext.Current.CancellationToken);
+    }
+
+    private static void Add(DataTable table, string name, string recovery, DateTime? checkDb, DateTime? full, DateTime? log, bool readable = true, string state = "ONLINE", string? role = null,
+        DateTime? created = null, string instance = "INST1", string? allowConnections = null) =>
+        table.Rows.Add(name, state, recovery, created ?? Checked.AddYears(-1), (object?)role ?? DBNull.Value,
+            (object?)checkDb ?? DBNull.Value, (object?)full ?? DBNull.Value, (object?)log ?? DBNull.Value, readable,
+            instance, (object?)allowConnections ?? DBNull.Value);
+
+    /* The primary result set is followed by the log list unless the target is platform managed, which builds no second set. */
+    private static async Task<List<DatabaseProtectionCollector.Row>> ReadAsync(DataTable table, CollectorTargetInfo? target = null)
+    {
+        var managed = target is not null && (target.IsAzureSqlDb || target.IsAzureManagedInstance);
+        return await ReadWithAsync(Context(target), table, managed ? null : Logs(1));
+    }
 
     [Fact]
     public async Task ACheckDbOf1900_ReadsNever_ANullOnAnOnlineDatabaseReadsUnknown_ARealTimeReadsChecked()
@@ -176,6 +234,189 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.Equal("ONLINE", rows[0].StateDesc);
         Assert.Equal("RESTORING", rows[1].StateDesc);
         Assert.Null(rows[1].ReplicaRole);
+    }
+
+    [Fact]
+    public async Task TheRows_CarryTheRememberedCheck_AndSayFailedUntilTheSupplementalApplies()
+    {
+        var table = Shape();
+        Add(table, "Sales", "FULL", null, Full, Log, role: "SECONDARY");
+        var checkTime = Checked.AddDays(-1);
+        var state = new Dictionary<string, string> { [DatabaseProtectionErrorLogState.CheckKeyPrefix + "Sales"] = CheckValue(checkTime, "NO_INFOMSGS, DATA_PURITY", 2) };
+
+        var row = Assert.Single(await ReadWithAsync(ContextWith(state), table, Logs(1)));
+
+        Assert.Equal(checkTime, row.ErrorLogCheckDbTime);
+        Assert.Equal("NO_INFOMSGS, DATA_PURITY", row.ErrorLogCheckDbOptions);
+        Assert.Equal(2, row.ErrorLogCheckDbErrors);
+        Assert.Equal(DatabaseProtectionCollector.ErrorLogFailed, row.ErrorLogState);
+        Assert.Equal("The error log read did not complete in this cycle (timeout or error).", row.ErrorLogMessage);
+        Assert.Null(row.ErrorLogGrant);
+    }
+
+    [Fact]
+    public async Task ARememberedCheckBeforeTheCreateDate_IsNotCarried()
+    {
+        var table = Shape();
+        Add(table, "Sales", "FULL", null, Full, Log, created: Checked);
+        var state = new Dictionary<string, string> { [DatabaseProtectionErrorLogState.CheckKeyPrefix + "Sales"] = CheckValue(Checked.AddDays(-1)) };
+
+        var row = Assert.Single(await ReadWithAsync(ContextWith(state), table, Logs(1)));
+
+        Assert.Null(row.ErrorLogCheckDbTime);
+        Assert.Null(row.ErrorLogCheckDbOptions);
+        Assert.Null(row.ErrorLogCheckDbErrors);
+    }
+
+    [Fact]
+    public async Task TheLogList_BecomesThePlan_AndThePlannedArchivesGetAnAttempt()
+    {
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var context = ContextWith(new Dictionary<string, string>());
+
+        await ReadWithAsync(context, table, Logs(7));
+
+        var plan = Assert.IsType<DatabaseProtectionErrorLogState.ErrorLogPlan>(context.DatabaseProtectionErrorLogPlan);
+        Assert.Equal(new[] { 0, 1, 2, 3 }, plan.Read.Select(a => a.Archive).ToArray());
+        Assert.Equal(
+            DatabaseProtectionErrorLogState.FormatAttempts(new Dictionary<DateTime, int>
+            {
+                [Checked.AddDays(-1)] = 1, [Checked.AddDays(-2)] = 1, [Checked.AddDays(-3)] = 1,
+            }),
+            context.PendingState[DatabaseProtectionErrorLogState.AttemptsKey]);
+        Assert.Equal("INST1", context.PendingState[DatabaseProtectionErrorLogState.InstanceKey]);
+    }
+
+    [Fact]
+    public async Task AChangedInstance_StartsOver()
+    {
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var state = new Dictionary<string, string>
+        {
+            [DatabaseProtectionErrorLogState.InstanceKey] = "OLDNODE",
+            [DatabaseProtectionErrorLogState.CheckKeyPrefix + "Sales"] = CheckValue(Checked.AddDays(-1)),
+            [DatabaseProtectionErrorLogState.BackfillDoneKey] = bool.TrueString,
+            [DatabaseProtectionErrorLogState.NewestArchiveKey] = "2026-10-20T00:00:00.000",
+        };
+        var context = ContextWith(state);
+
+        var row = Assert.Single(await ReadWithAsync(context, table, Logs(7)));
+
+        Assert.Null(row.ErrorLogCheckDbTime);
+        Assert.True(context.DatabaseProtectionErrorLogPlan!.Before.Reset);
+        Assert.Equal("INST1", context.PendingState[DatabaseProtectionErrorLogState.InstanceKey]);
+        Assert.False(row.ErrorLogBackfillComplete);
+        Assert.NotEqual(bool.TrueString, context.PendingState.GetValueOrDefault(DatabaseProtectionErrorLogState.BackfillDoneKey));
+    }
+
+    [Fact]
+    public async Task AResetCycle_StagesEmptyValuesForTheOldChecks_AndTheNextCycleReadsNoRememberedCheck()
+    {
+        /* #8865 R7: only overwriting the instance key would bring the old node's checks back the next cycle, once the key matches. */
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var salesKey = DatabaseProtectionErrorLogState.CheckKeyPrefix + "Sales";
+        var state = new Dictionary<string, string>
+        {
+            [DatabaseProtectionErrorLogState.InstanceKey] = "OLDNODE",
+            [salesKey] = CheckValue(Checked.AddDays(-1)),
+            [DatabaseProtectionErrorLogState.CheckKeyPrefix + "Gone"] = CheckValue(Checked.AddDays(-2)),
+        };
+        var first = ContextWith(state);
+
+        await ReadWithAsync(first, table, Logs(1));
+
+        Assert.Equal(string.Empty, first.PendingState[salesKey]);
+        Assert.Equal(string.Empty, first.PendingState[DatabaseProtectionErrorLogState.CheckKeyPrefix + "Gone"]);
+
+        var carried = Carry(first, state);
+        var second = ContextWith(carried);
+        var row = Assert.Single(await ReadWithAsync(second, table, Logs(1)));
+
+        Assert.False(second.DatabaseProtectionErrorLogPlan!.Before.Reset);
+        Assert.Null(row.ErrorLogCheckDbTime);
+        Assert.DoesNotContain(DatabaseProtectionErrorLogState.InstanceKey, second.PendingState.Keys);
+    }
+
+    [Fact]
+    public async Task WhenTheSupplementalNeverApplies_TheBackfillStillEnds()
+    {
+        /* #8865: skipped archives count as done, so the markers move past them even though no cycle ever reads one: the backlog
+           ends on a server whose current log times out every cycle. Seven logs are six archives, three a cycle, two attempts each:
+           2 x ceil(6 / 3) = 4 cycles to give up on every archive, and one more to see that nothing is left. */
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var state = new Dictionary<string, string>();
+        bool? complete = null;
+        var cycles = 0;
+        while (cycles < 10 && complete != true)
+        {
+            var context = ContextWith(state);
+            var row = Assert.Single(await ReadWithAsync(context, table, Logs(7)));
+            complete = row.ErrorLogBackfillComplete;
+            state = Carry(context, state);
+            cycles++;
+        }
+
+        Assert.True(complete);
+        Assert.Equal(5, cycles);
+        Assert.Equal(6, DatabaseProtectionErrorLogState.ParseDates(state[DatabaseProtectionErrorLogState.SkippedKey]).Count);
+    }
+
+    [Fact]
+    public async Task ManagedInstanceAndAzure_HaveNoPlan_AndAreNotApplicable()
+    {
+        foreach (var target in new[] { new CollectorTargetInfo { IsAzureSqlDb = true }, new CollectorTargetInfo { IsAzureManagedInstance = true } })
+        {
+            var table = Shape();
+            Add(table, "AppDb", "FULL", Checked, Full, Log);
+            var context = ContextWith(new Dictionary<string, string>(), target);
+
+            var row = Assert.Single(await ReadWithAsync(context, table, null));
+
+            Assert.Null(context.DatabaseProtectionErrorLogPlan);
+            Assert.Empty(context.PendingState);
+            Assert.Equal(DatabaseProtectionCollector.ErrorLogNotApplicable, row.ErrorLogState);
+            Assert.Null(row.ErrorLogMessage);
+            Assert.Null(row.ErrorLogBackfillComplete);
+            Assert.Null(row.ReplicaReadable);
+        }
+    }
+
+    [Fact]
+    public async Task ARefusedListing_PlansTheCurrentLogOnly_AndTheBackfillIsComplete()
+    {
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var refused = LogShape();
+        refused.Rows.Add(false, DBNull.Value, DBNull.Value);
+        var context = ContextWith(new Dictionary<string, string>());
+
+        var row = Assert.Single(await ReadWithAsync(context, table, refused));
+
+        var plan = context.DatabaseProtectionErrorLogPlan!;
+        Assert.False(plan.EnumerateOk);
+        Assert.Equal(new[] { 0 }, plan.Read.Select(a => a.Archive).ToArray());
+        Assert.True(row.ErrorLogBackfillComplete);
+    }
+
+    [Fact]
+    public async Task AReplicaThatIsNotReadable_ReadsReplicaReadableFalse()
+    {
+        var table = Shape();
+        Add(table, "NoConn", "FULL", Checked, Full, Log, role: "SECONDARY", allowConnections: "NO");
+        Add(table, "ReadOnly", "FULL", Checked, Full, Log, role: "SECONDARY", allowConnections: "READ_ONLY");
+        Add(table, "AllConn", "FULL", Checked, Full, Log, role: "SECONDARY", allowConnections: "ALL");
+        Add(table, "Standalone", "FULL", Checked, Full, Log);
+
+        var rows = await ReadWithAsync(ContextWith(new Dictionary<string, string>()), table, Logs(1));
+
+        Assert.False(rows[0].ReplicaReadable);
+        Assert.True(rows[1].ReplicaReadable);
+        Assert.True(rows[2].ReplicaReadable);
+        Assert.Null(rows[3].ReplicaReadable);
     }
 
     [Fact]
