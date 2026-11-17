@@ -479,6 +479,8 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Equal(126, wideTrend[0].GetProperty("execution_count").GetInt64());
         Assert.Equal(3.0, wideTrend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
         Assert.Contains("one 2-hour bucket", wide.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+        /* #8900: a wide bucket on this tier stamps its first point at the window's start, and the note says so in the raw tier's words. */
+        Assert.Contains("(a point in the window's first bucket at the window's start)", wide.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
         Assert.StartsWith("2026-03-04T10:00:00", wide.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
 
         /* A width the rollup cannot serve is refused, naming why — not quietly answered at the hour. */

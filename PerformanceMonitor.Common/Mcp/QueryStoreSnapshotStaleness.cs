@@ -32,8 +32,10 @@ public static class QueryStoreSnapshotStaleness
     /// <paramref name="collectorName"/> names the collector that writes it. <paramref name="collectorEnabled"/> is whether that
     /// collector's schedule runs it on this server: a disabled collector takes no newer capture, and the note says that instead of
     /// naming a cadence and sending the reader to look for a failed run. <paramref name="intervalMinutes"/> is the interval that
-    /// schedule runs it at on this server, which the note of an enabled collector names (<see cref="Cadence"/>).</summary>
-    public static string? Note(DateTime capturedUtc, DateTime nowUtc, string collectorName, bool collectorEnabled, int intervalMinutes)
+    /// schedule runs it at on this server, which the note of an enabled collector names (<see cref="Cadence"/>).
+    /// <paramref name="stampField"/> is how the note names the capture's time in the reply that carries it (#8903: the field the reader
+    /// will find, <c>captured_at</c> on the health reads, the row's <c>as_of</c> on the plan-correction rows).</summary>
+    public static string? Note(DateTime capturedUtc, DateTime nowUtc, string collectorName, bool collectorEnabled, int intervalMinutes, string stampField = "captured_at")
     {
         var age = nowUtc - capturedUtc;
         if (age < Threshold) return null;
@@ -41,12 +43,12 @@ public static class QueryStoreSnapshotStaleness
         if (!collectorEnabled)
         {
             return $"This is the newest capture, and it is {ago} old: the {collectorName} collector is disabled for this server, so no "
-                + "newer capture is taken and the state shown is the server's as of captured_at, not now. get_collector_schedules "
+                + $"newer capture is taken and the state shown is the server's as of {stampField}, not now. get_collector_schedules "
                 + "shows the schedule.";
         }
 
         return $"This is the newest capture, and it is {ago} old: the {collectorName} collector runs {Cadence(intervalMinutes)}, so the state shown is "
-            + "the server's as of captured_at, not now. Check get_collection_health for why no newer capture exists.";
+            + $"the server's as of {stampField}, not now. Check get_collection_health for why no newer capture exists.";
     }
 
     /// <summary>
