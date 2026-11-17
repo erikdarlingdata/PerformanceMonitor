@@ -412,6 +412,11 @@ public sealed class DatabaseProtectionBandsTests
 
         var none = DatabaseProtectionBands.Summarize([(facts[1], banded[1].Band)]);
         Assert.Equal("No database is judged: every one is offline or restoring.", none.Text);
+
+        /* #8865 M3: on the old path (the error log refused) a secondary is still excluded whole, and the sentence says so. */
+        var refusedSecondary = Healthy() with { DatabaseName = "Sales", ReplicaRole = "SECONDARY", ErrorLogState = "refused" };
+        var oldPath = DatabaseProtectionBands.Summarize([(facts[1], banded[1].Band), (refusedSecondary, DatabaseProtectionBands.Evaluate(refusedSecondary, Now, Limits))]);
+        Assert.Equal("No database is judged: every one is offline, restoring or a secondary whose error log was not read.", oldPath.Text);
     }
 
     [Theory]

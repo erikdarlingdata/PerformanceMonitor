@@ -328,8 +328,11 @@ public static class DatabaseProtectionBands
         string text;
         if (bands.Count == 0)
             text = "No databases in the capture.";
+        /* #8865 M3: a secondary is still excluded whole when its error log was not read (refused, an old row), so name it when one is. */
         else if (judged.Count == 0)
-            text = "No database is judged: every one is offline or restoring.";
+            text = bands.Any(b => b.Band.ExcludedReason == DetailSecondary)
+                ? "No database is judged: every one is offline, restoring or a secondary whose error log was not read."
+                : "No database is judged: every one is offline or restoring.";
         else if (overdueDatabases == 0)
             text = string.Create(CultureInfo.InvariantCulture, $"No database is overdue ({judged.Count} judged).");
         else
