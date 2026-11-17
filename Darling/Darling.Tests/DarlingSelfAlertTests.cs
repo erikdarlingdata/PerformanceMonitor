@@ -6164,6 +6164,8 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<DatabaseFileGrowthInfo>());
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult<TempDbSpaceInfo?>(null);
+        public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<TempDbFileInfo>());
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PvsPressureInfo>());
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>

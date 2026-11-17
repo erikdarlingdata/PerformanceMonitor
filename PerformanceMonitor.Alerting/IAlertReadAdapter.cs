@@ -224,11 +224,10 @@ public interface IAlertReadAdapter
     /// <summary>
     /// The tempdb files of the newest <c>database_size_stats</c> collection (database_id 2), with each file's growth settings and the
     /// volume's free space from the same collection, for the TempDB Growth Won't Fit alert (#8882). Empty when the store has no tempdb
-    /// rows for this server. A default member so a store without the read judges nothing instead of failing.
+    /// rows for this server.
     /// </summary>
     Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
-        string serverKey, CancellationToken cancellationToken = default)
-        => Task.FromResult(new List<TempDbFileInfo>());
+        string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The newest pvs_stats snapshot's per-database persistent version store state, for the

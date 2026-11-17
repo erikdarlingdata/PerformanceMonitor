@@ -154,6 +154,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
 
+        public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<TempDbFileInfo>());
+
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PvsPressureInfo>());
 
