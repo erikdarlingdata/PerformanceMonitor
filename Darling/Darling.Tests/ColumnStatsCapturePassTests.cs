@@ -162,6 +162,21 @@ public sealed class ColumnStatsCapturePassTests
 
         public Task<CollectorRunResult> RunAsync(ServerRuntime server, CancellationToken ct) => DarlingColumnStatsCapture.RunAsync(Runner, server, ct);
 
+        /* An Azure SQL Database logical server, whose database list the test sets. */
+        public ServerRuntime AzureServer(List<string> listed)
+        {
+            var server = Server("colstats-azure");
+            Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(listed);
+            return new ServerRuntime
+            {
+                Config = server.Config,
+                ConnectionString = server.ConnectionString,
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+                StorageName = server.StorageName,
+                ServerId = server.ServerId,
+            };
+        }
+
         public async Task<CollectorRunResult> RunNowAsync(ServerRuntime server, CancellationToken ct)
         {
             using (DarlingSnapshotScope.Enter())
@@ -830,6 +845,62 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
     }
 
     [Fact]
+    public async Task GroupDatabase_RefusedThenFailoverThenFailBack_TheRefusalIsWrittenAgain()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            var nodeA = rig.Server("colstats-node-a");
+            var nodeB = rig.Server("colstats-node-b");
+            rig.Source.Candidates["MirrorDb"] = [Stat(900, 1, s_t0)];
+
+            /* A is primary and has no SELECT there: one refusal row. */
+            rig.Source.Probes.Add(Probe("MirrorDb", 9, group: s_group, primary: true));
+            rig.Source.NoSelect.Add("MirrorDb");
+            await rig.RunAsync(nodeA, ct);
+
+            /* Failover to B, which has the grant: B reads and its row is the newest of the history. */
+            rig.Source.NoSelect.Clear();
+            await rig.RunAsync(nodeB, ct);
+            Assert.EndsWith("|-|true", await rig.LastRunAsync("MirrorDb", ct), StringComparison.Ordinal);
+
+            /* Fail back to A, still without the grant: A's own newest row says no_select, but the history's newest is B's granted row,
+               which is what the status reads, so A must write its refusal again. */
+            rig.Source.NoSelect.Add("MirrorDb");
+            await rig.RunAsync(nodeA, ct);
+
+            Assert.EndsWith("|no_select|false", await rig.LastRunAsync("MirrorDb", ct), StringComparison.Ordinal);
+            Assert.Equal("2", await rig.ScalarAsync(
+                "SELECT count(*) FROM collect.column_stats_runs WHERE refused = 'no_select' AND server_id = " + nodeA.ServerId, ct));
+        });
+    }
+
+    [Fact]
+    public async Task Azure_ADatabaseMissingFromThePartialList_IsKept_OneOutOfScope_IsForgotten()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.Source.Probes.Add(Probe(Reports, 6));
+            rig.Source.Candidates[Reports] = [Stat(600, 1, s_t0)];
+            var listed = new List<string> { "master", Sales, Reports };
+            var server = rig.AzureServer(listed);
+            await rig.RunAsync(server, ct);
+            Assert.Equal("2", await rig.ScalarAsync("SELECT count(DISTINCT database_name) FROM collect.column_stats", ct));
+
+            /* The list comes back without ReportsDb (a fallback or a paused database): not known to be gone, so it stays. */
+            listed.Remove(Reports);
+            await rig.RunAsync(server, ct);
+            Assert.Equal("2", await rig.ScalarAsync("SELECT count(DISTINCT database_name) FROM collect.column_stats", ct));
+
+            /* column_stats' scope now names SalesDb only: leaving the scope is configuration, so ReportsDb is forgotten. */
+            rig.ColumnStatsScope = [Sales];
+            await rig.RunAsync(server, ct);
+            Assert.Equal(Sales, await rig.ScalarAsync("SELECT string_agg(DISTINCT database_name, ',') FROM collect.column_stats", ct));
+            Assert.Equal(Sales, await rig.ScalarAsync("SELECT string_agg(database_name, ',') FROM collect.column_stats_state", ct));
+        });
+    }
+
+    [Fact]
     public async Task NoDatabaseHasGrant_RepeatedRuns_TheNewestServerRunStillShowsEveryRefusal()
     {
         await WithRigAsync(async (rig, ct) =>
@@ -843,7 +914,10 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
             await rig.RunAsync(server, ct);
             var second = await rig.RunAsync(server, ct);
 
-            Assert.Equal(0, second.Rows);
+            /* No new run row, but both databases still count in the run's rows: collection health must not read the second run as a
+               collector that produced and then stopped. */
+            Assert.Equal("2", await rig.ScalarAsync("SELECT count(*) FROM collect.column_stats_runs", ct));
+            Assert.Equal(2, second.Rows);
             Assert.Contains("precondition", second.HostNote, StringComparison.OrdinalIgnoreCase);
             Assert.Equal("2|2", await rig.ScalarAsync(
                 "SELECT count(*) || '|' || count(*) FILTER (WHERE refused = 'no_select') FROM collect.column_stats_runs WHERE server_id = " + server.ServerId

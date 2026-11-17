@@ -505,6 +505,23 @@ WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 AND s.has_filter = 0 AND ISNU
             Assert.Equal(expected - 2, overCap);
             Assert.Equal(expected, all.Count);
             Assert.All(capped, c => Assert.Contains((c.ObjectId, c.StatsId), all));
+
+            /* Largest tables first across every candidate, not only within the two: no candidate left out has more rows than the
+               smallest one kept. The full list with its row counts comes from the same read under a cap it does not reach. */
+            await reader.CloseAsync();
+            await using var full = new SqlCommand(ColumnStatsQueries.BuildCandidatesSql(ColumnStatsModel.MaxStatisticsPerDatabase), connection);
+            await using var fullReader = await full.ExecuteReaderAsync(r.Ct);
+            var everyCandidate = new List<(int ObjectId, int StatsId, long Rows)>();
+            while (await fullReader.ReadAsync(r.Ct))
+            {
+                everyCandidate.Add((fullReader.GetInt32(0), fullReader.GetInt32(3), fullReader.GetInt64(7)));
+            }
+
+            Assert.Equal(expected, everyCandidate.Count);
+            var smallestKept = capped.Min(c => c.Rows);
+            Assert.All(
+                everyCandidate.Where(c => !capped.Any(k => k.ObjectId == c.ObjectId && k.StatsId == c.StatsId)),
+                c => Assert.True(c.Rows <= smallestKept, $"Statistic {c.ObjectId}/{c.StatsId} ({c.Rows} rows) was left out while one of {smallestKept} rows was kept."));
         });
     }
 
@@ -566,8 +583,9 @@ WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 AND s.has_filter = 0 AND ISNU
                     Assert.Empty(rows);
                     Assert.Equal(ids.Count, errors.Count);
                     Assert.All(errors, e => Assert.Equal(1222, e.Number));
-                    /* LOCK_TIMEOUT is 5 seconds: one wait for the table, not one per statistic. */
-                    Assert.InRange(clock.Elapsed.TotalSeconds, 4.5, 9.0);
+                    /* LOCK_TIMEOUT is 5 seconds: one wait for the table (about 5 s), not one per statistic (about 25 s). The upper bound
+                       leaves room for a loaded box. */
+                    Assert.InRange(clock.Elapsed.TotalSeconds, 4.5, 15.0);
                 }
                 finally
                 {

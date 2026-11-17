@@ -31,9 +31,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>column_stats</c>' own scope cover (exclusions win), writable by the schema pass's rules
 /// (<see cref="SchemaWorkPlanner.NotWritableReason"/>). Oldest full read first, a never-read database before any. Only where column_stats
 /// itself is enabled: a named run of a collector that is off reads nothing. A database in scope that is not read is still stamped, with a
-/// state row made for it when it has none. On a server (not Azure SQL Database, whose list can be one database or online ones only) a
-/// database the run had before and no longer has, dropped or out of scope, loses its state row and, unless another server still points at
-/// the same history, its rows.</para>
+/// state row made for it when it has none. A database the run had before and no longer has loses its state row and, unless another server
+/// still points at the same history, its rows: on a server one that is dropped or out of scope; on Azure SQL Database, whose list can be
+/// one database or online ones only, one out of scope.</para>
 ///
 /// <para><b>Incremental.</b> A statistic is read when it is new, its <c>STATS_DATE</c> differs from the stored one, or a name it was
 /// stored under changed (a renamed schema, table, statistic or column keeps <c>STATS_DATE</c>), and the stored
@@ -133,6 +133,7 @@ public static class DarlingColumnStatsCapture
         private readonly List<string> _failed = [];
         private readonly List<string> _unfinished = [];
         private int _granted;
+        private int _repeatedRefusals;
         private int _locked;
         private int _errors;
         private string? _sampleError;
@@ -214,6 +215,7 @@ public static class DarlingColumnStatsCapture
                 }
             }
 
+            await ForgetOutOfScopeAzureAsync();
             _toRead = work.Count;
             foreach (var (database, state) in work.OrderBy(w => w.State?.LastFullReadAt ?? DateTime.MinValue))
             {
@@ -312,6 +314,18 @@ public static class DarlingColumnStatsCapture
                         _server.ServerId, probe.Name, DarlingSchemaCapture.KeyText(SchemaWorkPlanner.KeyFor(_server.ServerId, probe)), probe.RecoveryForkGuid, _runTime, null),
                     _ct));
 
+        /* Azure SQL Database: the list can be the one-database fallback or online databases only, so a database missing from it is not
+           known to be gone. Leaving a scope is configuration, though: a state row whose database either scope (or an exclusion) now leaves
+           out is forgotten by name, as on a server. */
+        private async Task ForgetOutOfScopeAzureAsync()
+        {
+            var states = await TimedStore(() => ColumnStatsStore.LoadServerStatesAsync(Store, _server.ServerId, _ct));
+            foreach (var state in states.Where(s => Covered([NameOnly(s.Database)]).Count == 0))
+            {
+                await TimedStore(() => ColumnStatsStore.ForgetDatabaseAsync(Store, state, _ct));
+            }
+        }
+
         /* The run's own databases that are gone (dropped, renamed) or out of either scope: their state row goes, and their rows too when no
            other server's state row still points at the same history and database (a group's rows stay while another replica sees it). */
         private async Task ForgetGoneAsync(IReadOnlyCollection<string> covered)
@@ -352,10 +366,16 @@ public static class DarlingColumnStatsCapture
                 {
                     _noSelect.Add(database);
 
-                    /* One run row per refusal, not one per run: while the newest row already says no_select the answer has not changed,
-                       and that row stays the newest, so the status in get_object_definition still reads the refusal from it. */
-                    var previous = await TimedStore(() => ColumnStatsStore.LoadNewestRefusedAsync(Store, _server.ServerId, keyText, database, _ct));
-                    if (previous != NoSelectRefusal)
+                    /* One run row per refusal, not one per run: while the newest row of the history (any server's, the row the status in
+                       get_object_definition reads) already says no_select the answer has not changed, and that row stays the newest. The
+                       database still counts in the run's rows, so a server where every database is refused does not read to collection
+                       health as a collector that produced and then stopped. */
+                    var previous = await TimedStore(() => ColumnStatsStore.LoadNewestRefusedAsync(Store, keyText, database, _ct));
+                    if (previous == NoSelectRefusal)
+                    {
+                        _repeatedRefusals++;
+                    }
+                    else
                     {
                         _rows.Add(Row(database, key, kind, 0, tally, SkipCounts.None, NoSelectRefusal, complete: false, "The login has no SELECT in this database; nothing was read."));
                     }
@@ -371,8 +391,10 @@ public static class DarlingColumnStatsCapture
 
                 if (fresh)
                 {
-                    /* A fresh start replaces the history's rows, whichever server wrote them: after a failover the new primary's baseline
-                       removes what the old primary stored. A database that moved from this server's own key (it joined a group) also
+                    /* A fresh start replaces the history's rows, whichever server wrote them: a new primary with no state row for the
+                       database (it never stamped it, as a secondary that was not in scope or not yet run) starts here and removes what the old
+                       primary stored. A new primary that stamped the database as a secondary has a state row under the group's key, is not
+                       fresh, and reads against the group's rows instead (they describe the same database). A database that moved from this server's own key (it joined a group) also
                        loses the rows under that key; a group's rows are the group's and are left to its servers and the stamp age. */
                     /* The new key and fork are saved with the deletes, in one transaction under the history lock, not after the last
                        batch: a purge in between would otherwise find no stamp under the new key and delete the rows this run writes. */
@@ -536,7 +558,8 @@ public static class DarlingColumnStatsCapture
                 written = await TimedStore(() => _runner.WriteColumnStatsRunRowsAsync(Store, _rows, _server, _runTime, _ct));
             }
 
-            return new CollectorRunResult(written, _sql.ElapsedMilliseconds, _storage.ElapsedMilliseconds, CollectorContext.NoMeasurements, BuildNote());
+            /* Rows is every database the run accounted for: a repeated refusal's row is the stored one, not a new one. */
+            return new CollectorRunResult(written + _repeatedRefusals, _sql.ElapsedMilliseconds, _storage.ElapsedMilliseconds, CollectorContext.NoMeasurements, BuildNote());
         }
 
         private string? BuildNote()
