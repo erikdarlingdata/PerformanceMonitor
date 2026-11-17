@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -59,7 +60,7 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
         decimal MaxSizeMb,
         /* #8881: the tempdb LOG, appended LAST for the same reason. Every one is nullable and defaults to NULL:
            NULL means the engine could not say (a function that is missing or refuses), which is not a zero.
-           The holder members are filled only while the log is at or above LogHolderMinUsedPercent. */
+           The holder members are filled only while the log is at or above TempDbLogHolderLine.MinLogUsedPercent (#8881). */
         decimal? LogTotalMb = null,
         decimal? LogUsedMb = null,
         decimal? LogUsedPercent = null,
@@ -71,10 +72,6 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
         DateTime? HolderBeginTimeUtc = null,
         long? HolderLogBytesUsed = null,
         long? HolderLogBytesReserved = null);
-
-    /// <summary>The log used percent at which the collector also captures the oldest active tempdb
-    /// transaction. Below it the holder columns are stored NULL (#8881).</summary>
-    public const int LogHolderMinUsedPercent = 50;
 
     public override string Name => "tempdb_stats";
 
@@ -145,7 +142,7 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
 
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
-    private const string QueryText = @"
+    private static readonly string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
@@ -256,7 +253,7 @@ END CATCH;
 /* The holder: the oldest active tempdb transaction, read only while the log is at or above the bar. LEFT JOINs
    keep a transaction that no session owns. The begin time is the server's local time, moved to UTC here so the
    store holds one clock. */
-IF @log_used_percent >= 50 /* LogHolderMinUsedPercent */
+IF @log_used_percent >= __LOG_HOLDER_MIN_USED_PERCENT__
 BEGIN
     BEGIN TRY
         EXECUTE sys.sp_executesql
@@ -299,7 +296,7 @@ SELECT /* PerformanceMonitorLite */
     holder_begin_time_utc = @holder_begin_time_utc,
     holder_log_bytes_used = @holder_log_bytes_used,
     holder_log_bytes_reserved = @holder_log_bytes_reserved;
-";
+".Replace("__LOG_HOLDER_MIN_USED_PERCENT__", TempDbLogHolderLine.MinLogUsedPercent.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {

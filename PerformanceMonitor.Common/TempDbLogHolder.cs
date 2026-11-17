@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Common;
 /// The newest tempdb collection in a chart window, as far as the tempdb log is concerned (#8881): who holds the oldest open
 /// tempdb transaction and why the log cannot clear. Lite, the Darling viewer and the web page's read each fill one from their own
 /// store, so all three screens say the same thing through <see cref="TempDbLogHolderLine.Build"/>. <see cref="SessionId"/> is null
-/// when the collector captured no holder, which it does below 50 percent of the log used and on an engine that cannot report one.
+/// when the collector captured no holder, which it does below <see cref="MinLogUsedPercent"/> percent of the log used and on an engine that cannot report one.
 /// <see cref="LogTotalMb"/> and <see cref="LogReuseWaitDesc"/> are read only by <c>get_tempdb_trend</c>, which states them once for the window instead of on every point.
 /// </summary>
 internal sealed record TempDbLogHolder(
@@ -35,6 +35,15 @@ internal sealed record TempDbLogHolder(
 /// <summary>The one plain line the three tempdb screens show beside the chart when the newest point has a holder (#8881).</summary>
 internal static class TempDbLogHolderLine
 {
+    /// <summary>The log used percent at which the tempdb collector starts reading the holder (#8881). Below it the holder columns are
+    /// stored NULL because nothing was read, not because nothing was found. The collector's SQL and every line that explains a missing
+    /// holder take the figure from here.</summary>
+    public const int MinLogUsedPercent = 50;
+
+    /// <summary>What to say when the log is under <see cref="MinLogUsedPercent"/> used and no holder is stored, so the reader does not
+    /// take the empty holder for a look that found nothing. An alert bar set below the percent fires in this range.</summary>
+    public static string NotReadBelowBarText => string.Create(CultureInfo.InvariantCulture, $"the holder is read at {MinLogUsedPercent}% log used and above");
+
     /// <summary>
     /// "Oldest tempdb log transaction: session 87, login app_user, program MyApp, open 14 minutes, 3.2 GB of log used." followed by the
     /// holdup reason when it is anything but NOTHING. Null when there is no holder, so the screen shows no line. The transaction's age

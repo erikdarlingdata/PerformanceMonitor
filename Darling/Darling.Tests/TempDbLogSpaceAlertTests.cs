@@ -173,4 +173,23 @@ public sealed class TempDbLogSpaceAlertTests
         var card = AlertContextBuilders.BuildTempDbLogSpaceContext(LogInfo(now, sessionless: false), now)!.Details.Single().Fields;
         Assert.Contains(card, f => f.Item1 == "Holder" && f.Item2 == "None captured");
     }
+
+    [Fact]
+    public void NoHolderUnderTheReadBar_SaysTheHolderIsNotReadThere_NotThatNoneWasCaptured()
+    {
+        var now = new DateTime(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
+        var info = LogInfo(now, sessionless: false);
+        info.LogUsedPercent = 30;
+        info.LogUsedMb = 300;
+
+        var message = AlertContextBuilders.TempDbLogSpaceMessage(info, now);
+        Assert.EndsWith(", the holder is read at 50% log used and above", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no holding transaction captured", message, StringComparison.Ordinal);
+        var card = AlertContextBuilders.BuildTempDbLogSpaceContext(info, now)!.Details.Single().Fields;
+        Assert.Contains(card, f => f.Item1 == "Holder" && f.Item2.Contains("the holder is read at 50% log used and above", StringComparison.Ordinal));
+        Assert.DoesNotContain(card, f => f.Item2 == "None captured");
+
+        info.LogUsedPercent = 50;
+        Assert.EndsWith(", no holding transaction captured", AlertContextBuilders.TempDbLogSpaceMessage(info, now), StringComparison.Ordinal);
+    }
 }

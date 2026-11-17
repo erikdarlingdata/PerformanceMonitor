@@ -1435,6 +1435,10 @@ public static class AlertContextBuilders
                 sb.Append(System.Globalization.CultureInfo.InvariantCulture, $", {bytesUsed / 1048576.0:F0} MB of log used");
             }
         }
+        else if (HolderWasNotRead(tempDb))
+        {
+            sb.Append(", ").Append(TempDbLogHolderLine.NotReadBelowBarText);
+        }
         else if (tempDb.HolderLoginName is null)
         {
             sb.Append(", no holding transaction captured");
@@ -1442,6 +1446,11 @@ public static class AlertContextBuilders
 
         return sb.ToString();
     }
+
+    /// <summary>True when the snapshot's log is under the percent the collector starts reading the holder at, so an empty holder means
+    /// "not read" and not "none found". An alert bar set below that percent fires in this range (#8881).</summary>
+    private static bool HolderWasNotRead(TempDbSpaceInfo tempDb) =>
+        (tempDb.LogUsedPercent ?? 0) < TempDbLogHolderLine.MinLogUsedPercent;
 
     /// <summary>How long the holder's transaction has been open at <paramref name="now"/>, or null when the snapshot has no begin time.
     /// Never negative: a clock that reads a moment behind the server's would otherwise print a negative age.</summary>
@@ -1497,6 +1506,10 @@ public static class AlertContextBuilders
             {
                 fields.Add(("Holder Log Used", System.FormattableString.Invariant($"{bytesUsed / 1048576.0:F0} MB")));
             }
+        }
+        else if (HolderWasNotRead(tempDb))
+        {
+            fields.Add(("Holder", "Not read: " + TempDbLogHolderLine.NotReadBelowBarText));
         }
         else
         {

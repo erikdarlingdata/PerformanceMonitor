@@ -46,5 +46,7 @@
     <!-- #5320: the alert statement filter (PerformanceMonitor.Alerting) judges one alert's values under one shared
          1.5 s JudgeBudget, the way the MCP output filter does for one result. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Alerting" />
+    <!-- #8881: the tempdb collector's SQL reads the holder at the same log used percent the alert wording states. -->
+    <InternalsVisibleTo Include="PerformanceMonitor.Collectors" />
   </ItemGroup>
 </Project>
