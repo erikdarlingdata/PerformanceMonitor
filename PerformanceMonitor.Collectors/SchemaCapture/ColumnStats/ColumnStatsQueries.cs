@@ -214,11 +214,11 @@ BEGIN
     SET @target = NULL;
     SET @sname = NULL;
     SET @stage = 0;
-    SELECT @target = QUOTENAME(SCHEMA_NAME(o.schema_id)) + N'.' + QUOTENAME(o.name), @sname = s.name
-    FROM sys.objects AS o
-    JOIN sys.stats AS s ON s.object_id = o.object_id
-    WHERE o.object_id = @oid AND s.stats_id = @sid;
     BEGIN TRY
+        SELECT @target = QUOTENAME(SCHEMA_NAME(o.schema_id)) + N'.' + QUOTENAME(o.name), @sname = s.name
+        FROM sys.objects AS o
+        JOIN sys.stats AS s ON s.object_id = o.object_id
+        WHERE o.object_id = @oid AND s.stats_id = @sid;
         IF @target IS NULL
         BEGIN
             THROW 50000, N'The statistic no longer exists.', 1;

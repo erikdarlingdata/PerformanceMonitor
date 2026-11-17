@@ -111,6 +111,17 @@ public sealed class ColumnStatsQueriesTests
     }
 
     [Fact]
+    public void CatalogLookupIsInsideTheTry()
+    {
+        var batch = ColumnStatsQueries.BuildReadBatch(OneStat, true);
+
+        var tryAt = batch.IndexOf("BEGIN TRY", StringComparison.Ordinal);
+        var lookupAt = batch.IndexOf("@sname = s.name", StringComparison.Ordinal);
+        var catchAt = batch.IndexOf("BEGIN CATCH", StringComparison.Ordinal);
+        Assert.True(tryAt >= 0 && lookupAt > tryAt && lookupAt < catchAt, "the sys.objects/sys.stats lookup must sit between BEGIN TRY and BEGIN CATCH");
+    }
+
+    [Fact]
     public void EmptyStatList_StillBuilds()
     {
         Assert.Contains("FROM #errs", ColumnStatsQueries.BuildReadBatch(Array.Empty<(int ObjectId, int StatsId)>(), true));
