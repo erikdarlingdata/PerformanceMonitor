@@ -260,8 +260,21 @@ public partial class ViewerServerTab
     /// calls this server Offline; read before each PostgreSQL tab loads, and false when the read fails.</summary>
     private bool _pgOffline;
 
+    /// <summary>
+    /// #8913: the optional extensions this server's newest census shows as absent (an Aurora server does not offer them), so a panel for
+    /// the collector that reads one says the engine limit instead of a setup step. Null until read, and when the read fails, which makes
+    /// no claim. Read with <see cref="_pgOffline"/> before each PostgreSQL tab loads.
+    /// </summary>
+    private System.Collections.Generic.IReadOnlyCollection<string>? _extensionsNotOffered;
+
     private async Task RefreshPgOfflineAsync()
     {
+        if (MonitoredEngineKind.IsAurora(_server.EngineKind))
+        {
+            var notOffered = await _dataService.GetExtensionsNotOfferedAsync(_server.ServerId);
+            _extensionsNotOffered = notOffered;
+        }
+
         try
         {
             var freshness = await _dataService.GetServerCollectionStateAsync();
@@ -283,7 +296,7 @@ public partial class ViewerServerTab
     /// <summary>The sentence for a collector this target can never run: the engine's gap, else (#8918) the PostgreSQL version's, else null.</summary>
     private string? PgCollectorGap(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None)
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None, _extensionsNotOffered)
         ?? ViewerDataService.PostgresVersionGap(_server, collectorName);
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -305,7 +318,7 @@ public partial class ViewerServerTab
             _server.ServerId, startUtc, endUtc, collectors.Select(c => c.Name).ToList());
 
         PgCollectorHealthGrid.ItemsSource =
-            ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
+            ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts, _extensionsNotOffered);
 
         /* #3691 part a2: the persisted analysis collection caveats, as on the SQL Server Collection Health tab. */
         var caveats = await _dataService.GetCollectionCaveatsAsync(_server.ServerId);
