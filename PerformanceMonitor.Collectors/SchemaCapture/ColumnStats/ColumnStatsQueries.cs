@@ -105,17 +105,16 @@ WHERE b.has_filter = 0
   AND b.stats_date IS NOT NULL
 ORDER BY b.table_rows DESC, b.object_id, b.stats_id;
 
-/* The exact instant where the server names its time zone. CURRENT_TIMEZONE_ID() and AT TIME ZONE are in dynamic SQL, so an older build
-   that knows neither still compiles this batch and keeps the current offset above. */
+/* The exact instant where the server names its time zone. CURRENT_TIMEZONE_ID(), sys.time_zone_info and AT TIME ZONE are in dynamic
+   SQL, so an older build that knows none of them still compiles this batch and keeps the current offset above. */
 DECLARE @tz nvarchar(256) = NULL;
 IF CONVERT(int, SERVERPROPERTY('EngineEdition')) IN (5, 8) OR CONVERT(int, SERVERPROPERTY('ProductMajorVersion')) >= 16
 BEGIN
     BEGIN TRY
-        EXECUTE sys.sp_executesql N'SET @z = CURRENT_TIMEZONE_ID();', N'@z nvarchar(256) OUTPUT', @z = @tz OUTPUT;
-        IF NOT EXISTS (SELECT 1 FROM sys.time_zone_info AS z WHERE z.name = @tz)
-        BEGIN
-            SET @tz = NULL;
-        END;
+        EXECUTE sys.sp_executesql
+            N'SET @z = CURRENT_TIMEZONE_ID(); IF NOT EXISTS (SELECT 1 FROM sys.time_zone_info AS z WHERE z.name = @z) SET @z = NULL;',
+            N'@z nvarchar(256) OUTPUT',
+            @z = @tz OUTPUT;
 
         IF @tz IS NOT NULL
         BEGIN
