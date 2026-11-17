@@ -3360,6 +3360,35 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     }
 
     /// <summary>
+    /// The effective FLEET-WIDE retention horizon for a collector (a per-server override can't apply to a
+    /// shared-table purge): the fleet override (<c>server_id</c> NULL) <c>retention_days</c> if set, else the
+    /// <see cref="CollectorScheduleDefaults"/> default. Pure. Feeds <see cref="DarlingRetention"/>.
+    /// <para>#3653: this locates the fleet row; the RULE (valid override else default, where valid is the same
+    /// <see cref="ValidRetention"/> bound) is <see cref="DarlingRetentionHorizons.ResolveFleetRetentionDays"/>
+    /// in Storage, so the viewer's Performance Calendar — which cannot see this assembly — judges a day against
+    /// the horizon this purge enforces rather than a re-derivation of it. One fleet row per collector exists
+    /// (<c>ux_config_collector_schedules_fleet</c>), so first-match is the match.</para>
+    /// </summary>
+    public static int ResolveFleetRetentionDays(string collectorName, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        int? fleetOverrideDays = null;
+        if (overrides is not null)
+        {
+            foreach (var o in overrides)
+            {
+                if (o.ServerId is null
+                    && string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    fleetOverrideDays = o.RetentionDays;
+                    break;
+                }
+            }
+        }
+
+        return DarlingRetentionHorizons.ResolveFleetRetentionDays(collectorName, fleetOverrideDays);
+    }
+
+    /// <summary>
     /// The LARGEST frequency, in minutes, a collector may run at on any server (#8798): the shipped default (it applies to every server no
     /// row sets a frequency for, unless the fleet row sets one), the fleet row's and every per-server row's. Retention sizes the stamp window of
     /// a shared table by it. 0 when any of those is 0 (run once when the server loads): the caller has no interval to measure a stamp against.
@@ -3402,35 +3431,6 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         }
 
         return largest;
-    }
-
-    /// <summary>
-    /// The effective FLEET-WIDE retention horizon for a collector (a per-server override can't apply to a
-    /// shared-table purge): the fleet override (<c>server_id</c> NULL) <c>retention_days</c> if set, else the
-    /// <see cref="CollectorScheduleDefaults"/> default. Pure. Feeds <see cref="DarlingRetention"/>.
-    /// <para>#3653: this locates the fleet row; the RULE (valid override else default, where valid is the same
-    /// <see cref="ValidRetention"/> bound) is <see cref="DarlingRetentionHorizons.ResolveFleetRetentionDays"/>
-    /// in Storage, so the viewer's Performance Calendar — which cannot see this assembly — judges a day against
-    /// the horizon this purge enforces rather than a re-derivation of it. One fleet row per collector exists
-    /// (<c>ux_config_collector_schedules_fleet</c>), so first-match is the match.</para>
-    /// </summary>
-    public static int ResolveFleetRetentionDays(string collectorName, IReadOnlyList<ScheduleOverride> overrides)
-    {
-        int? fleetOverrideDays = null;
-        if (overrides is not null)
-        {
-            foreach (var o in overrides)
-            {
-                if (o.ServerId is null
-                    && string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
-                {
-                    fleetOverrideDays = o.RetentionDays;
-                    break;
-                }
-            }
-        }
-
-        return DarlingRetentionHorizons.ResolveFleetRetentionDays(collectorName, fleetOverrideDays);
     }
 
     /// <summary>
