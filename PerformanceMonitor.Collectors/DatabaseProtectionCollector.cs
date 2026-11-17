@@ -742,7 +742,7 @@ OPTION(RECOMPILE);";
         /* No exclusion list here: the lines are matched to the primary rows, which already left the excluded databases out. */
         var parameters = new List<CollectorParameter>
         {
-            new("@archives", string.Join(',', plan.Read.Select(a => a.Archive.ToString(CultureInfo.InvariantCulture))), CollectorParameterType.NVarChar128),
+            new("@archives", DatabaseProtectionErrorLogState.ArchiveList(plan.Read), CollectorParameterType.NVarChar128),
         };
         return new CollectorQuery(SupplementalQueryText, parameters);
     }

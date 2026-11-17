@@ -270,6 +270,26 @@ public sealed class DatabaseProtectionErrorLogStateTests
     }
 
     [Fact]
+    public void AMinuteHoldingMoreArchivesThanTheListCarries_IsReadInPart_ThenSkipped_RatherThanFailingEveryCycle()
+    {
+        /* #8865: a date read alone had no size cap, and the archive list is bound as nvarchar(128). Sixty archives in one minute made a
+           list the server cut short, so the batch failed (error 537) every cycle until the collector timed out. */
+        var logs = SameMinute(60, 62);
+
+        var plan1 = S.PlanArchives(Empty(), logs, true, S.ArchivesPerCycle);
+        Assert.True(S.ArchiveList(plan1.Read).Length <= S.MaxArchiveListLength);
+        Assert.Equal(Enumerable.Range(0, plan1.Read.Count), Numbers(plan1));
+        Assert.True(plan1.Read.Count > S.ArchivesPerCycle + 1);
+        /* Read in part, the date is not read whole, so no marker moves over it. */
+        Assert.Empty(ReadWhole(plan1));
+
+        var given = WithMarkers(S.MarkersAfter(plan1, ReadWhole(plan1), logs), new Dictionary<DateTime, int> { [LogDate(1)] = S.MaxArchiveAttempts });
+        var plan2 = S.PlanArchives(given, logs, true, S.ArchivesPerCycle);
+        Assert.Equal(new[] { LogDate(1) }, plan2.NewlySkipped);
+        Assert.Equal(new[] { 0, 61 }, Numbers(plan2));
+    }
+
+    [Fact]
     public void ADateThatDoesNotFitTheCycle_WaitsForTheNextOne_RatherThanBeingSplit()
     {
         /* Archives 1 and 2 share a date, 3 and 4 share another: two then two, never three then one. */

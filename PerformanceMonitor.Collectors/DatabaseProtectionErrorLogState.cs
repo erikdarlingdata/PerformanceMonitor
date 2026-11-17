@@ -65,6 +65,12 @@ public static class DatabaseProtectionErrorLogState
     /// <summary>An archive that failed this many times is skipped for good rather than blocking the markers.</summary>
     public const int MaxArchiveAttempts = 2;
 
+    /// <summary>
+    /// The longest <see cref="ArchiveList"/> the supplemental batch takes: its <c>@archives</c> is bound as <c>nvarchar(128)</c> and the
+    /// batch appends one comma. #8865: a longer list is cut short by the server and the batch fails (error 537) every cycle.
+    /// </summary>
+    public const int MaxArchiveListLength = 127;
+
     private const string DateFormat = "yyyy-MM-ddTHH:mm:ss.fff";
 
     /// <summary>The newest CHECKDB seen for one database: when it ran, with which options, and its error count.</summary>
@@ -195,7 +201,9 @@ public static class DatabaseProtectionErrorLogState
     /// <para>#8865: archives are taken a date at a time. The list dates an archive to the minute, so logs cycled within one minute share
     /// a date, and a date is planned, read, counted and skipped whole: reading part of a date and marking the date read would mark the
     /// rest of it read too. A date holding more archives than <paramref name="perCycle"/> is read whole in a cycle of its own, because
-    /// splitting it is the same fault; that costs one longer read on a server that cycled its log more than three times in one minute.</para>
+    /// splitting it is the same fault; that costs one longer read on a server that cycled its log more than three times in one minute. A date
+    /// holding more archives than <see cref="MaxArchiveListLength"/> lets the batch name is read in part, never whole, and is skipped once
+    /// it reaches <see cref="MaxArchiveAttempts"/>.</para>
     ///
     /// <para>#8865: a list that was refused or failed (<paramref name="enumerateOk"/> false) reads the current log only and
     /// leaves the loaded state exactly as it was. It says nothing about which archives exist, so it must not move a marker:
@@ -257,9 +265,12 @@ public static class DatabaseProtectionErrorLogState
                 break;
             }
 
-            read.AddRange(group);
-            archivesRead += group.Count;
-            if (archivesRead >= perCycle)
+            /* #8865: a date read alone is still capped at what the archive list can carry. The part read leaves the date unread, so it
+               is retried and then skipped after MaxArchiveAttempts, rather than the whole batch failing every cycle on a cut list. */
+            var taken = group.TakeWhile((_, n) => ArchiveList(read.Concat(group.Take(n + 1))).Length <= MaxArchiveListLength).ToList();
+            read.AddRange(taken);
+            archivesRead += taken.Count;
+            if (archivesRead >= perCycle || taken.Count < group.Count)
             {
                 break;
             }
@@ -267,6 +278,10 @@ public static class DatabaseProtectionErrorLogState
 
         return new ErrorLogPlan(read, newlySkipped, before, true, enumerated);
     }
+
+    /// <summary>The planned logs as the supplemental batch's <c>@archives</c>: their numbers, comma-separated.</summary>
+    public static string ArchiveList(IEnumerable<ArchiveInfo> read) =>
+        string.Join(',', read.Select(a => a.Archive.ToString(CultureInfo.InvariantCulture)));
 
     /// <summary>
     /// The dates read whole this cycle: every archive the list gave that date was in the plan and <paramref name="archiveOk"/> says it
