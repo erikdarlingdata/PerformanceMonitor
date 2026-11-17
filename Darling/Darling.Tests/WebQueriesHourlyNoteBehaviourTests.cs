@@ -26,12 +26,15 @@ public sealed class WebQueriesHourlyNoteBehaviourTests
 {
     private const string Trail = "The newest two or three hours are not in this chart yet";
 
-    private static string[] NotesOf(string source, string title)
+    private static string[] NotesOf(string source, string title) => Run(source, null, title).Notes;
+
+    private static (string[] Notes, int Points) Run(string source, string? queryStoreReply, string title)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-queries-hourly-note-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(source);
+        if (queryStoreReply is not null) psi.ArgumentList.Add(queryStoreReply);
 
         Process proc;
         try
@@ -41,7 +44,7 @@ public sealed class WebQueriesHourlyNoteBehaviourTests
         catch (Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-            return [];
+            return ([], 0);
         }
 
         using (proc)
@@ -60,7 +63,11 @@ public sealed class WebQueriesHourlyNoteBehaviourTests
             var panels = doc.RootElement.GetProperty("panels").EnumerateArray()
                 .Where(p => p.GetProperty("title").GetString() == title).ToArray();
             Assert.Single(panels);
-            return panels[0].GetProperty("notes").EnumerateArray().Select(n => n.GetString()!).ToArray();
+            var notes = panels[0].GetProperty("notes").EnumerateArray().Select(n => n.GetString()!).ToArray();
+            var charts = doc.RootElement.GetProperty("charts").EnumerateArray()
+                .Where(c => c.GetProperty("title").GetString() == title).ToArray();
+            Assert.Single(charts);
+            return (notes, charts[0].GetProperty("points").GetInt32());
         }
     }
 
@@ -91,9 +98,23 @@ public sealed class WebQueriesHourlyNoteBehaviourTests
     }
 
     [Fact]
-    public void QueryStoreDurationTrend_DrawsNoTrailingHoursNote()
+    public void QueryStoreDurationTrend_ReadsNewestHoursFromRawRows_DrawsItsPointsAndNoTrailingHoursNote()
     {
-        // It reads the newest hours from the raw rows and names its seam itself, so the hourly sentence would be false there.
-        Assert.Empty(NotesOf("hourly", "Query Store Duration Trend"));
+        // The reply it really gets: source "rollup+raw" (never "hourly"), a bucket sentence, bucket_minutes null. It reads the newest
+        // hours from the raw rows and names its seam itself, so the hourly sentence would be false there.
+        var (notes, points) = Run("raw", null, "Query Store Duration Trend");
+
+        Assert.Equal(3, points);
+        Assert.DoesNotContain(notes, n => n.Contains(Trail));
+    }
+
+    [Fact]
+    public void QueryStoreDurationTrend_DoesNotOptIntoTheNote_EvenForAReplyThatSaysHourly()
+    {
+        // The panel names no noteKind, so even a reply whose source is "hourly" and that states a width draws no sentence under it.
+        var (notes, points) = Run("raw", "qs-hourly", "Query Store Duration Trend");
+
+        Assert.Equal(3, points);
+        Assert.Empty(notes);
     }
 }

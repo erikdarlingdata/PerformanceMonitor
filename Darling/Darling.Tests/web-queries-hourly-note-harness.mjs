@@ -2,7 +2,7 @@
    panels.js (the line chart) and util.js (chartNote), with a stand-in DOM and a stub fetch that answers get_query_duration_trend and
    get_procedure_duration_trend with the scenario's `source`. It prints, for every panel on the Queries tab, the metric-note lines drawn.
    WebQueriesHourlyNoteBehaviourTests starts it as
-       node web-queries-hourly-note-harness.mjs <path to wwwroot/js> <source>
+       node web-queries-hourly-note-harness.mjs <path to wwwroot/js> <source> [qs-hourly]
    The whole js tree is copied into a scratch folder first, then charts.js (the SVG renderer needs a real browser) is replaced. */
 import fs from "node:fs";
 import os from "node:os";
@@ -82,7 +82,7 @@ try {
       "export const CATEGORICAL_COLORS = SERIES_COLORS;\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart() { return document.createElement('div'); }\n" +
-      "export function zoomableLineChart(spec) { (globalThis.__charts = globalThis.__charts || []).push({ title: spec.title, labels: (spec.series || []).map((x) => x.label), unit: spec.unit }); return document.createElement('div'); }\n" +
+      "export function zoomableLineChart(spec) { (globalThis.__charts = globalThis.__charts || []).push({ title: spec.title, labels: (spec.series || []).map((x) => x.label), unit: spec.unit, points: (spec.points || []).length }); return document.createElement('div'); }\n" +
       "export function chartZoomScope() { return ''; }\n"
   );
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
@@ -105,9 +105,20 @@ const settle = async () => {
 
 const ROWS = [0, 1, 2].map((i) => ({ time: "2026-01-01T0" + i + ":00:00.0000000Z", value: 10 + i, executions_per_second: 2 + i }));
 const body = { source, bucket: "hourly", bucket_minutes: 60, trend: ROWS };
+/* The Query Store trend's real reply (DarlingMcpTrendTools.DescribeQueryStoreTrend): the source is "rollup+raw" or "raw" and never "hourly", the width is
+   a sentence and `bucket_minutes` is null, and the seam instant is routing.raw_from. The fourth argument `qs-hourly` makes it a reply that WERE hourly (source "hourly", 60-minute buckets), to prove the panel does not opt in. */
+const queryStoreBody = {
+  source: process.argv[4] === "qs-hourly" ? "hourly" : "rollup+raw",
+  bucket: "1 hour before routing.raw_from, per-interval from it",
+  bucket_minutes: process.argv[4] === "qs-hourly" ? 60 : null,
+  routing: { raw_from: "2026-01-01T01:30:00.0000000Z" },
+  trend: ROWS,
+};
 globalThis.fetch = async (url) => {
   const u = String(url);
-  const answer = u.includes("/get_query_duration_trend") || u.includes("/get_procedure_duration_trend") ? body : {};
+  const answer = u.includes("/get_query_store_duration_trend")
+    ? queryStoreBody
+    : u.includes("/get_query_duration_trend") || u.includes("/get_procedure_duration_trend") ? body : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(answer) };
 };
 
@@ -125,4 +136,4 @@ walk(holder, (node) => {
   });
   found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", notes });
 });
-console.log(JSON.stringify({ panels: found, rejections }));
+console.log(JSON.stringify({ panels: found, charts: globalThis.__charts || [], rejections }));
