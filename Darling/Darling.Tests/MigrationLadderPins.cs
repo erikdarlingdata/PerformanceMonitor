@@ -144,16 +144,6 @@ public sealed class MigrationLadderPins
            so collide loudly at rebase instead of coexisting into a field incident. V45 is the one
            sanctioned hole, vacant for many releases and filled by nobody. */
         var above = PgMigrations.Scripts.Select(m => m.Version).Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(RungLadder.DenseExpected(above), above);
+        Assert.Equal(Enumerable.Range(above[0], above.Count).ToList(), above);
     }
-}
-
-/// <summary>
-/// What a dense ladder looks like above the historical V45 hole. V269 is reserved by another open PR (#8798 takes V270 meanwhile), so until
-/// that rung lands it is a sanctioned, temporary hole; once it is present the expectation includes it again. Delete the carve-out when V269 merges.
-/// </summary>
-internal static class RungLadder
-{
-    internal static List<int> DenseExpected(IReadOnlyList<int> above) =>
-        Enumerable.Range(above[0], above[^1] - above[0] + 1).Where(v => v != 269 || above.Contains(269)).ToList();
 }

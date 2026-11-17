@@ -66,7 +66,7 @@ public sealed class PgSchemaGeneratorTests
         /* 77 since #6875: identity_capacity (V224), also a plain table, so the hypertable count stays 71. */
         /* 78 since #7643: schema_objects (V256, the pass log schema_capture_passes), also a plain table, so the hypertable count stays 71. */
         /* 79 since #8784: object_inventory (V268), also a plain table, so the hypertable count stays 71. */
-        /* 80 since #8798: column_stats (V270, the run log column_stats_runs), also a plain table, so the hypertable count stays 71. */
+        /* 80 since #8798: column_stats (V272, the run log column_stats_runs), also a plain table, so the hypertable count stays 71. */
         Assert.Equal(80, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here

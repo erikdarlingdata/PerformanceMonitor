@@ -40,7 +40,7 @@ public sealed class ActivityDrivenPlanFetchStoreTests
 
         /* Dense above the one sanctioned historical hole at V45. */
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(RungLadder.DenseExpected(above), above);
+        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
 
         Assert.Equal("activity-driven-plan-fetch", PgMigrations.Scripts.Single(s => s.Version == 77).Name);
     }

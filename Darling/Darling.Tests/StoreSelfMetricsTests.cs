@@ -400,8 +400,8 @@ public sealed class StoreSelfMetricsTests
             ["collect.schema_constraints"] = "the check and foreign key constraints of a schema_objects version, a child of it and deleted with it (V256 doc)",
             ["collect.schema_triggers"] = "the triggers of a schema_objects version, a child of it and deleted with it (V256 doc)",
             ["collect.schema_capture_state"] = "the schema capture cursor, one row per server and database, bytes too small to matter (V256 doc)",
-        ["collect.column_stats"] = "the current column statistics rows, replaced in place per statistic (V270 doc): a store table, not a catalogue table, purged by its own retention",
-        ["collect.column_stats_state"] = "the column statistics cursor, one row per server and database, bytes too small to matter (V270 doc)",
+        ["collect.column_stats"] = "the current column statistics rows, replaced in place per statistic (V272 doc): a store table, not a catalogue table, purged by its own retention",
+        ["collect.column_stats_state"] = "the column statistics cursor, one row per server and database, bytes too small to matter (V272 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
         };
 

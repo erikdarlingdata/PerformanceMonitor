@@ -49,7 +49,7 @@ public class CollectionLogFanoutRollupStoreTests
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(RungLadder.DenseExpected(above), above);
+        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

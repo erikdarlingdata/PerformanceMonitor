@@ -18,7 +18,7 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/// <summary>#8798: <see cref="ColumnStatsStore"/> against a real store (V270). Needs <c>DARLING_TEST_PG</c>; each test mints its own scratch database.</summary>
+/// <summary>#8798: <see cref="ColumnStatsStore"/> against a real store (V272). Needs <c>DARLING_TEST_PG</c>; each test mints its own scratch database.</summary>
 /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class ColumnStatsStoreLiveTests
 {
