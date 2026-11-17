@@ -35,19 +35,23 @@ public sealed class DarlingMcpPgIoTools
     /// </summary>
     internal static string ContextMeaning(string? context) => DarlingPgIoReader.ContextMeaning(context);
 
-    /// <summary>#6206: the first PostgreSQL major with <c>pg_stat_io</c>.</summary>
-    internal const int PgStatIoFirstMajor = 16;
+    /// <summary>#6206: the first PostgreSQL major with <c>pg_stat_io</c>. Delegates to the one copy in the store project.</summary>
+    internal const int PgStatIoFirstMajor = DarlingPgIoReader.PgStatIoFirstMajor;
+
+    /// <summary>#6206: why <c>pg_io_stats</c> is not collected below <see cref="PgStatIoFirstMajor"/>, or null. Delegates to the one copy the Viewer also asks.</summary>
+    internal static string? NotCollectedForVersionMessage(string serverName, int? postgresMajorVersion) =>
+        DarlingPgIoReader.NotCollectedForVersionMessage(serverName, postgresMajorVersion);
 
     /// <summary>
-    /// #6206: why <c>pg_io_stats</c> is not collected on this target when its probed major is below
-    /// <see cref="PgStatIoFirstMajor"/>, or null when the major is unknown (no claim is made) or new enough.
+    /// #8918: the <c>not_collected</c> answer for a PostgreSQL 15 or older target, or null. Read only on an empty answer, so a server with
+    /// rows pays nothing. Both I/O reads that can come back empty ask it before saying a window was idle.
     /// </summary>
-    internal static string? NotCollectedForVersionMessage(string serverName, int? postgresMajorVersion) =>
-        postgresMajorVersion is > 0 and < PgStatIoFirstMajor
-            ? $"{serverName} runs PostgreSQL {postgresMajorVersion}, which has no pg_stat_io (it arrived in PostgreSQL {PgStatIoFirstMajor}), "
-              + "so I/O by backend type, object and context is not collected for this server. There is no setup step "
-              + "that changes this on the monitored server short of upgrading it."
-            : null;
+    internal static async Task<string?> VersionGapStatusAsync(NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
+    {
+        var (postgresMajor, _) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, serverId, cancellationToken);
+        var versionGap = NotCollectedForVersionMessage(displayName, postgresMajor);
+        return versionGap is null ? null : McpHelpers.Status("not_collected", versionGap);
+    }
 
     /// <summary>
     /// #7459: the status and finding for a window with no pg_stat_io activity. The collector stores cumulative counters and the read differences
@@ -108,11 +112,10 @@ public sealed class DarlingMcpPgIoTools
 
                 /* #6206: pg_stat_io does not exist before PostgreSQL 16, so the collector never runs on an older target and
                    there is nothing to wait for. Said as not_collected with the version, not as an empty window. */
-                var (postgresMajor, _) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
-                var versionGap = NotCollectedForVersionMessage(resolved.DisplayName, postgresMajor);
+                var versionGap = await VersionGapStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
                 if (versionGap != null)
                 {
-                    return McpHelpers.Status("not_collected", versionGap);
+                    return versionGap;
                 }
 
                 /* #7459: pg_io_stats stores cumulative counters and the read differences them, so an empty window is a measurement only when

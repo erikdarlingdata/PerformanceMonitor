@@ -167,6 +167,15 @@ public sealed partial class ViewerDataService
     /// permanent engine gap is nothing to do, a collector that should be running and has no rows in the
     /// window is something to chase, and a collector that ran and failed carries its own error text.</para>
     /// </summary>
+    /// <summary>
+    /// #8918: the sentence for a collector the target's PostgreSQL version cannot run, or null. Today that is <c>pg_io_stats</c> below
+    /// PostgreSQL 16, asked of the same copy the MCP reads use (<see cref="DarlingPgIoReader.NotCollectedForVersionMessage"/>).
+    /// </summary>
+    internal static string? PostgresVersionGap(DarlingServer server, string collectorName) =>
+        string.Equals(collectorName, "pg_io_stats", StringComparison.Ordinal)
+            ? DarlingPgIoReader.NotCollectedForVersionMessage(server.DisplayName, server.PostgresMajorVersion)
+            : null;
+
     public static List<PostgresCollectorHealthRow> BuildPostgresCollectorHealth(
         DarlingServer server,
         IReadOnlyList<ICollectorSchemaInfo> postgresCollectors,
@@ -181,8 +190,10 @@ public sealed partial class ViewerDataService
 
         foreach (var definition in postgresCollectors)
         {
-            var gap = CollectorEngineCapability.NotCollectedMessage(
+            var engineGap = CollectorEngineCapability.NotCollectedMessage(
                 server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None);
+            /* #8918: a PostgreSQL 15 target has no pg_stat_io, so pg_io_stats never runs there. That is a gap, not a collector that should have run. */
+            var gap = engineGap ?? PostgresVersionGap(server, definition.Name);
 
             byName.TryGetValue(definition.Name, out var facts);
 
@@ -190,7 +201,7 @@ public sealed partial class ViewerDataService
             var isFault = false;
             if (gap is not null)
             {
-                status = "Not collected on this engine";
+                status = engineGap is not null ? "Not collected on this engine" : "Not collected on this version";
             }
             else if (facts is null)
             {

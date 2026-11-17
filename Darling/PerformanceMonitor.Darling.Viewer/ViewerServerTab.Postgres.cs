@@ -132,8 +132,7 @@ public partial class ViewerServerTab
     /// </summary>
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
-        var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+        var gap = PgCollectorGap(collectorName);
 
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
@@ -144,8 +143,7 @@ public partial class ViewerServerTab
     /// </summary>
     private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
     {
-        var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+        var gap = PgCollectorGap(collectorName);
 
         return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText, cleared);
     }
@@ -259,9 +257,13 @@ public partial class ViewerServerTab
 
     /// <summary>True when a panel's collector cannot run here — used to skip the read entirely rather than
     /// spend a round trip proving a permanent gap is still permanent.</summary>
-    private bool PgCollectorIsGatedOff(string collectorName) =>
+    private bool PgCollectorIsGatedOff(string collectorName) => PgCollectorGap(collectorName) is not null;
+
+    /// <summary>The sentence for a collector this target can never run: the engine's gap, else (#8918) the PostgreSQL version's, else null.</summary>
+    private string? PgCollectorGap(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None)
+        ?? ViewerDataService.PostgresVersionGap(_server, collectorName);
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders
@@ -1273,9 +1275,13 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        /* #8918: PostgreSQL 15 has no pg_stat_io, so there is nothing to read and the note says so instead of calling the window idle. */
+        var ioGatedOff = PgCollectorIsGatedOff("pg_io_stats");
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var dataStartTask = StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
-        var rowsTask = _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        var dataStartTask = ioGatedOff ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
+        var rowsTask = ioGatedOff
+            ? Task.FromResult(new List<DarlingPgIoReader.PgIoRow>())
+            : _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL I/O Stats");
         var rows = rowsTask.Result;
         readFanOut.Release();
