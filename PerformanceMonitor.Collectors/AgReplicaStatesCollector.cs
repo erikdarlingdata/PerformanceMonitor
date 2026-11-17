@@ -43,6 +43,14 @@ namespace PerformanceMonitor.Collectors;
 /// metadata. <c>endpoint_url</c> is explicitly documented NULL in that state. So the reads below are
 /// null-tolerant throughout rather than only on the columns whose steady-state value is optional.</para>
 ///
+/// <para>Each AG source (both catalog views and both dm_hadr_* DMVs) is read once into a #temp table, and
+/// the final select joins the temps (#8889). Joined directly, the plan re-evaluates the DMV functions and the
+/// catalog views (which are themselves views over internal functions) per outer row in nested loops, so the
+/// cost grows with replicas times groups: at 98 groups and 196 replica rows the direct join ran for minutes
+/// and failed for memory, while the staged form returns the same rows in under a second. The key and flag
+/// columns go through CONVERT because SELECT ... INTO copies a declared NOT NULL, and a NULL arriving there
+/// under quorum loss would otherwise fail the insert instead of passing through as it does in a join.</para>
+///
 /// <para>PERMISSIONS, and the trap they create: the two catalog views require VIEW ANY DEFINITION,
 /// while only the dm_hadr_* DMV is covered by the VIEW SERVER STATE the product otherwise asks for
 /// (learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql).
@@ -77,7 +85,42 @@ public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplica
         string? PrimaryReplica = null);
 
     private const string QueryText = @"
+SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    replica_id = CONVERT(uniqueidentifier, ars.replica_id),
+    ars.role_desc,
+    ars.operational_state_desc,
+    ars.connected_state_desc,
+    ars.recovery_health_desc,
+    ars.synchronization_health_desc,
+    is_local = CONVERT(bit, ars.is_local)
+INTO #pm_ag_replica_states
+FROM sys.dm_hadr_availability_replica_states AS ars;
+
+SELECT
+    group_id = CONVERT(uniqueidentifier, ags.group_id),
+    ags.primary_replica
+INTO #pm_ag_group_states
+FROM sys.dm_hadr_availability_group_states AS ags;
+
+SELECT
+    ar.replica_id,
+    ar.group_id,
+    ar.replica_server_name,
+    ar.availability_mode_desc,
+    ar.failover_mode_desc,
+    ar.endpoint_url
+INTO #pm_ag_replicas
+FROM sys.availability_replicas AS ar;
+
+SELECT
+    group_id = CONVERT(uniqueidentifier, ag.group_id),
+    ag.name,
+    ag.is_distributed
+INTO #pm_ag_groups
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
@@ -93,12 +136,12 @@ SELECT /* PerformanceMonitorLite */
     is_local = ars.is_local,
     group_id = CONVERT(nvarchar(36), ag.group_id),
     primary_replica = ags.primary_replica
-FROM sys.availability_replicas AS ar
-JOIN sys.availability_groups AS ag
+FROM #pm_ag_replicas AS ar
+JOIN #pm_ag_groups AS ag
   ON ar.group_id = ag.group_id
-JOIN sys.dm_hadr_availability_replica_states AS ars
+JOIN #pm_ag_replica_states AS ars
   ON ar.replica_id = ars.replica_id
-LEFT JOIN sys.dm_hadr_availability_group_states AS ags
+LEFT JOIN #pm_ag_group_states AS ags
   ON ag.group_id = ags.group_id
 WHERE COALESCE(ag.is_distributed, 0) = 0
 ORDER BY
