@@ -592,6 +592,13 @@ export function shortEmptyLine(res, extensionLine) {
      fix among others and the table above says why for the rest. */
   if (res.status === "no_answers" && Array.isArray(h.suppressed_by_reason)) {
     const buckets = h.suppressed_by_reason;
+    /* #8926: the rows in this range carry no answer, but some index has one over the longer span the census measures. "No index has a bloat estimate" would
+       be wrong, and the table above may not be drawn at this range, so the sentence says what is true and what reaches the answered ones. */
+    const trusted = Number(h.trusted_index_count);
+    if (trusted > 0) {
+      return "No index in this range has a bloat estimate, but " + trusted + (trusted === 1 ? " index has" : " indexes have") +
+        " one over a longer range. Choose a longer range to see " + (trusted === 1 ? "it." : "them.");
+    }
     const grantBucket = buckets.some((b) => b && b.reason === "ColumnWidthsNotVisible");
     if (grantBucket && buckets.length === 1) {
       return "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
