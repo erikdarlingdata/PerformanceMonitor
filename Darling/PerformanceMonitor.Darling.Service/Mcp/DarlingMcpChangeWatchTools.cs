@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -75,7 +76,7 @@ public sealed class DarlingMcpChangeWatchTools
         "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
         "open, evaluating, closed or failed to see only watches in that state, or a result (flat, request_opened, moved_no_request, " +
         "moved_agent_change, moved_auto_plan_correction, no_data) to see only watches that closed with it. A closed watch that measured many queries can run to about 20 KB, " +
-        "so ask for a small limit (3 to 5), or pass watch_id to read one watch in any state. measures, not_measured and " +
+        "so ask for a small limit (3 to 5), or pass watch_id to read one watch in any state. The answer is held to the 32,768-byte response budget, whole watches only, newest first: budget_truncated and budget_note say how many watches fit, and a single watch over the budget on its own keeps its newest changes and says changes_left_out. measures, not_measured and " +
         "changes are sent once, at the top of the watch; result_detail holds the rest of the stored result (had_data, notes, window). " +
         "A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
@@ -137,7 +138,7 @@ public sealed class DarlingMcpChangeWatchTools
                     "is recorded; none has been since change watching began, or the 90 day retention removed it.");
             }
 
-            return JsonSerializer.Serialize(new
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.DisplayName,
                 state = state ?? "all",
@@ -170,12 +171,68 @@ public sealed class DarlingMcpChangeWatchTools
                         result_detail = WithoutRepeats(detail),
                     };
                 }),
-            });
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #8901: held to the shared response budget, whole watches only, newest first. */
+            return FitToBudget(payload, McpResponseBudget.DefaultBytes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_change_watches", ex);
         }
+    }
+
+    /// <summary>The sentence <c>budget_note</c> ends with when watches were left off: how one is read in full, and how the rest are listed.</summary>
+    private const string WatchesCutRemedy = "Pass watch_id to read one watch in full, or state to list only the watches in one state.";
+
+    /// <summary>
+    /// #8901: holds the answer to <paramref name="budgetBytes"/> by the rule the #8568 reads use. Whole watches are kept newest first and the
+    /// rest are left off (<c>budget_truncated</c>, <c>budget_note</c>, and <c>watch_count</c> rewritten to the watches kept). When the newest watch
+    /// is over the budget by itself, it is the only one kept and its <c>changes</c> are cut to the newest that fit: the watch says
+    /// <c>changes_left_out</c>, and the note says how many. A watch's changes are stored oldest first, so the newest are the last ones.
+    /// </summary>
+    internal static string FitToBudget(JsonObject payload, int budgetBytes)
+    {
+        if (payload["watches"] is not JsonArray watches || watches.Count == 0)
+        {
+            return payload.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        var inScope = watches.Count;
+        var first = watches[0]!.AsObject();
+        var changes = (first["changes"] as JsonArray)?.ToList() ?? new List<JsonNode?>();
+
+        string Build(int keptChanges)
+        {
+            var node = payload.DeepClone().AsObject();
+            var watch = first.DeepClone().AsObject();
+            var leftOut = changes.Count - keptChanges;
+            watch["changes"] = new JsonArray(changes.Skip(leftOut).Select(c => c?.DeepClone()).ToArray());
+            watch["changes_left_out"] = leftOut;
+            node["watches"] = new JsonArray(watch);
+            node["watch_count"] = 1;
+            node["budget_truncated"] = true;
+            var cutText = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{leftOut:#,0} of its {changes.Count:#,0} changes were left out and the newest {keptChanges:#,0} are kept.");
+            node["budget_note"] = inScope > 1
+                ? McpResponseBudget.PageCutNote(inScope, 1, "newest first", "watches", "The newest watch is over the budget by itself, so " + cutText + " " + WatchesCutRemedy)
+                : string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"TRUNCATED: this watch is over the {McpResponseBudget.DefaultBytes:#,0}-byte response budget by itself, so {cutText}");
+            return node.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        /* The newest watch alone, whole: when it fits, whole watches are the unit and the shared cut applies. */
+        var oneWatch = payload.DeepClone().AsObject();
+        oneWatch["watches"] = new JsonArray(first.DeepClone());
+        if (changes.Count <= 1 || Encoding.UTF8.GetByteCount(oneWatch.ToJsonString(McpHelpers.JsonOptions)) <= budgetBytes)
+        {
+            return McpResponseBudget.CapArray(
+                payload, "watches", "newest first", "watches", _ => WatchesCutRemedy, budgetBytes,
+                "budget_truncated", "budget_note", (node, kept) => node["watch_count"] = kept);
+        }
+
+        var fit = McpResponseBudget.RowsThatFit(changes.Count, n => Encoding.UTF8.GetByteCount(Build(n)), budgetBytes);
+        return Build(fit);
     }
 
     /// <summary>
