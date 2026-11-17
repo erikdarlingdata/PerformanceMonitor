@@ -137,7 +137,7 @@ WHERE server_id = ANY($1)";
                 var edition = reader.IsDBNull(1) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(1);
                 var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
                 var awsRdsKind = CollectorEngineCapability.AwsRdsKindOf(!reader.IsDBNull(3) && reader.GetBoolean(3), !reader.IsDBNull(4) && reader.GetBoolean(4));
-                if (CollectorEngineCapability.NotCollectedMessage(names[serverId], edition, kind, collectorName, awsRdsKind) is { } message)
+                if (NotCollectedMessage(names[serverId], edition, kind, collectorName, awsRdsKind) is { } message)
                 {
                     reasons[serverId] = message;
                 }
@@ -229,8 +229,35 @@ WHERE server_id = ANY($1)";
     /// </summary>
     private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
+        var message = NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
         return message is null ? null : McpHelpers.Status("not_collected", message);
+    }
+
+    /// <summary>
+    /// #8942: the PostgreSQL read that answers the same question as a SQL Server table, keyed by the gated table (the collector name every
+    /// engine-gated read asks the gate about). A refusal on a PostgreSQL target names it, so the caller does not have to guess which
+    /// <c>get_pg_*</c> read to try next. Only reads that are registered tools belong here, and only where the PostgreSQL read honestly answers the
+    /// same question: <c>database_size_stats</c> has none (<c>pg_database_size_stats</c> collects sizes, but no read serves them), so it is absent.
+    /// </summary>
+    internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, (string Read, string Answers)> PostgresReadFor =
+        new System.Collections.Generic.Dictionary<string, (string Read, string Answers)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["wait_stats"] = ("get_pg_wait_trend", "one wait event over time"),
+            ["query_stats"] = ("get_pg_query_duration_trend", "one statement's cost over time, with get_pg_top_queries to list the statements"),
+            ["session_stats"] = ("get_pg_session_states", "sessions by state over time"),
+            ["memory_stats"] = ("get_pg_cpu_utilization", "instance CPU on Amazon Aurora"),
+        };
+
+    /// <summary>
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> with, for a PostgreSQL target, the sentence that names the matching
+    /// PostgreSQL read from <see cref="PostgresReadFor"/> (#8942). Every Darling read refusal builds its words here.
+    /// </summary>
+    internal static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
+    {
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
+        return message is not null && MonitoredEngineKind.IsPostgres(engineKind) && PostgresReadFor.TryGetValue(collectorName, out var read)
+            ? $"{message} For a PostgreSQL target, {read.Read} reads {read.Answers}."
+            : message;
     }
 
     /// <summary>#6178: every registered server, enabled or not: the fleet a read with no server named would have covered.</summary>
@@ -247,6 +274,42 @@ ORDER BY server_name";
     /// data, or when the fleet cannot be read or is empty, so the caller keeps its own <c>empty</c> answer.
     /// </summary>
     public static async Task<string?> FleetNotCollectedStatusAsync(
+        NpgsqlDataSource postgres,
+        string collectorName,
+        CancellationToken cancellationToken = default) =>
+        await FleetNotCollectedMessageAsync(postgres, collectorName, cancellationToken) is { } message
+            ? McpHelpers.Status("not_collected", message)
+            : null;
+
+    /// <summary>
+    /// #8942: whether any registered server is a PostgreSQL target, so a read that covers SQL Server only can say so beside its true-negative
+    /// <c>empty</c> on a mixed store. A failed read is false: no claim.
+    /// </summary>
+    public static async Task<bool> AnyPostgresTargetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand("SELECT DISTINCT engine_kind FROM servers WHERE engine_kind IS NOT NULL");
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (MonitoredEngineKind.IsPostgres(reader.GetString(0)))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    /// <summary>#8942: the words of <see cref="FleetNotCollectedStatusAsync"/> without the envelope, for a read that adds its own sentence.</summary>
+    public static async Task<string?> FleetNotCollectedMessageAsync(
         NpgsqlDataSource postgres,
         string collectorName,
         CancellationToken cancellationToken = default)
@@ -275,7 +338,7 @@ ORDER BY server_name";
             try
             {
                 var (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
-                envelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
+                envelope = NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
