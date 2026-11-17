@@ -124,6 +124,23 @@ public sealed class WebPlainTextTests
     }
 
     [Fact]
+    public void PrefixedHoursBackFields_AndTheRawStatsTable_AreSaidInWords()
+    {
+        // #8929: the underscore before hours_back is a word character, so the plain hours_back rule never matched these.
+        var o = Run(
+        [
+            "covers effective_hours_back, not hours_back; compare to baseline_hours_back or pass trend_hours_back for a trend",
+            "The window reaches further back than this server's raw query_store_stats retains, and query_store_stats is large.",
+        ], out _);
+        Assert.DoesNotContain("_hours_back", o[0], StringComparison.Ordinal);
+        Assert.Contains("covers only the part of the time range it holds, not the time range", o[0], StringComparison.Ordinal);
+        Assert.Contains("the baseline range", o[0], StringComparison.Ordinal);
+        Assert.Contains("the trend range", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("query_store_stats", o[1], StringComparison.Ordinal);
+        Assert.Contains("raw query statistics retains, and the raw query statistics is large.", o[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheHealthOutputSentence_NamesNoField()
     {
         var o = Run(

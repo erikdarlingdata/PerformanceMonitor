@@ -680,6 +680,22 @@ export function leftOutNoteStrip(data) {
  * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
  * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
  */
+/**
+ * #8929: the span a read's window floor reaches back, in the page's words ("the last 72 hours" under two days, "the last 3 days" from
+ * two days), from the reply's `effective_hours_back`. Null when the value is not a positive number.
+ */
+export function effectiveSpanText(hours) {
+  const n = Number(hours);
+  if (typeof hours === "boolean" || hours === null || !Number.isFinite(n) || n <= 0) return null;
+  const trim = (x) => String(Math.round(x * 10) / 10);
+  if (n >= 48) {
+    const days = trim(n / 24);
+    return "the last " + days + (days === "1" ? " day" : " days");
+  }
+  const h = trim(n);
+  return "the last " + h + (h === "1" ? " hour" : " hours");
+}
+
 export function windowFloorStrip(data, desc) {
   if (!desc || desc.windowNote === false) return null;
   const chart = desc.viz === "line";
@@ -689,7 +705,9 @@ export function windowFloorStrip(data, desc) {
   if (source && source.window_truncated === true) {
     const note = source.truncation_note;
     if (typeof note !== "string" || !note.trim()) return null;
-    if (!chart) return noticeStrip(note);
+    /* #8929: a note written for an MCP caller says "covers effective_hours_back"; this page says the span the reply states. */
+    const span = effectiveSpanText(source.effective_hours_back);
+    if (!chart) return noticeStrip(span ? note.replace(/\beffective_hours_back, not hours_back\b/g, span + ", not the whole time range").replace(/\beffective_hours_back\b/g, span) : note);
     /* A chart draws only the row-capped note (#5644 W12): its time axis already shows the empty span of a data start that
        falls after the window's start, but a chart built from the newest N rows plots nothing before its oldest row while
        the axis and the title claim the whole window. That note names the oldest row shown (oldest_shown_utc). */

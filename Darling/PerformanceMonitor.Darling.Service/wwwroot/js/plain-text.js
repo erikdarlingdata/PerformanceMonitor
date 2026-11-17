@@ -216,6 +216,15 @@ function namedTokenText(text) {
   t = t.replace(/\bwiden hours_back\b/g, "widen the time range");
   t = t.replace(/\bhours_back\b/g, "the time range");
 
+  /* #8929: a field name with a prefix has no word boundary before `hours_back` (the underscore is a word character), so the two rules above
+     miss it. The Query Store clutter strip draws the span from the reply's own value (util.js, windowFloorStrip); these are the fallbacks for
+     a text with no value beside it. `raw query_store_stats` is the store table the raw statistics sit in, which the page calls the raw query statistics. */
+  t = t.replace(/\braw query_store_stats\b/g, "raw query statistics");
+  t = t.replace(/\bquery_store_stats\b/g, "the raw query statistics");
+  t = t.replace(/\beffective_hours_back\b/g, "only the part of the time range it holds");
+  t = t.replace(/\bbaseline_hours_back\b/g, "the baseline range");
+  t = t.replace(/\btrend_hours_back\b/g, "the trend range");
+
   t = t.replace(/\bCheck list_servers\b/g, "Check the server list");
   return t;
 }
