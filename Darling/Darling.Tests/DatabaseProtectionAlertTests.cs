@@ -161,6 +161,33 @@ public sealed class DatabaseProtectionAlertTests
         Assert.True(fired.DetailText?.Length < 1_000, "the detail stays short however many databases are overdue");
     }
 
+    /// <summary>#8865: an AG's replicas are separate monitored servers, each judged on its own error log, so a CHECKDB overdue on both raises two alerts,
+    /// one per server, each detail naming its own database state (an errors_found one says how many errors).</summary>
+    [Fact]
+    public async Task TwoReplicas_RaiseTwoCheckDbOverdueAlerts_EachNamingItsServer()
+    {
+        var h = AllOn();
+        var e = h.Build();
+        DatabaseProtectionFact Replica(DateTime c, TimeSpan checkAgo, int errors) => new(
+            "Sales", "ONLINE", "FULL", c.AddDays(-400), "SECONDARY", DatabaseProtectionCollector.PlatformNative,
+            c - TimeSpan.FromDays(1), DatabaseProtectionCollector.CheckDbChecked,
+            c - TimeSpan.FromDays(1), DatabaseProtectionCollector.BackupRecorded, c - TimeSpan.FromMinutes(5), DatabaseProtectionCollector.BackupRecorded,
+            ErrorLogState: DatabaseProtectionCollector.ErrorLogRead, ErrorLogBackfillComplete: true,
+            ErrorLogCheckDbTime: c - checkAgo, ErrorLogCheckDbOptions: "NO_INFOMSGS", ErrorLogCheckDbErrors: errors);
+
+        await e.ApplyDatabaseProtectionAsync(ServerId, "REPLICA-ONE", ReadAt(h.Now, c => new[] { Replica(c, TimeSpan.FromDays(20), 0) }), Ct);
+        await e.ApplyDatabaseProtectionAsync(ServerId + 1, "REPLICA-TWO", ReadAt(h.Now, c => new[] { Replica(c, TimeSpan.FromDays(2), 4) }), Ct);
+
+        var alerts = h.Deliverer.Outcomes.Where(o => o.MetricName == "CHECKDB Overdue").ToList();
+        Assert.Equal(2, alerts.Count);
+        var one = Assert.Single(alerts, a => a.ServerName == "REPLICA-ONE");
+        var two = Assert.Single(alerts, a => a.ServerName == "REPLICA-TWO");
+        Assert.Contains("Sales (20 days old)", one.DetailText, StringComparison.Ordinal);
+        Assert.Contains("Sales (CHECKDB found 4 errors, 2 days old)", two.DetailText, StringComparison.Ordinal);
+        Assert.Contains("CHECKDB found errors", two.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("found errors", one.DetailText, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AStandingOverdue_SendsAgainAfterTheRefireInterval_AndNotBefore()
     {

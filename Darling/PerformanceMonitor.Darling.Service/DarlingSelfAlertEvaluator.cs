@@ -5415,9 +5415,13 @@ internal sealed class DarlingSelfAlertEvaluator
                     (items.Count > OverdueDetailDatabases
                         ? string.Create(CultureInfo.InvariantCulture, $", and {items.Count - OverdueDetailDatabases} more")
                         : string.Empty);
+                /* #8865: a CHECKDB that found errors is overdue whatever its age, so "older than" alone would misread it. */
+                var lateness = items.Any(i => i.State == DatabaseProtectionBands.ErrorsFound)
+                    ? $"The {factName} is older than {threshold}, or CHECKDB found errors,"
+                    : $"The {factName} is older than {threshold}";
                 var delivery = await FireAsync(
                     key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
-                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {CountText.Plural(items.Count, "database")}: {names}." + consequence,
+                    detail: StateRepeatNote(decision, refire) + $"{lateness} on {CountText.Plural(items.Count, "database")}: {names}." + consequence,
                     severity: AlertSeverityLevel.Warning,
                     shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {CountText.Plural(items.Count, "database")}") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
                         (items.Count > 5 ? ", ..." : string.Empty),

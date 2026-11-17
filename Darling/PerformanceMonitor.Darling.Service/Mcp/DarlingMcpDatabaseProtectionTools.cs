@@ -46,6 +46,47 @@ public sealed class DarlingMcpDatabaseProtectionTools
         threshold_minutes = (long)band.Threshold.TotalMinutes,
     };
 
+    /* #8865: the CHECKDB fact also says where its time came from, the options and error count of the error-log line, why it reads as it does (a
+       backfill still running, a replica that is not readable) and, on an AG database, the boot-page time kept for reference. R11: a band with no
+       source is the boot page, because that is the time the old path shows. */
+    internal static object CheckDbFact(DateTime? lastTime, DatabaseProtectionFactBand band, string storedState) => new
+    {
+        state = band.State,
+        overdue = band.Overdue,
+        stored_state = storedState,
+        last_time = Format(lastTime),
+        age_minutes = band.Age is { } a ? (long)a.TotalMinutes : (long?)null,
+        age = band.Age is { } t ? Describe(t) : null,
+        threshold_minutes = (long)band.Threshold.TotalMinutes,
+        source = band.Source ?? DatabaseProtectionBands.SourceBootPage,
+        options = band.Options,
+        errors = band.Errors,
+        detail = band.Detail,
+        boot_page_time = Format(band.ReferenceTime),
+    };
+
+    /// <summary>#8865: what the collector said about the SQL Server error log read, taken from the first fact (it repeats on every row of a capture).
+    /// <c>refused</c> reads <c>precondition</c>, as the other tools word a refused grant; an old capture with no state reads <c>not_applicable</c>.</summary>
+    internal static object ErrorLogBlock(DatabaseProtectionFact? first)
+    {
+        var status = first?.ErrorLogState switch
+        {
+            DatabaseProtectionCollector.ErrorLogRead => "read",
+            DatabaseProtectionCollector.ErrorLogFailed => "failed",
+            DatabaseProtectionCollector.ErrorLogRefused => "precondition",
+            _ => "not_applicable",
+        };
+        return new
+        {
+            status,
+            message = first?.ErrorLogMessage,
+            grant = first?.ErrorLogGrant,
+            backfill = first?.ErrorLogBackfillComplete switch { true => "complete", false => "in_progress", _ => null },
+            skipped_archives = first?.ErrorLogSkippedArchives,
+            unparsed_lines = first?.ErrorLogUnparsedLines,
+        };
+    }
+
     /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units.</summary>
     internal static string Describe(TimeSpan age) => DatabaseProtectionBands.Describe(age);
 
@@ -56,7 +97,12 @@ public sealed class DarlingMcpDatabaseProtectionTools
         "new_database (created less than the threshold ago, so not late yet), not_expected (a SIMPLE-recovery database expects no log backup), " +
         "platform_managed (Azure SQL Database and Managed Instance, all three facts) or native_only (Amazon RDS, the full and log backup facts only): the age shows and is never overdue, " +
         "unknown (SQL Server 2017 before CU9 cannot answer CHECKDB) or unavailable (the backup read was refused, for example no VIEW DATABASE PERFORMANCE STATE on Azure SQL Database, which VIEW DATABASE STATE grants): both pass through and are never overdue, " +
-        "excluded (the database is offline, restoring, a secondary or otherwise not online; excluded_reason says which). An Amazon RDS database's CHECKDB is judged like any other. " +
+        "excluded (the database is offline, restoring or otherwise not online; excluded_reason says which; a secondary's full and log backup facts also read excluded, with detail secondary), " +
+        "pending (an Availability Group database whose CHECKDB is not found yet while the older error logs are still being read: never overdue), " +
+        "errors_found (the newest CHECKDB in the replica's own error log reported errors, so it is overdue whatever its age; errors counts them). An Amazon RDS database's CHECKDB is judged like any other. " +
+        "CHECKDB is judged per replica: a database in an Availability Group is judged on its own SQL Server error log, so a secondary has its own CHECKDB state, and the boot-page time (shared by every replica) shows only as checkdb.boot_page_time for reference. " +
+        "checkdb.source says where the time came from: error_log (the replica's own error log) or boot_page (the database boot page, which is what every database reads when the error log was not read); options and errors are what the error-log line said, and detail explains a state in words (a replica that is not readable, a backfill still running). replica_readable is false when a secondary refuses connections, so CHECKDB cannot run on it. " +
+        "error_log at server level says how the error log read went: status read, failed, precondition (the login was refused; grant names what to grant) or not_applicable (an old capture, or a platform that is not read), backfill in_progress or complete, skipped_archives and unparsed_lines when the read could not use some of what it found. " +
         "summary.text, overdue_full_backup, overdue_log_backup and overdue_checkdb name the overdue databases. overdue_only lists just the databases overdue on something. " +
         "Reads the database_protection collector (every 60 minutes), never a monitored server. Ages are measured at captured_at, the newest capture in the window. " +
         "Status words: unavailable (no capture in the window), precondition (the collector was refused, for example no SELECT on msdb.dbo.backupset), not_collected (the server's engine is not collected).")]
@@ -129,6 +175,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
                     overdue_checkdb = summary.OverdueCheckDb,
                     text = summary.Text,
                 },
+                error_log = ErrorLogBlock(read.Databases.Count > 0 ? read.Databases[0] : null),
                 databases_listed = listed.Count,
                 databases = listed.Select(b => new
                 {
@@ -139,13 +186,14 @@ public sealed class DarlingMcpDatabaseProtectionTools
                     platform = b.Fact.Platform,
                     created = Format(b.Fact.CreateDate),
                     excluded_reason = b.Band.ExcludedReason,
-                    checkdb = Fact(b.Fact.LastGoodCheckDbTime, b.Band.CheckDb, b.Fact.CheckDbState ?? ""),
+                    replica_readable = b.Fact.ReplicaReadable,
+                    checkdb = CheckDbFact(b.Fact.LastGoodCheckDbTime, b.Band.CheckDb, b.Fact.CheckDbState ?? ""),
                     full_backup = Fact(b.Fact.LastFullBackupTime, b.Band.FullBackup, b.Fact.FullBackupState ?? ""),
                     log_backup = Fact(b.Fact.LastLogBackupTime, b.Band.LogBackup, b.Fact.LogBackupState ?? ""),
                 }),
                 note = "All times are UTC. A threshold is the global setting (get_alert_settings) unless a server or database override (set_alert_threshold_override) replaces it; each fact's threshold_minutes is the one its database was judged against. last_time is null when there is no time to show (never, none_in_window, unknown, unavailable). " +
                     "Backups are read from the last 60 days of msdb, so none_in_window means none in 60 days, not never. " +
-                    "An excluded database and a platform-managed target are never overdue. A native-only (Amazon RDS) target's backups are not judged, but its CHECKDB is.",
+                    "An excluded database and a platform-managed target are never overdue. A native-only (Amazon RDS) target's backups are not judged, but its CHECKDB is. A secondary's backups are not judged (they run on the primary), but its CHECKDB is, from its own error log.",
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

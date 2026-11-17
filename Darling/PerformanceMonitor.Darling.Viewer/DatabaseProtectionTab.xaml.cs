@@ -107,16 +107,20 @@ public partial class DatabaseProtectionTab : UserControl
         if (read is null)
         {
             StatusLine.Text = "";
+            ErrorLogLine.Text = "";
             DatabasesDataGrid.ItemsSource = new List<ViewerDatabaseProtectionRow>();
             PlatformColumn.Visibility = Visibility.Collapsed;
+            CheckDbOptionsColumn.Visibility = Visibility.Collapsed;
             EmptyMessage.Visibility = Visibility.Collapsed;
             return;
         }
 
         StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read);
+        ErrorLogLine.Text = read.HasCapture ? "Error log: " + ViewerDatabaseProtectionText.ErrorLogNote(read) : "";
         var rows = ViewerDatabaseProtectionText.Rows(read);
         DatabasesDataGrid.ItemsSource = rows;
         PlatformColumn.Visibility = ViewerDatabaseProtectionText.ShowsPlatformColumn(rows) ? Visibility.Visible : Visibility.Collapsed;
+        CheckDbOptionsColumn.Visibility = rows.Any(r => r.CheckDbOptions.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
         EmptyMessage.Text = ViewerDatabaseProtectionText.EmptyText(read);
         EmptyMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }

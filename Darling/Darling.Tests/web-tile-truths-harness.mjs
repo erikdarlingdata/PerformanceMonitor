@@ -12,7 +12,9 @@
      - the Pool column of the Memory Grants grids, named
      - the Platform column of Backups and CHECKDB by Database, dropped when no row names a platform (item 33)
      - the Unrateable Rows column of Query Store Overhead, dropped when every row is zero (item 32)
-       node web-tile-truths-harness.mjs <path to wwwroot/js> */
+     - #8865: given a JSON file (a get_database_protection reply) as the third argument, the Backups and CHECKDB grid's headers, cells and
+       tooltips and the Error log tile, so a test can compare them with the Viewer's words
+       node web-tile-truths-harness.mjs <path to wwwroot/js> [<get_database_protection reply as a JSON file>] */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -335,7 +337,20 @@ try {
     someSamples: overheadHeaders([waitRow("QDS_A", 0), waitRow("QDS_B", 2)]),
   };
 
+  let protectionRead = null;
+  if (process.argv[3]) {
+    const input = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+    const grid = panels.VIZ.table(input, protectionSpec);
+    protectionRead = {
+      headers: headersOf(grid),
+      cells: cellsOf(grid),
+      tooltips: findAll(grid, (n) => n.tag === "span" && n.attrs.title).map((n) => n.attrs.title),
+      errorLog: tiles(panels.VIZ.stat(input, { stats: config.DATABASE_PROTECTION_SPECS[0].stats }))["Error log"] ?? null,
+    };
+  }
+
   console.log(JSON.stringify({
+    protectionRead,
     alertSetup, quietChips, workersPastCeiling, runnableWarning, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
     deadlockRates,
     protectionChip: chipText("Protection"),

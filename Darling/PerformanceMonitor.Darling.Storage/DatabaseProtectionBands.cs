@@ -99,6 +99,8 @@ public static class DatabaseProtectionBands
     public const string SourceErrorLog = "error_log";
     public const string SourceBootPage = "boot_page";
     private const string DetailSecondary = "secondary";
+    /// <summary>#8865: the sentence a replica that refuses connections gets, said by every surface (the band's detail, the web cell's tooltip, the Viewer's).</summary>
+    public const string DetailNotReadable = "replica is not readable, so CHECKDB cannot run on it";
 
     /// <summary>The database is judged on nothing: offline, restoring, recovering, not yet recovered, suspect or in emergency, or a secondary replica.</summary>
     public static string? ExclusionReason(string? stateDesc, string? replicaRole)
@@ -154,7 +156,7 @@ public static class DatabaseProtectionBands
     {
         var logTime = fact.ErrorLogCheckDbTime;
         var inAg = !string.IsNullOrEmpty(fact.ReplicaRole);
-        var notReadable = inAg && fact.ReplicaReadable == false ? "replica is not readable, so CHECKDB cannot run on it" : null;
+        var notReadable = inAg && fact.ReplicaReadable == false ? DetailNotReadable : null;
 
         if (!inAg)
         {
