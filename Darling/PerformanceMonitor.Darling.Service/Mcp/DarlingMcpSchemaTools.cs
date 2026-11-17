@@ -144,7 +144,7 @@ public sealed class DarlingMcpSchemaTools
     }
 
     [McpServerTool(Name = "get_object_definition"), Description(
-        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database.")]
+        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database. Each column carries selectivity and the table carries column_combinations (leading column combinations of a statistic): distinct_estimate, rows_per_value and selectivity from the statistics density vectors the opt-in column_stats collector reads, numbers only, with unique only from a unique index or constraint covering exactly those columns; selectivity_status says whether they are current, not_collected, not_read_yet, not_read (no SELECT grant for a database outside the collector's own list), a precondition with the grant, or current_only (an as_of before the stored read shows no numbers).")]
     public static Task<string> GetObjectDefinition(
         NpgsqlDataSource postgres,
         [Description("Database name.")] string database_name,
@@ -245,6 +245,9 @@ public sealed class DarlingMcpSchemaTools
             var (page, hasMoreByLimit) = McpHelpers.BoundPage(columns, column_limit);
             var totalColumns = definition.Columns.Count;
             var agName = version.AgName ?? key.AgName;
+            var selectivity = await ColumnSelectivity.ReadAsync(
+                postgres, connection, resolved.ServerId, database_name.Trim(), database, resolution.Keys, definition, at, cancellationToken);
+            var combinations = selectivity.View?.Combinations ?? [];
 
             /* A view's text is not paged like its columns: past a quarter of the response budget, as JSON, it is cut on a text element, and
                the answer says so with its length. */
@@ -252,10 +255,12 @@ public sealed class DarlingMcpSchemaTools
             var viewTextKeep = viewText is null ? 0 : ViewTextCutLength(viewText);
             var viewTextCut = viewText is not null && viewTextKeep < viewText.Length;
 
-            string Build(int n)
+            /* n columns and shownCombinations column combinations: the combinations go first when the answer is over the response budget. */
+            string Build(int n, int shownCombinations)
             {
                 var shown = page.Take(n).ToList();
                 var cut = n < page.Count;
+                var combinationsCut = selectivity.View is not null && shownCombinations < combinations.Count;
                 var more = hasMoreByLimit || cut;
                 return JsonSerializer.Serialize(new
                 {
@@ -312,8 +317,13 @@ public sealed class DarlingMcpSchemaTools
                     columns_returned = shown.Count,
                     columns_has_more = more,
                     next_column_offset = more ? column_offset + shown.Count : (int?)null,
-                    truncated = cut,
-                    budget_note = cut ? McpResponseBudget.PageCutNote(page.Count, shown.Count, "columns in ordinal order", "columns") : null,
+                    truncated = cut || combinationsCut,
+                    budget_note = cut
+                        ? McpResponseBudget.PageCutNote(page.Count, shown.Count, "columns in ordinal order", "columns")
+                        : combinationsCut ? McpResponseBudget.PageCutNote(combinations.Count, shownCombinations, "ordered by column list", "column combinations") : null,
+                    selectivity_status = selectivity.Status.Status,
+                    selectivity_checked_at = selectivity.Status.CheckedAt is { } checkedAt ? Utc(checkedAt) : null,
+                    selectivity_note = selectivity.Status.Note,
                     columns = shown.Select(c => new
                     {
                         ordinal = c.Ordinal,
@@ -332,7 +342,12 @@ public sealed class DarlingMcpSchemaTools
                         collation_name = c.CollationName,
                         is_sparse = c.IsSparse,
                         is_rowguidcol = c.IsRowGuidCol,
+                        selectivity = selectivity.View is { } view && view.Columns.TryGetValue(c.Name, out var item) ? item : null,
+                        selectivity_note = selectivity.View is { } noted && !noted.Columns.ContainsKey(c.Name) ? ColumnSelectivity.NoLeadingStatisticNote : null,
                     }),
+                    column_combinations_returned = selectivity.View is null ? (int?)null : shownCombinations,
+                    column_combinations_has_more = selectivity.View is null ? (bool?)null : combinationsCut,
+                    column_combinations = selectivity.View is null ? null : combinations.Take(shownCombinations).ToList(),
                     index_count = definition.Indexes.Count,
                     indexes = definition.Indexes.Select(i => new
                     {
@@ -368,7 +383,14 @@ public sealed class DarlingMcpSchemaTools
                 }, McpHelpers.JsonOptions);
             }
 
-            return McpResponseBudget.FitPrefix(page.Count, Build, McpResponseBudget.DefaultBytes, 0).Json;
+            /* The combinations are cut before any column: the columns are the definition, the combinations an addition to it. */
+            var combinationFit = McpResponseBudget.FitPrefix(combinations.Count, c => Build(page.Count, c), McpResponseBudget.DefaultBytes, 0);
+            if (Encoding.UTF8.GetByteCount(combinationFit.Json) <= McpResponseBudget.DefaultBytes)
+            {
+                return combinationFit.Json;
+            }
+
+            return McpResponseBudget.FitPrefix(page.Count, n => Build(n, 0), McpResponseBudget.DefaultBytes, 0).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
