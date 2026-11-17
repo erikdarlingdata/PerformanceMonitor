@@ -509,6 +509,8 @@ public sealed class NotificationRoutingTests
             AlertEngine.PvsWatermarkMetric, AlertEngine.FileGrowthWatermarkMetric,
             AlertEngine.AnomalousJobWatermarkMetric, AlertEngine.FailedJobWatermarkMetric,
             AlertEngine.CpuPersistenceMetric,
+            /* #8882: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            AlertEngine.TempDbGrowthFitPersistenceMetric,
             PostgresAlertEvaluator.WraparoundMetric, PostgresAlertEvaluator.XminHorizonMetric,
             PostgresAlertEvaluator.SlotRetentionMetric, PostgresAlertEvaluator.PoisonWaitMetric,
             ForcePlanTokens.MetricName, DatabaseStateTokens.MetricName,

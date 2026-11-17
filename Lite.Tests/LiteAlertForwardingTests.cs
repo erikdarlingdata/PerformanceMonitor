@@ -83,6 +83,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertLongRunningQueryExcludeCdc = true;
         App.AlertExcludedDatabases = new List<string>();
         App.AlertTempDbSpaceEnabled = true;
+        App.AlertTempDbGrowthFitEnabled = true;
         App.AlertTempDbSpaceThresholdPercent = 80;
         App.AlertLowDiskEnabled = true;
         App.AlertLowDiskThresholdPercent = 10;
@@ -1347,6 +1348,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertPoisonWaitEnabled = false; Assert.False(settings.PoisonWaitEnabled);
         App.AlertLongRunningQueryEnabled = false; Assert.False(settings.LongRunningQueryEnabled);
         App.AlertTempDbSpaceEnabled = false; Assert.False(settings.TempDbSpaceEnabled);
+        App.AlertTempDbGrowthFitEnabled = false; Assert.False(settings.TempDbGrowthFitEnabled);
         App.AlertLowDiskEnabled = false; Assert.False(settings.LowDiskEnabled);
         App.AlertPvsEnabled = false; Assert.False(settings.PvsEnabled);
         App.AlertLongRunningJobEnabled = false; Assert.False(settings.LongRunningJobEnabled);

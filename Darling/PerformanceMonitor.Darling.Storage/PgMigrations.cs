@@ -3484,7 +3484,7 @@ $rung$;";
         new Migration(268, "object-usage", V268Sql),
         /* V270 (#8882): tempdb's 'autogrow all files' flag on the database size rows. One nullable boolean column, then the SELECT * view over the table is
            expanded again. Nothing is backfilled: a row stored before this rung never read the flag, so NULL is the honest value, and the next hourly pass
-           writes it. */
+           writes it. The same rung adds the TempDB Growth Fit switch column to the alert settings row (default on). */
         new Migration(270, "database-size-autogrow-all-files", V270Sql),
     };
 
@@ -3496,11 +3496,14 @@ $rung$;";
     /// positional binary COPY with an explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload,
     /// and this ALTER no-ops there) and an upgraded one share one physical column order. The trailing <c>CREATE OR REPLACE VIEW</c> re-expands
     /// <c>v_database_size_stats</c>' pinned <c>SELECT *</c>. An older build writes its own column list, so the column stays NULL for the rows it
-    /// writes.
+    /// writes. The rung also adds <c>config.config_alert_settings.tempdb_growth_fit_enabled</c>, the TempDB Growth Fit alert's switch, a
+    /// <c>boolean NOT NULL DEFAULT TRUE</c> (<c>notify_connection_changes</c>' shape), so the switch a Viewer saves is the one the service reads back
+    /// at startup.
     /// </summary>
     private const string V270Sql = @"
 ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
-CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;";
+CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

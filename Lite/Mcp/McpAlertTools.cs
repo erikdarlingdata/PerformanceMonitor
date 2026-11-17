@@ -417,6 +417,10 @@ public sealed class McpAlertTools
                     enabled = App.AlertTempDbSpaceEnabled,
                     threshold_percent = App.AlertTempDbSpaceThresholdPercent
                 },
+                tempdb_growth_fit = new
+                {
+                    enabled = App.AlertTempDbGrowthFitEnabled
+                },
                 low_disk = new
                 {
                     enabled = App.AlertLowDiskEnabled,

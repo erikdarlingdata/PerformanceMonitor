@@ -625,6 +625,7 @@ public sealed partial class DarlingMcpAlertTools
             excluded_logins = s.LongRunningQueryExcludedLogins
         },
         tempdb_space = new { enabled = s.TempDbSpaceEnabled, threshold_percent = s.TempDbSpaceThresholdPercent },
+        tempdb_growth_fit = new { enabled = s.TempDbGrowthFitEnabled },
         low_disk = new
         {
             enabled = s.LowDiskEnabled,
@@ -3781,6 +3782,17 @@ public sealed partial class DarlingMcpAlertTools
                             case "enabled": AddBool("tempdb_space_enabled", n, "tempdb_space.enabled"); break;
                             case "threshold_percent": AddInt("tempdb_space_threshold_percent", n, "tempdb_space.threshold_percent", 1, 100); break;
                             default: error = $"Unknown field 'tempdb_space.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "tempdb_growth_fit":
+                    Group(prop.Value, "tempdb_growth_fit", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("tempdb_growth_fit_enabled", n, "tempdb_growth_fit.enabled"); break;
+                            default: error = $"Unknown field 'tempdb_growth_fit.{k}'."; break;
                         }
                     });
                     break;

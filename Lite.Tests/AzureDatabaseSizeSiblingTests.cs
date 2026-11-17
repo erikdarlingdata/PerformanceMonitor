@@ -106,21 +106,21 @@ public class AzureDatabaseSizeSiblingTests
             {
                 "master", 1, 1, "ROWS", "data_0", "data_0.mdf", 4.00m, 2.63m,
                 16.00m, 2097152m, "FULL", 160, "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value,
-                0, DBNull.Value, DBNull.Value,
+                0, DBNull.Value, DBNull.Value, DBNull.Value,
             },
             new object[]
             {
                 "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 10240.00m, 119.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value,
+                DBNull.Value, DBNull.Value,
             },
             new object[]
             {
                 "testdb2", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value,
+                DBNull.Value, DBNull.Value,
             });
 
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
@@ -166,14 +166,14 @@ public class AzureDatabaseSizeSiblingTests
                 "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 10240.00m, 119.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value,
+                DBNull.Value, DBNull.Value,
             },
             new object[]
             {
                 "testdb2", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value,
+                DBNull.Value, DBNull.Value,
             });
 
         var deltas = new RecordingCollectorDeltaCalculator();
