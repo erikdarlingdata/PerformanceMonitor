@@ -43,19 +43,6 @@ public sealed partial class LocalDataService
             }
         }
 
-        return ToInstanceEventInfo(state);
-    }
-
-    /// <summary>The shared judges' answer as the engine's types. Public so a test can plant rows without a store.</summary>
-    public static InstanceEventInfo ToInstanceEventInfo(IReadOnlyList<BaselineDiscontinuities.StateRow> state)
-    {
-        var restart = InstanceEvents.JudgeRestart(state);
-        var dumps = InstanceEvents.JudgeMemoryDumps(state);
-        return new InstanceEventInfo(
-            restart is { } r ? new InstanceRestartInfo(r.PreviousStartTime, r.NewStartTime, r.ObservedAtUtc) : null,
-            dumps is { } d && d.Current.NewestUtc is { } newest
-                ? new MemoryDumpInfo(
-                    newest, d.Current.Count, d.Current.RecentCount, Math.Max(1, d.Current.Count - d.Previous.Count), d.ObservedAtUtc)
-                : null);
+        return InstanceEventInfoMapper.ToInstanceEventInfo(state);
     }
 }

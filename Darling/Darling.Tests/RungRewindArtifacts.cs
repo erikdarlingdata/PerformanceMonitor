@@ -808,6 +808,10 @@ DROP TABLE IF EXISTS collect.object_executions_daily_built;
 DROP TABLE IF EXISTS collect.object_executions_daily_databases;
 DROP TABLE IF EXISTS collect.object_executions_daily_retention;
 DROP TABLE IF EXISTS collect.object_inventory;"),
+        // V271 (#8884): the Instance Restarted and Memory Dumps switches on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops both
+        // (the probe's sentinel is the Memory Dumps one) and the re-run of V271 adds them back on. Safe on a store that never had them.
+        new(271, "hasInstanceEventAlertSwitches",
+            @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS instance_restarted_enabled, DROP COLUMN IF EXISTS memory_dumps_enabled;"),
     ];
 
     /// <summary>

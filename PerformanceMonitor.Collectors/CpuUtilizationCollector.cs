@@ -257,7 +257,8 @@ BEGIN
                   @count = COUNT_BIG(*),
                   @newest = CONVERT(datetime2(7), SWITCHOFFSET(MAX(smd.creation_time), 0)),
                   @recent = COUNT_BIG(CASE WHEN smd.creation_time >= DATEADD(MINUTE, -10 /* InstanceEvents.RecentWindowMinutes */, SYSDATETIMEOFFSET()) THEN 1 END)
-              FROM sys.dm_server_memory_dumps AS smd;',
+              FROM sys.dm_server_memory_dumps AS smd
+              OPTION(RECOMPILE);',
             N'@count bigint OUTPUT, @newest datetime2(7) OUTPUT, @recent bigint OUTPUT',
             @count = @dump_count OUTPUT,
             @newest = @dump_newest_utc OUTPUT,

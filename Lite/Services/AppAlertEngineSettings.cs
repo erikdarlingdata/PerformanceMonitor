@@ -55,8 +55,8 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
        in the store, with the migration ladder that implies. */
     public bool ForcePlanFailureEnabled => true;
 
-    /* #8884: on by default, switched off in settings.json (alert_instance_restarted_enabled, alert_memory_dumps_enabled). There is no store column,
-       so no migration. */
+    /* #8884: on by default, switched off in settings.json (alert_instance_restarted_enabled, alert_memory_dumps_enabled). Lite has no store, so the Settings window
+       writes them to settings.json. */
     public bool InstanceRestartedEnabled => App.AlertInstanceRestartedEnabled;
     public bool MemoryDumpsEnabled => App.AlertMemoryDumpsEnabled;
 

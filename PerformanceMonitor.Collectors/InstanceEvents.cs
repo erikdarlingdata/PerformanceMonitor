@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>Memory dumps.</b> <c>cpu_utilization</c> reads <c>sys.dm_server_memory_dumps</c> in the round trip it already makes and hands
 /// <see cref="ObserveMemoryDumps"/> the total, the newest creation time (UTC) and the count of the last ten minutes. The stamp is persisted as
-/// <see cref="MemoryDumpsStateKey"/>, and on a rise the stamp it replaced goes to <see cref="MemoryDumpsPreviousStateKey"/>, the way the identity pair
+/// <see cref="MemoryDumpsStateKey"/>, and each time it changes the stamp it replaced goes to <see cref="MemoryDumpsPreviousStateKey"/>, so the pair always describes the latest change, the way the identity pair
 /// does. <see cref="JudgeMemoryDumps"/> reads that pair. No store column and no migration: both keys are rows of the existing table.</para>
 ///
 /// <para>The judges are pure and take the rows both stores return for <see cref="StateSql"/>, so the two read adapters (Lite over DuckDB, Darling
@@ -111,10 +111,12 @@ public static class InstanceEvents
     /// <summary>
     /// The memory dump observation for a SQL Server target. <paramref name="current"/> is null when the read failed or the engine has no dump view
     /// (Azure SQL Database, no permission): nothing is compared and nothing is persisted, so a failed pass can neither fire nor erase the stored stamp.
-    /// A newest creation time that moved later than the stored one is a rise: the run's note gets <see cref="MemoryDumpsNewMeasurement"/> and the
-    /// replaced stamp is staged under <see cref="MemoryDumpsPreviousStateKey"/>. The first observation (no stored stamp) is only recorded. The stamp
-    /// is staged whenever its newest time or total changed, and ONLY then, so a steady pass writes no state row and the
-    /// last-ten-minutes figure ageing out does not refresh the row. Returns true on a rise.
+    /// A newest creation time that moved later than the stored one is a rise: the run's note gets <see cref="MemoryDumpsNewMeasurement"/>. The first
+    /// observation (no stored stamp) is only recorded. The stamp is staged whenever its newest time or total changed, and ONLY then, so a steady pass
+    /// writes no state row and the last-ten-minutes figure ageing out does not refresh the row. Whenever the stamp is staged over a stored one, the
+    /// replaced stamp is staged with it under <see cref="MemoryDumpsPreviousStateKey"/>, a rise or not, so the pair always describes the latest
+    /// change: after a drop (a file removed, or the list cleared) the pair holds the stamp before the drop and the one after it, which
+    /// <see cref="JudgeMemoryDumps"/> never reads as a rise. Returns true on a rise.
     /// </summary>
     public static bool ObserveMemoryDumps(CollectorContext context, MemoryDumpStamp? current)
     {
@@ -133,11 +135,15 @@ public static class InstanceEvents
         if (rose)
         {
             context.Measure(MemoryDumpsNewMeasurement, Math.Max(1, now.Count - prior.Count));
-            context.PendingState[MemoryDumpsPreviousStateKey] = SerializeDumps(prior);
         }
 
         if (!hasPrior || prior.NewestUtc != now.NewestUtc || prior.Count != now.Count)
         {
+            if (hasPrior)
+            {
+                context.PendingState[MemoryDumpsPreviousStateKey] = SerializeDumps(prior);
+            }
+
             context.PendingState[MemoryDumpsStateKey] = SerializeDumps(now);
         }
 
@@ -202,7 +208,7 @@ public static class InstanceEvents
     }
 
     /// <summary>
-    /// The newest rise the persisted memory dump stamps hold, or null: the current stamp has a newest time and the previous stamp (written on the rise)
+    /// The newest rise the persisted memory dump stamps hold, or null: the current stamp has a newest time and the previous stamp (the one the current replaced)
     /// has none or an earlier one. A server with no previous stamp, a stamp that failed to parse, or a current stamp with no dump never counts. The CALLER decides
     /// how old is too old, and whether that newest dump fired already.
     /// </summary>

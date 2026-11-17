@@ -3482,7 +3482,20 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
+        /* V271 (#8884): the Instance Restarted and Memory Dumps alert switches on the alert settings. Two catalog-only boolean columns that default on. */
+        new Migration(271, "instance-event-alert-switches", V271Sql),
     };
+
+    /// <summary>
+    /// V271 (#8884): the two switches of the Instance Restarted and Memory Dumps alerts on <c>config.config_alert_settings</c>, each
+    /// <c>boolean NOT NULL DEFAULT TRUE</c> so an existing store keeps both alerts on. Catalog-only adds, idempotent, no backfill (the DEFAULT fills the
+    /// singleton row). <c>memory_dumps_enabled</c> is the probe's sentinel and is added LAST. An older build never reads the columns and keeps both
+    /// alerts on, so before rolling back past this rung switch both off by hand if you want them off.
+    /// </summary>
+    private const string V271Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS instance_restarted_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS memory_dumps_enabled boolean NOT NULL DEFAULT TRUE;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

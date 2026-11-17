@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -87,8 +88,23 @@ public sealed class InstanceEventsLiveTests
             Assert.Equal(3, dumps.NewCount);
             Assert.Equal(newest, dumps.NewestDumpUtc);
 
-            await PlantAsync(connection, ct, "cpu_utilization", InstanceEvents.MemoryDumpsPreviousStateKey, InstanceEvents.SerializeDumps(new(newest, 4, 0)), observed);
-            await PlantAsync(connection, ct, "cpu_utilization", InstanceEvents.MemoryDumpsStateKey, InstanceEvents.SerializeDumps(new(newest, 2, 0)), observed);
+            /* The rise above never fired. The collector's next pass sees fewer dumps and no newer one: it stages the stamp it replaced as the previous one
+               (the drop is the latest change), so what the store holds then is a pair that is not a rise. Run the collector's own observation to get it. */
+            var context = new CollectorContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                CollectionTime = observed,
+                Deltas = new CollectorDeltaCalculator(),
+                Target = new CollectorTargetInfo(),
+                State = new Dictionary<string, string> { [InstanceEvents.MemoryDumpsStateKey] = InstanceEvents.SerializeDumps(new(newest, 4, 3)) },
+            };
+            Assert.False(InstanceEvents.ObserveMemoryDumps(context, new InstanceEvents.MemoryDumpStamp(newest, 2, 0)));
+            foreach (var staged in context.PendingState)
+            {
+                await PlantAsync(connection, ct, "cpu_utilization", staged.Key, staged.Value, observed);
+            }
+
             Assert.Null((await adapter.GetInstanceEventsAsync(key, ct)).MemoryDumps);
 
             bodySucceeded = true;

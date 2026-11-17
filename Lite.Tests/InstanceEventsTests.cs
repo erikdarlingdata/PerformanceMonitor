@@ -88,13 +88,31 @@ public sealed class InstanceEventsTests : IClassFixture<SharedDuckDbFixture>, ID
             Row("cpu_utilization", InstanceEvents.MemoryDumpsStateKey, InstanceEvents.SerializeDumps(now)),
         };
 
-        var info = LocalDataService.ToInstanceEventInfo(rows).MemoryDumps;
+        var info = InstanceEventInfoMapper.ToInstanceEventInfo(rows).MemoryDumps;
 
         Assert.NotNull(info);
         Assert.Equal(now.NewestUtc, info!.NewestDumpUtc);
         Assert.Equal(4, info.TotalCount);
         Assert.Equal(3, info.RecentCount);
         Assert.Equal(2, info.NewCount);
+    }
+
+    /// <summary>Runs the collector's own observation for each stamp in turn, landing its staged state between passes the way the host does, and returns
+    /// the rows the store would then hold for the cpu_utilization collector. Returns each pass's answer through <paramref name="rose"/>.</summary>
+    private static List<BaselineDiscontinuities.StateRow> RunTheCollector(List<bool> rose, params InstanceEvents.MemoryDumpStamp?[] passes)
+    {
+        var state = new Dictionary<string, string>();
+        foreach (var pass in passes)
+        {
+            var context = Context(state);
+            rose.Add(InstanceEvents.ObserveMemoryDumps(context, pass));
+            foreach (var staged in context.PendingState)
+            {
+                state[staged.Key] = staged.Value;
+            }
+        }
+
+        return state.Select(kv => Row("cpu_utilization", kv.Key, kv.Value)).ToList();
     }
 
     [Fact]
@@ -104,12 +122,19 @@ public sealed class InstanceEventsTests : IClassFixture<SharedDuckDbFixture>, ID
         var first = new List<BaselineDiscontinuities.StateRow> { Row("cpu_utilization", InstanceEvents.MemoryDumpsStateKey, InstanceEvents.SerializeDumps(dump)) };
         Assert.Null(InstanceEvents.JudgeMemoryDumps(first));
 
-        var drop = new List<BaselineDiscontinuities.StateRow>
-        {
-            Row("cpu_utilization", InstanceEvents.MemoryDumpsPreviousStateKey, InstanceEvents.SerializeDumps(dump)),
-            Row("cpu_utilization", InstanceEvents.MemoryDumpsStateKey, InstanceEvents.SerializeDumps(dump with { Count = 2 })),
-        };
+        /* The collector's real sequence: a first observation, a rise that never fired (the alert was off, or the host was down), then a drop with no newer
+           dump. The pair the collector leaves must not read as a rise: it describes the latest change, the drop. */
+        var before = new InstanceEvents.MemoryDumpStamp(Persisted.AddDays(-30), 2, 0);
+        var risen = new InstanceEvents.MemoryDumpStamp(Persisted.AddMinutes(-20), 5, 0);
+        var rose = new List<bool>();
+        var drop = RunTheCollector(rose, before, risen, risen with { Count = 2 });
+        Assert.Equal(new[] { false, true, false }, rose);
         Assert.Null(InstanceEvents.JudgeMemoryDumps(drop));
+        Assert.Null(InstanceEventInfoMapper.ToInstanceEventInfo(drop).MemoryDumps);
+
+        /* And the pair after the rise alone is still the rise (the control: the same helper, one pass fewer). */
+        var riseOnly = RunTheCollector(new List<bool>(), before, risen);
+        Assert.NotNull(InstanceEvents.JudgeMemoryDumps(riseOnly));
 
         var none = new List<BaselineDiscontinuities.StateRow>
         {
@@ -192,7 +217,8 @@ public sealed class InstanceEventsTests : IClassFixture<SharedDuckDbFixture>, ID
         Assert.False(InstanceEvents.ObserveMemoryDumps(context, prior with { Count = 2 }));
 
         Assert.True(context.PendingState.ContainsKey(InstanceEvents.MemoryDumpsStateKey));
-        Assert.False(context.PendingState.ContainsKey(InstanceEvents.MemoryDumpsPreviousStateKey));
+        /* The replaced stamp goes to the previous key too, so the pair describes the drop and is never read as a rise. */
+        Assert.Equal(InstanceEvents.SerializeDumps(prior), context.PendingState[InstanceEvents.MemoryDumpsPreviousStateKey]);
     }
 
     /* ---------------- the DuckDB execution ---------------- */
