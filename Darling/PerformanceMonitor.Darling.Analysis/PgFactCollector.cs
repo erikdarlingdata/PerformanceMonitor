@@ -338,7 +338,9 @@ public sealed partial class PgFactCollector : IFactCollector
         TraceFlagsSql,
         ServerPropertiesSql,
         DiskSpaceSql,
-        PlanAdvisorySql
+        PlanAdvisorySql,
+        PgTempDbFileSetupReader.FilesSql,
+        PgTempDbFileSetupReader.SchedulerCountSql
     };
 
     // Single impl lives in PgBlockingPairRowQuery (shared with the pair-row reader);

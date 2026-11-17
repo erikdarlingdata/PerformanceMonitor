@@ -115,7 +115,8 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
         PendingGrantsSql,
         FileLatencyBreakdownSql,
         AutogrowthPercentFilesSql,
-        TempDbBreakdownSql
+        TempDbBreakdownSql,
+        PgTempDbFileSetupReader.FilesSql
     };
 
     /// <summary>
