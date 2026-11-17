@@ -108,8 +108,8 @@ VALUES ($1, $2, $3, $4)", c);
     {
         await WithStoreAsync(async (c, postgres, ct) =>
         {
-            /* Server 1 stopped seeing the database 10 days ago; server 2, in the same group, saw it now. The rows were read by server 1. */
-            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-10), ct, s_group);
+            /* Server 1 stopped seeing the database 40 days ago; server 2, in the same group, saw it now. The rows were read by server 1. */
+            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-40), ct, s_group);
             await SeedStateAsync(c, 2, "SalesDb", s_now, ct, s_group);
             await SeedRowAsync(c, 1, "SalesDb", 10, ct, s_group);
 
@@ -125,8 +125,8 @@ VALUES ($1, $2, $3, $4)", c);
     {
         await WithStoreAsync(async (c, postgres, ct) =>
         {
-            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-3), ct, s_group);
-            await SeedStateAsync(c, 2, "SalesDb", s_now.AddDays(-2), ct, s_group);
+            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-40), ct, s_group);
+            await SeedStateAsync(c, 2, "SalesDb", s_now.AddDays(-35), ct, s_group);
             await SeedRowAsync(c, 1, "SalesDb", 10, ct, s_group);
             /* Another database of server 3 is still seen and keeps its row. */
             await SeedStateAsync(c, 3, "OpsDb", s_now, ct);
@@ -160,13 +160,13 @@ VALUES (1, $1, 1, 's', 'SalesDb'), (2, $2, 1, 's', 'SalesDb')", c);
     }
 
     [Fact]
-    public async Task StampWindow_KeepsTwelveHoursOld_DropsThirtyHoursOld_AtTheDefaultInterval()
+    public async Task StampWindow_IsTheRetentionHorizon_AServerDownForDaysKeepsItsRows()
     {
         await WithStoreAsync(async (c, postgres, ct) =>
         {
-            await SeedStateAsync(c, 1, "FreshDb", s_now.AddHours(-12), ct);
+            await SeedStateAsync(c, 1, "FreshDb", s_now.AddDays(-29), ct);
             await SeedRowAsync(c, 1, "FreshDb", 10, ct);
-            await SeedStateAsync(c, 2, "StaleDb", s_now.AddHours(-30), ct);
+            await SeedStateAsync(c, 2, "StaleDb", s_now.AddDays(-31), ct);
             await SeedRowAsync(c, 2, "StaleDb", 11, ct);
 
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct);
@@ -178,31 +178,19 @@ VALUES (1, $1, 1, 's', 'SalesDb'), (2, $2, 1, 's', 'SalesDb')", c);
     }
 
     [Fact]
-    public async Task RunOnLoadCollector_NothingGoesByStampAge()
+    public async Task StampWindow_FollowsTheConfiguredRetention()
     {
         await WithStoreAsync(async (c, postgres, ct) =>
         {
-            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-40), ct);
-            await SeedRowAsync(c, 1, "SalesDb", 10, ct);
+            await SeedStateAsync(c, 1, "FreshDb", s_now.AddDays(-6), ct);
+            await SeedRowAsync(c, 1, "FreshDb", 10, ct);
+            await SeedStateAsync(c, 2, "StaleDb", s_now.AddDays(-8), ct);
+            await SeedRowAsync(c, 2, "StaleDb", 11, ct);
 
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct, largestFrequencyMinutesFor: _ => 0);
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct, retentionDaysFor: _ => 7);
 
-            Assert.Equal(1L, await CountAsync(c, "collect.column_stats", ct));
-            Assert.Equal(1L, await CountAsync(c, "collect.column_stats_state", ct));
-        });
-    }
-
-    [Fact]
-    public async Task WeeklyCollector_KeepsRowsStampedSixDaysAgo()
-    {
-        await WithStoreAsync(async (c, postgres, ct) =>
-        {
-            await SeedStateAsync(c, 1, "SalesDb", s_now.AddDays(-6), ct);
-            await SeedRowAsync(c, 1, "SalesDb", 10, ct);
-
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct, largestFrequencyMinutesFor: _ => 7 * 24 * 60);
-
-            Assert.Equal(1L, await CountAsync(c, "collect.column_stats", ct));
+            await using var remaining = new NpgsqlCommand("SELECT string_agg(database_name, ',') FROM collect.column_stats", c);
+            Assert.Equal("FreshDb", (string)(await remaining.ExecuteScalarAsync(ct))!);
             Assert.Equal(1L, await CountAsync(c, "collect.column_stats_state", ct));
         });
     }
