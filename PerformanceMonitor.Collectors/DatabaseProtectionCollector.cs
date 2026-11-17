@@ -111,6 +111,9 @@ public sealed class DatabaseProtectionCollector : CollectorDefinitionBase<Databa
        target has no readable error log and builds neither the listing nor the second set. */
     /* The server's Excluded Databases list is applied to the sys.databases read (#8775). The backups CTE joins to d.name, so a name left out of the
        catalog read is left out of the batch whole. The names are bound as parameters, so the text is built per call. */
+    /* #8865: the Availability Group sources are staged into #temp tables before the join, as the AG collectors do (#8889): joined live
+       inside the loop over sys.databases, the AG views were measured at minutes and then error 701 on a server with many groups, and this
+       batch carries the backup and boot-page facts. A platform-managed target reads no error log, so it skips the readability lookup. */
     private static string OnPremQuery(string exclusionClause, bool platformManaged) => $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 5000;
@@ -119,6 +122,19 @@ SET NOCOUNT ON;
 DECLARE
     @offset_minutes integer = DATEDIFF(MINUTE, GETDATE(), GETUTCDATE());
 
+/* An unparameterised batch runs at session scope, so a #temp table left by an earlier cycle on the same connection would still be there. */
+DROP TABLE IF EXISTS #pm_protection_local_replicas;
+DROP TABLE IF EXISTS #pm_protection_replicas;
+
+SELECT /* PerformanceMonitorLite */
+    database_id = CONVERT(integer, hdrs.database_id),
+    replica_id = CONVERT(uniqueidentifier, hdrs.replica_id),
+    is_primary_replica = CONVERT(bit, hdrs.is_primary_replica)
+INTO #pm_protection_local_replicas
+FROM sys.dm_hadr_database_replica_states AS hdrs
+WHERE hdrs.is_local = 1
+OPTION(RECOMPILE);
+" + (platformManaged ? string.Empty : ReplicaReadabilityStaging) + $@"
 WITH
     backups AS
 (
@@ -174,23 +190,34 @@ SELECT
     last_log = b.last_log,
     backups_readable = CONVERT(bit, 1),
     instance_name = CONVERT(sysname, @@SERVERNAME),
-    replica_allow_connections = CONVERT(nvarchar(60), ar.secondary_role_allow_connections_desc)
+    replica_allow_connections = " + (platformManaged ? "CONVERT(nvarchar(60), NULL)" : "ar.secondary_role_allow_connections_desc") + @"
 FROM sys.databases AS d
 LEFT JOIN backups AS b
   ON b.database_name = d.name
-LEFT JOIN sys.dm_hadr_database_replica_states AS rs
-  ON  rs.database_id = d.database_id
-  AND rs.is_local = 1
-LEFT JOIN sys.availability_replicas AS ar
+LEFT JOIN #pm_protection_local_replicas AS rs
+  ON rs.database_id = d.database_id
+" + (platformManaged ? string.Empty : @"LEFT JOIN #pm_protection_replicas AS ar
   ON ar.replica_id = rs.replica_id
-WHERE d.database_id <> 2
+") + @"WHERE d.database_id <> 2
 AND   d.source_database_id IS NULL
 " + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
 " + exclusionClause + @"
 ORDER BY
     d.name
 OPTION(RECOMPILE);
+
+DROP TABLE IF EXISTS #pm_protection_local_replicas;
+DROP TABLE IF EXISTS #pm_protection_replicas;
 " + (platformManaged ? string.Empty : ErrorLogListing);
+
+    private const string ReplicaReadabilityStaging = @"
+SELECT /* PerformanceMonitorLite */
+    replica_id = CONVERT(uniqueidentifier, ar.replica_id),
+    secondary_role_allow_connections_desc = CONVERT(nvarchar(60), ar.secondary_role_allow_connections_desc)
+INTO #pm_protection_replicas
+FROM sys.availability_replicas AS ar
+OPTION(RECOMPILE);
+";
 
     /* #8865: which error logs the instance holds, so ReadAsync can decide which of them the supplemental reads. The listing runs inside
        TRY/CATCH: a refused EXECUTE on sp_enumerrorlogs is a runtime error, and it must read as refused (a single (0, NULL, NULL) row),

@@ -1300,6 +1300,40 @@ INSERT #backupset VALUES
     }
 
     /// <summary>
+    /// #8865 I3: the primary batch stages the Availability Group sources into #temp tables before the join, and a platform-managed target
+    /// skips the readability lookup. Both shapes run against the instance (the container has no Availability Group, so every row reads
+    /// outside one) and return every database, master included. Each runs twice on one connection: with no excluded databases the batch is
+    /// sent unparameterised and runs at session scope, where a #temp table it left behind would fail the next cycle.
+    /// </summary>
+    [Fact]
+    public async Task ThePrimaryBatch_RunsInBothShapes_WithTheAgSourcesStaged_TwiceOnOneConnection()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        await using var connection = new SqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        foreach (var managed in new[] { false, false, true, true })
+        {
+            var context = new CollectorContext
+            {
+                CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "live-sql", Deltas = new CollectorDeltaCalculator(),
+                Target = new CollectorTargetInfo { SqlMajorVersion = major, IsAzureManagedInstance = managed },
+            };
+            await using var command = BindCommand(connection, DatabaseProtectionCollector.Instance.BuildQuery(context));
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var rows = await DatabaseProtectionCollector.Instance.ReadAsync(reader, context, ct);
+
+            var master = rows.Single(r => r.DatabaseName == "master");
+            Assert.Null(master.ReplicaRole);
+            Assert.Null(master.ReplicaReadable);
+            Assert.Equal(managed ? DatabaseProtectionCollector.ErrorLogNotApplicable : DatabaseProtectionCollector.ErrorLogFailed, master.ErrorLogState);
+        }
+    }
+
+    /// <summary>
     /// #8865 I5 and I6, on a real log. <c>DBCC CHECKDB (db, NOINDEX)</c> logs <c>DBCC CHECKDB (db, noindex) WITH ...</c>, which the old
     /// ")"-after-the-name match never found. A message 5235 line (planted with xp_logevent, the text SQL Server writes when a check ends
     /// abnormally) shares the good line's head, so without dropping it the server's newest-line-per-head reduction would keep it and lose
