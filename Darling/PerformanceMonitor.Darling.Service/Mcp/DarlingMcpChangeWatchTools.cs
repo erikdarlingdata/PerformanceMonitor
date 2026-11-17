@@ -79,12 +79,22 @@ public sealed class DarlingMcpChangeWatchTools
         "so ask for a small limit (3 to 5), or pass watch_id to read one watch in any state. The answer is held to the 32,768-byte response budget, whole watches only, newest first: budget_truncated and budget_note say how many watches fit, and a single watch over the budget on its own keeps its newest changes and says changes_left_out. measures, not_measured and " +
         "changes are sent once, at the top of the watch; result_detail holds the rest of the stored result (had_data, notes, window). " +
         "A read over the monitoring store; no monitored server is touched.")]
-    public static async Task<string> GetChangeWatches(
+    public static Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data). Omit it, or pass all, for every state.")] string? state = null,
         [Description("Most watches to return, newest first. Default 20 (1-1000). A small limit gives the newest, not a chosen watch: use watch_id.")] int limit = 20,
         [Description("Read one watch by its watch_id, in any state; state still applies if you give it. A watch_id that is not on this server answers not_found.")] string? watch_id = null,
+        CancellationToken cancellationToken = default) =>
+        GetChangeWatches(postgres, server_name, state, limit, watch_id, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// #8901: the read behind <c>get_change_watches</c>. Under a <paramref name="responseByteBudget"/> the answer is held to it (see
+    /// <see cref="FitToBudget"/>). The web route names no budget and keeps the whole answer, as the other web reads do: the viewer must not be
+    /// shrunk by the MCP cut.
+    /// </summary>
+    internal static async Task<string> GetChangeWatches(
+        NpgsqlDataSource postgres, string? server_name, string? state, int limit, string? watch_id, int? responseByteBudget,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -174,7 +184,7 @@ public sealed class DarlingMcpChangeWatchTools
             }, McpHelpers.JsonOptions)!.AsObject();
 
             /* #8901: held to the shared response budget, whole watches only, newest first. */
-            return FitToBudget(payload, McpResponseBudget.DefaultBytes);
+            return responseByteBudget is int budget ? FitToBudget(payload, budget) : payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -217,18 +227,23 @@ public sealed class DarlingMcpChangeWatchTools
             node["budget_note"] = inScope > 1
                 ? McpResponseBudget.PageCutNote(inScope, 1, "newest first", "watches", "The newest watch is over the budget by itself, so " + cutText + " " + WatchesCutRemedy)
                 : string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                    $"TRUNCATED: this watch is over the {McpResponseBudget.DefaultBytes:#,0}-byte response budget by itself, so {cutText}");
+                    $"TRUNCATED: this watch is over the {budgetBytes:#,0}-byte response budget by itself, so {cutText}");
             return node.ToJsonString(McpHelpers.JsonOptions);
         }
 
-        /* The newest watch alone, whole: when it fits, whole watches are the unit and the shared cut applies. */
+        /* The newest watch alone, whole: when it fits, whole watches are the unit and the shared cut applies. The shared cut adds its note
+           (and rewrites watch_count), so its answer is measured as written: a newest watch that fits only without the note is still cut by changes. */
         var oneWatch = payload.DeepClone().AsObject();
         oneWatch["watches"] = new JsonArray(first.DeepClone());
         if (changes.Count <= 1 || Encoding.UTF8.GetByteCount(oneWatch.ToJsonString(McpHelpers.JsonOptions)) <= budgetBytes)
         {
-            return McpResponseBudget.CapArray(
-                payload, "watches", "newest first", "watches", _ => WatchesCutRemedy, budgetBytes,
+            var capped = McpResponseBudget.CapArray(
+                payload.DeepClone().AsObject(), "watches", "newest first", "watches", _ => WatchesCutRemedy, budgetBytes,
                 "budget_truncated", "budget_note", (node, kept) => node["watch_count"] = kept);
+            if (changes.Count <= 1 || Encoding.UTF8.GetByteCount(capped) <= budgetBytes)
+            {
+                return capped;
+            }
         }
 
         var fit = McpResponseBudget.RowsThatFit(changes.Count, n => Encoding.UTF8.GetByteCount(Build(n)), budgetBytes);

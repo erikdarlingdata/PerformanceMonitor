@@ -688,12 +688,6 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
         });
     }
 
-    /// <summary>
-    /// #8655: <c>get_table_index_sizes</c> answered its 100-table page whole, which is over the budget on a server whose
-    /// rows carry a growth note, and its <c>truncated</c> was the 100-table cap alone. A default call over 130 tables
-    /// fits the budget and says what it left out, and following <c>next_offset</c> reads every table exactly once,
-    /// largest first. The web route's read names no budget and keeps the 100-table page.
-    /// </summary>
     /// <summary>#8901: records one watch of <paramref name="count"/> plan changes, one a minute from <paramref name="first"/>, and closes it so the next change opens a new watch.</summary>
     private static async Task<Guid> RecordPlanChangeWatchAsync(
         NpgsqlConnection connection, NpgsqlDataSource postgres, DateTime first, int count, string tag, CancellationToken ct)
@@ -710,6 +704,12 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
         return watchId.Value;
     }
 
+    /// <summary>
+    /// #8655: <c>get_table_index_sizes</c> answered its 100-table page whole, which is over the budget on a server whose
+    /// rows carry a growth note, and its <c>truncated</c> was the 100-table cap alone. A default call over 130 tables
+    /// fits the budget and says what it left out, and following <c>next_offset</c> reads every table exactly once,
+    /// largest first. The web route's read names no budget and keeps the 100-table page.
+    /// </summary>
     [Fact]
     public async Task ChangeWatches_Default_ThreeWatchesOfManyPlanChanges_KeepsWholeWatchesNewestFirst_AndSaysWhatItLeftOut()
     {
@@ -785,6 +785,31 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
             Assert.Contains($"only 1 fit", both.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
             Assert.Contains("1 were left out", both.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
             Assert.NotEqual(older, both.GetProperty("watches")[0].GetProperty("watch_id").GetGuid());
+        });
+    }
+
+    /// <summary>#8901: the web viewer's read is not held to the MCP budget: a watch of 160 changes comes back whole.</summary>
+    [Fact]
+    public async Task ChangeWatches_WebRoute_KeepsAWatchOfManyChangesWhole()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            var start = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-30);
+            const int total = 160;
+            var big = await RecordPlanChangeWatchAsync(connection, postgres, start, total, "web", ct);
+
+            /* The MCP read is cut for bytes. */
+            var mcp = AssertWithinBudget("get_change_watches", await DarlingMcpChangeWatchTools.GetChangeWatches(postgres, ServerName));
+            Assert.True(mcp.GetProperty("budget_truncated").GetBoolean());
+
+            var web = JsonDocument.Parse(await DarlingWebEndpoints.BuildReadDispatch()["get_change_watches"](new DefaultHttpContext(), postgres, null!)).RootElement;
+            var watch = Assert.Single(web.GetProperty("watches").EnumerateArray());
+            Assert.Equal(big, watch.GetProperty("watch_id").GetGuid());
+            Assert.Equal(total, watch.GetProperty("changes").GetArrayLength());
+            Assert.False(watch.TryGetProperty("changes_left_out", out _));
+            Assert.False(web.TryGetProperty("budget_truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True);
+            Assert.False(web.TryGetProperty("changes_left_out", out _));
+            Assert.Equal(1, web.GetProperty("watch_count").GetInt32());
         });
     }
 
