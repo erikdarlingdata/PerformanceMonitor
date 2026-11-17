@@ -168,7 +168,8 @@ public sealed class InstanceEventAlertSwitchesLiveTests
             Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 271), applied);
 
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
-            Assert.Equal(271, await viewer.GetStoreSchemaVersionAsync(ct));
+            /* The store has climbed the whole ladder, so the probe names the newest rung. */
+            Assert.Equal(PgMigrations.Scripts[^1].Version, await viewer.GetStoreSchemaVersionAsync(ct));
             var row = await viewer.GetAlertSettingsAsync(ct);
             Assert.NotNull(row);
             Assert.True(row.InstanceRestartedEnabled);
