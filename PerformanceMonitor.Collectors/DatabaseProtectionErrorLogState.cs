@@ -202,7 +202,7 @@ public static class DatabaseProtectionErrorLogState
     /// a date, and a date is planned, read, counted and skipped whole: reading part of a date and marking the date read would mark the
     /// rest of it read too. A date holding more archives than <paramref name="perCycle"/> is read whole in a cycle of its own, because
     /// splitting it is the same fault; that costs one longer read on a server that cycled its log more than three times in one minute. A date
-    /// holding more archives than <see cref="MaxArchiveListLength"/> lets the batch name is read in part, never whole, and is skipped once
+    /// whose archive numbers do not fit in <see cref="MaxArchiveListLength"/> characters is read in part, never whole, and is skipped once
     /// it reaches <see cref="MaxArchiveAttempts"/>.</para>
     ///
     /// <para>#8865: a list that was refused or failed (<paramref name="enumerateOk"/> false) reads the current log only and
