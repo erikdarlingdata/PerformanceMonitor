@@ -62,6 +62,64 @@ public sealed class AnalyzeServerWordingTests
         Assert.DoesNotContain("appears to have stopped", message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8910: a window that ends before the oldest row the store keeps, with that row at the retention horizon, was removed by
+    /// retention. The message says so, names the oldest row and the retention, and does not blame collection or quote the
+    /// lifetime history as if the data should be there.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void AWindowBeforeTheOldestRetainedRow_SaysRetentionRemovedIt_NotThatCollectionBroke(int pointInTimeFacts)
+    {
+        var context = ContextWith(0, null, null);
+        var oldest = End.AddDays(30).AddHours(-1);
+        var retention = new RetentionBoundary(oldest, oldest, "wait_stats", "30 days of retention for wait_stats");
+
+        var message = WindowEmptyText.Compose(context, dataSpanHours: 731.3, pointInTimeFacts, retention);
+
+        Assert.Contains("This window ends before the oldest row this store keeps (2026-11-18 11:00 UTC, 30 days of retention for wait_stats).", message, StringComparison.Ordinal);
+        Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("stopped", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("broken", message.Replace("did not break", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.DoesNotContain("total collected history", message, StringComparison.Ordinal);
+        Assert.Equal(pointInTimeFacts > 0, message.Contains("point-in-time", StringComparison.Ordinal));
+        Assert.Equal(string.Empty, WindowEmptyText.HealthPointer(removedByRetention: true));
+        Assert.Contains("get_collection_health", WindowEmptyText.HealthPointer(removedByRetention: false), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8910: the two windows that keep today's text. One lies inside the span the store keeps, so collection missed it. The
+    /// other ends before the store's first row, but that row is far newer than the retention horizon (a server monitored for five
+    /// days, asked about ten days ago), so retention did not remove it and the message must not say it did.
+    /// </summary>
+    [Theory]
+    [InlineData(-10, -10)]
+    [InlineData(30, 5)]
+    public void AWindowInsideTheSpan_OrBeforeAYoungStoresFirstRow_KeepsTheCollectionText(int oldestDaysFromWindowEnd, int horizonDaysFromWindowEnd)
+    {
+        var context = ContextWith(0, null, null);
+        var retention = new RetentionBoundary(
+            End.AddDays(oldestDaysFromWindowEnd), End.AddDays(horizonDaysFromWindowEnd), "wait_stats", "30 days of retention for wait_stats");
+
+        var message = WindowEmptyText.Compose(context, dataSpanHours: 216.0, factCount: 0, retention);
+
+        Assert.Contains("No collection landed inside it", message, StringComparison.Ordinal);
+        Assert.Contains("Collection may have stopped or broken", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Retention removed it", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheOldestRowMayBeADayPastTheHorizon_AndNoMore_ForRetentionToOwnTheWindow()
+    {
+        var horizon = End.AddDays(30);
+        Assert.True(new RetentionBoundary(horizon.AddHours(-3), horizon, "wait_stats", "x").RemovedWindow(End));
+        Assert.True(new RetentionBoundary(horizon.AddHours(23), horizon, "wait_stats", "x").RemovedWindow(End));
+        Assert.False(new RetentionBoundary(horizon.AddHours(25), horizon, "wait_stats", "x").RemovedWindow(End));
+        Assert.False(new RetentionBoundary(horizon, horizon, "wait_stats", "x").RemovedWindow(horizon.AddHours(1)));
+    }
+
     private static AnalysisStory StoryFor(string key, string hash) => new()
     {
         RootFactKey = key,

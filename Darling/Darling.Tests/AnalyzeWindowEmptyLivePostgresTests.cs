@@ -221,6 +221,106 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #8910: a window older than the retention the store keeps is answered as removed by retention, not as a collector that
+    /// "may have stopped or broken". The store holds a row at the retention horizon and a recent one, so the span passes the
+    /// history gate; <c>as_of</c> puts the window ten days past the horizon. Both tools say so, and neither points at
+    /// collection health. A window INSIDE the span with no rows, and a window before a young store's first row, keep the
+    /// collection wording: collection may well have missed the first, and retention never held the second.
+    /// </summary>
+    [Fact]
+    public async Task AWindowOlderThanRetention_SaysRetentionRemovedIt_AndOtherEmptyWindowsKeepTheCollectionText()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live window-empty analysis test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            var service = new DarlingAnalysisService(postgres);
+
+            int retentionDays;
+            using (var days = new NpgsqlCommand("SELECT " + DarlingRetentionHorizons.FleetRetentionDaysSql("wait_stats"), connection))
+                retentionDays = Convert.ToInt32(await days.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+
+            var now = DateTime.UtcNow;
+            string AsOf(double daysAgo) => now.AddDays(-daysAgo).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+            /* ── the store as the issue found it: its oldest row sits at the retention horizon (a day past it, as a
+               chunk purge leaves it), and a recent row keeps the whole span far over the 24h gate. */
+            await PlantWaitAsync(connection, Naive(now.AddDays(-(retentionDays + 1))), StaleWait, 60_000L, ct);
+            await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
+
+            var removed = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 48, as_of: AsOf(retentionDays + 10));
+            using (var doc = JsonDocument.Parse(removed))
+            {
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains($"{retentionDays} days of retention for wait_stats", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("stopped or broken", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("total collected history", message, StringComparison.Ordinal);
+            }
+            Assert.True(service.WindowEmptyRemovedByRetention);
+
+            var removedFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 48, as_of: AsOf(retentionDays + 10));
+            using (var doc = JsonDocument.Parse(removedFacts))
+            {
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("may not have run yet", message, StringComparison.Ordinal);
+            }
+
+            /* ── a window INSIDE the retained span that holds no rows: today's text, today's pointer. */
+            var inside = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 4, as_of: AsOf(retentionDays / 2.0));
+            using (var doc = JsonDocument.Parse(inside))
+            {
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("Collection may have stopped or broken", message, StringComparison.Ordinal);
+                Assert.Contains("get_collection_health", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("Retention removed it", message, StringComparison.Ordinal);
+            }
+            Assert.False(service.WindowEmptyRemovedByRetention);
+
+            var insideFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, as_of: AsOf(retentionDays / 2.0));
+            Assert.DoesNotContain("Retention removed it", insideFacts, StringComparison.Ordinal);
+
+            /* ── a young store: its first row is five days old, far past the horizon, so a window ten days back was
+               never held. Retention did not remove it, and the message must not say it did. */
+            await DeleteWaitRowsAsync(connection, ct);
+            await PlantWaitAsync(connection, Naive(now.AddDays(-5)), StaleWait, 60_000L, ct);
+            await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
+
+            var young = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 48, as_of: AsOf(10));
+            Assert.DoesNotContain("Retention removed it", young, StringComparison.Ordinal);
+            Assert.Contains("Collection may have stopped or broken", young, StringComparison.Ordinal);
+            Assert.False(service.WindowEmptyRemovedByRetention);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>Naive-UTC, the Kind every timestamp column in this store is bound with.</summary>
     private static DateTime Naive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -252,6 +352,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         command.Parameters.AddWithValue(50L);
         command.Parameters.AddWithValue(waitMs);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteWaitRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {ServerId};", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

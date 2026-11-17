@@ -85,6 +85,12 @@ public class AnalysisService
     public string? WindowEmptyMessage { get; private set; }
 
     /// <summary>
+    /// True when <see cref="WindowEmptyMessage"/> says retention removed the window (#8910) rather than that collection may
+    /// have missed it. The MCP tools read it to drop their pointer at collection health, which is green for that window.
+    /// </summary>
+    public bool WindowEmptyRemovedByRetention { get; private set; }
+
+    /// <summary>
     /// How much of the last pass's window the collector actually observed (#3538 A2), stamped by the
     /// fact collector and carried out here the way <see cref="WindowEmptyMessage"/> is, because the
     /// findings list cannot say it: a pass over a window with a three-hour hole returns the SAME shape as
@@ -240,6 +246,7 @@ public class AnalysisService
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
+        WindowEmptyRemovedByRetention = false;
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
@@ -335,7 +342,11 @@ public class AnalysisService
                    read (wait_stats on a SQL Server target, pg_database_stats on a PostgreSQL one, #3665), so
                    "unstamped" is not a third state here — Coverage is null only when collection threw, and
                    that unwinds through the catch below, never through this test. */
-                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count);
+                /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and the
+                   message says so instead of blaming collection. The read costs one MIN, and only on this branch. */
+                var retention = await ReadRetentionBoundaryAsync(context.ServerId, context.CancellationToken);
+                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count, retention);
+                WindowEmptyRemovedByRetention = retention?.RemovedWindow(context.TimeRangeEnd) == true;
 
                 AppLogger.Warn("AnalysisService",
                     $"No observed collection in the analysis window for {context.ServerName} " +
@@ -1282,6 +1293,43 @@ WHERE server_id = $1";
                allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
                into an insufficient-data SKIP, which is a different and far calmer-looking answer
                than the one the caller is about to log. */
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The oldest row the store holds for a server in <c>v_wait_stats</c> (the hot table and the parquet archive) and the
+    /// retention that bounds it, for the window-empty answer to tell a window retention removed from one collection missed
+    /// (#8910). The hot table's <c>retention_days</c> moves rows to the archive and does not delete them, so what bounds the
+    /// history is the archive's <see cref="RetentionService.ArchiveRetentionMonths"/>. Null when the server has no row, or when
+    /// the read fails: a failed read must not turn an answer into an error, and the answer then keeps its collection
+    /// wording. An abandonment is not swallowed. The same unbounded MIN the data-span gate already runs on every pass.
+    /// </summary>
+    public async Task<RetentionBoundary?> ReadRetentionBoundaryAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT MIN(collection_time) FROM v_wait_stats WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            if (result is not DateTime oldest)
+                return null;
+
+            return new RetentionBoundary(
+                DateTime.SpecifyKind(oldest, DateTimeKind.Utc),
+                DateTime.UtcNow.AddMonths(-RetentionService.ArchiveRetentionMonths),
+                "wait_stats",
+                $"{RetentionService.ArchiveRetentionMonths} months of retention for wait_stats");
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
+        {
+            AppLogger.Warn("AnalysisService", $"The retention boundary read failed; the window-empty answer keeps its collection wording: {ex.Message}");
             return null;
         }
     }

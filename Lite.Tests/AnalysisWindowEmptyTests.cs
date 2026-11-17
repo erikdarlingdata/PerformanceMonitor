@@ -239,6 +239,87 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
         Assert.True(service.LastWindowCoverage!.IsObserved);
     }
 
+    /// <summary>
+    /// #8910: a window older than the history Lite keeps (the archive's three months) is answered as removed by retention, not
+    /// as a collector that "may have stopped or broken". The store holds a row at the retention horizon and a recent one, so the
+    /// span passes the history gate; <c>as_of</c> puts the window ten days past the horizon. Both tools say so, and neither
+    /// points at collection health. A window INSIDE the span with no rows, and a window before a young store's first row,
+    /// keep the collection wording: collection may well have missed the first, and retention never held the second.
+    /// </summary>
+    [Fact]
+    public async Task AWindowOlderThanRetention_SaysRetentionRemovedIt_AndOtherEmptyWindowsKeepTheCollectionText()
+    {
+        var now = DateTime.UtcNow;
+        string AsOf(double daysAgo) => now.AddDays(-daysAgo).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var horizonDaysAgo = (now - now.AddMonths(-RetentionService.ArchiveRetentionMonths)).TotalDays;
+
+        await PlantWaitAsync(now.AddDays(-(horizonDaysAgo + 1)), StaleWait, 60_000L);
+        await PlantWaitAsync(now.AddHours(-5), StaleWait, 60_000L);
+
+        var service = new AnalysisService(_duckDb);
+        var removed = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 48, as_of: AsOf(horizonDaysAgo + 10));
+        using (var doc = JsonDocument.Parse(removed))
+        {
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            var message = doc.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+            Assert.Contains("3 months of retention for wait_stats", message, StringComparison.Ordinal);
+            Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("stopped or broken", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("total collected history", message, StringComparison.Ordinal);
+        }
+        Assert.True(service.WindowEmptyRemovedByRetention);
+
+        var removedFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 48, as_of: AsOf(horizonDaysAgo + 10));
+        using (var doc = JsonDocument.Parse(removedFacts))
+        {
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            var message = doc.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+            Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("may not have run yet", message, StringComparison.Ordinal);
+        }
+
+        /* A window INSIDE the retained span that holds no rows: today's text, today's pointer. */
+        var inside = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 4, as_of: AsOf(horizonDaysAgo / 2.0));
+        using (var doc = JsonDocument.Parse(inside))
+        {
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            var message = doc.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("Collection may have stopped or broken", message, StringComparison.Ordinal);
+            Assert.Contains("get_collection_health", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Retention removed it", message, StringComparison.Ordinal);
+        }
+        Assert.False(service.WindowEmptyRemovedByRetention);
+
+        var insideFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: AsOf(horizonDaysAgo / 2.0));
+        Assert.DoesNotContain("Retention removed it", insideFacts, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8910: a young store's first row is five days old, far past the retention horizon, so a window ten days back was never
+    /// held. Retention did not remove it, and the message must not say it did.
+    /// </summary>
+    [Fact]
+    public async Task AWindowBeforeAYoungStoresFirstRow_KeepsTheCollectionText_NotARetentionClaim()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitAsync(now.AddDays(-5), StaleWait, 60_000L);
+        await PlantWaitAsync(now.AddHours(-5), StaleWait, 60_000L);
+
+        var service = new AnalysisService(_duckDb);
+        var result = await McpAnalysisTools.AnalyzeServer(
+            service, _serverManager, hours_back: 48,
+            as_of: now.AddDays(-10).ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+
+        Assert.DoesNotContain("Retention removed it", result, StringComparison.Ordinal);
+        Assert.Contains("Collection may have stopped or broken", result, StringComparison.Ordinal);
+        Assert.False(service.WindowEmptyRemovedByRetention);
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)
