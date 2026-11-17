@@ -740,7 +740,9 @@ public sealed partial class DarlingWorker
             /* #8146: clamped and logged once here, because darling.json is read once at start. */
             xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger),
             /* #7643: the schema pass reads the cadence the dispatch schedules it at, live over the same overrides. */
-            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes);
+            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes,
+            /* #8798: column_stats reads only where schema_objects is on, by the same Enabled the dispatch skips a disabled collector by. */
+            collectorEnabled: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).Enabled);
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;

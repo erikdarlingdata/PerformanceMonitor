@@ -474,6 +474,11 @@ public sealed partial class DarlingCollectorRunner
 
     internal int CollectorFrequencyMinutesFor(string collectorName, int serverId) => _collectorFrequencyMinutes(collectorName, serverId);
 
+    /* #8798: whether a collector is enabled on one server, resolved live over the same overrides the dispatch reads to skip a disabled one. */
+    private readonly Func<string, int, bool> _collectorEnabled;
+
+    internal bool CollectorEnabledFor(string collectorName, int serverId) => _collectorEnabled(collectorName, serverId);
+
     /// <summary>The databases monitored as their own servers, for this runtime. Empty unless it is an Azure SQL Database logical server.</summary>
     internal IReadOnlyList<string> SeparatelyMonitoredDatabasesFor(ServerRuntime server) => _separatelyMonitoredDatabases(server);
 
@@ -1278,7 +1283,7 @@ public sealed partial class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null, int? xeRingBufferMaxEvents = null, Func<string, int, int>? collectorFrequencyMinutes = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null, int? xeRingBufferMaxEvents = null, Func<string, int, int>? collectorFrequencyMinutes = null, Func<string, int, bool>? collectorEnabled = null)
     {
         RingBufferMaxEvents = RingBufferTarget.Clamp(xeRingBufferMaxEvents);
         _queryStoreFetchTopN = queryStoreFetchTopN ?? (() => 0);
@@ -1309,6 +1314,8 @@ public sealed partial class DarlingCollectorRunner
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
         /* #7643: null provider = every collector's shipped cadence (what the worker schedules by when no override is stored). */
         _collectorFrequencyMinutes = collectorFrequencyMinutes ?? ((name, _) => CollectorScheduleDefaults.All[name].FrequencyMinutes);
+        /* #8798: null provider = every collector's shipped default (what the worker dispatches by when no override is stored). */
+        _collectorEnabled = collectorEnabled ?? ((name, _) => CollectorScheduleDefaults.All[name].DefaultEnabled);
         _separatelyMonitoredDatabases = separatelyMonitoredDatabases ?? (_ => Array.Empty<string>());
         /* #4961: null provider = no install id, so no long-query session can be named (what a test that builds a runner
            without one gets). The worker passes the id it made at start. */
