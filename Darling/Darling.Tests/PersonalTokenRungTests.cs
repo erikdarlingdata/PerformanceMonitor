@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: each test mints its own database through ScratchPostgres and so cannot race the shared one. */
-/// <summary>V272 (#8737): the personal MCP token table, its checks and the Viewer's schema probe.</summary>
+/// <summary>V274 (#8737): the personal MCP token table, its checks and the Viewer's schema probe.</summary>
 public sealed class PersonalTokenRungTests
 {
     private const string InsertSql = "INSERT INTO config.mcp_personal_token (token_id, secret_sha256, owner_key, subject, token_name, role, created_at, expires_at) VALUES (@id, @hash, 'owner', 'subject', 'name', @role, @created, @expires)";

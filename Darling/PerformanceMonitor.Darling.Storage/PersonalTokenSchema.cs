@@ -9,13 +9,13 @@
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// V272 (#8737): the store of personal MCP tokens, <c>config.mcp_personal_token</c>. One row per token: the sha256 of its secret (never the
+/// V274 (#8737): the store of personal MCP tokens, <c>config.mcp_personal_token</c>. One row per token: the sha256 of its secret (never the
 /// secret), the owner key and subject it acts as, a name, a role, and its lifetime and revocation. Only the store owner reads or writes it.
 /// </summary>
 public static class PersonalTokenSchema
 {
     /// <summary>The migration creating the table.</summary>
-    public const int Version = 272;
+    public const int Version = 274;
 
     /// <summary>
     /// The table, its index and the owner-only lockdown, applied atomically by the migration runner. Every statement is written literally, with
@@ -106,7 +106,7 @@ ALTER TABLE config.mcp_personal_token ENABLE ALWAYS TRIGGER trg_mcp_personal_tok
 
     /// <summary>
     /// The managed-roles re-revoke: takes every privilege on the table from PUBLIC and the four roles, and grants nothing back. It runs after every
-    /// blanket grant, so none of them can put a privilege back. Guarded, so a store below V272 is left alone.
+    /// blanket grant, so none of them can put a privilege back. Guarded, so a store below V274 is left alone.
     /// </summary>
     public static string ReassertPermissionsSql(string config, string admin, string viewer, string web, string mcp) => $"""
 DO $personal_token$

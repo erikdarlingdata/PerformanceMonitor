@@ -48,7 +48,7 @@ public sealed class DarlingMcpPersonalTokenLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>E1: the store as V271 leaves it (the V272 table and its trigger function dropped). The host starts, a personal token gets 401,
+    /// <summary>E1: the store as V273 leaves it (the V274 table and its trigger function dropped). The host starts, a personal token gets 401,
     /// the file tokens work, and several ticks log the missing table once.</summary>
     [Fact]
     public async Task Personal_StoreOneRungBehind_401_FileTokensWork()

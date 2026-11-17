@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// V272 (#8737): after managed provisioning no login but the store owner reads or writes <c>config.mcp_personal_token</c>, and a stray GRANT
+/// V274 (#8737): after managed provisioning no login but the store owner reads or writes <c>config.mcp_personal_token</c>, and a stray GRANT
 /// made later still cannot write it, because both owner-only triggers are <c>ENABLE ALWAYS</c>. The roles are cluster-wide, so the class is
 /// in the <c>pg-cluster-roles</c> collection.
 /// </summary>
