@@ -142,6 +142,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool LongRunningQueryEnabled => _config.Alerts.LongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => _config.Alerts.TempDbSpaceEnabled;
     public bool TempDbLogSpaceEnabled => _config.Alerts.TempDbLogSpaceEnabled;
+    public bool TempDbGrowthFitEnabled => _config.Alerts.TempDbGrowthFitEnabled;
     public bool LowDiskEnabled => _config.Alerts.LowDiskEnabled;
     public bool LongRunningJobEnabled => _config.Alerts.LongRunningJobEnabled;
     public bool FailedJobEnabled => _config.Alerts.FailedJobEnabled;

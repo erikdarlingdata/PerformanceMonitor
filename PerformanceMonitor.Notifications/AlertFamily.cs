@@ -105,6 +105,7 @@ public static class AlertFamily
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
         ["tempdb Log Space"] = Performance,
+        ["tempdb Growth Fit"] = Performance,
         ["Volume Free Space"] = Performance,
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,

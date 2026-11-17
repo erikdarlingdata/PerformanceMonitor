@@ -109,7 +109,9 @@ public sealed partial class ViewerDataService
         /* #7611 (V245): the three Database Protection ages, APPENDED for the same reason and under the same connect-time store gate. */
         "backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours, " +
         /* #8881 (V269): the TempDB Log Space switch and bar, APPENDED for the same reason and under the same connect-time store gate (a store below V269 is refused at connect, so the columns exist). */
-        "tempdb_log_space_enabled, tempdb_log_space_threshold_percent";
+        "tempdb_log_space_enabled, tempdb_log_space_threshold_percent, " +
+        /* #8882 (V270): the TempDB Growth Fit alert's switch, APPENDED for the same reason and under the same connect-time store gate. */
+        "tempdb_growth_fit_enabled";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -126,7 +128,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -230,6 +232,7 @@ ON CONFLICT (id) DO UPDATE SET
     checkdb_overdue_threshold_hours = EXCLUDED.checkdb_overdue_threshold_hours,
     tempdb_log_space_enabled = EXCLUDED.tempdb_log_space_enabled,
     tempdb_log_space_threshold_percent = EXCLUDED.tempdb_log_space_threshold_percent,
+    tempdb_growth_fit_enabled = EXCLUDED.tempdb_growth_fit_enabled,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -386,6 +389,7 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey) });        // $99 (#7611, V245)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.TempDbLogSpaceEnabled });                                                                    // $100 (#8881, V269)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Clamp(r.TempDbLogSpaceThresholdPercent, 1, 100) });                                        // $101 (#8881, V269)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.TempDbGrowthFitEnabled });                                                                   // $102 (#8882, V270)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -517,6 +521,8 @@ ON CONFLICT (id) DO UPDATE SET
         CheckDbOverdueThresholdHours = reader.GetInt32(98),
         TempDbLogSpaceEnabled = reader.GetBoolean(99),
         TempDbLogSpaceThresholdPercent = reader.GetInt32(100),
+        /* #8882 (V270): the TempDB Growth Fit switch appended at ordinal 101. */
+        TempDbGrowthFitEnabled = reader.GetBoolean(101),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -697,6 +703,8 @@ public sealed class AlertSettingsRow
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
+    /// <summary>#8882 (V270): alert when the next autogrowth of a tempdb file will not fit on its volume. On by default.</summary>
+    public bool TempDbGrowthFitEnabled { get; set; } = true;
     public int TempDbSpaceThresholdPercent { get; set; } = 80;
     /// <summary>#8881 (V269): the TempDB Log Space alert's switch and bar (percent of the tempdb log used).</summary>
     public bool TempDbLogSpaceEnabled { get; set; } = true;
@@ -901,6 +909,7 @@ public sealed class AlertSettingsRow
             && string.Equals(DailyReportTitle, other.DailyReportTitle, StringComparison.Ordinal)
             && BackupOverdueThresholdHours == other.BackupOverdueThresholdHours
             && LogBackupOverdueThresholdMinutes == other.LogBackupOverdueThresholdMinutes
-            && CheckDbOverdueThresholdHours == other.CheckDbOverdueThresholdHours;
+            && CheckDbOverdueThresholdHours == other.CheckDbOverdueThresholdHours
+            && TempDbGrowthFitEnabled == other.TempDbGrowthFitEnabled;
     }
 }

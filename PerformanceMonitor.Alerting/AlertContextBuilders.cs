@@ -1355,6 +1355,76 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>The headline of the TempDB Growth Won't Fit alert (#8882): the largest shortfall, and how many more volumes are short.</summary>
+    public static string TempDbGrowthFitMessage(TempDbGrowthFitResult result) => TempDbGrowthFit.Describe(result);
+
+    /// <summary>
+    /// The TempDB Growth Won't Fit context (#8882): one item per volume that cannot take the next growth, naming the volume, the files, the
+    /// MB needed and the MB free, then one item with the count of files that cannot grow at all.
+    /// </summary>
+    public static AlertContext? BuildTempDbGrowthFitContext(TempDbGrowthFitResult result)
+    {
+        if (result is null) throw new ArgumentNullException(nameof(result));
+
+        var context = new AlertContext();
+        foreach (var shortfall in result.Shortfalls)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = $"{shortfall.Volume}: next {(shortfall.IsLog ? "log" : "data file")} growth needs {shortfall.NeededMb:F0} MB, {shortfall.FreeMb:F0} MB free",
+                Fields = new()
+                {
+                    ("Volume", shortfall.Volume),
+                    ("Files", string.Join(", ", shortfall.FileNames)),
+                    ("Growth Needed", $"{shortfall.NeededMb:F0} MB"),
+                    ("Volume Free", $"{shortfall.FreeMb:F0} MB"),
+                    ("Short By", $"{shortfall.ShortByMb:F0} MB")
+                }
+            });
+        }
+
+        var cannotGrow = BuildTempDbCannotGrowItem(result, onlyWhenNoDataFileCanGrow: false);
+        if (cannotGrow is not null)
+        {
+            context.Details.Add(cannotGrow);
+        }
+
+        return context;
+    }
+
+    /// <summary>
+    /// The count of tempdb files that cannot grow (growth turned off, or already at the ceiling), and "no data file can grow" when that
+    /// is true of every data file (#8882). Null when there is nothing to say: no such file, or, with
+    /// <paramref name="onlyWhenNoDataFileCanGrow"/>, when at least one data file can still grow.
+    /// </summary>
+    public static AlertDetailItem? BuildTempDbCannotGrowItem(TempDbGrowthFitResult result, bool onlyWhenNoDataFileCanGrow)
+    {
+        if (result is null) throw new ArgumentNullException(nameof(result));
+
+        if (result.FilesUnableToGrow.Count == 0 || (onlyWhenNoDataFileCanGrow && !result.NoDataFileCanGrow))
+        {
+            return null;
+        }
+
+        var fields = new List<(string, string)>
+        {
+            ("Files That Cannot Grow", $"{result.FilesUnableToGrow.Count} of {result.FileCount}"),
+            ("Names", string.Join(", ", result.FilesUnableToGrow))
+        };
+        if (result.NoDataFileCanGrow)
+        {
+            fields.Insert(0, ("No Data File Can Grow", $"All {result.DataFileCount} data files are at their ceiling or have growth turned off"));
+        }
+
+        return new AlertDetailItem
+        {
+            Heading = result.NoDataFileCanGrow
+                ? $"tempdb: no data file can grow ({result.FilesUnableToGrow.Count} of {result.FileCount} files cannot grow)"
+                : $"tempdb: {result.FilesUnableToGrow.Count} of {result.FileCount} files cannot grow",
+            Fields = fields
+        };
+    }
+
     public static AlertContext? BuildTempDbSpaceContext(TempDbSpaceInfo tempDb)
     {
         var context = new AlertContext();

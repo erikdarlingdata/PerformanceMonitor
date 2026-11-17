@@ -271,6 +271,7 @@ public partial class App : Application
        rule). Empty by default; persisted as the alert_excluded_volumes array, edited on the Alerts tab. */
     public static List<string> AlertExcludedVolumes { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
+    public static bool AlertTempDbGrowthFitEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
     public static bool AlertTempDbLogSpaceEnabled { get; set; } = true;
     public static int AlertTempDbLogSpaceThresholdPercent { get; set; } = 80;
@@ -1515,6 +1516,7 @@ public partial class App : Application
             if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);
             if (read.TryGetProperty("alert_tempdb_log_space_enabled", out v)) AlertTempDbLogSpaceEnabled = v.Bool(AlertTempDbLogSpaceEnabled);
             if (read.TryGetProperty("alert_tempdb_log_space_threshold_percent", out v)) AlertTempDbLogSpaceThresholdPercent = v.WholeNumber(AlertTempDbLogSpaceThresholdPercent, 1, 100);
+            if (read.TryGetProperty("alert_tempdb_growth_fit_enabled", out v)) AlertTempDbGrowthFitEnabled = v.Bool(AlertTempDbGrowthFitEnabled);
             if (read.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.Bool(AlertLowDiskEnabled);
             if (read.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = v.WholeNumber(AlertLowDiskThresholdPercent, 0, 100);
             if (read.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = v.WholeNumber(AlertLowDiskThresholdGb, 0, int.MaxValue);

@@ -232,6 +232,13 @@ public class AlertBodyClockFrameDisciplineTests
                 HolderSessionId = 57, HolderLoginName = "etl_login", HolderProgramName = "nightly load",
                 HolderBeginTimeUtc = AnchorUtc.AddMinutes(-42), HolderLogBytesUsed = 734_003_200, HolderLogBytesReserved = 1_048_576_000
             }, AnchorUtc)),
+        ("BuildTempDbGrowthFitContext", () => AlertContextBuilders.BuildTempDbGrowthFitContext(
+            new TempDbGrowthFitResult
+            {
+                FileCount = 9, DataFileCount = 8, JudgedFileCount = 9, DataFilesUnableToGrow = 1,
+                FilesUnableToGrow = ["tempdev8"],
+                Shortfalls = [new TempDbGrowthShortfall("T:\\", IsLog: false, ["tempdev1", "tempdev2"], NeededMb: 8_192, FreeMb: 2_048)]
+            })),
 
         /* The two server-sourced instants. Planted on the server's clock with the fleet offset, which is
            the shape the defect was measured in. */
@@ -304,7 +311,7 @@ public class AlertBodyClockFrameDisciplineTests
 
         /* And the census is closed, not a floor: a builder that vanishes has to be a deliberate edit here
            rather than a silently shorter scan. */
-        Assert.Equal(11, reflected.Count);
+        Assert.Equal(12, reflected.Count);
     }
 
     [Fact]

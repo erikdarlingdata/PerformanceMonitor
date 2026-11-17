@@ -42,6 +42,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool LongRunningQueryEnabled => App.AlertLongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => App.AlertTempDbSpaceEnabled;
     public bool TempDbLogSpaceEnabled => App.AlertTempDbLogSpaceEnabled;
+    public bool TempDbGrowthFitEnabled => App.AlertTempDbGrowthFitEnabled;
     public bool LowDiskEnabled => App.AlertLowDiskEnabled;
     public bool PvsEnabled => App.AlertPvsEnabled;
     public bool LongRunningJobEnabled => App.AlertLongRunningJobEnabled;

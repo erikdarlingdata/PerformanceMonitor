@@ -74,6 +74,7 @@ public static class InvestigationFamily
         ["Runnable Queue"] = Resources,
         ["tempdb Space"] = Resources,
         ["tempdb Log Space"] = Resources,
+        ["tempdb Growth Fit"] = Resources,
         ["Version Store (PVS)"] = Resources,
         ["Volume Free Space"] = Resources,
         ["Database File Growth"] = Resources,

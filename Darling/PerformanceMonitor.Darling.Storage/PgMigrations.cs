@@ -3484,6 +3484,10 @@ $rung$;";
         new Migration(268, "object-usage", V268Sql),
         /* V269 (#8881): the tempdb log on tempdb_stats, and what holds it. Eleven nullable columns, no DEFAULT, no backfill, plus the alert's switch and bar on config_alert_settings (NOT NULL with a DEFAULT). */
         new Migration(269, "tempdb-log-space", V269Sql),
+        /* V270 (#8882): tempdb's 'autogrow all files' flag on the database size rows. One nullable boolean column, then the SELECT * view over the table is
+           expanded again. Nothing is backfilled: a row stored before this rung never read the flag, so NULL is the honest value, and the next hourly pass
+           writes it. The same rung adds the TempDB Growth Fit switch column to the alert settings row (default on). */
+        new Migration(270, "database-size-autogrow-all-files", V270Sql),
     };
 
     /// <summary>
@@ -3524,6 +3528,23 @@ ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_reser
 ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_log_space_enabled boolean NOT NULL DEFAULT TRUE;
 ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_log_space_threshold_percent integer NOT NULL DEFAULT 80;
 CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
+
+    /// <summary>
+    /// V270 (#8882): <c>collect.database_size_stats.is_autogrow_all_files</c>, whether the file's filegroup grows all its files together
+    /// (<c>sys.filegroups.is_autogrow_all_files</c>). Collected for tempdb's data files only; NULL on the log file, on every other database,
+    /// on a server before SQL Server 2016 and on a row stored before this rung. One nullable <c>boolean</c>, no DEFAULT, no backfill (V241's shape),
+    /// which is catalog-only and accepted on a compressed hypertable. <b>Appended LAST</b>, after <c>vlf_count</c>, because the writer is a
+    /// positional binary COPY with an explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload,
+    /// and this ALTER no-ops there) and an upgraded one share one physical column order. The trailing <c>CREATE OR REPLACE VIEW</c> re-expands
+    /// <c>v_database_size_stats</c>' pinned <c>SELECT *</c>. An older build writes its own column list, so the column stays NULL for the rows it
+    /// writes. The rung also adds <c>config.config_alert_settings.tempdb_growth_fit_enabled</c>, the TempDB Growth Fit alert's switch, a
+    /// <c>boolean NOT NULL DEFAULT TRUE</c> (<c>notify_connection_changes</c>' shape), so the switch a Viewer saves is the one the service reads back
+    /// at startup.
+    /// </summary>
+    private const string V270Sql = @"
+ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
+CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

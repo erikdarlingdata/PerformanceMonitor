@@ -255,6 +255,8 @@
     // The file seeds a new store only; after that the store's value governs, and the Viewer's Settings window edits it.
     "tempDbLogSpaceEnabled": true,
     "tempDbLogSpaceThresholdPercent": 80,
+    // TempDB Growth Won't Fit: alert when the next autogrowth of a tempdb file will not fit on its volume. Default true.
+    "tempDbGrowthFitEnabled": true,
     "cpuThresholdPercent": 80,
     "cpuMode": "total", // "total" (SQL + other processes) or "sql" (SQL process only)
     // Blocking pages on blocked WAIT TIME, not on one event. "blockingCountThreshold" (default 3) pages when

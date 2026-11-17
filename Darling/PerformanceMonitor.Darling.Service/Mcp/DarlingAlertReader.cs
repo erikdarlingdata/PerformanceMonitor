@@ -705,7 +705,9 @@ LIMIT 1";
         int CheckDbOverdueThresholdHours,
         /* #8881 (V269): the TempDB Log Space switch and bar. APPENDED, same reason. */
         bool TempDbLogSpaceEnabled,
-        int TempDbLogSpaceThresholdPercent);
+        int TempDbLogSpaceThresholdPercent,
+        /* #8882 (V270): the TempDB Growth Fit switch (boolean NOT NULL DEFAULT TRUE). APPENDED, same reason. */
+        bool TempDbGrowthFitEnabled);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -750,7 +752,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
        daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
        backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
-       tempdb_log_space_enabled, tempdb_log_space_threshold_percent
+       tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+       tempdb_growth_fit_enabled
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -834,7 +837,9 @@ WHERE id = 1";
             /* #7611 (V245): the three Database Protection ages at 96-98. */
             reader.GetInt32(96), reader.GetInt32(97), reader.GetInt32(98),
             /* #8881 (V269): the TempDB Log Space switch and bar at 99-100. */
-            reader.GetBoolean(99), reader.GetInt32(100));
+            reader.GetBoolean(99), reader.GetInt32(100),
+            /* #8882 (V270): the TempDB Growth Fit switch at 101. */
+            reader.GetBoolean(101));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

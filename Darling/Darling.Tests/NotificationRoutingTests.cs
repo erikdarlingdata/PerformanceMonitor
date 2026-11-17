@@ -511,6 +511,8 @@ public sealed class NotificationRoutingTests
             AlertEngine.CpuPersistenceMetric,
             /* #8881: the TempDB Log Space alert fires through the constant, which the AlertOutcome literal scan below cannot see. */
             AlertEngine.TempDbLogSpacePersistenceMetric,
+            /* #8882: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            AlertEngine.TempDbGrowthFitPersistenceMetric,
             PostgresAlertEvaluator.WraparoundMetric, PostgresAlertEvaluator.XminHorizonMetric,
             PostgresAlertEvaluator.SlotRetentionMetric, PostgresAlertEvaluator.PoisonWaitMetric,
             ForcePlanTokens.MetricName, DatabaseStateTokens.MetricName,

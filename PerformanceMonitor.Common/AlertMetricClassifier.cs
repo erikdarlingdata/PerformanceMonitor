@@ -198,6 +198,9 @@ namespace PerformanceMonitor.Common
                window on both engines (before that, SQL Server's average ms per wait; rows from then still
                render in the same unit, which is why the arm did not change). Long-running query carries
                elapsed minutes. */
+            /* #8882: tempdb Growth Fit carries megabytes, not a percentage: the next growth step the volume cannot hold, and the free space on that volume. */
+            "tempdb Growth Fit" => $"{value:F0} MB",
+
             "Poison Wait" => $"{value:F0} ms",
 
             /* #5641: Runnable Queue carries the window's average runnable tasks per scheduler, and the bar it crossed. */

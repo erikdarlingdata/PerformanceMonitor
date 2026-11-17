@@ -1799,6 +1799,127 @@ LIMIT 1";
         return found;
     }
 
+    /* ---------------- tempdb files for the growth-fit alert (#8882) ---------------- */
+
+    /// <summary>
+    /// The tempdb files (database_id 2) of the newest <c>database_size_stats</c> collection: each file's growth settings, its volume
+    /// and the volume's free space, all from one collection so they describe one instant. $1 server_id.
+    /// </summary>
+    public const string TempDbFilesSql = @"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   database_id = 2
+)
+ORDER BY file_id";
+
+    /// <summary><see cref="TempDbFilesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same server
+    /// returned (<see cref="NewestRowFloor"/>), never a clock. Same rows, same order.</summary>
+    public const string TempDbFilesSinceSql = @"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time >= $2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   database_id = 2
+    AND   collection_time >= $2
+)
+ORDER BY file_id";
+
+    private readonly NewestRowFloor _tempDbFilesFloor = new();
+
+    public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetTempDbFilesCoreAsync(serverKey, ct),
+            serverKey,
+            "TempDB growth fit",
+            cancellationToken);
+    }
+
+    private async Task<List<TempDbFileInfo>> GetTempDbFilesCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<TempDbFileInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await _tempDbFilesFloor.ReadAsync(serverId, async since =>
+        {
+            items.Clear();
+            DateTime? newest = null;
+            using var command = new NpgsqlCommand(since is null ? TempDbFilesSql : TempDbFilesSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var item = new TempDbFileInfo
+                {
+                    FileId = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+                    FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    FileTypeDesc = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    TotalSizeMb = reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
+                    AutoGrowthMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
+                    IsPercentGrowth = !reader.IsDBNull(5) && reader.GetBoolean(5),
+                    GrowthPct = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
+                    MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+                    VolumeMountPoint = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    VolumeTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                    VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                    IsAutogrowAllFiles = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
+                    CollectionTimeUtc = reader.IsDBNull(12) ? null : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc)
+                };
+                items.Add(item);
+                if (item.CollectionTimeUtc is { } sampled && (newest is null || sampled > newest))
+                {
+                    newest = sampled;
+                }
+            }
+
+            return newest;
+        });
+
+        return items;
+    }
+
     /* ---------------- anomalous jobs ---------------- */
 
     /// <summary>

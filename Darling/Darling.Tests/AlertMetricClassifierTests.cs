@@ -138,4 +138,12 @@ public class AlertMetricClassifierTests
         Assert.True(AlertMetricClassifier.IsWarning(null));
         Assert.True(AlertMetricClassifier.IsWarning(""));
     }
+
+    [Fact]
+    public void FormatHistoryValue_TempDbGrowthFit_RendersMegabytes_NotAPercentage()
+    {
+        /* Review of #8887: the alert stores the growth the volume cannot hold and the volume's free space, both in MB. */
+        Assert.Equal("4096 MB", AlertMetricClassifier.FormatHistoryValue("tempdb Growth Fit", 4096));
+        Assert.Equal("1000 MB", AlertMetricClassifier.FormatHistoryValue("tempdb Growth Fit", 1000));
+    }
 }

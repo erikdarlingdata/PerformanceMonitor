@@ -522,7 +522,8 @@ internal static class GoldenCollectorSchema
     volume_free_mb DECIMAL(19,2),
     is_percent_growth BOOLEAN,
     growth_pct INTEGER,
-    vlf_count INTEGER
+    vlf_count INTEGER,
+    is_autogrow_all_files BOOLEAN
 )",
         ["index_object_stats"] = @"CREATE TABLE IF NOT EXISTS index_object_stats (
     collection_id BIGINT PRIMARY KEY,

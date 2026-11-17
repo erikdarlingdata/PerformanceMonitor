@@ -958,6 +958,7 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
         AlertTempDbLogSpaceCheckBox.IsChecked = App.AlertTempDbLogSpaceEnabled;
         AlertTempDbLogSpaceThresholdBox.Text = App.AlertTempDbLogSpaceThresholdPercent.ToString();
+        AlertTempDbGrowthFitCheckBox.IsChecked = App.AlertTempDbGrowthFitEnabled;
         AlertLowDiskCheckBox.IsChecked = App.AlertLowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = App.AlertLowDiskThresholdPercent.ToString();
         AlertLowDiskThresholdGbBox.Text = App.AlertLowDiskThresholdGb.ToString();
@@ -1127,6 +1128,7 @@ public partial class SettingsWindow : Window
         App.AlertTempDbLogSpaceEnabled = AlertTempDbLogSpaceCheckBox.IsChecked == true;
         if (int.TryParse(AlertTempDbLogSpaceThresholdBox.Text, out var tempDbLog) && tempDbLog > 0 && tempDbLog <= 100)
             App.AlertTempDbLogSpaceThresholdPercent = tempDbLog;
+        App.AlertTempDbGrowthFitEnabled = AlertTempDbGrowthFitCheckBox.IsChecked == true;
         App.AlertLowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true;
         if (int.TryParse(AlertLowDiskThresholdPercentBox.Text, out var lowDiskPct) && lowDiskPct >= 0 && lowDiskPct <= 100)
             App.AlertLowDiskThresholdPercent = lowDiskPct;
@@ -1250,6 +1252,7 @@ public partial class SettingsWindow : Window
         root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
         root["alert_tempdb_log_space_enabled"] = App.AlertTempDbLogSpaceEnabled;
         root["alert_tempdb_log_space_threshold_percent"] = App.AlertTempDbLogSpaceThresholdPercent;
+        root["alert_tempdb_growth_fit_enabled"] = App.AlertTempDbGrowthFitEnabled;
         root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
         root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
         root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
@@ -1389,6 +1392,8 @@ public partial class SettingsWindow : Window
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
         if (AlertTempDbLogSpaceCheckBox.IsChecked == true)
             parts.Add($"tempdb log > {AlertTempDbLogSpaceThresholdBox.Text}%");
+        if (AlertTempDbGrowthFitCheckBox.IsChecked == true)
+            parts.Add("tempdb growth will not fit");
         if (AlertLowDiskCheckBox.IsChecked == true)
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
@@ -1439,6 +1444,7 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
         AlertTempDbLogSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbLogSpaceThresholdBox.IsEnabled = enabled;
+        AlertTempDbGrowthFitCheckBox.IsEnabled = enabled;
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
