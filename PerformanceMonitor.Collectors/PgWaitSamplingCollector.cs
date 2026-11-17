@@ -236,7 +236,7 @@ WHERE a.pid <> pg_backend_pid()
   AND coalesce(a.application_name, '') NOT IN ('" + ServiceApplicationName + "', '" + ServiceRemediationApplicationName + @"')
   AND (a.wait_event_type IS NOT NULL OR a.state = 'active')
   AND coalesce(a.wait_event_type, 'CPU') NOT IN (" + IgnoredTypeList + @")
-  AND NOT (a.wait_event_type = 'Extension' AND a.wait_event = 'Extension'
+  AND NOT (a.wait_event_type IS NOT DISTINCT FROM 'Extension' AND a.wait_event IS NOT DISTINCT FROM 'Extension'
            AND coalesce(a.backend_type, 'client backend') <> 'client backend')";
 
     /// <summary>

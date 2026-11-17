@@ -131,7 +131,7 @@ public sealed class PgBackgroundWorkerWaitRankingLiveTests
 
     /// <summary>
     /// The sampler's own snapshot statement, run over a stand-in pg_stat_activity so each backend type is present at once:
-    /// a background worker's generic Extension wait is dropped, a client backend's is kept, and a background worker's named wait is kept.
+    /// a background worker's generic Extension wait is dropped, a client backend's is kept, a background worker's named wait is kept, and an active background worker on CPU (no wait type, no wait event) is kept.
     /// </summary>
     [Fact]
     public async Task TheSamplerSnapshot_DropsABackgroundWorkersGenericExtensionWait_AndKeepsAClientBackends()
@@ -151,7 +151,8 @@ public sealed class PgBackgroundWorkerWaitRankingLiveTests
                 (102, 'Extension', 'Extension', 'idle', '', NULL, 'TimescaleDB Background Worker Scheduler'),
                 (103, 'Extension', 'Extension', 'active', 'app', 7, 'client backend'),
                 (104, 'IO', 'WalSync', 'active', '', NULL, 'walwriter'),
-                (105, 'Extension', 'PostgresFdwGetResult', 'active', 'app', 8, 'client backend')",
+                (105, 'Extension', 'PostgresFdwGetResult', 'active', 'app', 8, 'client backend'),
+                (106, NULL, NULL, 'active', '', NULL, 'autovacuum worker')",
         })
         {
             await using var setup = new NpgsqlCommand(statement, connection);
@@ -168,7 +169,7 @@ public sealed class PgBackgroundWorkerWaitRankingLiveTests
             }
         }
 
-        Assert.Equal(new[] { 103, 104, 105 }, kept.OrderBy(pid => pid).ToArray());
+        Assert.Equal(new[] { 103, 104, 105, 106 }, kept.OrderBy(pid => pid).ToArray());
     }
 
     private static async Task SeedSampledAsync(NpgsqlConnection connection, string eventType, string eventName, CancellationToken ct, params long[] counts)

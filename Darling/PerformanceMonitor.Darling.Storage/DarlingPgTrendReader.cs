@@ -205,7 +205,7 @@ public static class DarlingPgTrendReader
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   wait_event IS NOT NULL
-        AND   NOT (coalesce(wait_type, '') = 'Extension' AND wait_event = 'Extension')
+        AND   NOT (wait_type IS NOT DISTINCT FROM 'Extension' AND wait_event IS NOT DISTINCT FROM 'Extension')
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   sample_interval_seconds > 0
@@ -556,7 +556,7 @@ public static class DarlingPgTrendReader
             WHERE server_id = $1
             AND   event IS NOT NULL
             AND   coalesce(event_type, '') <> 'CPU'
-            AND   NOT (coalesce(event_type, '') = 'Extension' AND event = 'Extension')
+            AND   NOT (event_type IS NOT DISTINCT FROM 'Extension' AND event IS NOT DISTINCT FROM 'Extension')
             AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY event, collection_time
