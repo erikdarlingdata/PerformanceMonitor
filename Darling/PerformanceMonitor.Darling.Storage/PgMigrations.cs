@@ -2913,6 +2913,34 @@ BEGIN
 END $$;";
 
     /// <summary>
+    /// V272 (#8824): the hourly wait totals, <c>collect.wait_stats_hourly</c>, created where the store can hold it at migration time so the
+    /// Daily Summary can read the hours of an open day from it instead of summing raw <c>wait_stats</c>. V259's shape at hour grain: per
+    /// server, per UTC hour, per stored wait type, the summed positive <c>delta_wait_time_ms</c>. On a TimescaleDB store whose
+    /// <c>wait_stats</c> is already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is
+    /// catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it and gives it the refresh policy (four days
+    /// of window, which fills it) and the five-day retention. There is no backfill step: the policy's own first run fills the days it keeps.
+    /// On a store without TimescaleDB, or a fresh one whose table is not yet a hypertable here, it is the plain view over
+    /// <c>collect.wait_stats</c>, which the sweep drops for the aggregate once the table is a hypertable. Idempotent. An older build ignores
+    /// the relation and reads raw <c>wait_stats</c> as before.
+    /// </summary>
+    private static readonly string V272Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
+    END IF;
+
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsHourlySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.wait_stats_hourly') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsHourlyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V263 (#8549): the oldest-run rollup, <c>collect.job_history_oldest_daily</c>, created where the store can hold it at migration time
     /// so the Job History time range picker's "Data starts" note can read each server's first run from one small row per server per day
     /// instead of sorting every compressed <c>job_history</c> chunk. Per server, per UTC day of collection: the smallest <c>run_datetime</c>.
@@ -3490,6 +3518,8 @@ $rung$;";
         new Migration(270, "database-size-autogrow-all-files", V270Sql),
         /* V271 (#8884): the Instance Restarted and Memory Dumps alert switches on the alert settings. Two catalog-only boolean columns that default on. */
         new Migration(271, "instance-event-alert-switches", V271Sql),
+        /* V272 (#8824): the hourly wait totals, the open day's read under the Daily Summary. Catalog-only: no existing row moves. */
+        new Migration(272, "wait-stats-hourly-rollup", V272Sql),
     };
 
     /// <summary>

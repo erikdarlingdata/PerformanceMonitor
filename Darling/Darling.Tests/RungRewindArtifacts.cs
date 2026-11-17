@@ -836,6 +836,10 @@ CREATE OR REPLACE VIEW collect.v_database_size_stats AS SELECT * FROM collect.da
         // (the probe's sentinel is the Memory Dumps one) and the re-run of V271 adds them back on. Safe on a store that never had them.
         new(271, "hasInstanceEventAlertSwitches",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS instance_restarted_enabled, DROP COLUMN IF EXISTS memory_dumps_enabled;"),
+        // V272 (#8824): the hourly wait totals. The probe's sentinel is the relation itself, a continuous aggregate or the plain view, so the
+        // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V272 or the ensure sweep makes it
+        // again. Safe on a store that never had it.
+        new(272, "hasWaitStatsHourly", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsHourlyView)),
     ];
 
     /// <summary>

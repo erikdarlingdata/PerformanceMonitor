@@ -594,6 +594,19 @@ public static partial class TimescaleSupport
     /// TimescaleDB store, a plain view over the same select elsewhere. OFF the hourly phase grid: see <see cref="OffGridAggregates"/>.</summary>
     public const string WaitStatsDailyView = "wait_stats_daily";
 
+    /// <summary>The hourly wait totals rollup (#8824): per server, per UTC hour, per stored wait type, the summed positive
+    /// <c>delta_wait_time_ms</c>. Read by <c>DailySummarySql</c>'s <c>wait_per_spelling</c> part for the hours of a day that
+    /// <see cref="WaitStatsDailyView"/> does not hold yet (the open day, and the day or two the daily refresh has not reached), so the
+    /// first visit of the day no longer sums those hours from raw <c>wait_stats</c>. Holds only the days that read needs
+    /// (<see cref="WaitStatsHourlyRetentionInterval"/>); the daily rollup holds the long history. A continuous aggregate (materialized
+    /// only) on a TimescaleDB store, a plain view over the same select elsewhere. OFF the hourly phase grid: see
+    /// <see cref="OffGridAggregates"/>.</summary>
+    public const string WaitStatsHourlyView = "wait_stats_hourly";
+
+    /// <summary>How long <see cref="WaitStatsHourlyView"/> keeps its buckets (#8824): one day past the four days of refresh window
+    /// (<see cref="DailyRefreshStartOffset"/>), so a retention drop never outruns a refresh. The daily rollup holds everything older.</summary>
+    public const string WaitStatsHourlyRetentionInterval = "5 days";
+
     /// <summary>The oldest run per server per UTC day of collection (#8549): <c>min(run_datetime)</c> of <c>job_history</c> by
     /// <c>time_bucket('1 day', collection_time)</c>. Read by the Job History time range picker's "Data starts" note for every day it
     /// holds, so the note no longer sorts every compressed chunk to find each server's first run. A continuous aggregate (materialized
@@ -834,6 +847,52 @@ GROUP BY server_id, date_trunc('day', collection_time), wait_type";
             HourlyRefreshScheduleInterval,
             phaseMinutes: null,
             bucketsPerBatch: DailyRefreshBucketsPerBatch);
+
+    /// <summary>The hourly wait totals rollup (#8824), <see cref="WaitStatsHourlyView"/>. <see cref="CreateWaitStatsDailySql"/> at hour
+    /// grain: key (server_id, bucket, wait_type), the stored spelling kept, the same <c>delta_wait_time_ms &gt; 0</c> filter and sum, over
+    /// a <c>time_bucket('1 hour')</c> that is the same hour <c>date_trunc('hour', collection_time)</c> gives on the naive-UTC column.
+    /// <c>materialized_only = true</c>: the read takes an hour from the rollup when it holds it and from raw for every other hour, so a
+    /// real-time branch would only add a second read of the newest hours. Created <c>WITH NO DATA</c>: the refresh policy comes from
+    /// the ensure sweep.</summary>
+    public const string CreateWaitStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_hourly
+WITH (timescaledb.continuous, timescaledb.materialized_only = true) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    wait_type,
+    sum(delta_wait_time_ms) AS delta_wait_time_ms
+FROM collect.wait_stats
+WHERE delta_wait_time_ms > 0
+GROUP BY server_id, bucket, wait_type
+WITH NO DATA";
+
+    /// <summary>The plain view <see cref="WaitStatsHourlyView"/> is on a store whose <c>wait_stats</c> is not a hypertable (no
+    /// TimescaleDB, or a fresh store before its conversion): the same select with <c>date_trunc('hour')</c> for <c>time_bucket</c>. The
+    /// ensure sweep drops it for the aggregate once the table is a hypertable. It holds every hour, which reads the same rows the raw
+    /// statement would.</summary>
+    public const string CreateWaitStatsHourlyFallbackViewSql = @"CREATE OR REPLACE VIEW collect.wait_stats_hourly AS
+SELECT
+    server_id,
+    date_trunc('hour', collection_time) AS bucket,
+    wait_type,
+    sum(delta_wait_time_ms) AS delta_wait_time_ms
+FROM collect.wait_stats
+WHERE delta_wait_time_ms > 0
+GROUP BY server_id, date_trunc('hour', collection_time), wait_type";
+
+    /// <summary><see cref="WaitStatsHourlyView"/>'s refresh policy (#8824): <see cref="WaitStatsDailyView"/>'s schedule and end offset
+    /// exactly (the hourly interval as BOTH <c>schedule_interval</c> and <c>end_offset</c>, see
+    /// <see cref="ScheduleIntervalDoublesAsEndOffset"/>), over <see cref="DailyRefreshStartOffset"/> of window: the open day plus the days
+    /// the daily refresh can lag. An hour is materialized once it is whole and an hour old, and a row that arrives for an already
+    /// materialized hour invalidates its bucket so the next run re-sums it. One run re-sums at most the hours whose raw rows changed,
+    /// so there is nothing to batch.</summary>
+    public static string AddWaitStatsHourlyRefreshPolicySql()
+        => AddContinuousAggregatePolicySql(
+            WaitStatsHourlyView,
+            DailyRefreshStartOffset,
+            HourlyRefreshScheduleInterval,
+            HourlyRefreshScheduleInterval,
+            phaseMinutes: null);
 
     /// <summary>The oldest-run rollup (#8549), <see cref="JobHistoryOldestDailyView"/>. Key (server_id, bucket); the one value is the
     /// smallest <c>run_datetime</c> (the server's wall clock as stored, NULLs ignored as the note's ordered read puts them last) among
@@ -2549,6 +2608,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
         PerfmonIntervalBaselineView => "perfmon_stats",
         WaitStatsCadenceBaselineView => "wait_stats",
         WaitStatsDailyView => "wait_stats",
+        WaitStatsHourlyView => "wait_stats",
         JobHistoryOldestDailyView => "job_history",
         WaitStatsIntervalBaselineView => "wait_stats",
         /* The superseded pair reads the same raw tables; named so the retirement fixture and any coverage probe
@@ -7094,7 +7154,7 @@ WITH NO DATA";
            would quietly do nothing against them, leaving the store permanently on raw scans, so the stale
            fallback is dropped first. Guarded to never touch a real continuous aggregate, and isolated per
            view — this is a transition path, and failing it must not stop the sweep. */
-        foreach (var view in BaselineAggregates.Select(a => a.View).Append(WaitStatsDailyView).Append(JobHistoryOldestDailyView))
+        foreach (var view in BaselineAggregates.Select(a => a.View).Append(WaitStatsDailyView).Append(WaitStatsHourlyView).Append(JobHistoryOldestDailyView))
         {
             try
             {
@@ -8783,6 +8843,10 @@ AND   j.hypertable_name = '{relation}'";
             /* #8549: the daily wait totals are a LEAF (#1757's rule): their consumer is the Daily Summary's 30-day read, so Coverage names
                the aggregate itself. 35 days, the baseline tier's span, five days past the 30-day window. */
             (Relation: WaitStatsDailyView, DropAfter: BaselineRetentionInterval, TimeColumn: "bucket", Coverage: new[] { WaitStatsDailyView }),
+
+            /* #8824: the hourly wait totals are a LEAF too: the open-day read is their only consumer, and the daily rollup above holds
+               everything older, so Coverage names the aggregate itself. 5 days, one past the four days its refresh policy re-materializes. */
+            (Relation: WaitStatsHourlyView, DropAfter: WaitStatsHourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { WaitStatsHourlyView }),
         })
         /* The seven baseline-tier policies (#1757; nine until #2007). Coverage is the tier ITSELF: see the leaf rule in the
            summary above -- their consumer is the baseline computation, whose capture requirement is the
@@ -11349,7 +11413,10 @@ AND   ca.view_name IN ({views})";
         /* #8549: the daily wait totals. Existence is the probe once more: a store on an older service, or one whose sweep has not
            made the aggregate yet, has none (or the plain view on a store without TimescaleDB), and the Daily Summary reads raw
            wait_stats for exactly that store. */
-        $"to_regclass('collect.{WaitStatsDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{WaitStatsDailyView}') IS NOT NULL, " +
+        /* #8824: the hourly wait totals. Existence is the probe once more: a store on an older service has none, and the Daily Summary
+           reads its open day from raw wait_stats for exactly that store. */
+        $"to_regclass('collect.{WaitStatsHourlyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -11378,7 +11445,7 @@ AND   ca.view_name IN ({views})";
             reader.GetBoolean(11), reader.GetBoolean(12),
             reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
             reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18),
-            reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21));
+            reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -14135,6 +14202,8 @@ WITH NO DATA";
         /* #8549: the daily wait totals, off the grid for the reason the entry above is: a grid member costs the heaviest refresh
            window lead time, and its refresh only works once a day. The daily policy has no grid minute. */
         (CreateWaitStatsDailySql, WaitStatsDailyView, AddWaitStatsDailyRefreshPolicySql),
+        /* #8824: the hourly wait totals under the Daily Summary's open-day read, off the grid for the same reason as the daily ones. */
+        (CreateWaitStatsHourlySql, WaitStatsHourlyView, AddWaitStatsHourlyRefreshPolicySql),
         /* #8549: the oldest-run rollup under the Job History note, off the grid for the same reason as the daily wait totals. */
         (CreateJobHistoryOldestDailySql, JobHistoryOldestDailyView, AddJobHistoryOldestDailyRefreshPolicySql),
     };
@@ -17596,7 +17665,7 @@ public readonly record struct RollupAvailability(
     bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false,
     bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false,
     bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false,
-    bool QueryGrainIoHourly = false, bool ProcedureGrainIoHourly = false, bool WaitStatsDaily = false)
+    bool QueryGrainIoHourly = false, bool ProcedureGrainIoHourly = false, bool WaitStatsDaily = false, bool WaitStatsHourly = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
@@ -17607,13 +17676,13 @@ public readonly record struct RollupAvailability(
         && QueryStoreIntervalDaily && QueryStoreDayGrainDaily
         && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly
         && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily
-        && QueryGrainIoHourly && ProcedureGrainIoHourly && WaitStatsDaily;
+        && QueryGrainIoHourly && ProcedureGrainIoHourly && WaitStatsDaily && WaitStatsHourly;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#5329 shape: every rollup up to and including the interval-honest dailies, none of the
     /// two hourly rollups that carry logical reads — a store whose ensure sweep has not created them yet. A
@@ -17670,6 +17739,7 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStatsIoHourlyView => QueryGrainIoHourly,
         TimescaleSupport.ProcedureStatsIoHourlyView => ProcedureGrainIoHourly,
         TimescaleSupport.WaitStatsDailyView => WaitStatsDaily,
+        TimescaleSupport.WaitStatsHourlyView => WaitStatsHourly,
         _ => false,
     };
 }
@@ -17736,6 +17806,10 @@ public sealed class RollupCoverage
     /// <summary>Does the store hold <see cref="TimescaleSupport.WaitStatsDailyView"/> (#8549)? The Daily Summary read takes it for
     /// the closed days it holds and reads raw <c>wait_stats</c> for the rest; without it, the whole window reads raw.</summary>
     public bool HasWaitStatsDaily => _availability.WaitStatsDaily;
+
+    /// <summary>Does the store hold <see cref="TimescaleSupport.WaitStatsHourlyView"/> (#8824)? The Daily Summary read takes the hours of an
+    /// open or lagging day from it when it holds them, and reads raw <c>wait_stats</c> for the rest; without it, those days read raw.</summary>
+    public bool HasWaitStatsHourly => _availability.WaitStatsHourly;
 
     /// <summary>Does the store hold <see cref="TimescaleSupport.QueryStatsIntervalDailyView"/> (#8549)? The Daily Summary's hourly tier counts
     /// the unique queries of each closed day it holds from it instead of from the interval hourly, in about 24 times fewer rows. Without it, or
