@@ -753,6 +753,70 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(after.Count, Entries(ReadAcl()).Count);
     }
 
+    /* ---- a legacy CryptoAPI key (#8957): the certificate names a CryptoAPI provider, and .NET hands back an RSACng ---- */
+
+    [Fact]
+    public void RealGrant_OnALegacySChannelKey_ReadsAndGrantsThroughTheKeyFile()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "Certificate keys and their ACLs are Windows only.");
+
+        const string account = "S-1-5-19"; // LocalService: present on every Windows, one account, never a group
+        using var installed = LegacyCertificate.Create();
+        var thumbprint = installed.Certificate.Thumbprint;
+
+        byte[] ReadAcl()
+        {
+            using var key = DarlingTlsKeyAccess.OpenKeyTarget(installed.Certificate);
+            Assert.Equal("CAPI key file", key.Kind);
+            return key.ReadDescriptor();
+        }
+
+        var before = Entries(ReadAcl());
+        Assert.NotEmpty(before);
+        Assert.DoesNotContain(before, e => e.Sid.Value == account);
+
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => false,
+            DarlingTlsStore.ReadStore,
+            name => DarlingTlsKeyAccess.ResolveAccount(name, "no such service here"),
+            certificate => DarlingTlsKeyAccess.OpenKeyTarget(certificate));
+
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var code = DarlingTlsKeyAccess.Run(
+            new DarlingTlsKeyAccess.GrantArgs(thumbprint, account, StoreLocation.CurrentUser, "My"), seams, output, error);
+
+        Assert.True(code == 0, error.ToString());
+        Assert.Contains("Granted Read", output.ToString(), StringComparison.Ordinal);
+        var after = Entries(ReadAcl());
+        Assert.Equal(before.Count + 1, after.Count);
+        Assert.Single(after, e => e.Sid.Value == account && e.Qualifier == AceQualifier.AccessAllowed);
+    }
+
+    [Fact]
+    public void Run_ALegacyKeyWithNoKeyFile_NamesTheProviderAndPrintsTheExactIcaclsCommand()
+    {
+        using var certificate = Make("capi-missing.corp.test");
+        const string path = @"C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys\0123456789abcdef_fedcba98-7654";
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => true,
+            (_, _) => new[] { new X509Certificate2(certificate) },
+            _ => new DarlingTlsKeyAccess.AccountResolution(Service, @"NT SERVICE\PerformanceMonitor Darling", null),
+            _ => throw new DarlingTlsKeyAccess.CapiKeyFileMissingException("Microsoft RSA SChannel Cryptographic Provider", path));
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var code = DarlingTlsKeyAccess.Run(Args(certificate.Thumbprint), seams, output, error);
+
+        Assert.Equal(1, code);
+        var said = error.ToString();
+        Assert.Contains("Microsoft RSA SChannel Cryptographic Provider", said, StringComparison.Ordinal);
+        Assert.Contains(
+            $"icacls \"{path}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(R)\"", said, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed.", said, StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+    }
+
     /* ---- helpers ---- */
 
     private static DarlingTlsKeyAccess.GrantArgs Args(
@@ -953,6 +1017,59 @@ public sealed class DarlingTlsKeyAccessTests
             {
                 Certificate.Dispose();
             }
+        }
+    }
+
+    /// <summary>
+    /// A certificate whose key is a legacy CryptoAPI key (the "Microsoft RSA SChannel Cryptographic Provider"), made in the
+    /// current user's personal store with Windows PowerShell and removed with its key on dispose.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private sealed class LegacyCertificate : IDisposable
+    {
+        private LegacyCertificate(X509Certificate2 certificate) => Certificate = certificate;
+
+        public X509Certificate2 Certificate { get; }
+
+        public static LegacyCertificate Create()
+        {
+            var name = $"darling-8957-{Guid.NewGuid():N}";
+            var thumbprint = RunPowerShell(
+                $"(New-SelfSignedCertificate -Subject 'CN={name}' -CertStoreLocation Cert:\\CurrentUser\\My "
+                + "-Provider 'Microsoft RSA SChannel Cryptographic Provider' -KeyExportPolicy NonExportable).Thumbprint");
+
+            using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+            store.Open(OpenFlags.ReadOnly);
+            var found = store.Certificates.Find(X509FindType.FindByThumbprint, thumbprint, false);
+            Assert.Single(found);
+            return new LegacyCertificate(found[0]);
+        }
+
+        public void Dispose()
+        {
+            var thumbprint = Certificate.Thumbprint;
+            Certificate.Dispose();
+            RunPowerShell($"Remove-Item 'Cert:\\CurrentUser\\My\\{thumbprint}' -DeleteKey");
+        }
+
+        private static string RunPowerShell(string command)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add("-NoProfile");
+            start.ArgumentList.Add("-Command");
+            start.ArgumentList.Add(command);
+            using var process = System.Diagnostics.Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEnd();
+            var errors = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            Assert.True(process.ExitCode == 0, errors);
+            return output.Trim();
         }
     }
 }
