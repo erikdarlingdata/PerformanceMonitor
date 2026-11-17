@@ -180,7 +180,7 @@ const indexFlagText = (r) => (indexFlags(r).join(", ") || "—");
 /**
  * The share is of the size the estimate covered. When only some of a rolled-up row's copies have an estimate, that is less than the row's
  * Size, so the cell names its basis instead of sitting a bare 100% beside a bigger size (#8897). A row whose copies were all estimated keeps
- * the plain percent: its basis is an older reading of the same size, not a smaller part of it.
+ * the plain percent: the estimate and the Size are both pg_relation_size read in one statement, so the basis equals the Size.
  */
 export function indexEmptyShareText(r) {
   if (r.estimated_bloat_share == null) return "—";

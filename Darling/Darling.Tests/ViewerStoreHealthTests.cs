@@ -220,11 +220,11 @@ public sealed class ViewerStoreHealthTests
     public void TheEmptySpaceCell_KeepsItsPlainText_WhenEveryCopyWasEstimated_OrThereIsOneCopy()
     {
         const long mb = 1024 * 1024;
-        // Every copy has an estimate. The basis is an older reading of the same size, so it is not named.
-        var all = StoreHealthRows.Index(RolledUpRow(164, 0, 18 * mb, 4 * mb, 0.25, 16 * mb, 164)).Reclaimable;
+        // Every copy has an estimate. A live read sizes the estimate and the row in one statement, so the basis equals the row's size and is not named.
+        var all = StoreHealthRows.Index(RolledUpRow(164, 0, 18 * mb, 4 * mb, 0.25, 18 * mb, 164)).Reclaimable;
         Assert.Equal("4.0 MB (25.0%)", all.Replace(',', '.'));
 
-        var single = StoreHealthRows.Index(RolledUpRow(1, 0, 18 * mb, 4 * mb, 0.25, 16 * mb, 1)).Reclaimable;
+        var single = StoreHealthRows.Index(RolledUpRow(1, 0, 18 * mb, 4 * mb, 0.25, 18 * mb, 1)).Reclaimable;
         Assert.Equal("4.0 MB (25.0%)", single.Replace(',', '.'));
 
         // An estimate from a read that predates the basis column keeps the plain text.

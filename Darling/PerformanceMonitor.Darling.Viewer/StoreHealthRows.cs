@@ -230,7 +230,7 @@ internal static class StoreHealthRows
     /// <summary>
     /// #8897: the share is of the size the estimate covered. When only some of a rolled-up row's copies have an estimate, that is less than the
     /// row's Size, so the cell names its basis ("6.0 MB of the 6.0 MB estimated (100.0%)") instead of sitting a bare 100% beside a bigger size.
-    /// A row whose copies were all estimated keeps the plain text: its basis is an older reading of the same size, not a smaller part of it.
+    /// A row whose copies were all estimated keeps the plain text: the estimate and the Size are both pg_relation_size read in one statement, so the basis equals the Size.
     /// </summary>
     internal static string ReclaimableText(StoreIndexHealthRow r, long reclaimableBytes)
     {

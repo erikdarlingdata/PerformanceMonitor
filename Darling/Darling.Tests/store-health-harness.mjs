@@ -102,7 +102,7 @@ const INDEXES = [
   index({ index_name: "ix_rolled_one", index_count: 164, larger_than_heap: true, larger_than_heap_count: 1, bytes: 18 * MB, heap_bytes: 451 * MB, index_to_heap: 0.04,
     estimated_reclaimable_bytes: 6 * MB, estimated_bloat_share: 1, estimated_basis_bytes: 6 * MB, estimate_indexes_usable: 40 }),
   index({ index_name: "ix_rolled_several", index_count: 164, larger_than_heap: true, larger_than_heap_count: 7, bytes: 20 * MB, heap_bytes: 451 * MB, index_to_heap: 0.04,
-    estimated_reclaimable_bytes: 4 * MB, estimated_bloat_share: 0.25, estimated_basis_bytes: 16 * MB, estimate_indexes_usable: 164 }),
+    estimated_reclaimable_bytes: 4 * MB, estimated_bloat_share: 0.25, estimated_basis_bytes: 20 * MB, estimate_indexes_usable: 164 }),
 ];
 const coverage = (o) => ({ schema_name: "collect", table_name: "parts", index_name: "ix_parts", parent_index_valid: true, leaf_count: 3, leaves_with_index: 3, leaves_missing_index: 0, missing_leaves: [], leaves_invalid_index: 0, invalid_leaves: [], ...o });
 const indexesAnswer = (cov) => cov === null
