@@ -48,9 +48,15 @@ public sealed class DarlingMcpPgIoTools
     /// </summary>
     internal static async Task<string?> VersionGapStatusAsync(NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
     {
-        var (postgresMajor, _) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, serverId, cancellationToken);
-        var versionGap = NotCollectedForVersionMessage(displayName, postgresMajor);
+        var versionGap = await VersionGapMessageAsync(postgres, serverId, displayName, cancellationToken);
         return versionGap is null ? null : McpHelpers.Status("not_collected", versionGap);
+    }
+
+    /// <summary>#8918: the sentence behind <see cref="VersionGapStatusAsync"/>, or null when the major is unknown or 16 and newer.</summary>
+    internal static async Task<string?> VersionGapMessageAsync(NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
+    {
+        var (postgresMajor, _) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, serverId, cancellationToken);
+        return NotCollectedForVersionMessage(displayName, postgresMajor);
     }
 
     /// <summary>
@@ -112,10 +118,10 @@ public sealed class DarlingMcpPgIoTools
 
                 /* #6206: pg_stat_io does not exist before PostgreSQL 16, so the collector never runs on an older target and
                    there is nothing to wait for. Said as not_collected with the version, not as an empty window. */
-                var versionGap = await VersionGapStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
+                var versionGap = await VersionGapMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
                 if (versionGap != null)
                 {
-                    return versionGap;
+                    return McpHelpers.Status("not_collected", versionGap);
                 }
 
                 /* #7459: pg_io_stats stores cumulative counters and the read differences them, so an empty window is a measurement only when
