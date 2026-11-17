@@ -192,6 +192,228 @@ public sealed class DatabaseProtectionBandsTests
         Assert.Equal("No database is overdue (1 judged).", summary.Text);
     }
 
+    /* ── #8865: each replica judged on its own error log ── */
+
+    private static DatabaseProtectionFact Logged(string? role = "PRIMARY") => Healthy() with
+    {
+        ReplicaRole = role, ErrorLogState = "read", ErrorLogBackfillComplete = true,
+    };
+
+    [Fact]
+    public void ASecondaryWithARecentErrorLogCheck_IsOk_AndItsBackupsStayExcluded()
+    {
+        var band = DatabaseProtectionBands.Evaluate(
+            Logged("SECONDARY") with { ErrorLogCheckDbTime = Now.AddDays(-2), ErrorLogCheckDbOptions = "NO_INFOMSGS", ErrorLogCheckDbErrors = 0 }, Now, Limits);
+
+        Assert.Null(band.ExcludedReason);
+        Assert.Equal("ok", band.CheckDb.State);
+        Assert.False(band.CheckDb.Overdue);
+        Assert.Equal(TimeSpan.FromDays(2), band.CheckDb.Age);
+        Assert.Equal("error_log", band.CheckDb.Source);
+        Assert.Equal("NO_INFOMSGS", band.CheckDb.Options);
+        foreach (var f in new[] { band.FullBackup, band.LogBackup })
+        {
+            Assert.Equal("excluded", f.State);
+            Assert.False(f.Overdue);
+            Assert.Equal("secondary", f.Detail);
+        }
+    }
+
+    [Fact]
+    public void ASecondaryWithNoCheck_AfterTheBackfill_ReadsNever_AndIsOverdue()
+    {
+        var band = DatabaseProtectionBands.Evaluate(Logged("SECONDARY"), Now, Limits);
+
+        Assert.Equal("never", band.CheckDb.State);
+        Assert.True(band.CheckDb.Overdue);
+        Assert.Equal("error_log", band.CheckDb.Source);
+    }
+
+    [Fact]
+    public void AnAgDatabaseWithNoCheck_DuringTheBackfill_ReadsPending_AndIsNotOverdue()
+    {
+        foreach (var role in new[] { "PRIMARY", "SECONDARY" })
+        {
+            var band = DatabaseProtectionBands.Evaluate(Logged(role) with { ErrorLogBackfillComplete = false }, Now, Limits);
+
+            Assert.Equal("pending", band.CheckDb.State);
+            Assert.False(band.CheckDb.Overdue);
+            Assert.Null(band.CheckDb.Age);
+            Assert.Contains("still being read", band.CheckDb.Detail, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void AnAgDatabaseWithAnOldCheckFoundDuringTheBackfill_IsOverdueAtOnce()
+    {
+        var band = DatabaseProtectionBands.Evaluate(
+            Logged("SECONDARY") with { ErrorLogBackfillComplete = false, ErrorLogCheckDbTime = Now.AddDays(-20) }, Now, Limits);
+
+        Assert.Equal("overdue", band.CheckDb.State);
+        Assert.True(band.CheckDb.Overdue);
+        Assert.Equal(TimeSpan.FromDays(20), band.CheckDb.Age);
+    }
+
+    [Fact]
+    public void ASecondaryThatIsNotReadable_ReadsNever_WithTheReadableDetail()
+    {
+        var band = DatabaseProtectionBands.Evaluate(Logged("SECONDARY") with { ReplicaReadable = false }, Now, Limits);
+
+        Assert.Equal("never", band.CheckDb.State);
+        Assert.True(band.CheckDb.Overdue);
+        Assert.Contains("not readable", band.CheckDb.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APrimary_IsJudgedOnItsOwnErrorLog_NotOnTheBootPage()
+    {
+        var bootPage = Now.AddHours(-5);
+        var band = DatabaseProtectionBands.Evaluate(Logged() with { LastGoodCheckDbTime = bootPage }, Now, Limits);
+
+        Assert.Equal("never", band.CheckDb.State);
+        Assert.True(band.CheckDb.Overdue);
+        Assert.Equal("error_log", band.CheckDb.Source);
+        Assert.Equal(bootPage, band.CheckDb.ReferenceTime);
+    }
+
+    [Fact]
+    public void ACheckThatFoundErrors_IsErrorsFound_AndOverdueEvenWhenFresh()
+    {
+        var band = DatabaseProtectionBands.Evaluate(
+            Logged() with { ErrorLogCheckDbTime = Now.AddHours(-1), ErrorLogCheckDbErrors = 3, ErrorLogCheckDbOptions = "NO_INFOMSGS" }, Now, Limits);
+
+        Assert.Equal("errors_found", band.CheckDb.State);
+        Assert.True(band.CheckDb.Overdue);
+        Assert.Equal(TimeSpan.FromHours(1), band.CheckDb.Age);
+        Assert.Equal(3, band.CheckDb.Errors);
+        Assert.Equal("NO_INFOMSGS", band.CheckDb.Options);
+    }
+
+    [Fact]
+    public void OutsideAnAg_TheNewerSourceWins_AndANewerFailedCheckIsErrorsFound()
+    {
+        var outside = Logged(null) with { LastGoodCheckDbTime = Now.AddDays(-3) };
+
+        var logNewer = DatabaseProtectionBands.Evaluate(outside with { ErrorLogCheckDbTime = Now.AddDays(-1), ErrorLogCheckDbErrors = 0 }, Now, Limits);
+        Assert.Equal("ok", logNewer.CheckDb.State);
+        Assert.Equal("error_log", logNewer.CheckDb.Source);
+        Assert.Equal(TimeSpan.FromDays(1), logNewer.CheckDb.Age);
+
+        var bootNewer = DatabaseProtectionBands.Evaluate(outside with { ErrorLogCheckDbTime = Now.AddDays(-9), ErrorLogCheckDbErrors = 2 }, Now, Limits);
+        Assert.Equal("ok", bootNewer.CheckDb.State);
+        Assert.Equal("boot_page", bootNewer.CheckDb.Source);
+        Assert.Equal(TimeSpan.FromDays(3), bootNewer.CheckDb.Age);
+
+        var failedNewer = DatabaseProtectionBands.Evaluate(outside with { ErrorLogCheckDbTime = Now.AddDays(-1), ErrorLogCheckDbErrors = 2 }, Now, Limits);
+        Assert.Equal("errors_found", failedNewer.CheckDb.State);
+        Assert.True(failedNewer.CheckDb.Overdue);
+
+        var noLog = DatabaseProtectionBands.Evaluate(outside, Now, Limits);
+        Assert.Equal("ok", noLog.CheckDb.State);
+        Assert.Equal("boot_page", noLog.CheckDb.Source);
+
+        /* Outside an AG a running backfill never reads pending: the boot page (here with no check) is what it reads meanwhile. */
+        var neverAnywhere = DatabaseProtectionBands.Evaluate(
+            outside with { LastGoodCheckDbTime = null, CheckDbState = "never", ErrorLogBackfillComplete = false }, Now, Limits);
+        Assert.Equal("never", neverAnywhere.CheckDb.State);
+    }
+
+    [Fact]
+    public void AFailedRead_IsJudgedOnTheRememberedCheck()
+    {
+        var failed = Logged("SECONDARY") with { ErrorLogState = "failed", ErrorLogMessage = "timeout", ErrorLogCheckDbTime = Now.AddDays(-20) };
+
+        var band = DatabaseProtectionBands.Evaluate(failed, Now, Limits);
+
+        Assert.Null(band.ExcludedReason);
+        Assert.Equal("overdue", band.CheckDb.State);
+        Assert.Equal("error_log", band.CheckDb.Source);
+    }
+
+    [Fact]
+    public void ARefusedRead_BandsAsToday_WithASecondaryExcluded()
+    {
+        /* #8865 Review Focus 5: a refused read leaves the boot page as the source, and a secondary is excluded on all three facts as before. */
+        var refusedSecondary = Healthy() with { ReplicaRole = "SECONDARY", ErrorLogState = "refused", ErrorLogCheckDbTime = Now.AddDays(-1) };
+        var secondaryBand = DatabaseProtectionBands.Evaluate(refusedSecondary, Now, Limits);
+        Assert.Equal("secondary", secondaryBand.ExcludedReason);
+        Assert.All(new[] { secondaryBand.CheckDb, secondaryBand.FullBackup, secondaryBand.LogBackup }, f => Assert.Equal("excluded", f.State));
+
+        var refusedPrimary = DatabaseProtectionBands.Evaluate(
+            Healthy() with { ErrorLogState = "refused", LastGoodCheckDbTime = Now.AddDays(-20) }, Now, Limits);
+        Assert.Equal("overdue", refusedPrimary.CheckDb.State);
+        Assert.Null(refusedPrimary.CheckDb.Source);
+
+        var notApplicable = DatabaseProtectionBands.Evaluate(
+            Healthy() with { ReplicaRole = "SECONDARY", ErrorLogState = "not_applicable" }, Now, Limits);
+        Assert.Equal("secondary", notApplicable.ExcludedReason);
+    }
+
+    [Fact]
+    public void AnOldRowWithNullColumns_BandsAsToday()
+    {
+        var primary = DatabaseProtectionBands.Evaluate(Healthy() with { ReplicaRole = "PRIMARY", LastGoodCheckDbTime = null, CheckDbState = "never" }, Now, Limits);
+        Assert.Equal("never", primary.CheckDb.State);
+        Assert.Null(primary.CheckDb.Source);
+
+        var secondary = DatabaseProtectionBands.Evaluate(Healthy() with { ReplicaRole = "SECONDARY" }, Now, Limits);
+        Assert.Equal("secondary", secondary.ExcludedReason);
+        Assert.Equal("excluded", secondary.CheckDb.State);
+    }
+
+    [Fact]
+    public void AFormerSecondaryNowPrimary_KeepsItsOwnLogCheck()
+    {
+        var band = DatabaseProtectionBands.Evaluate(
+            Logged() with { LastGoodCheckDbTime = null, CheckDbState = "never", ErrorLogCheckDbTime = Now.AddDays(-4), ErrorLogCheckDbErrors = 0 }, Now, Limits);
+
+        Assert.Equal("ok", band.CheckDb.State);
+        Assert.Equal("error_log", band.CheckDb.Source);
+        Assert.Equal("ok", band.FullBackup.State);
+    }
+
+    [Fact]
+    public void ManagedPlatform_Unchanged()
+    {
+        var managed = DatabaseProtectionBands.Evaluate(
+            Logged() with { Platform = "platform_managed", ErrorLogCheckDbTime = Now.AddDays(-1), ErrorLogCheckDbErrors = 4 }, Now, Limits);
+        Assert.Equal("platform_managed", managed.CheckDb.State);
+        Assert.False(managed.CheckDb.Overdue);
+
+        var managedSecondary = DatabaseProtectionBands.Evaluate(Logged("SECONDARY") with { Platform = "platform_managed" }, Now, Limits);
+        Assert.Equal("secondary", managedSecondary.ExcludedReason);
+    }
+
+    [Fact]
+    public void TheOverdueText_ForErrorsFound()
+    {
+        var fact = Logged() with { DatabaseName = "Sales", ErrorLogCheckDbTime = Now.AddDays(-2), ErrorLogCheckDbErrors = 3 };
+
+        var overdue = Assert.Single(DatabaseProtectionBands.OverdueFacts([fact], Now));
+
+        Assert.Equal("errors_found", overdue.State);
+        Assert.Equal("Sales (CHECKDB found 3 errors, 2 days old)", overdue.Text);
+    }
+
+    [Fact]
+    public void TheSummary_CountsASecondaryAsJudged()
+    {
+        var facts = new[]
+        {
+            Logged("SECONDARY") with { DatabaseName = "Sales", ErrorLogCheckDbTime = Now.AddDays(-1) },
+            Healthy() with { DatabaseName = "off", StateDesc = "OFFLINE" },
+        };
+        var banded = facts.Select(f => (Fact: f, Band: DatabaseProtectionBands.Evaluate(f, Now, Limits))).ToList();
+
+        var summary = DatabaseProtectionBands.Summarize(banded);
+        Assert.Equal(1, summary.Assessed);
+        Assert.Equal(1, summary.Excluded);
+        Assert.Equal(0, summary.OverdueDatabases);
+
+        var none = DatabaseProtectionBands.Summarize([(facts[1], banded[1].Band)]);
+        Assert.Equal("No database is judged: every one is offline or restoring.", none.Text);
+    }
+
     [Theory]
     [InlineData(42, "42 minutes")]
     [InlineData(1, "1 minute")]
