@@ -392,6 +392,54 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         });
     }
 
+    /* #8865: one row planted with every error log column comes back through both readers, so the bands can judge on them. */
+    [Fact]
+    public async Task TheErrorLogFacts_AreReadBackByTheStoreReader_AndByTheFleetRead()
+    {
+        var checkDbAt = new DateTime(2026, 11, 10, 3, 30, 0, DateTimeKind.Unspecified);
+        var at = DateTime.UtcNow.AddMinutes(-5);
+        await WithStoreAsync(async (connection, ct) =>
+        {
+            await InsertAsync(connection, ct, at, new Seed("with_log"));
+            await InsertAsync(connection, ct, at, new Seed("old_row"));
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"UPDATE collect.database_protection
+SET errorlog_state = $1, errorlog_message = $2, errorlog_grant = $3, errorlog_backfill_complete = $4, errorlog_skipped_archives = $5,
+    errorlog_unparsed_lines = $6, errorlog_checkdb_time = $7, errorlog_checkdb_options = $8, errorlog_checkdb_errors = $9, replica_readable = $10
+WHERE server_id = $11 AND database_name = $12",
+                "partial", "archive 3 skipped", "GRANT EXECUTE ON sys.xp_readerrorlog", true, "3,4", 2, checkDbAt, "NO_INFOMSGS", 0, false, ServerId, "with_log");
+        }, async (postgres, ct) =>
+        {
+            var store = (await DarlingDatabaseProtectionReader.ReadAsync(postgres, ServerId, at.AddHours(-1), at.AddHours(1), cancellationToken: ct)).Databases
+                .ToDictionary(d => d.DatabaseName);
+            var fleet = (await DarlingFleetReader.ReadDatabaseProtectionCapturesAsync(postgres, DateTime.UtcNow, ct))[ServerId].Facts
+                .ToDictionary(d => d.DatabaseName);
+
+            foreach (var facts in new[] { store, fleet })
+            {
+                var f = facts["with_log"];
+                Assert.Equal("partial", f.ErrorLogState);
+                Assert.Equal("archive 3 skipped", f.ErrorLogMessage);
+                Assert.Equal("GRANT EXECUTE ON sys.xp_readerrorlog", f.ErrorLogGrant);
+                Assert.True(f.ErrorLogBackfillComplete);
+                Assert.Equal("3,4", f.ErrorLogSkippedArchives);
+                Assert.Equal(2, f.ErrorLogUnparsedLines);
+                Assert.Equal(checkDbAt, f.ErrorLogCheckDbTime);
+                Assert.Equal("NO_INFOMSGS", f.ErrorLogCheckDbOptions);
+                Assert.Equal(0, f.ErrorLogCheckDbErrors);
+                Assert.False(f.ReplicaReadable);
+
+                /* A row from before V269 has every new column NULL, and the fact keeps them null. */
+                var old = facts["old_row"];
+                Assert.Null(old.ErrorLogState);
+                Assert.Null(old.ErrorLogCheckDbTime);
+                Assert.Null(old.ErrorLogBackfillComplete);
+                Assert.Null(old.ReplicaReadable);
+            }
+
+            return 0;
+        });
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData(5)]  // Azure SQL Database runs this collector too, so a miss there is a missing capture, not an engine gap

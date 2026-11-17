@@ -2024,7 +2024,9 @@ AND   {SqlServerCollectedTargetSql}";
     /// and disabled servers, so neither pays a lateral probe on each fleet read. $1 is the window start.</summary>
     internal const string FleetDatabaseProtectionSql = $@"
 SELECT d.server_id, d.collection_time, d.database_name, d.state_desc, d.recovery_model_desc, d.create_date, d.replica_role, d.platform,
-       d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state
+       d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state,
+       d.errorlog_state, d.errorlog_message, d.errorlog_grant, d.errorlog_backfill_complete, d.errorlog_skipped_archives, d.errorlog_unparsed_lines,
+       d.errorlog_checkdb_time, d.errorlog_checkdb_options, d.errorlog_checkdb_errors, d.replica_readable
 FROM servers AS s
 CROSS JOIN LATERAL
 (
@@ -2041,6 +2043,29 @@ AND   {SqlServerCollectedTargetSql}";
     /// <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the alerts, the tool and the Viewer use; this only batches the read.
     /// A platform-managed server has none, by that judgment.</summary>
     internal static async Task<Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>> ReadDatabaseProtectionOverdueAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var captures = await ReadDatabaseProtectionCapturesAsync(postgres, nowUtc, cancellationToken);
+        var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
+        /* #7611: each database is judged against its own ages, the same resolution the alerts, the tool and the Viewer use. */
+        var resolverFor = captures.Count > 0
+            ? await DatabaseProtectionThresholdSettings.ReadFleetAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            : null;
+        foreach (var (serverId, (at, facts)) in captures)
+        {
+            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at, resolverFor!(serverId).ForDatabase);
+            if (overdue.Count > 0)
+            {
+                map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(
+                    o.Kind, o.Database, o.State, o.Age is { } age ? (long)age.TotalSeconds : null, o.Label + ": " + o.Text)).ToList();
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>The newest capture per server and its facts, as stored (#8865: split from the banding so a test can see what the fleet read carries).</summary>
+    internal static async Task<Dictionary<int, (DateTime At, List<DatabaseProtectionFact> Facts)>> ReadDatabaseProtectionCapturesAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
     {
         var captures = new Dictionary<int, (DateTime At, List<DatabaseProtectionFact> Facts)>();
@@ -2060,28 +2085,17 @@ AND   {SqlServerCollectedTargetSql}";
 
                 string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
                 DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
+                bool? Flag(int i) => reader.IsDBNull(i) ? null : reader.GetBoolean(i);
+                int? Count(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
+                /* #8865: the error log facts (V269), NULL on a row written before it. */
                 capture.Facts.Add(new DatabaseProtectionFact(
                     Text(2) ?? string.Empty, Text(3), Text(4), Time(5), Text(6), Text(7),
-                    Time(8), Text(9), Time(10), Text(11), Time(12), Text(13)));
+                    Time(8), Text(9), Time(10), Text(11), Time(12), Text(13),
+                    Text(14), Text(15), Text(16), Flag(17), Text(18), Count(19), Time(20), Text(21), Count(22), Flag(23)));
             }
         }
 
-        var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
-        /* #7611: each database is judged against its own ages, the same resolution the alerts, the tool and the Viewer use. */
-        var resolverFor = captures.Count > 0
-            ? await DatabaseProtectionThresholdSettings.ReadFleetAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
-            : null;
-        foreach (var (serverId, (at, facts)) in captures)
-        {
-            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at, resolverFor!(serverId).ForDatabase);
-            if (overdue.Count > 0)
-            {
-                map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(
-                    o.Kind, o.Database, o.State, o.Age is { } age ? (long)age.TotalSeconds : null, o.Label + ": " + o.Text)).ToList();
-            }
-        }
-
-        return map;
+        return captures;
     }
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
