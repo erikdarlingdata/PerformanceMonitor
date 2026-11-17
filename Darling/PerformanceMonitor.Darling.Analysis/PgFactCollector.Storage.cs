@@ -428,6 +428,31 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
         }
     }
 
+    /// <summary>
+    /// #8883: the TEMPDB_FILE_SETUP fact, built from tempdb's files in the newest database_size_stats collection and the newest
+    /// visible online scheduler count. One fact whose value is the number of file-setup checks the server fails; none when it fails
+    /// none, and none for a server with no tempdb rows (an Azure SQL Database). Advisory: it adds no alert. The checks are
+    /// <see cref="TempDbFileSetup"/>, shared with Lite.
+    /// </summary>
+    private async Task CollectTempDbFileSetupFactsAsync(AnalysisContext context, List<Fact> facts)
+    {
+        try
+        {
+            var files = await PgTempDbFileSetupReader.ReadFilesAsync(_postgres, context, FactCommandTimeoutSeconds);
+            if (files.Count == 0) return;
+
+            var schedulers = await PgTempDbFileSetupReader.ReadSchedulerCountAsync(_postgres, context, FactCommandTimeoutSeconds);
+            var fact = TempDbFileSetup.BuildFact(context, files, schedulers);
+            if (fact is not null)
+                facts.Add(fact);
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other facts, and WHY is reported (#2826). */
+            ReportCollectionFailure(ex, context);
+        }
+    }
+
     /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). */
     public const string DiskSpaceSql = @"
 WITH latest AS (

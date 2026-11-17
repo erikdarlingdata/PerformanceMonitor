@@ -93,13 +93,13 @@ public sealed class HyperscaleLogSizeCollectorTests
             {
                 "hsdb", 5, 1, "ROWS", "hsdb_data", @"D:\hsdb.mdf", 10240.00m, 315.25m,
                 128.00m, 4194304.00m, "FULL", DBNull.Value, "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value,
-                0, DBNull.Value, DBNull.Value,
+                0, DBNull.Value, DBNull.Value, DBNull.Value,
             },
             new object[]
             {
                 "hsdb", 5, 2, "LOG", "hsdb_log", @"D:\hsdb.ldf", DBNull.Value, 40.50m,
                 DBNull.Value, DBNull.Value, "FULL", DBNull.Value, "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value, DBNull.Value, 4,
+                DBNull.Value, DBNull.Value, 4, DBNull.Value,
             });
 
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas, isAzureSqlDb: true), CancellationToken.None);
@@ -114,7 +114,7 @@ public sealed class HyperscaleLogSizeCollectorTests
 
         var writer = new RecordingCollectorRowWriter();
         DatabaseSizeStatsCollector.Instance.WritePayload(rows[1], writer, CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
-        Assert.Equal(19, writer.Values.Count);
+        Assert.Equal(20, writer.Values.Count);
         Assert.Null(writer.Values[6]);
     }
 }
