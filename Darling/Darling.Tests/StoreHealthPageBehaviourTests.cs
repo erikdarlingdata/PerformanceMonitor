@@ -129,6 +129,22 @@ public sealed class StoreHealthPageBehaviourTests
         Assert.Equal("collect.parts_2", coverage[0][6]);
     }
 
+    /// <summary>#8897: a rolled-up row's flag says how many of its copies are larger than their table, even one, and its empty-space percent
+    /// names the size it is a share of when only some copies were estimated. A single copy and a fully estimated row keep the plain text.</summary>
+    [Fact]
+    public void ARolledUpIndexRow_SaysHowManyCopiesAreLarger_AndNamesTheBasisOfAPartialEstimate()
+    {
+        var rows = Rows(Result.Value.GetProperty("afterIndexes").GetProperty("indexRows"));
+        var one = rows.Single(r => r.Contains("ix_rolled_one"));
+        Assert.Equal("1 of 164 copies larger than its table", one[0]);
+        Assert.Contains(one, c => c.Contains("100% of the 6.0 MB estimated", StringComparison.Ordinal));
+        var several = rows.Single(r => r.Contains("ix_rolled_several"));
+        Assert.Equal("7 of 164 copies larger than its table", several[0]);
+        Assert.Contains("25%", several);
+        Assert.DoesNotContain(several, c => c.Contains("estimated", StringComparison.Ordinal) && !c.Contains("Not Estimated", StringComparison.Ordinal));
+        Assert.Equal("Larger than its table", rows.Single(r => r.Contains("ix_big"))[0]);
+    }
+
     [Fact]
     public void WhenEveryPartitionHasEveryIndex_TheCoverageSectionIsOneLine()
     {

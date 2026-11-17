@@ -90,14 +90,19 @@ const tablesAnswer = () => ({
 });
 const index = (o) => ({
   schema_name: "collect", table_name: "store_metrics", kind: "table", index_name: "ix_ok", on_compressed_data: false, index_count: 1, leaf_count: 0, bytes: 5 * MB, heap_bytes: 800 * MB,
-  index_to_heap: 0.006, idx_scan: 100, is_primary_key: false, is_unique: false, valid: true, larger_than_heap: false, rarely_used: false,
-  estimated_reclaimable_bytes: null, estimated_bloat_share: null, estimate_skipped_reason: null, ...o,
+  index_to_heap: 0.006, idx_scan: 100, is_primary_key: false, is_unique: false, valid: true, larger_than_heap: false, larger_than_heap_count: 0, rarely_used: false,
+  estimated_reclaimable_bytes: null, estimated_bloat_share: null, estimated_basis_bytes: null, estimate_indexes_usable: 0, estimate_skipped_reason: null, ...o,
 });
 const INDEXES = [
   index({ index_name: "ix_broken", valid: false }),
   index({ index_name: "ix_big", larger_than_heap: true, bytes: 900 * MB, index_to_heap: 1.1 }),
   index({ index_name: "ix_ok" }),
   index({ index_name: "ix_unanalyzed", estimate_skipped_reason: "The table has never been analyzed, so no estimate is made." }),
+  /* #8897: one rolled-up row that is partly estimated, with one copy larger than its table, one with several, and one estimated in full. */
+  index({ index_name: "ix_rolled_one", index_count: 164, larger_than_heap: true, larger_than_heap_count: 1, bytes: 18 * MB, heap_bytes: 451 * MB, index_to_heap: 0.04,
+    estimated_reclaimable_bytes: 6 * MB, estimated_bloat_share: 1, estimated_basis_bytes: 6 * MB, estimate_indexes_usable: 40 }),
+  index({ index_name: "ix_rolled_several", index_count: 164, larger_than_heap: true, larger_than_heap_count: 7, bytes: 20 * MB, heap_bytes: 451 * MB, index_to_heap: 0.04,
+    estimated_reclaimable_bytes: 4 * MB, estimated_bloat_share: 0.25, estimated_basis_bytes: 20 * MB, estimate_indexes_usable: 164 }),
 ];
 const coverage = (o) => ({ schema_name: "collect", table_name: "parts", index_name: "ix_parts", parent_index_valid: true, leaf_count: 3, leaves_with_index: 3, leaves_missing_index: 0, missing_leaves: [], leaves_invalid_index: 0, invalid_leaves: [], ...o });
 const indexesAnswer = (cov) => cov === null

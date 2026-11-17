@@ -485,6 +485,54 @@ CREATE INDEX zz_part_d_idx ON collect.zz_part (d);", ct);
     }
 
     /// <summary>
+    /// #8897: the estimate runs in the same statement as the size read, and both sizes are pg_relation_size, so a row whose copies were
+    /// all estimated reads a basis equal to its size, for a plain index and for a rolled-up one. The basis is what the grid names when
+    /// only some copies were estimated.
+    /// </summary>
+    [Fact]
+    public async Task AnEstimatedIndexRow_ReadsABasisEqualToItsSize_ForOneIndexAndForARolledUpOne()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #8787 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* Heaps past the 1 MB estimate floor. The index is built on the full table, then most rows go, so it holds far more pages than
+           the statistics say it needs and the estimate is a number and not a skip. */
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_est (id integer, payload text) WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_est SELECT g, repeat('x', 40) FROM generate_series(1, 100000) AS g;
+CREATE INDEX zz_est_id ON collect.zz_est (id);
+DELETE FROM collect.zz_est WHERE id % 10 <> 0;
+CREATE TABLE collect.zz_est_part (d date NOT NULL, id integer, payload text) PARTITION BY RANGE (d);
+CREATE TABLE collect.zz_est_part_1 PARTITION OF collect.zz_est_part FOR VALUES FROM ('2026-01-01') TO ('2026-02-01') WITH (autovacuum_enabled = false);
+CREATE TABLE collect.zz_est_part_2 PARTITION OF collect.zz_est_part FOR VALUES FROM ('2026-02-01') TO ('2026-03-01') WITH (autovacuum_enabled = false);
+INSERT INTO collect.zz_est_part SELECT CASE WHEN g % 20 < 10 THEN DATE '2026-01-10' ELSE DATE '2026-02-10' END, g, repeat('x', 40) FROM generate_series(1, 100000) AS g;
+CREATE INDEX zz_est_part_id ON collect.zz_est_part (id);
+DELETE FROM collect.zz_est_part WHERE id % 10 <> 0;", ct);
+        await FlushThenAsync(connection, new[] { "ANALYZE collect.zz_est", "ANALYZE collect.zz_est_part" }, ct);
+
+        var indexes = await DarlingStoreTableHealthReader.GetIndexesAsync(dataSource, ct);
+
+        var single = Assert.Single(indexes, i => i.TableName == "zz_est" && i.IndexName == "zz_est_id");
+        Assert.Equal(1, single.EstimateIndexesUsable);
+        Assert.NotNull(single.EstimatedReclaimableBytes);
+        Assert.NotNull(single.EstimatedBasisBytes);
+        Assert.Equal(single.Bytes, single.EstimatedBasisBytes);
+
+        var rolled = Assert.Single(indexes, i => i.TableName == "zz_est_part" && i.IndexName == "zz_est_part_id");
+        Assert.Equal(2, rolled.IndexCount);
+        Assert.Equal(2, rolled.EstimateIndexesUsable);
+        Assert.NotNull(rolled.EstimatedReclaimableBytes);
+        Assert.NotNull(rolled.EstimatedBasisBytes);
+        Assert.Equal(rolled.Bytes, rolled.EstimatedBasisBytes);
+    }
+
+    /// <summary>
     /// The MCP tool holds its reply to the response budget: a store with many tables asked for the most rows is cut to whole
     /// rows that fit, says so, and next_offset reads on from the first row left out. The web route asks for no budget and
     /// gets every row it asked for.

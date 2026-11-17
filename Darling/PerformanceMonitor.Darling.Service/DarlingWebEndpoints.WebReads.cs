@@ -179,7 +179,7 @@ public static partial class DarlingWebEndpoints
                 : DatabaseNamesRefusal(c),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_known_patterns"] = (c, pg, an) => DarlingMcpKnownPatternTools.GetKnownPatterns(pg, Server(c), Str(c, "metric_name"), cancellationToken: c.RequestAborted),
-            ["get_change_watches"] = (c, pg, an) => DarlingMcpChangeWatchTools.GetChangeWatches(pg, Server(c), Str(c, "state"), Rows(c, "limit", 20), Str(c, "watch_id"), c.RequestAborted),
+            ["get_change_watches"] = (c, pg, an) => DarlingMcpChangeWatchTools.GetChangeWatches(pg, Server(c), Str(c, "state"), Rows(c, "limit", 20), Str(c, "watch_id"), responseByteBudget: null, c.RequestAborted),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── core data reads ── */
@@ -260,7 +260,7 @@ public static partial class DarlingWebEndpoints
             ["get_load_by_caller"] = (c, pg, an) => DarlingMcpWhoDroveItTools.GetLoadByCallerCore(pg, Server(c), Hours(c, 1), Rows(c, "top", 20), Rows(c, "statements", 3), AsOf(c), c.RequestAborted),
             ["get_query_pileups"] = (c, pg, an) => DarlingMcpWhoDroveItTools.GetQueryPileupsCore(pg, Server(c), Hours(c, 24), Rows(c, "min_sessions", 5), Rows(c, "top", 10), AsOf(c), c.RequestAborted),
             ["get_query_store_top"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted, tag: Str(c, "tag"), responseByteBudget: null)
+                ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted, tag: Str(c, "tag"), responseByteBudget: null, roundAverages: false)
                 : DatabaseNamesRefusal(c),
             ["get_long_query_completions"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), AsOf(c), databases, logger, c.RequestAborted, tag: Str(c, "tag"), include_monitor: QueryBool(c, "include_monitor", false))

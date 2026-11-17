@@ -1077,6 +1077,8 @@ internal static class PgDisplay
         public string IndexName { get; init; } = "";
         public string IndexSize { get; init; } = "";
         public string ScansInWindow { get; init; } = "";
+        /// <summary>The cell tooltip (#8915): says why the windowed count is a dash. Empty when the count is known.</summary>
+        public string ScansInWindowNote { get; init; } = "";
 
         /// <summary>The server's own lifetime counter, shown BESIDE the windowed figure rather than
         /// instead of it: they answer different questions, and an operator who checks in psql must not
@@ -1137,7 +1139,9 @@ internal static class PgDisplay
             TableName = row.TableName ?? "",
             IndexName = row.IndexName ?? "",
             IndexSize = Bytes(row.IndexBytes),
-            ScansInWindow = Count(row.ScansInWindow),
+            /* #8915: null is unknown (fewer than two samples), shown as the dash, never as a zero. */
+            ScansInWindowNote = row.ScansInWindow is null ? "Needs two samples: this index has been read once, so there is no windowed count yet. The Lifetime Scans column still has the server's own count." : "",
+            ScansInWindow = row.ScansInWindow is long windowed ? Count(windowed) : NotApplicableText,
             TotalScans = Count(row.TotalScans),
             /* NULL means two different things - PostgreSQL 15 and below do not record it at all, and on
                16+ it is an index never scanned since the reset - so the dash stands for "not recorded"
@@ -1151,7 +1155,7 @@ internal static class PgDisplay
             IsInvalid = !row.IsValid,
             IsUnscanned = unscanned,
             IndexSizeSort = Raw(row.IndexBytes),
-            ScansInWindowSort = Raw(row.ScansInWindow),
+            ScansInWindowSort = row.ScansInWindow is long windowedSort ? Raw(windowedSort) : null,
             TotalScansSort = Raw(row.TotalScans),
             BlockAccessesSort = Raw(row.BlocksHit + row.BlocksRead),
         };

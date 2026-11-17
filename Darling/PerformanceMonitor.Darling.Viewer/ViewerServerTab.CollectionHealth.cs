@@ -71,7 +71,7 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
-        using var readFanOut = ViewerReadFanOut.Of(5);
+        using var readFanOut = ViewerReadFanOut.Of(6);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
         var dataStartTask = _dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
@@ -81,22 +81,23 @@ public partial class ViewerServerTab
            and leave both grids, the note and the caveats undrawn. */
         var durationTask = ReadOrEmptyAsync(() => _dataService.GetCollectorDurationTrendAsync(_server.ServerId, startUtc, endUtc), "Collection Health duration chart");
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        /* #8913: the extensions this Aurora engine does not offer ride the same width as the other reads, so the gate below never waits on a read of its own. Other engines have nothing to ask. */
+        var notOfferedTask = MonitoredEngineKind.IsAurora(_server.EngineKind)
+            ? _dataService.GetExtensionsNotOfferedAsync(_server.ServerId)
+            : Task.FromResult<System.Collections.Generic.IReadOnlyCollection<string>?>(_extensionsNotOffered);
         /* #8549: each read is booked by name (Track hands the task back unchanged), so a slow Collection Health says which read it was. */
         _ = timer?.Track("health summary read", healthTask);
         _ = timer?.Track("collection log data start read", dataStartTask);
         _ = timer?.Track("collection log read", logTask);
         _ = timer?.Track("duration trend read", durationTask);
         _ = timer?.Track("caveats read", caveatsTask);
-        await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask), dataStartTask, "Collection Log");
+        await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask, notOfferedTask), dataStartTask, "Collection Log");
 
-        /* The four reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
+        /* The reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
-        if (MonitoredEngineKind.IsAurora(_server.EngineKind))
-        {
-            _extensionsNotOffered = await _dataService.GetExtensionsNotOfferedAsync(_server.ServerId);
-        }
+        _extensionsNotOffered = notOfferedTask.Result;
 
         ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered);
         await ShowCollectionHealthAsync(

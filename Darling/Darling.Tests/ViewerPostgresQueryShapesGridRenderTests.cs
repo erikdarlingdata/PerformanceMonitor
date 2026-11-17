@@ -35,7 +35,7 @@ public sealed class ViewerPostgresQueryShapesGridRenderTests
         (ResourceDictionary)XamlReader.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(ViewerDir(), "Themes", "DarkTheme.xaml")));
 
     /// <summary>Builds the PostgreSQL server tab, opens Activity then Query Shapes, hands the body the grid, and lays the window out.</summary>
-    private static T OnQueryShapes<T>(Action<ViewerServerTab> fill, Func<ViewerServerTab, T> read, int subTab = 2) =>
+    private static T OnQueryShapes<T>(Action<ViewerServerTab> fill, Func<ViewerServerTab, T> read, int subTab = 2, double height = 1000) =>
         StaTestThread.Run(() =>
         {
             /* The tab's XAML resolves NumericCell and the rest from the application's merged theme (see ViewerPostgresGridNumericSortTests.OnTab);
@@ -56,7 +56,7 @@ public sealed class ViewerPostgresQueryShapesGridRenderTests
                 var tab = new ViewerServerTab(
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "pg-shapes-test", "pg-shapes-test", true, null, engineKind: "postgres"));
-                var window = new Window { Content = tab, Width = 1800, Height = 1000 };
+                var window = new Window { Content = tab, Width = 1800, Height = height };
                 StaTestThread.ShowOffScreen(window);
                 try
                 {
@@ -198,5 +198,36 @@ public sealed class ViewerPostgresQueryShapesGridRenderTests
 
         Assert.True(gridHeight > 100, $"the grid was not laid out ({gridHeight}).");
         Assert.True(pidBottom <= gridHeight, $"the row is {rowHeight:0} px tall in a {gridHeight:0} px grid and its PID sits at {pidBottom:0} px, below what the grid shows.");
+    }
+
+    private static DarlingPgDatabaseReader.PgDatabaseRow DatabaseRow(string name, long tempFiles, long tempBytes) =>
+        new(name, 5_000_000, 40_000, 90_000, 4_000_000, tempFiles, tempBytes, 2, 0, 0, null, 288, DateTime.UtcNow.AddDays(-1), DateTime.UtcNow, 12);
+
+    /// <summary>
+    /// #8917: on a short window the star rows left the per-database counters grid about 56 px, a header strip with no row in view, and no
+    /// note said why. It now keeps room for a header and several rows, and the page scrolls.
+    /// </summary>
+    [Fact]
+    public void TheDatabaseCountersGrid_ShowsItsRows_OnAShortWindow()
+    {
+        var (shown, rowCount, gridHeight) = OnQueryShapes(
+            tab => tab.PgDatabaseStatsGrid.ItemsSource = new[]
+            {
+                DatabaseRow("appdb", 19_162, 77L * 1024 * 1024 * 1024),
+                DatabaseRow("postgres", 0, 0),
+                DatabaseRow("template1", 0, 0),
+                DatabaseRow("reports", 12, 4096),
+                DatabaseRow("audit", 3, 2048),
+                DatabaseRow("scratch", 1, 512),
+            }.Select(PgDisplay.Database).ToList(),
+            tab => (FirstRowCells(tab.PgDatabaseStatsGrid),
+                    ClippedTextProbe.Descendants(tab.PgDatabaseStatsGrid).OfType<DataGridRow>().Count(),
+                    tab.PgDatabaseStatsGrid.ActualHeight),
+            height: 650);
+
+        Assert.True(gridHeight >= 200, $"the grid is {gridHeight:0} px tall, a header strip with no row in view.");
+        Assert.True(rowCount > 0, "the grid shows no rows");
+        Assert.Equal("appdb", shown["Database"]);
+        Assert.Equal("19,162", shown["Temp Files"]);
     }
 }

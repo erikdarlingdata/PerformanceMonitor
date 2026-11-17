@@ -170,6 +170,15 @@ public sealed partial class ViewerDataService
     /// <para>#8913: <paramref name="extensionsNotOffered"/> is the stored extension list the other panels use. On Aurora, a collector whose
     /// extension the server does not offer is an engine limit here, as it is on Collection Health, not a fault with a setup step.</para>
     /// </summary>
+    /// <summary>
+    /// #8918: the sentence for a collector the target's PostgreSQL version cannot run, or null. Today that is <c>pg_io_stats</c> below
+    /// PostgreSQL 16, asked of the same copy the MCP reads use (<see cref="DarlingPgIoReader.NotCollectedForVersionMessage"/>).
+    /// </summary>
+    internal static string? PostgresVersionGap(DarlingServer server, string collectorName) =>
+        string.Equals(collectorName, "pg_io_stats", StringComparison.Ordinal)
+            ? DarlingPgIoReader.NotCollectedForVersionMessage(server.DisplayName, server.PostgresMajorVersion)
+            : null;
+
     public static List<PostgresCollectorHealthRow> BuildPostgresCollectorHealth(
         DarlingServer server,
         IReadOnlyList<ICollectorSchemaInfo> postgresCollectors,
@@ -185,8 +194,10 @@ public sealed partial class ViewerDataService
 
         foreach (var definition in postgresCollectors)
         {
-            var gap = CollectorEngineCapability.NotCollectedMessage(
+            var engineGap = CollectorEngineCapability.NotCollectedMessage(
                 server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None, extensionsNotOffered);
+            /* #8918: a PostgreSQL 15 target has no pg_stat_io, so pg_io_stats never runs there. That is a gap, not a collector that should have run. */
+            var gap = engineGap ?? PostgresVersionGap(server, definition.Name);
 
             byName.TryGetValue(definition.Name, out var facts);
 
@@ -194,7 +205,7 @@ public sealed partial class ViewerDataService
             var isFault = false;
             if (gap is not null)
             {
-                status = "Not collected on this engine";
+                status = engineGap is not null ? "Not collected on this engine" : "Not collected on this version";
             }
             else if (facts is null)
             {
@@ -457,6 +468,35 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 200, CancellationToken cancellationToken = default) =>
         DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
             _dataSource, serverId, startUtc, endUtc, limit, cancellationToken: cancellationToken);
+
+    /// <summary>The database a PostgreSQL server entry connects to: <c>config_monitored_servers.database</c>, a non-secret column. Null
+    /// when the entry names none, or the server has no entry.</summary>
+    public const string PgEntryDatabaseSql = "SELECT database FROM config.config_monitored_servers WHERE server_id = $1";
+
+    /// <summary>The Overview extension panel's rows (#8914): the extension rows of the database the server entry connects to, with that
+    /// database's name. <c>pg_extension</c> is per database, and the collector stores one row per extension for every database on the
+    /// server, so the cluster-wide read tells an operator to run CREATE EXTENSION for an extension that exists where the entry connects
+    /// whenever it is missing from some other database (typically the <c>postgres</c> maintenance database). Other databases are in
+    /// the Extension Install Census beside it. An entry that names no database gets every database's rows, as before.</summary>
+    public async Task<PgExtensionPanelData> GetPgExtensionPanelAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 200, CancellationToken cancellationToken = default)
+    {
+        string? entryDatabase;
+        await using (var command = _dataSource.CreateCommand(PgEntryDatabaseSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            entryDatabase = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(
+                await command.ExecuteScalarAsync(cancellationToken) as string);
+        }
+
+        var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
+            _dataSource, serverId, startUtc, endUtc, limit, entryDatabase, cancellationToken);
+        return new PgExtensionPanelData(entryDatabase, rows);
+    }
+
+    /// <summary>The extension panel's rows and the database they are scoped to (null: every database).</summary>
+    public sealed record PgExtensionPanelData(string? EntryDatabase, List<DarlingPgExtensionAvailabilityReader.PgExtensionRow> Rows);
 
     /// <summary>Activity tab - lock state by mode, type and relation over the window (#2544). Every row
     /// carries the capture denominator, because these are SAMPLES: three ungranted rows means something
