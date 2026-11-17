@@ -39,9 +39,11 @@ public static class CheckDbErrorLogLine
     /// <summary>
     /// The databases among <paramref name="names"/> a line is about. #8865: the name follows <c>DBCC CHECKDB (</c> and ends at the
     /// <c>)</c> that closes it, or at <c>, </c> when the check ran with a second argument inside the parentheses (<c>NOINDEX</c> or a
-    /// repair option: <c>DBCC CHECKDB (db, noindex) WITH ...</c>). A name may itself hold either, so every such end is tried against the
-    /// names, compared exactly. A line of message 5235 (the check ended abnormally) is about no database: it says nothing about the
-    /// check's result and must not shadow an earlier good line.
+    /// repair option: <c>DBCC CHECKDB (db, noindex) WITH ...</c>). A name may itself hold either, so an end counts only where the log
+    /// puts one: a <c>)</c> followed by <c> WITH </c> or <c> executed by </c>, and a <c>, </c> followed by one of those options and
+    /// then such a <c>)</c>. Otherwise <c>Sales, Inc</c> would also credit <c>Sales</c> with its check and its error count. Names are
+    /// compared exactly. A line of message 5235 (the check ended abnormally) is about no database: it says nothing about the check's
+    /// result and must not shadow an earlier good line.
     /// </summary>
     public static IEnumerable<string> DatabaseNames(string text, IReadOnlySet<string> names)
     {
@@ -56,7 +58,7 @@ public static class CheckDbErrorLogLine
         var end = executedBy > 0 ? executedBy : text.Length;
         for (var i = Prefix.Length; i < end; i++)
         {
-            if (text[i] == ')' || (text[i] == ',' && i + 1 < end && text[i + 1] == ' '))
+            if (ClosesTheName(text, i) || EndsBeforeASecondArgument(text, i))
             {
                 var name = text.Substring(Prefix.Length, i - Prefix.Length);
                 if (names.Contains(name))
@@ -65,6 +67,38 @@ public static class CheckDbErrorLogLine
                 }
             }
         }
+    }
+
+    /* #8865: the arguments CHECKDB takes after the name inside the parentheses. */
+    private static readonly string[] SecondArguments = { NoIndex, "repair_allow_data_loss", "repair_fast", "repair_rebuild" };
+
+    /* #8865: the ")" that closes the parentheses is followed by the WITH options or by " executed by "; a ")" inside a name is not. */
+    private static bool ClosesTheName(string text, int i) =>
+        text[i] == ')'
+        && (text.AsSpan(i).StartsWith(WithMarker, StringComparison.Ordinal)
+            || text.AsSpan(i + 1).StartsWith(ExecutedByMarker, StringComparison.Ordinal));
+
+    /* #8865: ", " ends the name only when a CHECKDB argument follows it and closes the parentheses: "(Sales, noindex)" is Sales,
+       "(Sales, Inc)" is not. */
+    private static bool EndsBeforeASecondArgument(string text, int i)
+    {
+        if (text[i] != ',' || i + 1 >= text.Length || text[i + 1] != ' ')
+        {
+            return false;
+        }
+
+        foreach (var argument in SecondArguments)
+        {
+            var close = i + 2 + argument.Length;
+            if (close < text.Length
+                && text.AsSpan(i + 2, argument.Length).Equals(argument, StringComparison.OrdinalIgnoreCase)
+                && ClosesTheName(text, close))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

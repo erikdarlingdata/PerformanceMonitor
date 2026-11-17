@@ -622,22 +622,25 @@ public sealed class DatabaseProtectionCollectorTests
     public async Task ANoIndexLine_IsMatched_AndTheNewestLineOfADatabaseWinsAcrossHeads()
     {
         /* #8865 I6: NOINDEX is logged inside the parentheses, "DBCC CHECKDB (A, noindex)", which the ")"-after-the-name match missed. The
-           server keeps one line per head, so a database can come back with several (here a full check and a later NOINDEX one). */
+           server keeps one line per head, so a database can come back with several (here a full check and a later NOINDEX one). A newer
+           line about a database whose name holds ", " ("A, Inc") is that database's alone, not A's too. */
         var table = Shape();
         Add(table, "A", "FULL", null, Full, Log);
-        Add(table, "A, noindex", "FULL", null, Full, Log);
+        Add(table, "A, Inc", "FULL", null, Full, Log);
         var context = ContextWith(SettledState());
         var rows = await ReadWithAsync(context, table, Logs(1));
         var lines = LineShape();
         lines.Rows.Add(Checked.AddDays(-4), CheckLine("A"));
         lines.Rows.Add(Checked.AddDays(-2), "DBCC CHECKDB (A, noindex) WITH no_infomsgs executed by sa found 0 errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 0 seconds.");
+        lines.Rows.Add(Checked.AddDays(-1), CheckLine("A, Inc", 4));
 
         await ApplyAsync(context, rows, Status((0, true)), lines);
 
         Assert.Equal(Checked.AddDays(-2), rows[0].ErrorLogCheckDbTime);
         Assert.Equal("full,noindex", rows[0].ErrorLogCheckDbOptions);
-        /* A database really called "A, noindex" reads the same line: the log cannot tell the two apart. */
-        Assert.Equal(Checked.AddDays(-2), rows[1].ErrorLogCheckDbTime);
+        Assert.Equal(0, rows[0].ErrorLogCheckDbErrors);
+        Assert.Equal(Checked.AddDays(-1), rows[1].ErrorLogCheckDbTime);
+        Assert.Equal(4, rows[1].ErrorLogCheckDbErrors);
         Assert.Equal(0, rows[0].ErrorLogUnparsedLines);
     }
 

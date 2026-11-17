@@ -34,13 +34,19 @@ public class CheckDbErrorLogLineTests
     [Fact]
     public void ALine_NamesTheDatabasesItCanBeAbout_ExactlyAndWithASecondArgument()
     {
-        var names = new HashSet<string>(StringComparer.Ordinal) { "Sales", "Sales old", "My) odd", "My", "sales" };
+        var names = new HashSet<string>(StringComparer.Ordinal) { "Sales", "Sales old", "Sales, Inc", "Acme", "My) odd", "My", "sales" };
 
         Assert.Equal(new[] { "Sales" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales) WITH no_infomsgs executed by sa found 0 errors", names));
         Assert.Equal(new[] { "Sales" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales, noindex) WITH no_infomsgs executed by sa found 0 errors", names));
+        Assert.Equal(new[] { "Sales" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales, NOINDEX) executed by sa found 0 errors", names));
+        Assert.Equal(new[] { "Sales" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales, repair_allow_data_loss) WITH no_infomsgs executed by sa found 0 errors", names));
         Assert.Equal(new[] { "Sales old" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales old) executed by sa found 0 errors", names));
-        /* A name holding ")" is found; so is the shorter name it starts with, as the old prefix match did: the log cannot tell them apart. */
-        Assert.Equal(new[] { "My", "My) odd" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (My) odd) executed by sa found 0 errors", names));
+        /* #8865: a name holding ", " is not also credited to the shorter name before it; only a check option may follow that comma. */
+        Assert.Equal(new[] { "Sales, Inc" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales, Inc) WITH no_infomsgs executed by sa found 0 errors", names));
+        Assert.Equal(new[] { "Sales, Inc" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales, Inc, noindex) executed by sa found 0 errors", names));
+        Assert.Empty(CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Acme, Archive 2019) WITH no_infomsgs executed by sa found 4 errors", names));
+        /* A name holding ")" is found, and the shorter name it starts with is not: that ")" is not followed by WITH or "executed by". */
+        Assert.Equal(new[] { "My) odd" }, CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (My) odd) executed by sa found 0 errors", names));
         Assert.Empty(CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Unknown) executed by sa found 0 errors", names));
         /* Message 5235: the check ended abnormally, so the line says nothing about the database's last check. */
         Assert.Empty(CheckDbErrorLogLine.DatabaseNames("DBCC CHECKDB (Sales) WITH no_infomsgs executed by sa terminated abnormally due to error state 5. Elapsed time: 0 hours 0 minutes 0 seconds.", names));
