@@ -349,29 +349,17 @@ public partial class ViewerServerTab
             return;
         }
 
-        var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
+        var panel = await _dataService.GetPgExtensionPanelAsync(_server.ServerId, startUtc, endUtc);
+        var rows = panel.Rows;
 
         PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList();
         await LoadPgExtensionInstallCensusAsync(startUtc, endUtc);
-
-        var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
-        var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
 
         var extensionMinutes = await EffectiveCollectorMinutesAsync("pg_extension_availability", 1440);
         PgExtensionsNote.Text = PanelNote("pg_extension_availability", rows.Count,
             $"The extension collector runs {CollectorCadenceText.Every(extensionMinutes)}, so a server added in the last "
             + $"{CollectorCadenceText.Span(extensionMinutes)} has nothing here yet.")
-            + (rows.Count == 0
-                ? string.Empty
-                : $"  {CountText.Plural(actionable, "extension")} this product can use {(actionable == 1 ? "is" : "are")} available on this server and NOT "
-                  + "installed; each is one CREATE EXTENSION away."
-                  + (outdated > 0
-                      ? $"  {outdated} {(outdated == 1 ? "is" : "are")} installed but behind the version the server offers, which is worth "
-                        + "fixing with ALTER EXTENSION … UPDATE: a stale extension can be missing columns a "
-                        + "collector reads, and that surfaces as a confusing error rather than as a gap."
-                      : string.Empty)
-                  + "  \u201cInstalled\u201d is scoped to the database this server entry connects to: "
-                  + "pg_extension is per-database while the server's offer is cluster-wide.");
+            + (rows.Count == 0 ? string.Empty : PgExtensionPanelText.Headline(rows, panel.EntryDatabase));
     }
 
     /// <summary>Fills the Extension Install Census under the Extensions grid: one row per extension created anywhere on the server,
