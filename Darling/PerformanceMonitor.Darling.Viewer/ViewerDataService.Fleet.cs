@@ -915,7 +915,7 @@ public sealed class FleetRollup
         {
             /* #7561: a critical identity tile bands the card and a warning one only lists it. Either way the reason names it, in the service's words
                (ServerHealthClassifier.IdentityCapacityReason), so a Healthy server in Needs attention says why. */
-            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns, identity.ExhaustedColumns));
         }
 
         if (s.DatabaseStateReason is { Length: > 0 } databaseStateReason)

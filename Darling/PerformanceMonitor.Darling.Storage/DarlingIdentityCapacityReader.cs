@@ -56,6 +56,9 @@ public sealed record IdentityColumnFact(
     /// <summary>Inserts left before the engine raises an arithmetic overflow: null when the value was not stored.</summary>
     public BigInteger? ValuesRemaining => Capacity?.Remaining;
 
+    /// <summary>#8928: no value is left, so the next insert fails: 0 remaining, or 100 percent used when the remaining count was not stored. The only column the reason line may call "at its limit".</summary>
+    public bool AtLimit => ValuesRemaining is { } remaining ? remaining <= 0 : PercentUsed >= 100.0;
+
     /// <summary>
     /// The percent and days-left grades together, the worse winning (#8818): ok, warning (70 percent used or under 30 days left) or critical (90 percent
     /// or under 7 days). Null when no percent is known. With no <see cref="Exhaustion"/> the percent grades alone.
