@@ -254,7 +254,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
 
         Assert.Equal(400, reply.Status);
         Assert.Equal("role_not_allowed", reply.Error);
-        Assert.Empty(await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken));
+        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken)).Rows);
     }
 
     [Fact]
@@ -391,6 +391,60 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal("at_cap", third.Error);
     }
 
+    /// <summary>I2: create then revoke frees the live slot, so a loop of the two is held by the 24-hour ceiling: 429 too_many_recent.</summary>
+    [Fact]
+    public async Task Create_TooManyRecent_429()
+    {
+        await using var rig = await StartAsync(Settings(cap: 1));
+        var vera = PersonFor("create-too-many-recent");
+        for (var i = 0; i < PersonalTokenStore.RecentCreatesPerSlot; i++)
+        {
+            var made = await rig.CreateAsync(vera, "loop-" + i.ToString(CultureInfo.InvariantCulture));
+            Assert.Equal(201, made.Status);
+            Assert.Equal(204, (await rig.SendAsync("POST", "/api/mcp-tokens/" + (string)made.Body!["record"]!["id"]! + "/revoke", vera)).Status);
+        }
+
+        var refused = await rig.CreateAsync(vera, "one-more");
+
+        Assert.Equal(429, refused.Status);
+        Assert.Equal("too_many_recent", refused.Error);
+        Assert.False(string.IsNullOrWhiteSpace((string?)refused.Body!["message"]));
+        Assert.DoesNotContain((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken)).Rows,
+            r => r.TokenName == "one-more");
+    }
+
+    /// <summary>I2 (#3699): <c>?all=1</c> answers at most <see cref="PersonalTokenStore.ListLimit"/> rows and says when it cut, on a store of its own.</summary>
+    [Fact]
+    public async Task List_All_PastTheLimit_SetsTruncated()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the personal token route live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var insert = new NpgsqlCommand(string.Format(CultureInfo.InvariantCulture,
+                "INSERT INTO config.mcp_personal_token (token_id, secret_sha256, owner_key, subject, token_name, role, created_at, expires_at) "
+                + "SELECT lpad(to_hex(i), 16, '0'), sha256(i::text::bytea), 'bulk', 's', 'n' || i, 'reader', now() - make_interval(secs => {0} - i), now() + interval '1 day' "
+                + "FROM generate_series(0, {0}) AS i", PersonalTokenStore.ListLimit), connection);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var rig = await Rig.StartAsync(scratch.ConnectionString, Settings());
+        var ada = PersonFor("list-all-truncated", Seat.Admin);
+
+        var cut = await rig.SendAsync("GET", "/api/mcp-tokens?all=1", ada);
+        var own = await rig.SendAsync("GET", "/api/mcp-tokens", ada);
+
+        Assert.Equal(200, cut.Status);
+        Assert.True((bool?)cut.Body!["truncated"]);
+        Assert.Equal(PersonalTokenStore.ListLimit, cut.Body["tokens"]!.AsArray().Count);
+        Assert.False((bool?)own.Body!["truncated"]);
+        Assert.Empty(own.Body["tokens"]!.AsArray());
+    }
+
     [Fact]
     public async Task Create_SharedTokenAdmin_oidc_only()
     {
@@ -430,7 +484,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         }
 
         Assert.False((bool?)me.Body!["personal_tokens"]);
-        Assert.Empty(await PersonalTokenStore.ListAsync(rig.Owner, ada.OwnerKey, TestContext.Current.CancellationToken));
+        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, ada.OwnerKey, TestContext.Current.CancellationToken)).Rows);
     }
 
     [Fact]
@@ -456,7 +510,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal(415, text.Status);
         Assert.Equal(415, form.Status);
         Assert.Equal(415, none.Status);
-        Assert.Empty(await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken));
+        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken)).Rows);
     }
 
     [Fact]

@@ -108,6 +108,7 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
             }
 
             _rows = map;
+            Forget(map);
             lock (_logSync)
             {
                 _missingTableLogged = false;
@@ -256,6 +257,26 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
 
             _deadLogged[tokenId] = now;
             return true;
+        }
+    }
+
+    /* Keeps the flush and dead-log memory to the ids the last load returned, so a token that is gone from the store (purged) leaves nothing here. */
+    private void Forget(Dictionary<string, PersonalTokenSecretRow> loaded)
+    {
+        lock (_flushSync)
+        {
+            foreach (var id in _lastFlushed.Keys.Where(id => !loaded.ContainsKey(id)).ToList())
+            {
+                _lastFlushed.Remove(id);
+            }
+        }
+
+        lock (_deadSync)
+        {
+            foreach (var id in _deadLogged.Keys.Where(id => !loaded.ContainsKey(id)).ToList())
+            {
+                _deadLogged.Remove(id);
+            }
         }
     }
 

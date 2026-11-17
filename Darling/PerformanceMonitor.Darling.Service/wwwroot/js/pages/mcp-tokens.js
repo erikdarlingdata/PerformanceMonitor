@@ -8,7 +8,7 @@
 
 /*
  * My MCP tokens (#8737): the page where a person signed in with OpenID Connect makes, lists and revokes their own MCP tokens, and where an
- * administrator sees everyone's. It reads GET /api/mcp-tokens ({tokens, max_lifetime_days, allowed_roles}; ?all=1 adds each row's subject and
+ * administrator sees everyone's. It reads GET /api/mcp-tokens ({tokens, truncated, max_lifetime_days, allowed_roles}; ?all=1 adds each row's subject and
  * is for an admin seat) and writes POST /api/mcp-tokens (the create, the one answer that carries the token's value) and
  * POST /api/mcp-tokens/{id}/revoke. The server is the authority for every limit; the form only offers what the server just said it allows.
  *
@@ -144,7 +144,14 @@ export function renderMcpTokens(host, me) {
       mount(target, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message || emptyText));
       return;
     }
-    mount(target, res.data.tokens.length === 0 ? emptyStrip(emptyText) : tokenTable(res.data.tokens, withSubject, (row) => revoke(row, withSubject)));
+    if (res.data.tokens.length === 0) {
+      mount(target, emptyStrip(emptyText));
+      return;
+    }
+    const table = tokenTable(res.data.tokens, withSubject, (row) => revoke(row, withSubject));
+    mount(target, res.data.truncated === true
+      ? [emptyStrip("Only the newest " + res.data.tokens.length + " tokens are shown; older ones are left out."), table]
+      : table);
   };
 
   const drawForm = () => {

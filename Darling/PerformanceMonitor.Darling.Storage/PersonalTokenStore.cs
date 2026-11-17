@@ -25,7 +25,10 @@ public sealed record PersonalTokenRow(string TokenId, string OwnerKey, string Su
 /// <summary>A token with the sha256 of its secret, for the MCP snapshot only.</summary>
 public sealed record PersonalTokenSecretRow(PersonalTokenRow Row, byte[] SecretSha256);
 
-public enum PersonalTokenCreateOutcome { Created, NameTaken, AtCap }
+public enum PersonalTokenCreateOutcome { Created, NameTaken, AtCap, TooManyRecent }
+
+/// <summary>A list of tokens, newest <see cref="PersonalTokenStore.ListLimit"/> at most, oldest first; <see cref="Truncated"/> when older rows were left out.</summary>
+public sealed record PersonalTokenPage(IReadOnlyList<PersonalTokenRow> Rows, bool Truncated);
 
 /// <summary>
 /// The one reader and writer of <c>config.mcp_personal_token</c> (#8737). Every call takes the store OWNER's data source: the table grants nothing
@@ -40,18 +43,26 @@ public static class PersonalTokenStore
     private const string LockSql = "SELECT pg_advisory_xact_lock(hashtextextended('mcp_personal_token:' || $1, 0))";
 
     private const string CountSql = @"
-SELECT count(*) FILTER (WHERE token_name = $2), count(*)
+SELECT count(*) FILTER (WHERE token_name = $2 AND revoked_at IS NULL AND expires_at > $3),
+       count(*) FILTER (WHERE revoked_at IS NULL AND expires_at > $3),
+       count(*) FILTER (WHERE created_at > $4)
 FROM config.mcp_personal_token
-WHERE owner_key = $1 AND revoked_at IS NULL AND expires_at > $3";
+WHERE owner_key = $1";
 
     private const string InsertSql = @"
 INSERT INTO config.mcp_personal_token (token_id, secret_sha256, owner_key, subject, token_name, role, created_at, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
 
+    /* The newest $2 rows (the caller asks for one more than it answers), handed back oldest first. */
     private const string ListSql = @"
 SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, last_used_at, revoked_at, revoked_by, revoke_reason
-FROM config.mcp_personal_token
-WHERE $1::text IS NULL OR owner_key = $1
+FROM (
+    SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, last_used_at, revoked_at, revoked_by, revoke_reason
+    FROM config.mcp_personal_token
+    WHERE $1::text IS NULL OR owner_key = $1
+    ORDER BY created_at DESC, token_id DESC
+    LIMIT $2
+) AS newest
 ORDER BY created_at, token_id";
 
     private const string LoadAllSql = @"
@@ -89,12 +100,24 @@ SET last_used_at = greatest(t.last_used_at, v.used_at)
 FROM unnest($1::text[], $2::timestamptz[]) AS v(token_id, used_at)
 WHERE t.token_id = v.token_id";
 
+    /// <summary>How many tokens one owner key may create in <see cref="RecentWindow"/>, per slot of the live cap, revoked ones included.</summary>
+    public const int RecentCreatesPerSlot = 4;
+
+    /// <summary>The window <see cref="RecentCreatesPerSlot"/> counts creates over.</summary>
+    public static readonly TimeSpan RecentWindow = TimeSpan.FromHours(24);
+
+    /// <summary>The most rows one list answers.</summary>
+    public const int ListLimit = 1000;
+
     /// <summary>The reason journaled and stored when the settings turn operator tokens off.</summary>
     public const string OperatorsDisabledReason = "operator_tokens_disabled";
 
     /// <summary>
     /// Makes a token, unless the owner key already holds <paramref name="maxPerPerson"/> live ones (<see cref="PersonalTokenCreateOutcome.AtCap"/>)
-    /// or a live one with the same name (<see cref="PersonalTokenCreateOutcome.NameTaken"/>). The count and the insert sit in one transaction behind a
+    /// or a live one with the same name (<see cref="PersonalTokenCreateOutcome.NameTaken"/>), or has created <see cref="RecentCreatesPerSlot"/> times
+    /// <paramref name="maxPerPerson"/> tokens in the last <see cref="RecentWindow"/>, revoked ones included
+    /// (<see cref="PersonalTokenCreateOutcome.TooManyRecent"/>): a revoke frees a live slot at once, and the dead row stays for the retention, so
+    /// without that ceiling a create-and-revoke loop grows the table without bound. The counts and the insert sit in one transaction behind a
     /// transaction-scoped advisory lock on the owner key, so two creates for the same owner at the last slot cannot both pass the count. The name of a
     /// revoked or expired token is free.
     /// </summary>
@@ -112,13 +135,14 @@ WHERE t.token_id = v.token_id";
                 await command.ExecuteNonQueryAsync(ct);
             }
 
-            long named, live;
-            await using (var command = Command(connection, transaction, CountSql, Text(ownerKey), Text(tokenName), Time(utcNow)))
+            long named, live, recent;
+            await using (var command = Command(connection, transaction, CountSql, Text(ownerKey), Text(tokenName), Time(utcNow), Time(utcNow - RecentWindow)))
             await using (var reader = await command.ExecuteReaderAsync(ct))
             {
                 await reader.ReadAsync(ct);
                 named = reader.GetInt64(0);
                 live = reader.GetInt64(1);
+                recent = reader.GetInt64(2);
             }
 
             if (named > 0)
@@ -129,6 +153,11 @@ WHERE t.token_id = v.token_id";
             if (live >= maxPerPerson)
             {
                 return (PersonalTokenCreateOutcome.AtCap, false);
+            }
+
+            if (recent >= (long)maxPerPerson * RecentCreatesPerSlot)
+            {
+                return (PersonalTokenCreateOutcome.TooManyRecent, false);
             }
 
             await using (var command = Command(connection, transaction, InsertSql, Text(tokenId),
@@ -143,12 +172,16 @@ WHERE t.token_id = v.token_id";
         }, ct);
     }
 
-    /// <summary>The tokens of one owner key, or of everyone when <paramref name="ownerKey"/> is null. Never selects the hash.</summary>
-    public static async Task<IReadOnlyList<PersonalTokenRow>> ListAsync(NpgsqlDataSource owner, string? ownerKey, CancellationToken ct)
+    /// <summary>
+    /// The tokens of one owner key, or of everyone when <paramref name="ownerKey"/> is null: the newest <see cref="ListLimit"/>, oldest first, and
+    /// whether older rows were left out (read with one more row than it answers, #3699). Never selects the hash.
+    /// </summary>
+    public static async Task<PersonalTokenPage> ListAsync(NpgsqlDataSource owner, string? ownerKey, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(owner);
         await using var connection = await owner.OpenConnectionAsync(ct);
-        await using var command = Command(connection, null, ListSql, NullableText(ownerKey));
+        await using var command = Command(connection, null, ListSql, NullableText(ownerKey),
+            new NpgsqlParameter<int> { TypedValue = ListLimit + 1, NpgsqlDbType = NpgsqlDbType.Integer });
         await using var reader = await command.ExecuteReaderAsync(ct);
         var rows = new List<PersonalTokenRow>();
         while (await reader.ReadAsync(ct))
@@ -156,7 +189,14 @@ WHERE t.token_id = v.token_id";
             rows.Add(ReadRow(reader));
         }
 
-        return rows;
+        /* The extra row is the oldest one read; it is left out. */
+        var truncated = rows.Count > ListLimit;
+        if (truncated)
+        {
+            rows.RemoveAt(0);
+        }
+
+        return new PersonalTokenPage(rows, truncated);
     }
 
     /// <summary>Every token with the sha256 of its secret: the MCP snapshot's read, and nothing else's.</summary>

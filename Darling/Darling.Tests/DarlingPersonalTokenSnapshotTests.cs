@@ -279,6 +279,49 @@ public sealed class DarlingPersonalTokenSnapshotTests
         Assert.Equal(2, rig.Touches.Count);
     }
 
+    /// <summary>I2: the flush memory is kept only for ids the last load returned, so tokens that are gone do not pile up in it.</summary>
+    [Fact]
+    public async Task Refresh_ForgetsTheFlushTimeOfATokenTheLoadNoLongerReturns()
+    {
+        var rig = new Rig();
+        var token = PersonalTokenFormat.Mint();
+        rig.Rows = () => new[] { Row(token, T0.AddDays(1)) };
+        await rig.Refresh();
+        rig.Snapshot.MarkUsed(token.TokenId, T0);
+        await rig.Snapshot.FlushLastUsedAsync(rig.Owner, T0, CancellationToken.None);
+        Assert.Single(rig.Touches);
+
+        /* Still loaded: a use inside five minutes waits. */
+        await rig.Refresh();
+        rig.Snapshot.MarkUsed(token.TokenId, T0.AddMinutes(1));
+        await rig.Snapshot.FlushLastUsedAsync(rig.Owner, T0.AddMinutes(1), CancellationToken.None);
+        Assert.Single(rig.Touches);
+
+        /* Gone from the store (purged): its flush time is dropped, so the pending use goes out at once. */
+        rig.Rows = () => Array.Empty<PersonalTokenSecretRow>();
+        await rig.Refresh();
+        await rig.Snapshot.FlushLastUsedAsync(rig.Owner, T0.AddMinutes(2), CancellationToken.None);
+        Assert.Equal(2, rig.Touches.Count);
+    }
+
+    [Fact]
+    public async Task Refresh_ForgetsTheDeadLogTimeOfATokenTheLoadNoLongerReturns()
+    {
+        var rig = new Rig();
+        var kept = PersonalTokenFormat.Mint();
+        var gone = PersonalTokenFormat.Mint();
+        rig.Rows = () => new[] { Row(kept, T0, revokedAt: T0), Row(gone, T0, revokedAt: T0) };
+        await rig.Refresh();
+        Assert.True(rig.Snapshot.ShouldLogDead(kept.TokenId, T0));
+        Assert.True(rig.Snapshot.ShouldLogDead(gone.TokenId, T0));
+
+        rig.Rows = () => new[] { Row(kept, T0, revokedAt: T0) };
+        await rig.Refresh();
+
+        Assert.False(rig.Snapshot.ShouldLogDead(kept.TokenId, T0.AddMinutes(1)));
+        Assert.True(rig.Snapshot.ShouldLogDead(gone.TokenId, T0.AddMinutes(1)));
+    }
+
     [Fact]
     public void ShouldLogDead_OncePerHour()
     {

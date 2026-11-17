@@ -73,8 +73,9 @@ public sealed class McpTokensWebTests
             state, revoked_by = revokedBy, revoke_reason = reason, subject,
         });
 
-    private static string Listing(string rows, string roles = """["reader"]""", int max = 90) =>
-        "{\"status\":200,\"body\":{\"tokens\":[" + rows + "],\"max_lifetime_days\":" + max + ",\"allowed_roles\":" + roles + "}}";
+    private static string Listing(string rows, string roles = """["reader"]""", int max = 90, bool truncated = false) =>
+        "{\"status\":200,\"body\":{\"tokens\":[" + rows + "],\"max_lifetime_days\":" + max + ",\"allowed_roles\":" + roles
+        + ",\"truncated\":" + (truncated ? "true" : "false") + "}}";
 
     private static string Config(string me, string? own = null, string? all = null, string? create = null, string? revoke = null, string? extra = null) =>
         "{" + string.Join(",", new[]
@@ -249,6 +250,18 @@ public sealed class McpTokensWebTests
         Assert.Equal(new[] { "GET /api/mcp-tokens", "GET /api/mcp-tokens?all=1" }, urls);
     }
 
+    /// <summary>I2: a cut list says so above the table; a whole one says nothing.</summary>
+    [Fact]
+    public void EveryoneList_Truncated_SaysOnlyTheNewestAreShown()
+    {
+        var cut = Run("render", Config(OidcAdmin, own: Listing(Row("a", "mine", "live")), all: Listing(Row("z", "theirs", "live", subject: "z@b.c"), truncated: true)));
+        var whole = Run("render", Config(OidcAdmin, own: Listing(Row("a", "mine", "live")), all: Listing(Row("z", "theirs", "live", subject: "z@b.c"))));
+
+        Assert.Contains(cut.GetProperty("first").GetProperty("strips").EnumerateArray(), s => s.GetString()!.Contains("newest", StringComparison.Ordinal));
+        Assert.Equal(2, cut.GetProperty("first").GetProperty("tables").GetArrayLength());
+        Assert.DoesNotContain(whole.GetProperty("first").GetProperty("strips").EnumerateArray(), s => s.GetString()!.Contains("newest", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ReadOnlySeat_HasNoEveryoneSection_AndAsksForNoOtherPeoplesRows()
     {
@@ -287,6 +300,7 @@ public sealed class McpTokensWebTests
     [Theory]
     [InlineData("at_cap", 409, "You already have 5 live tokens. Revoke one first.")]
     [InlineData("name_taken", 409, "You already have a live token with that name.")]
+    [InlineData("too_many_recent", 429, "You made too many tokens in the last 24 hours. Try again later.")]
     [InlineData("role_not_allowed", 400, "This sign-in may not make a token with that role.")]
     public void RefusalCodes_ShownAsMessages(string code, int status, string message)
     {
