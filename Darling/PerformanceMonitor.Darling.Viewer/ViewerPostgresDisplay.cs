@@ -2103,7 +2103,8 @@ internal static class PgDisplay
     {
         Facet = ViewerServerTab.PlanCaptureFacetLabel(row.Facet, capitalize: true),
         FacetName = row.Facet,
-        Satisfied = row.IsSatisfied ? "yes" : "no",
+        /* #8912: an Aurora engine limit reads "engine limit", not "no": there is no step to take. */
+        Satisfied = row.IsSatisfied ? "yes" : row.IsEngineLimit ? "engine limit" : "no",
         Observed = row.Observed ?? "(not reported)",
         Detail = row.Detail ?? string.Empty,
         CaptureTime = SnapshotTime(row.CaptureTime),

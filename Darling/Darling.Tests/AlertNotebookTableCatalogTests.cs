@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// The reads are found in the template sources; the catalog is read by running the shipped JavaScript under Node
 /// (reported as skipped when Node is not installed).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertNotebookTableCatalogTests
 {
     private static readonly string[] s_serviceDir = { "Darling", "PerformanceMonitor.Darling.Service" };

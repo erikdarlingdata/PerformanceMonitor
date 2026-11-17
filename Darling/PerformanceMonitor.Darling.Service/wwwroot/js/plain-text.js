@@ -638,7 +638,12 @@ export function shortEmptyLine(res, extensionLine) {
   if (h.reason === "plan_capture_not_ready") {
     const n = typeof h.unsatisfied_count === "number" && h.unsatisfied_count > 0 ? h.unsatisfied_count : 0;
     return (n === 1 ? "One setting that plan capture needs is" : n > 1 ? n + " settings that plan capture needs are" : "Plan capture is") +
-      " not ready on this server, so no plans are captured. The Plan Capture Readiness panel lists each one with its fix.";
+      " not ready on this server, so no plans are captured. The Plan Capture Readiness panel lists each one with its fix." +
+      (h.engine_limited === true ? " Plans also cannot be attributed to a statement on this engine, which no setting changes." : "");
+  }
+  /* #8912: Aurora's parameter group cannot put %Q in log_line_prefix, so no plan is stored and none can join to a statement. */
+  if (h.reason === "plan_attribution_engine_limit") {
+    return "Plans are not captured on this server, and no setting changes that. Aurora PostgreSQL does not let log_line_prefix carry the query id the plan capture needs.";
   }
   return null;
 }
