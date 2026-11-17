@@ -91,6 +91,9 @@ ORDER BY database_name";
     /// the marker row's collection_time (one pass stamps one time), so the join is on equality. First seen (#6876) comes from one grouped pass
     /// over the hint rows (<c>firsts</c>): the earliest row after the hint's last absence. A correlated per-hint minimum scanned every captured
     /// row once per hint (345 hints over 24 hours of captures took 2 seconds).
+    /// <para>#8909: the read runs under <see cref="NoNestLoopRead"/>. While the window lies past the end of the <c>collection_time</c> histogram (the
+    /// table is plain, so its statistics lag by a day or more on a busy store), the planner estimates the window at one row and runs the <c>absent</c>
+    /// step as nested loops over tens of thousands of rows on each side: 60 s and a timeout for 310 hints, against 0.5 s with nested loops off.</para>
     /// </summary>
     public static string HintsSql(DatabaseFilter databases) => $@"
 WITH {Ctes(databases)},
@@ -195,7 +198,11 @@ FROM unnest($4::text[], $5::bigint[]) AS k(database_name, query_id)";
                     counts[countReader.GetString(0)] = (checked((int)countReader.GetInt64(1)), checked((int)countReader.GetInt64(2)));
             }
 
-            await using var command = postgres.CreateCommand(HintsSql(databases));
+            /* #8909: the hints list runs in a short read-only transaction with nested loops off, as the forced plan list does. SET LOCAL ends
+               with the transaction, which is disposed with this block, so the pooled connection goes back to its own settings. See NoNestLoopRead. */
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await NoNestLoopRead.BeginAsync(connection, commandTimeoutSeconds, cancellationToken);
+            await using var command = new NpgsqlCommand(HintsSql(databases), connection, transaction);
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);
