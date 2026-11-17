@@ -836,6 +836,11 @@ CREATE OR REPLACE VIEW collect.v_database_size_stats AS SELECT * FROM collect.da
         // (the probe's sentinel is the Memory Dumps one) and the re-run of V271 adds them back on. Safe on a store that never had them.
         new(271, "hasInstanceEventAlertSwitches",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS instance_restarted_enabled, DROP COLUMN IF EXISTS memory_dumps_enabled;"),
+        // V272 (#8798): the column statistics store. Three new tables; the probe's sentinel is the state table. A re-run of V272 makes them again.
+        new(272, "hasColumnStats",
+            @"DROP TABLE IF EXISTS collect.column_stats;
+DROP TABLE IF EXISTS collect.column_stats_state;
+DROP TABLE IF EXISTS collect.column_stats_runs;"),
     ];
 
     /// <summary>

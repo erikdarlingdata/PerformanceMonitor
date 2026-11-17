@@ -4113,11 +4113,11 @@ LIMIT 1";
     /// <summary>
     /// #4999: this server's collector schedule overrides, its own rows and the fleet-wide ones, the two levels
     /// the worker layers over the shipped defaults. The table is sparse (an absent row is the default), so this
-    /// is usually empty. Only the frequency matters here: the retention and enabled columns ride along because
-    /// <see cref="ScheduleOverride"/> carries them, and a collector's database scope is not read.
+    /// is usually empty. Only the frequency matters here: the retention, enabled and databases columns ride along because
+    /// <see cref="ScheduleOverride"/> carries them (column selectivity's status reads the enabled switches and the database scopes, #8798).
     /// </summary>
     internal const string ScheduleOverridesSql = @"
-SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
+SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases
 FROM config.config_collector_schedules
 WHERE server_id = $1
 OR    server_id IS NULL";
@@ -4128,7 +4128,7 @@ OR    server_id IS NULL";
     /// needs each server's rows. The same columns as <see cref="ScheduleOverridesSql"/>, read the same way.
     /// </summary>
     internal const string AllScheduleOverridesSql = @"
-SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
+SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases
 FROM config.config_collector_schedules";
 
     /// <summary>
@@ -4136,10 +4136,11 @@ FROM config.config_collector_schedules";
     /// <paramref name="serverId"/> is null. A failure to read costs the roll-up nothing but the
     /// overrides: every row then keeps the shipped cadence it was judged by before, and the health read still
     /// answers. The warning goes through <see cref="ReadScope"/>: the recorder's logger when a scope is open,
-    /// Trace otherwise. A cancellation is not swallowed.
+    /// Trace otherwise. A cancellation is not swallowed. <paramref name="throwOnFailure"/> (#8798) lets a caller for whom an empty list would
+    /// be a wrong answer, not a degraded one, see the failure instead.
     /// </summary>
     internal static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
-        NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken, bool throwOnFailure = false)
     {
         var overrides = new List<ScheduleOverride>();
         try
@@ -4159,10 +4160,11 @@ FROM config.config_collector_schedules";
                     reader.GetString(1),
                     reader.IsDBNull(2) ? null : reader.GetInt32(2),
                     reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                    reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
+                    reader.IsDBNull(4) ? null : reader.GetBoolean(4),
+                    reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException && !throwOnFailure)
         {
             ReadScope.Warn($"Collection health could not read the collector schedule overrides for server {serverId}, so its collectors are judged by their shipped cadences. The cause is logged with this entry.", ex);
             return Array.Empty<ScheduleOverride>();
