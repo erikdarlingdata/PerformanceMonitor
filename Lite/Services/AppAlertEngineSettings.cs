@@ -41,6 +41,8 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool ClientTimeoutsEnabled => App.AlertClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => App.AlertLongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => App.AlertTempDbSpaceEnabled;
+    public bool TempDbLogSpaceEnabled => App.AlertTempDbLogSpaceEnabled;
+    public bool TempDbGrowthFitEnabled => App.AlertTempDbGrowthFitEnabled;
     public bool LowDiskEnabled => App.AlertLowDiskEnabled;
     public bool PvsEnabled => App.AlertPvsEnabled;
     public bool LongRunningJobEnabled => App.AlertLongRunningJobEnabled;
@@ -54,6 +56,11 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
        would be silently reset on the first config_version bump. If this needs to be configurable it goes
        in the store, with the migration ladder that implies. */
     public bool ForcePlanFailureEnabled => true;
+
+    /* #8884: on by default, switched off in settings.json (alert_instance_restarted_enabled, alert_memory_dumps_enabled). Lite has no store, so the Settings window
+       writes them to settings.json. */
+    public bool InstanceRestartedEnabled => App.AlertInstanceRestartedEnabled;
+    public bool MemoryDumpsEnabled => App.AlertMemoryDumpsEnabled;
 
     public int CpuThresholdPercent => App.AlertCpuThreshold;
     public int BlockingCountThreshold => App.AlertBlockingThreshold;
@@ -97,6 +104,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public IReadOnlyList<string> LongRunningQueryExcludedLogins => App.AlertLongRunningQueryExcludedLogins;
 
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;
+    public int TempDbLogSpaceThresholdPercent => Math.Clamp(App.AlertTempDbLogSpaceThresholdPercent, 1, 100);
     public int LowDiskThresholdPercent => App.AlertLowDiskThresholdPercent;
     public int LowDiskThresholdGb => App.AlertLowDiskThresholdGb;
 

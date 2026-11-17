@@ -254,6 +254,7 @@ public sealed partial class PgFactCollector : IFactCollector
         await CollectMemoryPressureEventFactsAsync(context, facts);
         await CollectDatabaseConfigFactsAsync(context, facts);
         await CollectFileAutogrowthFactsAsync(context, facts);
+        await CollectTempDbFileSetupFactsAsync(context, facts);
         await CollectProcedureStatsFactsAsync(context, facts);
         await CollectActiveQueryFactsAsync(context, facts);
         await CollectRunningJobFactsAsync(context, facts);
@@ -337,7 +338,9 @@ public sealed partial class PgFactCollector : IFactCollector
         TraceFlagsSql,
         ServerPropertiesSql,
         DiskSpaceSql,
-        PlanAdvisorySql
+        PlanAdvisorySql,
+        PgTempDbFileSetupReader.FilesSql,
+        PgTempDbFileSetupReader.SchedulerCountSql
     };
 
     // Single impl lives in PgBlockingPairRowQuery (shared with the pair-row reader);

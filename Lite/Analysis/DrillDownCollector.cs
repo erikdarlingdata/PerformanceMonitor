@@ -86,6 +86,11 @@ public partial class DrillDownCollector
                 if (pathKeys.Contains("FILE_AUTOGROWTH_PERCENT"))
                     await CollectAutogrowthPercentFiles(finding, context);
 
+                /* #8883: the tempdb file list is one cheap read of the newest collection and renders the TEMPDB_FILE_SETUP
+                   finding, which scores 0.3 (advisory). Collect it regardless of the 0.5 display gate. */
+                if (pathKeys.Contains("TEMPDB_FILE_SETUP"))
+                    await CollectTempDbSetupFiles(finding, context);
+
                 /* WS4: re-parse the top collected query plans to render the specific missing
                    indexes / warnings for a MISSING_INDEX or PLAN_WARNING finding, which scores 0.4
                    (advisory). Run regardless of the 0.5 display gate, like the config drill-downs

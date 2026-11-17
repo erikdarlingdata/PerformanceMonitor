@@ -84,6 +84,7 @@ public sealed class PgFactCollectorTests
         "CollectServerPropertiesFactsAsync",
         "CollectSessionFactsAsync",
         "CollectTempDbFactsAsync",
+        "CollectTempDbFileSetupFactsAsync",
         "CollectTraceFlagFactsAsync",
         "CollectWaitStatsFactsAsync"
     };
@@ -109,14 +110,15 @@ public sealed class PgFactCollectorTests
     [Fact]
     public void AllSql_CoversEveryQuery_OnePerCollectMethodPlusTheDmvFallback()
     {
-        /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
+        /* 33 collect methods (32 fact readers plus the #3538 coverage witness), one query each, plus
            the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
            PLAN_REGRESSION's #3953 table twin and #5448 daily-totals twin: the plan-regression method runs one of
            three reads per server, and Lite has no store for the second or the third (its DuckDB keeps no
            latest-snapshot interval table), plus #5516's DatabaseSizeNewestSql: the database-size method runs
            it first and DatabaseSizeSql only when a file has dropped out of the newest snapshot, plus #6640's
-           QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills. */
-        Assert.Equal(LiteCollectMethodSurface.Length + 5, PgFactCollector.AllSql.Count);
+           QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills, plus
+           #8883's SchedulerCountSql: the tempdb file setup method reads the file list first and the scheduler count second. */
+        Assert.Equal(LiteCollectMethodSurface.Length + 6, PgFactCollector.AllSql.Count);
         Assert.Contains(PgFactCollector.QuerySpillsRankedSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);

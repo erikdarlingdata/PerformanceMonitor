@@ -500,6 +500,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         "client_timeouts.critical_per_minute" => s.ClientTimeoutsCriticalPerMinute,
         "long_running_query.threshold_minutes" => s.LongRunningQueryThresholdMinutes,
         "tempdb_space.threshold_percent" => s.TempDbSpaceThresholdPercent,
+        "tempdb_log_space.threshold_percent" => s.TempDbLogSpaceThresholdPercent,
         "low_disk.threshold_percent" => s.LowDiskThresholdPercent,
         "low_disk.threshold_gb" => s.LowDiskThresholdGb,
         "low_disk.critical_free_percent" => s.DiskCriticalFreePercent,

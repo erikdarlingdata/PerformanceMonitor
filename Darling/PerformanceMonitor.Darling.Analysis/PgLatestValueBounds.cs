@@ -46,6 +46,7 @@ internal static class PgLatestValueBounds
         MemoryClerksCollector.Instance,
         PlanCacheStatsCollector.Instance,
         MemoryStatsCollector.Instance,
+        CpuSchedulerStatsCollector.Instance,
     };
 
     /// <summary>This server's schedule overrides: its own rows and the fleet-wide ones, the two levels the

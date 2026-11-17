@@ -602,7 +602,10 @@ public sealed class MeasurementContractCensusTests
            keys: the store keys state by (server_id, collector_name), so each holds its own prior under its
            own name. */
         Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, WaitStatsCollector.Instance.StateKeys);
-        Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, CpuUtilizationCollector.Instance.StateKeys);
+        /* #8884: cpu_utilization also keeps the memory dump stamp and the one a rise replaced, beside its identity pair. */
+        Assert.Equal(
+            new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey, InstanceEvents.MemoryDumpsStateKey, InstanceEvents.MemoryDumpsPreviousStateKey },
+            CpuUtilizationCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey, ServerEpoch.StatementsDeallocStateKey }, PgStatementStatsCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey }, PgWaitStatsCollector.Instance.StateKeys);
     }

@@ -828,8 +828,9 @@ public sealed class ServerEpochTests
         Assert.Equal(
             new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey },
             WaitStatsCollector.Instance.StateKeys);
+        /* #8884: cpu_utilization also keeps the memory dump stamp and the one a rise replaced. */
         Assert.Equal(
-            new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey },
+            new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey, InstanceEvents.MemoryDumpsStateKey, InstanceEvents.MemoryDumpsPreviousStateKey },
             CpuUtilizationCollector.Instance.StateKeys);
         Assert.Equal(
             new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey, ServerEpoch.StatementsDeallocStateKey },

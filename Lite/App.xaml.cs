@@ -271,7 +271,12 @@ public partial class App : Application
        rule). Empty by default; persisted as the alert_excluded_volumes array, edited on the Alerts tab. */
     public static List<string> AlertExcludedVolumes { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
+    public static bool AlertTempDbGrowthFitEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
+    public static bool AlertTempDbLogSpaceEnabled { get; set; } = true;
+    public static int AlertTempDbLogSpaceThresholdPercent { get; set; } = 80;
+    public static bool AlertInstanceRestartedEnabled { get; set; } = true;
+    public static bool AlertMemoryDumpsEnabled { get; set; } = true;
     public static bool AlertLowDiskEnabled { get; set; } = true;
     public static int AlertLowDiskThresholdPercent { get; set; } = 10; // Alert when a volume's free space < X% (0 disables this check)
     public static int AlertLowDiskThresholdGb { get; set; } = 5;        // Alert when a volume's free space < X GB (0 disables this check)
@@ -1511,6 +1516,11 @@ public partial class App : Application
             }
             if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
             if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);
+            if (read.TryGetProperty("alert_tempdb_log_space_enabled", out v)) AlertTempDbLogSpaceEnabled = v.Bool(AlertTempDbLogSpaceEnabled);
+            if (read.TryGetProperty("alert_tempdb_log_space_threshold_percent", out v)) AlertTempDbLogSpaceThresholdPercent = v.WholeNumber(AlertTempDbLogSpaceThresholdPercent, 1, 100);
+            if (read.TryGetProperty("alert_tempdb_growth_fit_enabled", out v)) AlertTempDbGrowthFitEnabled = v.Bool(AlertTempDbGrowthFitEnabled);
+            if (read.TryGetProperty("alert_instance_restarted_enabled", out v)) AlertInstanceRestartedEnabled = v.Bool(AlertInstanceRestartedEnabled);
+            if (read.TryGetProperty("alert_memory_dumps_enabled", out v)) AlertMemoryDumpsEnabled = v.Bool(AlertMemoryDumpsEnabled);
             if (read.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.Bool(AlertLowDiskEnabled);
             if (read.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = v.WholeNumber(AlertLowDiskThresholdPercent, 0, 100);
             if (read.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = v.WholeNumber(AlertLowDiskThresholdGb, 0, int.MaxValue);

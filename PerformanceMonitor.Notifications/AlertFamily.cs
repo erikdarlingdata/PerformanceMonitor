@@ -104,6 +104,8 @@ public static class AlertFamily
         [ClientTimeoutsMetric] = Performance,
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
+        ["tempdb Log Space"] = Performance,
+        ["tempdb Growth Fit"] = Performance,
         ["Volume Free Space"] = Performance,
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,
@@ -113,6 +115,9 @@ public static class AlertFamily
         ["CHECKDB Overdue"] = Performance,
         ["Identity Capacity"] = Performance,
         ["Forced Plan Failing"] = Performance,
+        /* #8884: both are events about the monitored instance itself, so the on-call hears them. */
+        ["Instance Restarted"] = Performance,
+        ["Memory Dumps"] = Performance,
 
         /* ---- performance: the PostgreSQL-only alerts ---- */
         ["PostgreSQL Wraparound Risk"] = Performance,

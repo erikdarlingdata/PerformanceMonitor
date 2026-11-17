@@ -221,6 +221,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "PerformanceMonitor.Collectors/DmvBlockingSnapshotCollector.cs", "context.CollectionTime",
             "stamped by the host from the collection cycle's own clock, which is naive UTC — so on a "
             + "DMV-fallback row this UTC column sits beside two server-local *_last_tran_started ones"),
+        ("tempdb_stats", "holder_begin_time", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/TempDbStatsCollector.cs", "DATEDIFF(SECOND, GETDATE(), GETUTCDATE())",
+            "sys.dm_tran_database_transactions stamps the server's local clock; the collector's SQL moves it to UTC with the offset in force before storing, so the store holds one clock; #8881"),
         ("query_store_stats", "first_execution_time", ClockFrame.Utc,
             "PerformanceMonitor.Collectors/QueryStoreCollector.cs", ").UtcDateTime",
             "Query Store returns datetimeoffset; the reader normalises through DateTimeOffset.UtcDateTime "

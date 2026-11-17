@@ -1530,6 +1530,11 @@ internal static class ToolRecommendations
             new("audit_config", "Check server-level configuration"),
             new("get_blocked_process_reports", "Check if RCSI-off databases have blocking")
         ],
+        ["TEMPDB_FILE_SETUP"] =
+        [
+            new("get_database_sizes", "See tempdb's files with their sizes and growth settings"),
+            new("get_wait_stats", "Check for PAGELATCH waits on tempdb allocation pages")
+        ],
         ["FILE_AUTOGROWTH_PERCENT"] =
         [
             new("get_database_sizes", "See per-file sizes and autogrowth settings"),

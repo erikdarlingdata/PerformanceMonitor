@@ -412,10 +412,27 @@ public sealed class McpAlertTools
                     excluded_program_name_prefixes = App.AlertLongRunningQueryExcludedProgramNamePrefixes,
                     excluded_logins = App.AlertLongRunningQueryExcludedLogins
                 },
+                instance_restarted = new
+                {
+                    enabled = App.AlertInstanceRestartedEnabled
+                },
+                memory_dumps = new
+                {
+                    enabled = App.AlertMemoryDumpsEnabled
+                },
                 tempdb_space = new
                 {
                     enabled = App.AlertTempDbSpaceEnabled,
                     threshold_percent = App.AlertTempDbSpaceThresholdPercent
+                },
+                tempdb_log_space = new
+                {
+                    enabled = App.AlertTempDbLogSpaceEnabled,
+                    threshold_percent = App.AlertTempDbLogSpaceThresholdPercent
+                },
+                tempdb_growth_fit = new
+                {
+                    enabled = App.AlertTempDbGrowthFitEnabled
                 },
                 low_disk = new
                 {

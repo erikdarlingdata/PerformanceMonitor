@@ -1437,7 +1437,13 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #7028 (V230): deliberately NOT the shipped 0 / 0 (off), so a payload that dropped the columns would not match. */
         BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5,
         DailyReportEnabled: true, DailyReportSendAt: "06:30", DailyReportTimeZone: "America/New_York", DailyReportTitle: "Morning report",
-        BackupOverdueThresholdHours: 168, LogBackupOverdueThresholdMinutes: 60, CheckDbOverdueThresholdHours: 336);
+        BackupOverdueThresholdHours: 168, LogBackupOverdueThresholdMinutes: 60, CheckDbOverdueThresholdHours: 336,
+        /* #8881 (V269): deliberately NOT the shipped true / 80, so a payload that dropped the columns would not match. */
+        TempDbLogSpaceEnabled: false, TempDbLogSpaceThresholdPercent: 65,
+        /* #8882 (V270): deliberately NOT the shipped true. */
+        TempDbGrowthFitEnabled: false,
+        /* #8884 (V271): the Instance Restarted and Memory Dumps switches, shipped on. */
+        InstanceRestartedEnabled: true, MemoryDumpsEnabled: true);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

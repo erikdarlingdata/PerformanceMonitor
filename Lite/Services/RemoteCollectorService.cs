@@ -470,7 +470,7 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Records a collector execution result for health tracking.
     /// </summary>
-    internal void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null, bool xeSessionUnavailable = false)
+    internal void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null, bool xeSessionUnavailable = false, bool timedOut = false)
     {
         lock (_healthLock)
         {
@@ -527,14 +527,22 @@ public partial class RemoteCollectorService
             {
                 entry.LastErrorMessage = errorMessage;
                 entry.ConsecutiveErrors++;
-                /* A different answer from the server: the refusal streak ends. */
-                GetRefusedBackoff(serverId).Record(collectorName, refused: false, null, DateTime.UtcNow, TimeSpan.Zero);
+                /* #8891: a statement that timed out extends its own streak under one fixed answer, so a collector that times out
+                   run after run is tried less often instead of holding up the collectors after it in this server's sweep. Any
+                   other error is a different answer from the server, and the streak ends. */
+                var timeout = timedOut && status == "ERROR";
+                GetRefusedBackoff(serverId).Record(
+                    collectorName,
+                    refused: timeout,
+                    timeout ? RefusedCollectorBackoff.TimedOutAnswer : null,
+                    DateTime.UtcNow,
+                    timeout ? RefusalInterval(serverId, collectorName) : TimeSpan.Zero);
             }
         }
     }
 
-    /* #6186: per server, the collectors the server keeps refusing with the same answer and when each is tried next. In memory:
-       a restart tries every collector once at its normal interval. */
+    /* #6186: per server, the collectors the server keeps refusing with the same answer, or whose statement keeps timing out
+       (#8891), and when each is tried next. In memory: a restart tries every collector once at its normal interval. */
     private readonly ConcurrentDictionary<int, RefusedCollectorBackoff> _refusedBackoffs = new();
 
     internal RefusedCollectorBackoff GetRefusedBackoff(int serverId) =>
@@ -550,8 +558,9 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// #6186: true while a collector the server has refused with the same answer run after run is waiting out its backoff, so
-    /// the sweep skips it without a run or a log row. False after the wait, and after its first success or a different answer.
+    /// #6186: true while a collector the server has refused with the same answer run after run, or whose statement has timed out
+    /// run after run (#8891), is waiting out its backoff, so the sweep skips it without a run or a log row. False after the
+    /// wait, and after a run that ends some other way.
     /// </summary>
     internal bool IsCollectorBackedOff(int serverId, string collectorName) =>
         _refusedBackoffs.TryGetValue(serverId, out var backoff)
@@ -829,6 +838,7 @@ public partial class RemoteCollectorService
         string? errorMessage = null;
         int rowsCollected = 0;
         bool xeSessionUnavailable = false;
+        bool timedOut = false;
 
         /* Clear the per-call fields HERE, not only inside the definition runner: everything below can
            throw before the runner is ever entered — the XE session ensure for deadlocks /
@@ -883,11 +893,11 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            // Back off collectors the server keeps refusing with the same permission denial (#857, #6186):
-            // tried less often, not every interval, and never stopped for good.
+            // Back off collectors the server keeps refusing with the same permission denial (#857, #6186), or whose statement
+            // keeps timing out (#8891): tried less often, not every interval, and never stopped for good.
             if (IsCollectorBackedOff(GetServerId(server), collectorName))
             {
-                AppLogger.Debug("Collector", $"Skipping collector '{collectorName}' for server '{server.DisplayName}' - permission denied repeatedly, backing off");
+                AppLogger.Debug("Collector", $"Skipping collector '{collectorName}' for server '{server.DisplayName}' - refused or timed out repeatedly, backing off");
                 return;
             }
 
@@ -1084,6 +1094,9 @@ public partial class RemoteCollectorService
         catch (SqlException ex)
         {
             status = "ERROR";
+            /* #8891: a command timeout counts toward the repeat-failure backoff. Lite opens the run's connection itself and a
+               server it reads as offline is not swept at all, so every -2 that reaches here counts. */
+            timedOut = ex.Number == -2;
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
                 + AzureDmvPermissionHint.For(
                     ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
@@ -1155,7 +1168,14 @@ public partial class RemoteCollectorService
         }
 
         // Track collector health
-        RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
+        RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable, timedOut);
+        if (timedOut
+            && status == "ERROR"
+            && GetRefusedBackoff(GetServerId(server)).Streak(collectorName) is var timeoutStreak
+            && timeoutStreak == RefusedCollectorBackoff.FreeRefusals + 1)
+        {
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} timed out {timeoutStreak} times in a row: it is tried less often (up to every {RefusedCollectorBackoff.MaxDelay}) until a run ends some other way (#8891)");
+        }
 
         /* #4938: a run that did not succeed still wrote a collection_log row below, and the start-up read counts that
            row as the last run whatever its status. For a daily-or-longer collector, with or without a run time, the

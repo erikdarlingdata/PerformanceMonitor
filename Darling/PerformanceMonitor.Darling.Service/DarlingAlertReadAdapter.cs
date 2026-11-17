@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -1666,7 +1667,18 @@ SELECT
     top_session_tempdb_mb,
     top_session_id,
     max_size_mb,
-    collection_time
+    collection_time,
+    log_total_mb,
+    log_used_mb,
+    log_used_percent,
+    log_reuse_wait_desc,
+    log_truncation_holdup_reason,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    holder_log_bytes_reserved
 FROM tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -1688,7 +1700,18 @@ SELECT
     top_session_tempdb_mb,
     top_session_id,
     max_size_mb,
-    collection_time
+    collection_time,
+    log_total_mb,
+    log_used_mb,
+    log_used_percent,
+    log_reuse_wait_desc,
+    log_truncation_holdup_reason,
+    holder_session_id,
+    holder_login_name,
+    holder_program_name,
+    holder_begin_time,
+    holder_log_bytes_used,
+    holder_log_bytes_reserved
 FROM tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -1754,7 +1777,20 @@ LIMIT 1";
                        because that is what it IS and what the property's name says (the #3636 file-growth read's
                        idiom). The engine only ever compares one server's stamps with each other, so the Kind is
                        honesty rather than arithmetic. */
-                    CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
+                    CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                    /* #8881: the tempdb log, all NULL on a row collected before V269, on an engine that lacks the function, and (the
+                       holder) below 50 percent used. A NULL stays null here: the log alert reads null as "no measurement", never as zero. */
+                    LogTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                    LogUsedMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                    LogUsedPercent = reader.IsDBNull(11) ? null : ToDouble(reader.GetValue(11)),
+                    LogReuseWaitDesc = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    LogTruncationHoldupReason = reader.IsDBNull(13) ? null : reader.GetString(13),
+                    HolderSessionId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                    HolderLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+                    HolderProgramName = reader.IsDBNull(16) ? null : reader.GetString(16),
+                    HolderBeginTimeUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
+                    HolderLogBytesUsed = reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                    HolderLogBytesReserved = reader.IsDBNull(19) ? null : reader.GetInt64(19)
                 };
             }
 
@@ -1762,6 +1798,127 @@ LIMIT 1";
         });
 
         return found;
+    }
+
+    /* ---------------- tempdb files for the growth-fit alert (#8882) ---------------- */
+
+    /// <summary>
+    /// The tempdb files (database_id 2) of the newest <c>database_size_stats</c> collection: each file's growth settings, its volume
+    /// and the volume's free space, all from one collection so they describe one instant. $1 server_id.
+    /// </summary>
+    public const string TempDbFilesSql = @"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   database_id = 2
+)
+ORDER BY file_id";
+
+    /// <summary><see cref="TempDbFilesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same server
+    /// returned (<see cref="NewestRowFloor"/>), never a clock. Same rows, same order.</summary>
+    public const string TempDbFilesSinceSql = @"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time >= $2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   database_id = 2
+    AND   collection_time >= $2
+)
+ORDER BY file_id";
+
+    private readonly NewestRowFloor _tempDbFilesFloor = new();
+
+    public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetTempDbFilesCoreAsync(serverKey, ct),
+            serverKey,
+            "TempDB growth fit",
+            cancellationToken);
+    }
+
+    private async Task<List<TempDbFileInfo>> GetTempDbFilesCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<TempDbFileInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await _tempDbFilesFloor.ReadAsync(serverId, async since =>
+        {
+            items.Clear();
+            DateTime? newest = null;
+            using var command = new NpgsqlCommand(since is null ? TempDbFilesSql : TempDbFilesSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var item = new TempDbFileInfo
+                {
+                    FileId = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+                    FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    FileTypeDesc = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    TotalSizeMb = reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
+                    AutoGrowthMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
+                    IsPercentGrowth = !reader.IsDBNull(5) && reader.GetBoolean(5),
+                    GrowthPct = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
+                    MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+                    VolumeMountPoint = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    VolumeTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                    VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                    IsAutogrowAllFiles = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
+                    CollectionTimeUtc = reader.IsDBNull(12) ? null : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc)
+                };
+                items.Add(item);
+                if (item.CollectionTimeUtc is { } sampled && (newest is null || sampled > newest))
+                {
+                    newest = sampled;
+                }
+            }
+
+            return newest;
+        });
+
+        return items;
     }
 
     /* ---------------- anomalous jobs ---------------- */
@@ -2380,6 +2537,40 @@ AND   qs.collection_time > $2";
     internal static List<ForcePlanFailureInfo> ReuseForWindow(
         IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
         rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
+
+    /// <summary>The restart and memory dump rise the store holds (#8884): the shared <see cref="InstanceEvents.StateSql"/> over this server's
+    /// <c>collector_state</c> rows, judged by the shared <see cref="InstanceEvents"/> functions. Lite's twin is
+    /// <c>LocalDataService.GetInstanceEventsAsync</c>.</summary>
+    public Task<InstanceEventInfo> GetInstanceEventsAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetInstanceEventsCoreAsync(serverKey, ct),
+            serverKey,
+            "instance events",
+            cancellationToken);
+    }
+
+    private async Task<InstanceEventInfo> GetInstanceEventsCoreAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(InstanceEvents.StateSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        var state = new List<BaselineDiscontinuities.StateRow>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            state.Add(new BaselineDiscontinuities.StateRow(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetDateTime(3)));
+        }
+
+        return InstanceEventInfoMapper.ToInstanceEventInfo(state);
+    }
 
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)

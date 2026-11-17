@@ -176,6 +176,7 @@ public partial class DuckDbFactCollector : IFactCollector
         await RunCollectorAsync(CollectMemoryPressureEventFactsAsync);
         await RunCollectorAsync(CollectDatabaseConfigFactsAsync);
         await RunCollectorAsync(CollectFileAutogrowthFactsAsync);
+        await RunCollectorAsync(CollectTempDbFileSetupFactsAsync);
         await RunCollectorAsync(CollectProcedureStatsFactsAsync);
         await RunCollectorAsync(CollectActiveQueryFactsAsync);
         await RunCollectorAsync(CollectRunningJobFactsAsync);
