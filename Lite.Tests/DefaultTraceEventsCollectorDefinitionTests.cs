@@ -450,13 +450,15 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            It is used only while its event time is not ahead of the stored watermark; no host code, generic wiring.
 
            ELEVEN since #8146. long_query_completions declares the ring-buffer position key (xe_ring_position) the loss accounting compares
-           each run against; blocked_process_report and deadlocks gained the same key. Staged with the run, generic wiring, no host code. */
+           each run against; blocked_process_report and deadlocks gained the same key. Staged with the run, generic wiring, no host code.
+
+           TWELVE since #8865. database_protection declares its per-instance marker and its remembered CHECKDB keys. Darling-only, so Lite's runner never loads it. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "long_query_completions", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
+        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "database_protection", "deadlocks", "default_trace_events", "long_query_completions", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
     }
 
     [Fact]

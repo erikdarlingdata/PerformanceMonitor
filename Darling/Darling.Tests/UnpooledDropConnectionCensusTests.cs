@@ -97,6 +97,8 @@ public sealed class UnpooledDropConnectionCensusTests
             "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
         ["BlockingHeadEvidenceLiveSqlTests.cs::TwoIdleHeadBlockers_ReadAsSleepingWithTheirLoginTimeOneOpenTransactionAndExactLogBytes"] =
             "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
+        ["DatabaseProtectionCollectorTests.cs::DropDatabaseAsync"] =
+            "#8865: the DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
     };
 
     /// <summary>Matches case-insensitively: T-SQL and PostgreSQL both accept <c>drop database</c>.</summary>
