@@ -188,6 +188,10 @@ DEALLOCATE database_cursor;
 
 Adding all three grants eliminates both. See issue [#915](https://github.com/erikdarlingdata/PerformanceMonitor/issues/915) for the full diagnosis.
 
+### Error log read (CHECKDB)
+
+The CHECKDB part of the protection collector reads the SQL Server error log with `sp_readerrorlog` and `sp_enumerrorlogs`. Both run under `VIEW SERVER STATE`, which the grants above already include, so there is no new grant. A login without `VIEW SERVER STATE` cannot run the protection collector's main query at all. On SQL Server 2022, a login that has only `VIEW SERVER PERFORMANCE STATE` reads the backups but gets the error log read refused (error 27219). The database protection row then shows a `precondition` that names `VIEW SERVER STATE`. See [CHECKDB Overdue and Availability Groups](darling/alerts-and-notifications.md#checkdb-overdue-and-availability-groups).
+
 ### Azure SQL Database (Lite / Darling)
 
 Azure SQL Database doesn't support server-level logins. Create a **contained database user** directly on the target database:
