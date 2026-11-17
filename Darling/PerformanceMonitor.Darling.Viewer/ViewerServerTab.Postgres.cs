@@ -1452,10 +1452,7 @@ public partial class ViewerServerTab
         var flapping = rows.Count(r => r.TotalSamples > 0 && r.Samples < r.TotalSamples);
 
         PgReplicationStatsNote.Text = rows.Count == 0
-            ? "No standby was streaming from this server in this window. On a REPLICA that is the expected "
-              + "answer: pg_stat_replication is the primary-side view and reports nothing unless this "
-              + "server is cascading to a downstream of its own. On a primary it means nothing is "
-              + "replicating from it, which is either correct or the finding."
+            ? PgDisplay.ReplicationStatsEmptyNote(_server.EngineKind)
             : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
               + $"{PgDisplay.Bytes(worst)} of unapplied WAL - that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
