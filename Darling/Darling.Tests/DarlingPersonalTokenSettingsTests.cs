@@ -46,13 +46,32 @@ public sealed class DarlingPersonalTokenSettingsTests
         Assert.Empty(log.Entries);
     }
 
+    /// <summary>I4: an admin's personal token is a reader unless the operator opts in with <c>adminRole: operator</c>.</summary>
     [Fact]
-    public void Resolve_Served_WithOidcWebAndStore()
+    public void Resolve_Served_WithOidcWebAndStore_AdminsGetReaderByDefault()
     {
         var (settings, log) = Resolve(Served());
 
-        Assert.Equal(new PersonalTokenSettings(30, 5, "operator", null), settings);
+        Assert.Equal(new PersonalTokenSettings(30, 5, "reader", null), settings);
+        Assert.False(settings!.AdminMayMintOperator);
         Assert.Empty(log.Entries);
+    }
+
+    [Fact]
+    public void Resolve_OperatorAdminRole_IsOptIn()
+    {
+        var (settings, log) = Resolve(Served(new McpPersonalTokensConfig { Enabled = true, AdminRole = "operator" }));
+
+        Assert.True(settings!.AdminMayMintOperator);
+        Assert.Empty(log.Entries);
+    }
+
+    [Fact]
+    public void TheSampleFile_LeavesAdminsReaderTokens()
+    {
+        var sample = DarlingConfig.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "darling.sample.json")));
+
+        Assert.Equal("reader", sample.Mcp.PersonalTokens!.AdminRole);
     }
 
     [Theory]

@@ -222,6 +222,8 @@ With [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) on, a person s
 
 **Format and storage.** A token is `dpt1_`, a 16-hex id, `_` and a 43-character secret. The value is shown once, at creation. No route, log or journal row shows it again. The store keeps the id and the SHA-256 of the secret in `config.mcp_personal_token`. The table is owner-only: nothing is granted to the admin, viewer, web or mcp logins, and owner-only write and truncate triggers guard it. Every read and write runs on the service's owner connection, so no request login can read the hashes. The journal events `mcp_personal_token_created`, `mcp_personal_token_revoked` and `mcp_personal_token_expiry_cut` are written only by the service. If a person's subject is not a valid login name, journal rows written through the person-scoped MCP tools use `person:mcp` instead.
 
+**Roles.** A person's token is a `reader`, unless the person has the admin seat and `adminRole` is `operator`. An operator personal token gets the write tools whatever `mcp.allowWrites` and `web.allowAdminWrites` say, the same rule as a named operator file token, so operator tokens are opt-in through `adminRole: operator` (the default is `reader`). The server administration tools still need both `mcp.allowWrites` and `mcp.allowServerAdmin`. With OpenID Connect and no role mapping every person who can sign in is an admin, so under `adminRole: operator` every one of them can mint an operator token; the start logs a warning that says so.
+
 **Lifetime and cap.** A token lives at most `maxLifetimeDays` (30 by default) and a person holds at most `maxTokensPerPerson` (5 by default). Dead tokens, expired or revoked, are deleted 30 days later.
 
 **What revokes a token.**

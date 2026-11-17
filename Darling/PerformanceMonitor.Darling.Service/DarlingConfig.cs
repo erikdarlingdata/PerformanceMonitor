@@ -1775,10 +1775,11 @@ public sealed class McpPersonalTokensConfig
     [JsonPropertyName("maxTokensPerPerson")]
     public int MaxTokensPerPerson { get; set; } = 5;
 
-    /// <summary>The strongest role an admin's personal token may take: <c>operator</c> (the default) or <c>reader</c>. A person who
-    /// is not an admin always gets <c>reader</c>.</summary>
+    /// <summary>The strongest role an admin's personal token may take: <c>reader</c> (the default) or <c>operator</c>. An operator personal
+    /// token gets the write tools whatever <c>mcp.allowWrites</c> and <c>web.allowAdminWrites</c> say, as a named operator file token does, so it
+    /// is opt-in. A person who is not an admin always gets <c>reader</c>.</summary>
     [JsonPropertyName("adminRole")]
-    public string AdminRole { get; set; } = "operator";
+    public string AdminRole { get; set; } = McpTokenEntry.ReaderRole;
 
     /// <summary>Optional: <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>.
     /// An unrecognized value leaves personal tokens off.</summary>

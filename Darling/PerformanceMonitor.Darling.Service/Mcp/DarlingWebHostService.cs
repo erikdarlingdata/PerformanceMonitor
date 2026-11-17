@@ -1212,7 +1212,8 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
 
                 /* Off Windows there is no managed store and no admin pool, but OIDC without a role mapping still gives every signed-in user the edit seat. */
-                WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger);
+                WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger,
+                    personalOperatorTokens: DarlingMcpHostService.PersonalTokensFor(config)?.AdminMayMintOperator == true);
             }
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
