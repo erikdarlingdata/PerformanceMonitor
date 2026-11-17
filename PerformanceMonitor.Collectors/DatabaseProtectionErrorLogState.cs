@@ -202,8 +202,8 @@ public static class DatabaseProtectionErrorLogState
     /// a date, and a date is planned, read, counted and skipped whole: reading part of a date and marking the date read would mark the
     /// rest of it read too. A date holding more archives than <paramref name="perCycle"/> is read whole in a cycle of its own, because
     /// splitting it is the same fault; that costs one longer read on a server that cycled its log more than three times in one minute. A date
-    /// whose archive numbers do not fit in <see cref="MaxArchiveListLength"/> characters is read in part, never whole, and is skipped once
-    /// it reaches <see cref="MaxArchiveAttempts"/>.</para>
+    /// whose archive numbers do not fit in <see cref="MaxArchiveListLength"/> characters is read in part and skipped in that
+    /// same cycle, so the markers move past it.</para>
     ///
     /// <para>#8865: a list that was refused or failed (<paramref name="enumerateOk"/> false) reads the current log only and
     /// leaves the loaded state exactly as it was. It says nothing about which archives exist, so it must not move a marker:
@@ -249,6 +249,7 @@ public static class DatabaseProtectionErrorLogState
         }
 
         var read = new List<ArchiveInfo> { current };
+        var listLength = ArchiveList(read).Length;
         var newlySkipped = new List<DateTime>();
         var archivesRead = 0;
         foreach (var group in WalkOrder(before.Markers, archives))
@@ -270,12 +271,31 @@ public static class DatabaseProtectionErrorLogState
                 break;
             }
 
-            /* #8865: a date read alone is still capped at what the archive list can carry. The part read leaves the date unread, so it
-               is retried and then skipped after MaxArchiveAttempts, rather than the whole batch failing every cycle on a cut list. */
-            var taken = group.TakeWhile((_, n) => ArchiveList(read.Concat(group.Take(n + 1))).Length <= MaxArchiveListLength).ToList();
+            /* #8865: a date read alone is still capped at what the archive list can carry, rather than the whole batch failing every
+               cycle on a cut list. A date read in part can never be read whole, and every read of it goes fine, so it would gain no
+               attempt and the markers would stall on it: it is skipped in the same cycle that reads its part, whose lines still count. */
+            var taken = new List<ArchiveInfo>();
+            foreach (var archive in group)
+            {
+                var length = listLength + 1 + archive.Archive.ToString(CultureInfo.InvariantCulture).Length;
+                if (length > MaxArchiveListLength)
+                {
+                    break;
+                }
+
+                taken.Add(archive);
+                listLength = length;
+            }
+
             read.AddRange(taken);
             archivesRead += taken.Count;
-            if (archivesRead >= perCycle || taken.Count < group.Count)
+            if (taken.Count < group.Count)
+            {
+                newlySkipped.Add(date);
+                break;
+            }
+
+            if (archivesRead >= perCycle)
             {
                 break;
             }

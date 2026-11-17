@@ -375,6 +375,49 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     [Fact]
+    public async Task AMinuteOfArchivesTooManyForTheList_IsSkippedOnItsFirstRead_AndTheBackfillMovesPastIt()
+    {
+        /* #8865: sixty archives closed in one minute do not fit the archive list. Every read going fine, the date must still end skipped
+           and the markers move past it; before the fix it gained no attempt, was re-read in part every cycle and the backfill never ended. */
+        var table = Shape();
+        Add(table, "Sales", "FULL", Checked, Full, Log);
+        var logs = LogShape();
+        logs.Rows.Add(true, 0, Checked, DBNull.Value);
+        for (var archive = 1; archive <= 60; archive++)
+        {
+            logs.Rows.Add(true, archive, Checked.AddDays(-1), DBNull.Value);
+        }
+
+        logs.Rows.Add(true, 61, Checked.AddDays(-2), DBNull.Value);
+        var state = new Dictionary<string, string>();
+        var plans = new List<int[]>();
+        var rows = new List<DatabaseProtectionCollector.Row>();
+        for (var cycle = 0; cycle < 2; cycle++)
+        {
+            var context = ContextWith(state);
+            rows = await ReadWithAsync(context, table, logs);
+            var plan = context.DatabaseProtectionErrorLogPlan!;
+            plans.Add(plan.Read.Select(a => a.Archive).ToArray());
+            var lines = LineShape();
+            if (cycle == 0)
+            {
+                lines.Rows.Add(Checked.AddDays(-1), CheckLine("Sales", 1));
+            }
+
+            await ApplyAsync(context, rows, Status(plan.Read.Select(a => (a.Archive, true)).ToArray()), lines);
+            state = Carry(context, state);
+        }
+
+        Assert.True(plans[0].Length > 4);
+        Assert.Equal(new[] { 0, 61 }, plans[1]);
+        Assert.Equal(new[] { Checked.AddDays(-1) }, DatabaseProtectionErrorLogState.ParseDates(state[DatabaseProtectionErrorLogState.SkippedKey]));
+        Assert.True(rows[0].ErrorLogBackfillComplete);
+        /* The part that was read still counts: its line is the database's check. */
+        Assert.Equal(Checked.AddDays(-1), rows[0].ErrorLogCheckDbTime);
+        Assert.Equal(1, rows[0].ErrorLogCheckDbErrors);
+    }
+
+    [Fact]
     public async Task ManagedInstanceAndAzure_HaveNoPlan_AndAreNotApplicable()
     {
         foreach (var target in new[] { new CollectorTargetInfo { IsAzureSqlDb = true }, new CollectorTargetInfo { IsAzureManagedInstance = true } })

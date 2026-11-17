@@ -288,23 +288,25 @@ public sealed class DatabaseProtectionErrorLogStateTests
     }
 
     [Fact]
-    public void AMinuteHoldingMoreArchivesThanTheListCarries_IsReadInPart_ThenSkipped_RatherThanFailingEveryCycle()
+    public void AMinuteHoldingMoreArchivesThanTheListCarries_IsReadInPart_AndSkippedInThatSameCycle()
     {
         /* #8865: a date read alone had no size cap, and the archive list is bound as nvarchar(128). Sixty archives in one minute made a
-           list the server cut short, so the batch failed (error 537) every cycle until the collector timed out. */
+           list the server cut short, so the batch failed (error 537) every cycle until the collector timed out. Capped but not skipped,
+           the date was never read whole and every read of it went fine, so it gained no attempt and the backfill stalled on it. */
         var logs = SameMinute(60, 62);
 
         var plan1 = S.PlanArchives(Empty(), logs, true, S.ArchivesPerCycle);
         Assert.True(S.ArchiveList(plan1.Read).Length <= S.MaxArchiveListLength);
         Assert.Equal(Enumerable.Range(0, plan1.Read.Count), Numbers(plan1));
         Assert.True(plan1.Read.Count > S.ArchivesPerCycle + 1);
-        /* Read in part, the date is not read whole, so no marker moves over it. */
-        Assert.Empty(ReadWhole(plan1));
+        Assert.Equal(new[] { LogDate(1) }, plan1.NewlySkipped);
 
-        var given = WithMarkers(S.MarkersAfter(plan1, ReadWhole(plan1), logs), new Dictionary<DateTime, int> { [LogDate(1)] = S.MaxArchiveAttempts });
-        var plan2 = S.PlanArchives(given, logs, true, S.ArchivesPerCycle);
-        Assert.Equal(new[] { LogDate(1) }, plan2.NewlySkipped);
+        /* Skipped, the date is done: the backfill marker moves past it although it was not read whole. */
+        var after1 = S.MarkersAfter(plan1, ReadWhole(plan1), logs);
+        Assert.Equal(LogDate(1), after1.BackfillBefore);
+        var plan2 = S.PlanArchives(new S.LoadedState(after1, new Dictionary<DateTime, int>(), plan1.NewlySkipped.ToList(), false), logs, true, S.ArchivesPerCycle);
         Assert.Equal(new[] { 0, 61 }, Numbers(plan2));
+        Assert.True(S.MarkersAfter(plan2, ReadWhole(plan2), logs).BackfillDone);
     }
 
     [Fact]
