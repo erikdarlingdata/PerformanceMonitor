@@ -159,10 +159,13 @@ public sealed class DarlingMcpSchemaToolsTests
         {
             Prefix("IX_Team", ["TeamId"], 0.1, sampled: 250, persisted: 30f),
             Prefix("IX_Credit", ["CreditType"], 0.1, sampled: 250),
+            Prefix("IX_Region", ["Region"], 0.1, sampled: 500, persisted: 0f),
         });
 
         Assert.Equal(30.0, Json(view.Columns["TeamId"]).GetProperty("sampled_percent").GetDouble(), 4);
         Assert.Equal(25.0, Json(view.Columns["CreditType"]).GetProperty("sampled_percent").GetDouble(), 4);
+        /* DBCC reports 0 for a statistic whose sample percent is not persisted: that is no value, not 0 percent. */
+        Assert.Equal(50.0, Json(view.Columns["Region"]).GetProperty("sampled_percent").GetDouble(), 4);
     }
 
     [Fact]

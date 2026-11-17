@@ -161,10 +161,10 @@ LIMIT 1";
         return new ColumnSelectivityView(columns, combinations);
     }
 
-    /// <summary>The persisted sample percent when the statistic has one, else rows sampled over rows; null for an empty table.</summary>
+    /// <summary>The persisted sample percent when the statistic has one (DBCC reports 0 for a statistic without one), else rows sampled over rows; null for an empty table.</summary>
     private static double? SampledPercent(StoredPrefix p)
     {
-        if (p.PersistedSamplePercent is { } persisted)
+        if (p.PersistedSamplePercent is { } persisted && persisted > 0)
         {
             return Math.Round((double)persisted, 2);
         }
