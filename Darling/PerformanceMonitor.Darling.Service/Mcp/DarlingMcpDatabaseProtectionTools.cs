@@ -44,6 +44,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
         age_minutes = band.Age is { } a ? (long)a.TotalMinutes : (long?)null,
         age = band.Age is { } t ? Describe(t) : null,
         threshold_minutes = (long)band.Threshold.TotalMinutes,
+        detail = band.Detail,
     };
 
     /* #8865: the CHECKDB fact also says where its time came from, the options and error count of the error-log line, why it reads as it does (a
@@ -114,7 +115,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
         "new_database (created less than the threshold ago, so not late yet), not_expected (a SIMPLE-recovery database expects no log backup), " +
         "platform_managed (Azure SQL Database and Managed Instance, all three facts) or native_only (Amazon RDS, the full and log backup facts only): the age shows and is never overdue, " +
         "unknown (SQL Server 2017 before CU9 cannot answer CHECKDB) or unavailable (the backup read was refused, for example no VIEW DATABASE PERFORMANCE STATE on Azure SQL Database, which VIEW DATABASE STATE grants): both pass through and are never overdue, " +
-        "excluded (the database is offline, restoring or otherwise not online; excluded_reason says which; a secondary's full and log backup facts also read excluded, with detail secondary), " +
+        "excluded (the database is offline, restoring or otherwise not online; excluded_reason says which; a secondary's full and log backup facts also read excluded, with detail secondary; when the error log was not read (refused, or an old capture) a secondary is still excluded whole, with excluded_reason secondary), " +
         "pending (an Availability Group database whose CHECKDB is not found yet while the older error logs are still being read: never overdue), " +
         "errors_found (the newest CHECKDB in the replica's own error log reported errors, so it is overdue whatever its age; errors counts them). An Amazon RDS database's CHECKDB is judged like any other. " +
         "CHECKDB is judged per replica: a database in an Availability Group is judged on its own SQL Server error log, so a secondary has its own CHECKDB state, and the boot-page time (shared by every replica) shows only as checkdb.boot_page_time for reference. " +

@@ -266,6 +266,8 @@ public sealed class DatabaseProtectionPerReplicaSurfacesTests
         var ag = Db(reply, "AgDb").GetProperty("checkdb");
         Assert.Equal(Iso(Now.AddDays(-2)), Str(ag, "last_time"));
         Assert.Equal(Iso(Now.AddDays(-30)), Str(ag, "boot_page_time"));
+        /* #8865 M8: the tool description promises detail secondary on a secondary's backup facts. */
+        Assert.Equal(("excluded", "secondary"), (Str(Db(reply, "AgDb").GetProperty("full_backup"), "state"), Str(Db(reply, "AgDb").GetProperty("full_backup"), "detail")));
 
         var logNewer = Db(reply, "LogNewer").GetProperty("checkdb");
         Assert.Equal(("error_log", Iso(Now.AddDays(-1))), (Str(logNewer, "source"), Str(logNewer, "last_time")));
