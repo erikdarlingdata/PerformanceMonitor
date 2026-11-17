@@ -3097,7 +3097,7 @@ DECLARE
    v_row {config}.config_notification_routes%ROWTYPE;
    -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
    -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
-   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false);
+   v_operator boolean := COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -3249,7 +3249,7 @@ DECLARE
    v_before jsonb;
    v_after jsonb;
 BEGIN
-   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{{1,64}}$' THEN
+   IF p_actor IS NULL OR p_actor !~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$' THEN
       RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
    END IF;
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
@@ -3410,7 +3410,7 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false) THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
