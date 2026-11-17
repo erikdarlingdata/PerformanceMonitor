@@ -5085,6 +5085,15 @@ public static partial class DarlingCliCommands
                 var readable = DarlingFileSecurity.IsReadableByOrdinaryUsers(full);
                 var others = DarlingFileSecurity.AccessBeyondTrusted(full);
                 var ownerTrusted = DarlingFileSecurity.IsTrustedOwner(full);
+                if (!readable && others is null && ownerTrusted && DarlingFileSecurity.GrantsHardenedAccount(full))
+                {
+                    /* #8923: nobody beyond SYSTEM, Administrators and the service account holds any entry, inherited ones included
+                       (both reads go by SID and count inherited rules), the owner is one of the three, and the service account can read it. There is nothing to
+                       fix, so this is a status line the installers print as plain output, not a warning. */
+                    output.WriteLine($"  SECURED  {full} ({what}): only SYSTEM, Administrators and the service account have access to it (outside the install folder, so it was not changed)");
+                    continue;
+                }
+
                 var note = readable ? "ordinary users can read it" : "ordinary users cannot read it";
                 if (others is not null)
                 {
