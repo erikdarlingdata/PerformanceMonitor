@@ -42,7 +42,7 @@ public sealed class QueryStoreHealthStoreTests
 
         /* Dense above the one sanctioned historical hole at V45. */
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
+        Assert.Equal(RungLadder.DenseExpected(above), above);
 
         Assert.Equal("query-store-health", PgMigrations.Scripts.Single(s => s.Version == 76).Name);
     }
