@@ -267,6 +267,29 @@ public sealed class ReadCallerTests
             PersonalDataNames(new[] { "Record.cookie", "Record.authToken", "Record.Authorization", "x.request_headers", "x.remote_ip_address", "x.user_name", "Offer.userAgent", "OfMcpClient.userAgent", "Record.caller", "x.distinct_callers" }));
     }
 
+    /// <summary>#8737: a personal token's caller name is rendered as the person and the token, split at the LAST <c>/</c>, because a subject
+    /// may hold one and a token name may not. The store identity carries the same text, and a file token whose name merely starts with
+    /// <c>personal:</c> (it cannot hold a <c>/</c>) stays a named token.</summary>
+    [Theory]
+    [InlineData("personal:alice@corp/ci", "personal token ci of alice@corp")]
+    [InlineData("personal:a/b@corp/ci", "personal token ci of a/b@corp")]
+    [InlineData("personal:noslash", "named token personal:noslash")]
+    [InlineData("ops-lead", "named token ops-lead")]
+    public void APersonalCallerName_IsRenderedAsThePersonAndTheToken(string name, string expected)
+    {
+        Assert.Equal(expected, ReadCaller.OfMcpIdentity(name, "a-bearer-value-0123456789abcdef"));
+
+        ReadCaller.SetAmbientMcpToken(ReadCaller.OfMcpIdentity(name, "a-bearer-value-0123456789abcdef"));
+        try
+        {
+            Assert.Equal(expected, ReadCaller.StoreTokenIdentity());
+        }
+        finally
+        {
+            ReadCaller.SetAmbientMcpToken(null);
+        }
+    }
+
     private static IEnumerable<string> InsertColumns(string sql)
     {
         var open = sql.IndexOf('(');
