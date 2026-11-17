@@ -50,7 +50,6 @@ public sealed class PgTargetRefusalNamesReadLiveTests
         Assert.NotEmpty(DarlingEngineCapability.PostgresReadFor);
         Assert.All(DarlingEngineCapability.PostgresReadFor.Values, v => Assert.Contains(v.Read, registered));
         Assert.Contains("get_pg_top_queries", registered);
-        Assert.Contains("get_pg_top_queries", DarlingMcpQueryFleetSummaryTools.FleetSqlServerOnlySentence, StringComparison.Ordinal);
     }
 
     private static async Task<ScratchPostgres> SeedAsync(bool pg, bool sql, CancellationToken ct)
@@ -113,11 +112,12 @@ public sealed class PgTargetRefusalNamesReadLiveTests
         Assert.Equal("not_collected", session.Status);
         Assert.Contains("get_pg_session_states", session.Message, StringComparison.Ordinal);
 
+        /* No registered PostgreSQL read honestly answers memory (utilization is gated on memory_stats, which get_memory_stats and get_memory_trend
+           share, and get_pg_cpu_utilization is CPU on Amazon Aurora only), and none serves database sizes, so these refusals name none. */
         var utilization = Parse(await DarlingMcpFinOpsTools.GetFinOps(postgres, "utilization", PgName, cancellationToken: ct));
         Assert.Equal("not_collected", utilization.Status);
-        Assert.Contains("get_pg_cpu_utilization", utilization.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("get_pg_", utilization.Message, StringComparison.Ordinal);
 
-        /* No registered PostgreSQL read serves database sizes, so the refusal names none. */
         var sizes = Parse(await DarlingMcpFinOpsTools.GetFinOps(postgres, "database_sizes", PgName, cancellationToken: ct));
         Assert.Equal("not_collected", sizes.Status);
         Assert.DoesNotContain("get_pg_", sizes.Message, StringComparison.Ordinal);
@@ -146,6 +146,34 @@ public sealed class PgTargetRefusalNamesReadLiveTests
         Assert.Contains("get_pg_top_queries", fleet.Message, StringComparison.Ordinal);
 
         Assert.Equal("empty", Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 10, cancellationToken: ct)).Status);
+    });
+
+    [Fact]
+    public Task FleetSummaryAndInventory_UnderAPostgresOnlyScopeOnAMixedStore_AnswerTheEngineStatus_AndNameNoServerOutsideTheScope() =>
+        RunAsync(true, true, async (postgres, ct) =>
+        {
+            var fleet = Parse(await DarlingServerResolver.ReadWebScopeAsync([PgId], [],
+                () => DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(postgres, "0xNOWHERE", 24, cancellationToken: ct)));
+            Assert.Equal("not_collected", fleet.Status);
+            Assert.Contains(PgName, fleet.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(SqlName, fleet.Message, StringComparison.Ordinal);
+            Assert.Contains("get_pg_top_queries", fleet.Message, StringComparison.Ordinal);
+
+            var inventory = Parse(await DarlingServerResolver.ReadWebScopeAsync([PgId], [],
+                () => DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 10, cancellationToken: ct)));
+            Assert.Equal("not_collected", inventory.Status);
+            Assert.Contains(PgName, inventory.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(SqlName, inventory.Message, StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public Task FleetSummary_UnderASqlServerOnlyScopeOnAMixedStore_KeepsEmpty_WithoutAPostgresRead() => RunAsync(true, true, async (postgres, ct) =>
+    {
+        var fleet = Parse(await DarlingServerResolver.ReadWebScopeAsync([SqlId], [],
+            () => DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(postgres, "0xNOWHERE", 24, cancellationToken: ct)));
+        Assert.Equal("empty", fleet.Status);
+        Assert.DoesNotContain("get_pg_", fleet.Message, StringComparison.Ordinal);
+        Assert.Contains("get_top_queries_by_cpu", fleet.Message, StringComparison.Ordinal);
     });
 
     [Fact]

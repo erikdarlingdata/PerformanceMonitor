@@ -237,7 +237,9 @@ WHERE server_id = ANY($1)";
     /// #8942: the PostgreSQL read that answers the same question as a SQL Server table, keyed by the gated table (the collector name every
     /// engine-gated read asks the gate about). A refusal on a PostgreSQL target names it, so the caller does not have to guess which
     /// <c>get_pg_*</c> read to try next. Only reads that are registered tools belong here, and only where the PostgreSQL read honestly answers the
-    /// same question: <c>database_size_stats</c> has none (<c>pg_database_size_stats</c> collects sizes, but no read serves them), so it is absent.
+    /// same question. Two keys are absent on purpose: <c>database_size_stats</c> (<c>pg_database_size_stats</c> collects sizes, but no read serves
+    /// them) and <c>memory_stats</c> (it gates <c>get_memory_stats</c> and <c>get_memory_trend</c> too, and <c>get_pg_cpu_utilization</c> answers CPU on
+    /// Amazon Aurora only, so no registered PostgreSQL read answers memory).
     /// </summary>
     internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, (string Read, string Answers)> PostgresReadFor =
         new System.Collections.Generic.Dictionary<string, (string Read, string Answers)>(StringComparer.OrdinalIgnoreCase)
@@ -245,7 +247,6 @@ WHERE server_id = ANY($1)";
             ["wait_stats"] = ("get_pg_wait_trend", "one wait event over time"),
             ["query_stats"] = ("get_pg_query_duration_trend", "one statement's cost over time, with get_pg_top_queries to list the statements"),
             ["session_stats"] = ("get_pg_session_states", "sessions by state over time"),
-            ["memory_stats"] = ("get_pg_cpu_utilization", "instance CPU on Amazon Aurora"),
         };
 
     /// <summary>
@@ -282,19 +283,21 @@ ORDER BY server_name";
             : null;
 
     /// <summary>
-    /// #8942: whether any registered server is a PostgreSQL target, so a read that covers SQL Server only can say so beside its true-negative
-    /// <c>empty</c> on a mixed store. A failed read is false: no claim.
+    /// #8942: whether any server in the caller's scope is a PostgreSQL target, so a read that covers SQL Server only can say so beside its
+    /// true-negative <c>empty</c> on a mixed store. It reads the same servers the scoped fleet reads do (<see cref="DarlingServerResolver.WebAllowedServerIds"/>).
+    /// A failed read is false: no claim.
     /// </summary>
     public static async Task<bool> AnyPostgresTargetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try
         {
-            await using var command = postgres.CreateCommand("SELECT DISTINCT engine_kind FROM servers WHERE engine_kind IS NOT NULL");
+            var allowedIds = DarlingServerResolver.WebAllowedServerIds;
+            await using var command = postgres.CreateCommand("SELECT server_id, engine_kind FROM servers WHERE engine_kind IS NOT NULL");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                if (MonitoredEngineKind.IsPostgres(reader.GetString(0)))
+                if ((allowedIds is null || allowedIds.Contains(reader.GetInt32(0))) && MonitoredEngineKind.IsPostgres(reader.GetString(1)))
                 {
                     return true;
                 }
@@ -308,13 +311,18 @@ ORDER BY server_name";
         return false;
     }
 
-    /// <summary>#8942: the words of <see cref="FleetNotCollectedStatusAsync"/> without the envelope, for a read that adds its own sentence.</summary>
+    /// <summary>
+    /// #8942: the words of <see cref="FleetNotCollectedStatusAsync"/> without the envelope, for a read that adds its own sentence. Under a web
+    /// scope it asks only about the servers the scoped read covers (<see cref="DarlingServerResolver.WebAllowedServerIds"/>), so neither the
+    /// decision nor a server name comes from a server the caller cannot see.
+    /// </summary>
     public static async Task<string?> FleetNotCollectedMessageAsync(
         NpgsqlDataSource postgres,
         string collectorName,
         CancellationToken cancellationToken = default)
     {
         var servers = new System.Collections.Generic.List<(int ServerId, string ServerName)>();
+        var allowedIds = DarlingServerResolver.WebAllowedServerIds;
         try
         {
             await using var command = postgres.CreateCommand(RegisteredServersSql);
@@ -322,7 +330,11 @@ ORDER BY server_name";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                servers.Add((reader.GetInt32(0), reader.GetString(1)));
+                var serverId = reader.GetInt32(0);
+                if (allowedIds is null || allowedIds.Contains(serverId))
+                {
+                    servers.Add((serverId, reader.GetString(1)));
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
