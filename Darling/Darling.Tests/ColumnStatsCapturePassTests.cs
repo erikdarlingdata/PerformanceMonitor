@@ -526,6 +526,49 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
     }
 
     [Fact]
+    public async Task TraceFlag9485_OneDeniedStatistic_AmongReadOnes_IsAnErrorNotARefusal()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            var server = rig.Server();
+            await rig.TraceFlagAsync(server, 9485, ct);
+            rig.Source.Errors[(100, 2)] = (230, "The SELECT permission was denied on the column 'Status' of the object 'T100'.");
+
+            var result = await rig.RunAsync(server, ct);
+
+            Assert.Equal("baseline|3|2|0|0|0|1|-|true", await rig.LastRunAsync(Sales, ct));
+            Assert.DoesNotContain("precondition", result.HostNote ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("could not be read", result.HostNote);
+
+            /* Next run: only the statistic that failed is read again, it fails again, and nothing stored was refused: still an error. */
+            await rig.RunAsync(server, ct);
+            Assert.Equal("incremental|3|0|0|0|0|1|-|true", await rig.LastRunAsync(Sales, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TraceFlag9485_StoredStatisticNowRefused_IsARefusal()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            var server = rig.Server();
+            await rig.TraceFlagAsync(server, 9485, ct);
+            await rig.RunAsync(server, ct);
+
+            /* The grant still works for the catalog, but a statistic read before is now refused and nothing else was read. */
+            rig.Source.Candidates[Sales] = [Stat(100, 1, s_t0.AddHours(1), 5000, "Id"), Stat(100, 2, s_t0, 5000, "TeamId", "Status"), Stat(200, 1, s_t0, 10, "Id")];
+            rig.Source.Errors[(100, 1)] = (2557, "User 'monitor' does not have permission to run DBCC SHOW_STATISTICS for object 'T100'.");
+
+            var result = await rig.RunAsync(server, ct);
+
+            Assert.Equal("incremental|3|0|0|0|0|1|tf9485|true", await rig.LastRunAsync(Sales, ct));
+            Assert.Contains("precondition", result.HostNote, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
     public async Task LockTimeout_CountsLocked_AndRetriesNextRun()
     {
         await WithRigAsync(async (rig, ct) =>

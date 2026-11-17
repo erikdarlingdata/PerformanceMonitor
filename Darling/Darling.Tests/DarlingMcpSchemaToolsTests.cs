@@ -153,7 +153,7 @@ public sealed class DarlingMcpSchemaToolsTests
     }
 
     [Fact]
-    public void SampledPercent_IsThePersistedValueWhenSet_ElseSampledOverRows()
+    public void SampledPercent_IsRowsSampledOverRows_NeverThePersistedDefault()
     {
         var view = ColumnSelectivity.Shape(Orders(), new[]
         {
@@ -162,9 +162,9 @@ public sealed class DarlingMcpSchemaToolsTests
             Prefix("IX_Region", ["Region"], 0.1, sampled: 500, persisted: 0f),
         });
 
-        Assert.Equal(30.0, Json(view.Columns["TeamId"]).GetProperty("sampled_percent").GetDouble(), 4);
+        /* The persisted percent is the default for the next update; the numbers shown came from 250 of 1000 rows. */
+        Assert.Equal(25.0, Json(view.Columns["TeamId"]).GetProperty("sampled_percent").GetDouble(), 4);
         Assert.Equal(25.0, Json(view.Columns["CreditType"]).GetProperty("sampled_percent").GetDouble(), 4);
-        /* DBCC reports 0 for a statistic whose sample percent is not persisted: that is no value, not 0 percent. */
         Assert.Equal(50.0, Json(view.Columns["Region"]).GetProperty("sampled_percent").GetDouble(), 4);
     }
 
@@ -284,8 +284,8 @@ public sealed class DarlingMcpSchemaToolsTests
 
     private static SelectivityFacts Facts(
         bool columnStatsOn = true, bool schemaOn = true, bool inScope = true, bool inOwnList = false, SelectivityRun? run = null,
-        bool serverRunHadNoGrant = false, bool tf9485 = false, int rows = 3, DateTime? newestRead = null, DateTime? checkedAt = null, DateTime? lastFullRead = null) =>
-        new(columnStatsOn, schemaOn, inScope, inOwnList, run, serverRunHadNoGrant, tf9485, rows, newestRead ?? s_read, checkedAt ?? s_read.AddMinutes(10), lastFullRead ?? s_read);
+        bool serverRunHadNoGrant = false, bool tf9485 = false, int rows = 3, DateTime? newestRead = null, DateTime? lastFullRead = null) =>
+        new(columnStatsOn, schemaOn, inScope, inOwnList, run, serverRunHadNoGrant, tf9485, rows, newestRead ?? s_read, lastFullRead ?? s_read);
 
     [Fact]
     public void CollectorOff_StatusNotCollected()
@@ -303,10 +303,39 @@ public sealed class DarlingMcpSchemaToolsTests
     [Fact]
     public void Current_CarriesTheCheckedAtStamp()
     {
-        var current = ColumnSelectivity.Decide(Facts(run: new SelectivityRun(s_read, null)), "SalesDb", null);
+        var current = ColumnSelectivity.Decide(Facts(run: new SelectivityRun(s_read.AddMinutes(10), null)), "SalesDb", null);
 
         Assert.Equal("current", current.Status);
         Assert.Equal(s_read.AddMinutes(10), current.CheckedAt);
+        /* No run row (rows stored by a run whose record aged out): the newest stored read. */
+        Assert.Equal(s_read, ColumnSelectivity.Decide(Facts(run: null), "SalesDb", null).CheckedAt);
+    }
+
+    [Fact]
+    public void EveryStatusAfterTheSwitches_CarriesTheNewestRunTime()
+    {
+        var run = s_read.AddMinutes(20);
+        foreach (var refused in new[] { "no_select", "tf9485" })
+        {
+            Assert.Equal(run, ColumnSelectivity.Decide(Facts(inOwnList: true, run: new SelectivityRun(run, refused), rows: 0), "SalesDb", null).CheckedAt);
+            Assert.Equal(run, ColumnSelectivity.Decide(Facts(run: new SelectivityRun(run, refused), rows: 0), "SalesDb", null).CheckedAt);
+        }
+
+        Assert.Equal(run, ColumnSelectivity.Decide(Facts(run: new SelectivityRun(run, null), rows: 0, lastFullRead: null), "SalesDb", null).CheckedAt);
+        Assert.Equal(run, ColumnSelectivity.Decide(Facts(run: new SelectivityRun(run, null)), "SalesDb", s_read.AddDays(-1)).CheckedAt);
+        Assert.Null(ColumnSelectivity.Decide(Facts(columnStatsOn: false, run: new SelectivityRun(run, null)), "SalesDb", null).CheckedAt);
+    }
+
+    [Fact]
+    public void TraceFlagRefusal_IsPrecondition_WithoutAGrantToRun()
+    {
+        /* Outside the own list too: SELECT is there, so another grant is no answer. */
+        var refused = ColumnSelectivity.Decide(Facts(inOwnList: false, run: new SelectivityRun(s_read, "tf9485"), tf9485: true, rows: 0), "SalesDb", null);
+
+        Assert.Equal("precondition", refused.Status);
+        Assert.Contains(ColumnSelectivity.TraceFlagSentence, refused.Note, StringComparison.Ordinal);
+        Assert.DoesNotContain("no SELECT", refused.Note, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT SELECT", refused.Note, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -326,6 +355,9 @@ public sealed class DarlingMcpSchemaToolsTests
         var named = ColumnSelectivity.Decide(Facts(inOwnList: true, run: new SelectivityRun(s_read, "no_select"), rows: 0), "Sales]Db", null);
         Assert.Equal("precondition", named.Status);
         Assert.Contains("GRANT SELECT", named.Note, StringComparison.Ordinal);
+        /* A bare GRANT fails with 15151 where the login has no user: the statement makes the user first. */
+        Assert.Contains("CREATE USER", named.Note, StringComparison.Ordinal);
+        Assert.Contains("--column-stats-databases", named.Note, StringComparison.Ordinal);
         Assert.Contains("[Sales]]Db]", named.Note, StringComparison.Ordinal);
         Assert.DoesNotContain("9485", named.Note, StringComparison.Ordinal);
 
@@ -354,7 +386,7 @@ public sealed class DarlingMcpSchemaToolsTests
     {
         Assert.Equal("not_read_yet", ColumnSelectivity.Decide(Facts(run: null, rows: 0, lastFullRead: null), "SalesDb", null).Status);
         /* A baseline cut short by the budget has a run row but no finished read: the table may simply not have been reached. */
-        var unfinished = new SelectivityFacts(true, true, true, false, new SelectivityRun(s_read, null), false, false, 0, null, null, null);
+        var unfinished = new SelectivityFacts(true, true, true, false, new SelectivityRun(s_read, null), false, false, 0, null, null);
         Assert.Equal("not_read_yet", ColumnSelectivity.Decide(unfinished, "SalesDb", null).Status);
     }
 

@@ -59,7 +59,6 @@ internal sealed record SelectivityFacts(
     bool TraceFlag9485,
     int StoredRows,
     DateTime? NewestRead,
-    DateTime? CheckedAt,
     DateTime? LastFullReadAt);
 
 internal sealed record SelectivityStatus(string Status, string Note, DateTime? CheckedAt);
@@ -80,13 +79,9 @@ internal static class ColumnSelectivity
 {
     internal const string NoLeadingStatisticNote = "no statistic leads with this column";
 
-    private const string TraceFlagSentence =
+    /// <summary>The one sentence for trace flag 9485, in the run note and in the status note.</summary>
+    internal const string TraceFlagSentence =
         "Trace flag 9485 is on for this server, so the SELECT grant does not satisfy DBCC SHOW_STATISTICS: it needs db_owner, db_ddladmin or ownership of the table.";
-
-    private const string OverridesSql = @"
-SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases
-FROM config.config_collector_schedules
-WHERE server_id = $1 OR server_id IS NULL";
 
     private const string ExcludedSql = "SELECT excluded_databases FROM config.config_monitored_servers WHERE server_id = $1";
 
@@ -103,8 +98,8 @@ FROM collect.column_stats_runs
 WHERE server_id = $1
   AND collection_time = (SELECT max(collection_time) FROM collect.column_stats_runs WHERE server_id = $1)";
 
-    private const string StateStampsSql = @"
-SELECT max(last_seen_in_scope_at), max(last_full_read_at)
+    private const string LastFullReadSql = @"
+SELECT max(last_full_read_at)
 FROM collect.column_stats_state
 WHERE database_name = $1 AND history_key = ANY($2)";
 
@@ -161,16 +156,12 @@ LIMIT 1";
         return new ColumnSelectivityView(columns, combinations);
     }
 
-    /// <summary>The persisted sample percent when the statistic has one (DBCC reports 0 for a statistic without one), else rows sampled over rows; null for an empty table.</summary>
-    private static double? SampledPercent(StoredPrefix p)
-    {
-        if (p.PersistedSamplePercent is { } persisted && persisted > 0)
-        {
-            return Math.Round((double)persisted, 2);
-        }
-
-        return p.Rows > 0 ? Math.Round(p.RowsSampled * 100.0 / p.Rows, 2) : null;
-    }
+    /// <summary>
+    /// Rows sampled over rows: the sample behind the numbers shown. The persisted sample percent is not used, because it is the default for
+    /// the NEXT update, not the sample the current numbers came from. Null for an empty table.
+    /// </summary>
+    private static double? SampledPercent(StoredPrefix p) =>
+        p.Rows > 0 ? Math.Round(p.RowsSampled * 100.0 / p.Rows, 2) : null;
 
     private static string StripDirection(string keyColumn)
     {
@@ -186,9 +177,14 @@ LIMIT 1";
         return text;
     }
 
+    /// <summary>
+    /// The status. Every status after the switch and scope checks carries the database's newest run time (<c>selectivity_checked_at</c>), when a
+    /// run has reached it; <c>current</c> falls back to the newest stored read.
+    /// </summary>
     internal static SelectivityStatus Decide(SelectivityFacts facts, string database, DateTime? at)
     {
         ArgumentNullException.ThrowIfNull(facts);
+        var checkedAt = facts.NewestRun?.CollectionTime;
         if (!facts.ColumnStatsEnabled)
         {
             return new SelectivityStatus(
@@ -218,17 +214,26 @@ LIMIT 1";
             return new SelectivityStatus(
                 "current_only",
                 $"Selectivity is current only: statistics are not kept as a history, and as_of is before the stored read ({Utc(newest)}), so no numbers are shown for the version at as_of.",
-                null);
+                checkedAt);
         }
 
-        var tfSentence = facts.TraceFlag9485 || facts.NewestRun?.Refused == "tf9485" ? " " + TraceFlagSentence : string.Empty;
-        var grant = $"USE {QuoteName(database)}; GRANT SELECT TO [<monitoring user>];";
+        /* The run read nothing because DBCC SHOW_STATISTICS was refused despite the grant: another SELECT grant does not help. */
+        if (facts.NewestRun?.Refused == "tf9485")
+        {
+            return new SelectivityStatus(
+                "precondition",
+                $"DBCC SHOW_STATISTICS was refused in {database} although the monitoring login has SELECT there. {TraceFlagSentence}",
+                checkedAt);
+        }
+
+        var tfSentence = facts.TraceFlag9485 ? " " + TraceFlagSentence : string.Empty;
+        var grant = GrantStatement(database);
         if (facts.InOwnExplicitList && facts.NewestRun?.Refused is not null)
         {
             return new SelectivityStatus(
                 "precondition",
-                $"column_stats names {database} in its own database list, but the monitoring login cannot read statistics there. Run: {grant}{tfSentence}",
-                null);
+                $"column_stats names {database} in its own database list, but the monitoring login has no SELECT there. Run: {grant}{tfSentence}",
+                checkedAt);
         }
 
         if (facts.NewestServerRunHadNoGrant)
@@ -236,7 +241,7 @@ LIMIT 1";
             return new SelectivityStatus(
                 "precondition",
                 $"No database in scope grants the monitoring login SELECT, so column_stats read no statistics on its newest run. For {database}: {grant}{tfSentence}",
-                null);
+                checkedAt);
         }
 
         if (facts.NewestRun?.Refused is not null)
@@ -244,7 +249,7 @@ LIMIT 1";
             return new SelectivityStatus(
                 "not_read",
                 $"{database} was skipped: the monitoring login has no SELECT there, and column_stats' own database list does not name it, so this is expected until a grant is given. To read it: {grant}{tfSentence}",
-                null);
+                checkedAt);
         }
 
         if (facts.StoredRows == 0 && (facts.NewestRun is null || facts.LastFullReadAt is null))
@@ -252,11 +257,19 @@ LIMIT 1";
             return new SelectivityStatus(
                 "not_read_yet",
                 $"No statistics of {database} have been read yet: the first read has not reached it (a secondary, read-only or otherwise not-writable database is never read; an availability group database is read from its primary).",
-                null);
+                checkedAt);
         }
 
-        return new SelectivityStatus("current", "Selectivity is read from the statistics density vectors and refreshed when a statistic is updated.", facts.CheckedAt ?? facts.NewestRead ?? facts.NewestRun?.CollectionTime);
+        return new SelectivityStatus("current", "Selectivity is read from the statistics density vectors and refreshed when a statistic is updated.", checkedAt ?? facts.NewestRead);
     }
+
+    /// <summary>
+    /// The statements that let the monitoring login read statistics in one database: its user first when it has none there (a bare GRANT
+    /// fails with error 15151 then), then the grant. The grant script's --column-stats-databases option prints the same block.
+    /// </summary>
+    internal static string GrantStatement(string database) =>
+        $"USE {QuoteName(database)}; IF DATABASE_PRINCIPAL_ID(N'<monitoring login>') IS NULL CREATE USER [<monitoring login>] FOR LOGIN [<monitoring login>]; GRANT SELECT TO [<monitoring login>]; "
+        + $"(or print the block with --grant-script <server> --column-stats-databases {database})";
 
     private static string QuoteName(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
 
@@ -278,7 +291,7 @@ LIMIT 1";
         var scopeDatabase = writerId == serverId ? askedDatabase : database;
         serverId = writerId;
         askedDatabase = scopeDatabase;
-        var overrides = await ReadOverridesAsync(postgres, serverId, cancellationToken);
+        var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken, throwOnFailure: true);
         var excluded = await ReadExcludedAsync(postgres, serverId, cancellationToken);
         var columnStatsOn = StoreConfigProvider.ResolveSchedule(ColumnStatsCollector.Instance.Name, serverId, overrides).Enabled;
         var schemaOn = StoreConfigProvider.ResolveSchedule(SchemaObjectsCollector.Instance.Name, serverId, overrides).Enabled;
@@ -289,7 +302,7 @@ LIMIT 1";
 
         if (!columnStatsOn || !schemaOn || !inScope)
         {
-            var off = Decide(new SelectivityFacts(columnStatsOn, schemaOn, inScope, inOwnList, null, false, false, 0, null, null, null), askedDatabase, at);
+            var off = Decide(new SelectivityFacts(columnStatsOn, schemaOn, inScope, inOwnList, null, false, false, 0, null, null), askedDatabase, at);
             return new SelectivityResult(off, null);
         }
 
@@ -297,7 +310,7 @@ LIMIT 1";
         var stored = await ColumnStatsStore.ReadForObjectAsync(connection, keyTexts, database, definition.ObjectId, cancellationToken);
         var run = await ReadNewestRunAsync(postgres, keyTexts, database, cancellationToken);
         var noGrant = await ReadServerRunHadNoGrantAsync(postgres, serverId, cancellationToken);
-        var (seen, fullRead) = await ReadStateStampsAsync(postgres, keyTexts, database, cancellationToken);
+        var fullRead = await ReadLastFullReadAsync(postgres, keyTexts, database, cancellationToken);
         var traceFlag = false;
         if (run?.Refused is not null || noGrant)
         {
@@ -306,8 +319,7 @@ LIMIT 1";
         }
 
         DateTime? newestRead = stored.Count == 0 ? null : stored.Max(p => p.ReadAt);
-        var facts = new SelectivityFacts(
-            true, true, true, inOwnList, run, noGrant, traceFlag, stored.Count, newestRead, seen ?? run?.CollectionTime, fullRead);
+        var facts = new SelectivityFacts(true, true, true, inOwnList, run, noGrant, traceFlag, stored.Count, newestRead, fullRead);
         var status = Decide(facts, askedDatabase, at);
         var showNumbers = status.Status == "current" || (stored.Count > 0 && status.Status is "precondition" or "not_read");
         return new SelectivityResult(status, showNumbers ? Shape(definition, stored) : null);
@@ -336,27 +348,6 @@ LIMIT 1";
     private static bool Allowed(IReadOnlyList<string> scope, IReadOnlyList<string> excluded, string database) =>
         (scope.Count == 0 || scope.Contains(database, StringComparer.OrdinalIgnoreCase))
         && !excluded.Any(e => string.Equals(e.Trim(), database, StringComparison.OrdinalIgnoreCase));
-
-    internal static async Task<IReadOnlyList<ScheduleOverride>> ReadOverridesAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
-    {
-        await using var cmd = postgres.CreateCommand(OverridesSql);
-        cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-        var result = new List<ScheduleOverride>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            result.Add(new ScheduleOverride(
-                reader.IsDBNull(0) ? null : reader.GetInt32(0),
-                reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetInt32(2),
-                reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.IsDBNull(4) ? null : reader.GetBoolean(4),
-                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
-        }
-
-        return result;
-    }
 
     private static async Task<IReadOnlyList<string>> ReadExcludedAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
     {
@@ -388,20 +379,14 @@ LIMIT 1";
         return await reader.ReadAsync(ct) && reader.GetInt64(0) > 0 && reader.GetInt64(0) == reader.GetInt64(1);
     }
 
-    /// <summary>The newest in-scope stamp and full-read time of the database under any of the history keys.</summary>
-    private static async Task<(DateTime? Seen, DateTime? FullRead)> ReadStateStampsAsync(
+    /// <summary>The newest full-read time of the database under any of the history keys.</summary>
+    private static async Task<DateTime?> ReadLastFullReadAsync(
         NpgsqlDataSource postgres, string[] keyTexts, string database, CancellationToken ct)
     {
-        await using var cmd = postgres.CreateCommand(StateStampsSql);
+        await using var cmd = postgres.CreateCommand(LastFullReadSql);
         cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = keyTexts });
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
-        {
-            return (null, null);
-        }
-
-        return (reader.IsDBNull(0) ? null : reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1));
+        return await cmd.ExecuteScalarAsync(ct) is DateTime value ? value : null;
     }
 }

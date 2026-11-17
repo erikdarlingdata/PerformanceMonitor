@@ -1129,7 +1129,7 @@ WHERE status = 'in_progress'
 
         try
         {
-            var overrides = await Mcp.ColumnSelectivity.ReadOverridesAsync(_postgres, server.ServerId, cancellationToken);
+            var overrides = await Mcp.DarlingDataReader.ReadScheduleOverridesAsync(_postgres, server.ServerId, cancellationToken, throwOnFailure: true);
             return ResolveColumnStatsGrantDatabases(server.ServerId, overrides);
         }
         catch (OperationCanceledException)

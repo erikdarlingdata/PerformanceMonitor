@@ -41,7 +41,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Permissions.</b> A database where the login lacks SELECT is skipped (<c>refused = no_select</c>) and named in the note. The
 /// note names a precondition only when no database had the grant or a database in <c>column_stats</c>' own list lacked it: an empty list
 /// means every database while the grant goes to a few, so a missing grant is normal. Trace flag 9485 makes SELECT insufficient for DBCC
-/// SHOW_STATISTICS; a database whose reads fail with permission errors while it is on records <c>refused = tf9485</c>.</para>
+/// SHOW_STATISTICS; while it is on, a database where nothing could be read (no statistic read this run, and nothing stored or a stored
+/// statistic now refused) records <c>refused = tf9485</c>; a refusal among readable statistics is an error.</para>
 ///
 /// <para><b>Budgets.</b> The schema pass's values: five minutes per run, checked before a database starts and between batches, and 120
 /// seconds per database, checked between batches and cancelling a batch in flight. Every skip ends in the note, never in an exception.</para>
@@ -363,7 +364,10 @@ public static class DarlingColumnStatsCapture
                     await ReadBatchAsync(connection, database, keyText, toRead.Skip(offset).Take(BatchSize).ToList(), byId, tally, token);
                 }
 
-                if (tally.PermissionErrors > 0 && _traceFlag9485)
+                /* Trace flag 9485 explains a refusal only when nothing could be read: this run read nothing, and either nothing is stored
+                   for the database or a statistic read before now fails. One denied column among readable statistics is an error. */
+                if (_traceFlag9485 && tally.PermissionFailed.Count > 0 && tally.Read == 0
+                    && (stored.Count == 0 || tally.PermissionFailed.Any(stored.ContainsKey)))
                 {
                     refused = "tf9485";
                     _tf9485.Add(database);
@@ -444,7 +448,7 @@ public static class DarlingColumnStatsCapture
                 tally.Errors++;
                 if (s_permissionErrors.Contains(error.Number))
                 {
-                    tally.PermissionErrors++;
+                    tally.PermissionFailed.Add((error.ObjectId, error.StatsId));
                 }
 
                 var name = byId.TryGetValue((error.ObjectId, error.StatsId), out var stat)
@@ -513,7 +517,7 @@ public static class DarlingColumnStatsCapture
 
             if (_traceFlag9485 && (_tf9485.Count > 0 || noGrantAnywhere || missingInOwnList.Count > 0))
             {
-                Add("trace flag 9485 is on, so the SELECT grant does not satisfy DBCC SHOW_STATISTICS: it needs db_owner, db_ddladmin or ownership of the table");
+                Add(ColumnSelectivity.TraceFlagSentence);
             }
 
             foreach (var (reason, names) in _notWritable)
@@ -598,7 +602,7 @@ public static class DarlingColumnStatsCapture
         public int Deleted { get; set; }
         public int Locked { get; set; }
         public int Errors { get; set; }
-        public int PermissionErrors { get; set; }
+        public List<(int ObjectId, int StatsId)> PermissionFailed { get; } = [];
         public string? SampleError { get; set; }
     }
 }
