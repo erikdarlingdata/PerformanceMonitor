@@ -73,6 +73,12 @@ public sealed class DatabaseProtectionCollector : CollectorDefinitionBase<Databa
     public const string BackupNotExpected = "not_expected";
     public const string BackupUnavailable = "unavailable";
 
+    /* #8865: how the SQL Server error log read for a row went. Raw facts only; what they mean for the band is decided at read time. */
+    public const string ErrorLogRead = "read";
+    public const string ErrorLogRefused = "refused";
+    public const string ErrorLogFailed = "failed";
+    public const string ErrorLogNotApplicable = "not_applicable";
+
     public readonly record struct Row(
         string DatabaseName,
         string? StateDesc,
@@ -85,7 +91,17 @@ public sealed class DatabaseProtectionCollector : CollectorDefinitionBase<Databa
         DateTime? LastFullBackupTime,
         string FullBackupState,
         DateTime? LastLogBackupTime,
-        string LogBackupState);
+        string LogBackupState,
+        string ErrorLogState,
+        string? ErrorLogMessage,
+        string? ErrorLogGrant,
+        bool? ErrorLogBackfillComplete,
+        string? ErrorLogSkippedArchives,
+        int? ErrorLogUnparsedLines,
+        DateTime? ErrorLogCheckDbTime,
+        string? ErrorLogCheckDbOptions,
+        int? ErrorLogCheckDbErrors,
+        bool? ReplicaReadable);
 
     /* Result shape, both queries: name, state_desc, recovery_model_desc, create_date (UTC), replica_role, checkdb (raw datetime, local
        to the server), last_full (UTC), last_log (UTC), backups_readable (bit). */
@@ -259,6 +275,16 @@ OPTION(RECOMPILE);";
         new CollectorColumn("full_backup_state", CollectorColumnType.Varchar),
         new CollectorColumn("last_log_backup_time", CollectorColumnType.Timestamp),
         new CollectorColumn("log_backup_state", CollectorColumnType.Varchar),
+        new CollectorColumn("errorlog_state", CollectorColumnType.Varchar),
+        new CollectorColumn("errorlog_message", CollectorColumnType.Varchar),
+        new CollectorColumn("errorlog_grant", CollectorColumnType.Varchar),
+        new CollectorColumn("errorlog_backfill_complete", CollectorColumnType.Boolean),
+        new CollectorColumn("errorlog_skipped_archives", CollectorColumnType.Varchar),
+        new CollectorColumn("errorlog_unparsed_lines", CollectorColumnType.Integer),
+        new CollectorColumn("errorlog_checkdb_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("errorlog_checkdb_options", CollectorColumnType.Varchar),
+        new CollectorColumn("errorlog_checkdb_errors", CollectorColumnType.Integer),
+        new CollectorColumn("replica_readable", CollectorColumnType.Boolean),
     };
 
     /// <summary>The platform label for a target: Azure SQL Database and Managed Instance are platform_managed, RDS native_only.</summary>
@@ -322,7 +348,17 @@ OPTION(RECOMPILE);";
                 lastFull,
                 BackupStateFor(lastFull, readable, notExpected: false),
                 lastLog,
-                BackupStateFor(lastLog, readable, notExpected: simple)));
+                BackupStateFor(lastLog, readable, notExpected: simple),
+                ErrorLogNotApplicable,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
         }
 
         return rows;
@@ -357,6 +393,16 @@ OPTION(RECOMPILE);";
             .Value(row.LastFullBackupTime)     /* last_full_backup_time TIMESTAMP */
             .Value(row.FullBackupState)        /* full_backup_state VARCHAR */
             .Value(row.LastLogBackupTime)      /* last_log_backup_time TIMESTAMP */
-            .Value(row.LogBackupState);        /* log_backup_state VARCHAR */
+            .Value(row.LogBackupState)         /* log_backup_state VARCHAR */
+            .Value(row.ErrorLogState)          /* errorlog_state VARCHAR */
+            .Value(row.ErrorLogMessage)        /* errorlog_message VARCHAR */
+            .Value(row.ErrorLogGrant)          /* errorlog_grant VARCHAR */
+            .Value(row.ErrorLogBackfillComplete) /* errorlog_backfill_complete BOOLEAN */
+            .Value(row.ErrorLogSkippedArchives) /* errorlog_skipped_archives VARCHAR */
+            .Value(row.ErrorLogUnparsedLines)  /* errorlog_unparsed_lines INTEGER */
+            .Value(row.ErrorLogCheckDbTime)    /* errorlog_checkdb_time TIMESTAMP */
+            .Value(row.ErrorLogCheckDbOptions) /* errorlog_checkdb_options VARCHAR */
+            .Value(row.ErrorLogCheckDbErrors)  /* errorlog_checkdb_errors INTEGER */
+            .Value(row.ReplicaReadable);       /* replica_readable BOOLEAN */
     }
 }

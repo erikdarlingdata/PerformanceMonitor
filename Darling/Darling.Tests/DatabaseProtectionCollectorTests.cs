@@ -209,15 +209,30 @@ public sealed class DatabaseProtectionCollectorTests
     }
 
     [Fact]
-    public void TheV223Table_IsTheGeneratorsOutputForTheCatalogEntry()
+    public void TheTableAfterV223AndTheNewRung_IsTheGeneratorsOutput()
     {
-        var rung = PgMigrations.Scripts.Single(m => m.Version == 223).Sql.Replace("collect.", "", StringComparison.Ordinal);
-        var generated = PgSchemaGenerator.CreateTable(DatabaseProtectionCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(DatabaseProtectionCollector.Instance);
+        var v223 = PgMigrations.Scripts.Single(m => m.Version == 223).Sql.Replace("collect.", "", StringComparison.Ordinal);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == 270);
+        Assert.Equal("database-protection-error-log", rung.Name);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-        /* The rung also adds the three alert switches to config_alert_settings, so the table and its index are the rung's start, not all of it. */
-        Assert.StartsWith(Norm(generated).TrimEnd(';'), Norm(rung), StringComparison.Ordinal);
+        /* #8865: the table is V223's CREATE TABLE with the new rung's ADD COLUMNs folded in, in order, so a fresh store (the generator)
+           and an upgraded one (V223 then the rung) have one physical column order, which the positional binary COPY needs. */
+        var columns = System.Text.RegularExpressions.Regex.Matches(
+                rung.Sql, @"ADD COLUMN IF NOT EXISTS (\w+ [a-z]+)", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(5))
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+        Assert.Equal(10, columns.Count);
+
+        var v223Table = Norm(v223);
+        var close = v223Table.IndexOf(");", StringComparison.Ordinal);
+        var folded = v223Table[..close].TrimEnd() + ", " + string.Join(", ", columns) + " " + v223Table[close..];
+
+        var generated = PgSchemaGenerator.CreateTable(DatabaseProtectionCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(DatabaseProtectionCollector.Instance);
+
+        /* The V223 rung also adds the three alert switches to config_alert_settings, so the table and its index are its start, not all of it. */
+        Assert.StartsWith(Norm(generated).TrimEnd(';'), folded, StringComparison.Ordinal);
     }
 }
 
@@ -251,10 +266,13 @@ public sealed class DatabaseProtectionStoreLiveTests
         {
             new("AppDb", "ONLINE", "FULL", at.AddYears(-1), null, DatabaseProtectionCollector.PlatformManaged,
                 null, DatabaseProtectionCollector.CheckDbNever, null, DatabaseProtectionCollector.BackupUnavailable,
-                null, DatabaseProtectionCollector.BackupUnavailable),
+                null, DatabaseProtectionCollector.BackupUnavailable,
+                DatabaseProtectionCollector.ErrorLogNotApplicable, null, null, null, null, null, null, null, null, null),
             new("Other", "ONLINE", "SIMPLE", at.AddYears(-2), "PRIMARY", DatabaseProtectionCollector.PlatformManaged,
                 at.AddDays(-3), DatabaseProtectionCollector.CheckDbChecked, at.AddDays(-1), DatabaseProtectionCollector.BackupRecorded,
-                null, DatabaseProtectionCollector.BackupNotExpected),
+                null, DatabaseProtectionCollector.BackupNotExpected,
+                DatabaseProtectionCollector.ErrorLogRead, "read ok", "grant exec", true, "2 archives", 3,
+                at.AddDays(-2), "NO_INFOMSGS", 0, true),
         };
 
         var writer = new PgCollectorRowWriter();
@@ -280,7 +298,7 @@ public sealed class DatabaseProtectionStoreLiveTests
         }
 
         await using var read = new NpgsqlCommand(
-            "SELECT database_name, platform, checkdb_state, full_backup_state, log_backup_state, last_full_backup_time, last_good_checkdb_time FROM collect.database_protection WHERE server_id = 7 ORDER BY database_name", connection);
+            "SELECT database_name, platform, checkdb_state, full_backup_state, log_backup_state, last_full_backup_time, last_good_checkdb_time, errorlog_state, errorlog_message, errorlog_grant, errorlog_backfill_complete, errorlog_skipped_archives, errorlog_unparsed_lines, errorlog_checkdb_time, errorlog_checkdb_options, errorlog_checkdb_errors, replica_readable FROM collect.database_protection WHERE server_id = 7 ORDER BY database_name", connection);
         await using var reader = await read.ExecuteReaderAsync(ct);
 
         Assert.True(await reader.ReadAsync(ct));
@@ -289,6 +307,11 @@ public sealed class DatabaseProtectionStoreLiveTests
         Assert.Equal("never", reader.GetString(2));
         Assert.Equal("unavailable", reader.GetString(3));
         Assert.True(reader.IsDBNull(5));
+        Assert.Equal("not_applicable", reader.GetString(7));
+        for (var i = 8; i <= 16; i++)
+        {
+            Assert.True(reader.IsDBNull(i), "column " + i);
+        }
 
         Assert.True(await reader.ReadAsync(ct));
         Assert.Equal("Other", reader.GetString(0));
@@ -297,6 +320,16 @@ public sealed class DatabaseProtectionStoreLiveTests
         Assert.Equal("not_expected", reader.GetString(4));
         Assert.Equal(at.AddDays(-1), reader.GetDateTime(5));
         Assert.Equal(at.AddDays(-3), reader.GetDateTime(6));
+        Assert.Equal("read", reader.GetString(7));
+        Assert.Equal("read ok", reader.GetString(8));
+        Assert.Equal("grant exec", reader.GetString(9));
+        Assert.True(reader.GetBoolean(10));
+        Assert.Equal("2 archives", reader.GetString(11));
+        Assert.Equal(3, reader.GetInt32(12));
+        Assert.Equal(at.AddDays(-2), reader.GetDateTime(13));
+        Assert.Equal("NO_INFOMSGS", reader.GetString(14));
+        Assert.Equal(0, reader.GetInt32(15));
+        Assert.True(reader.GetBoolean(16));
         Assert.False(await reader.ReadAsync(ct));
     }
 }

@@ -3482,7 +3482,32 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
+        /* V270 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
+           Catalog-only ALTERs on a plain table, nothing is backfilled, so the upgrade stays fast. */
+        new Migration(270, "database-protection-error-log", V270Sql),
     };
+
+    /// <summary>
+    /// V270 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
+    /// that replica's own SQL Server error log. <b>Raw facts only</b>: how the log read went (<c>errorlog_state</c>, message, the grant that
+    /// would fix a refusal), whether the backfill reached the start of the retained logs, the archives skipped, the lines that did not parse,
+    /// the newest completed CHECKDB the log shows (time, options, error count) and whether the database was readable on that replica. What
+    /// they mean for the band is decided at read time. One nullable column each, no DEFAULT, no backfill: a row stored before this rung
+    /// carries NULL in all ten and bands exactly as it did. Catalog-only on a plain table. <b>Appended in the order of the collector's
+    /// payload</b> after <c>log_backup_state</c>, because the writer is a positional binary COPY: a fresh store (the generated V223 table
+    /// carries the columns and these ALTERs no-op there) and an upgraded one share one physical column order. Every statement is idempotent.
+    /// </summary>
+    private const string V270Sql = @"
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_state text;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_message text;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_grant text;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_backfill_complete boolean;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_skipped_archives text;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_unparsed_lines integer;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_checkdb_time timestamp;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_checkdb_options text;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_checkdb_errors integer;
+ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS replica_readable boolean;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.
