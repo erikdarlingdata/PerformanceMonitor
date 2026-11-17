@@ -304,12 +304,14 @@ LIMIT 1";
         }
 
         double? uptimeDays = null;
+        DateTime? measuredFrom = null;
         if (sqlServerStartTime is { } start)
         {
             var days = (referenceLocalTime - start).TotalDays;
             if (days >= 0)
             {
                 uptimeDays = days;
+                measuredFrom = start;
             }
         }
 
@@ -324,6 +326,10 @@ LIMIT 1";
             ServerSupportsCompression = supportsCompression,
             ServerSupportsOnline = supportsOnline,
             ServerUptimeDays = uptimeDays,
+            /* #8880: the heap finding's note dates its counters from the start time the uptime above was measured from, so the two
+               never disagree. Its thresholds keep the record defaults; there is no setting for them. */
+            ServerStartTime = measuredFrom,
+            IncludeHeaps = true,
             /* CompressionMin/MaxSavingsFactor keep the record defaults (0.20 / 0.60 — sp_IndexCleanup's band). */
         };
     }
