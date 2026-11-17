@@ -78,6 +78,25 @@ internal static class DarlingTlsKeyAccess
         public string KeyPath { get; }
     }
 
+    /// <summary>A legacy CryptoAPI key whose provider could not be opened without a prompt, so its key file could not be
+    /// found. Carries what the refusal prints: the provider, the key folder and the provider's own message.</summary>
+    internal sealed class CapiKeyNotOpenedException : InvalidOperationException
+    {
+        public CapiKeyNotOpenedException(string provider, string keyFolder, string reason)
+            : base($"the legacy CryptoAPI key (provider {provider}) could not be opened ({reason})")
+        {
+            Provider = provider;
+            KeyFolder = keyFolder;
+            Reason = reason;
+        }
+
+        public string Provider { get; }
+
+        public string KeyFolder { get; }
+
+        public string Reason { get; }
+    }
+
     /// <summary>A key's security descriptor, readable and writable, whatever kind of key it is.</summary>
     internal interface IKeyAclTarget : IDisposable
     {
@@ -476,6 +495,16 @@ internal static class DarlingTlsKeyAccess
                 error.WriteLine("Nothing was changed.");
                 return 1;
             }
+            catch (CapiKeyNotOpenedException ex)
+            {
+                var userStore = args.Location == StoreLocation.CurrentUser ? "-user " : string.Empty;
+                error.WriteLine($"{VerbName}: the private key of {which} is a legacy CryptoAPI key (provider {ex.Provider}), and Windows could not open it to find its key file: {ex.Reason}");
+                error.WriteLine($"Find the key file yourself. Run: certutil {userStore}-store {args.StoreName} {certificate.Thumbprint}");
+                error.WriteLine($"It prints the key's \"Unique container name\". That name is the file under {ex.KeyFolder}");
+                error.WriteLine($"Then grant the account by hand: icacls \"{Path.Combine(ex.KeyFolder, "<unique container name>")}\" /grant \"{account.Display}:(R)\"");
+                error.WriteLine("Nothing was changed.");
+                return 1;
+            }
             catch (Exception ex) when (ex is InvalidOperationException or CryptographicException or IOException or UnauthorizedAccessException)
             {
                 error.WriteLine($"{VerbName}: the private key of {which} could not be opened to read its access list ({ex.Message})");
@@ -754,21 +783,23 @@ internal static class DarlingTlsKeyAccess
     {
         ArgumentNullException.ThrowIfNull(certificate);
 
-        /* A key made by a legacy CryptoAPI provider (an internal CA template that names "Microsoft RSA SChannel
-           Cryptographic Provider", for one) can come back from .NET as an RSACng. CNG cannot read its "Security Descr"
-           property ("Key not valid for use in specified state"), but the key is still a file: so the certificate's own
-           key provider info decides, before the .NET key type does. */
-        if (ReadLegacyProvider(certificate) is { } legacy)
-        {
-            return new CapiFileAclTarget(CapiKeyFile(legacy));
-        }
-
         /* A CNG key's handle belongs to the algorithm object that produced it: disposing the object closes the handle.
            So the target takes the object and closes it itself. */
         var rsa = certificate.GetRSAPrivateKey();
         switch (rsa)
         {
             case RSACng cng:
+                /* A key made by a legacy CryptoAPI provider (an internal CA template that names "Microsoft RSA SChannel
+                   Cryptographic Provider", for one) can come back from .NET as an RSACng. CNG cannot read its "Security
+                   Descr" property ("Key not valid for use in specified state"), but the key is still a file: so an RSACng
+                   whose certificate names a CryptoAPI provider (a nonzero provider type) goes through the key file. A CNG
+                   key (type 0) keeps its own property. Every other key type is handled as it always was. */
+                if (ReadLegacyProvider(certificate) is { } legacy)
+                {
+                    rsa.Dispose();
+                    return new CapiFileAclTarget(CapiKeyFile(legacy));
+                }
+
                 return new CngKeyAclTarget(cng.Key, rsa);
 
             case RSACryptoServiceProvider capi:
@@ -860,29 +891,38 @@ internal static class DarlingTlsKeyAccess
                 WindowsIdentity.GetCurrent().User?.Value ?? string.Empty);
 
     /// <summary>The key file of a legacy key, found through its provider, type and container as certlm.msc does. The
-    /// key is opened as an existing key only, and kept (PersistKeyInCsp) so that disposing it can never delete it.</summary>
+    /// key is opened as an existing key only, never with a prompt (a card or PIN dialog never rises from a command
+    /// line), and kept (PersistKeyInCsp) so that disposing it can never delete it. When the provider cannot be opened
+    /// the file name is not guessed: the refusal carries the provider's own message.</summary>
     [SupportedOSPlatform("windows")]
-    private static string CapiKeyFile(LegacyKeyProvider legacy)
+    internal static string CapiKeyFile(LegacyKeyProvider legacy, Func<LegacyKeyProvider, string>? uniqueName = null)
     {
         var folder = CapiKeyFolder(legacy.MachineKeySet);
-        var fileName = legacy.Container;
+        string fileName;
         try
         {
-            var parameters = new CspParameters((int)legacy.ProviderType, legacy.Provider, legacy.Container)
-            {
-                Flags = CspProviderFlags.UseExistingKey | (legacy.MachineKeySet ? CspProviderFlags.UseMachineKeyStore : 0),
-            };
-            using var csp = new RSACryptoServiceProvider(parameters);
-            csp.PersistKeyInCsp = true;
-            fileName = csp.CspKeyContainerInfo.UniqueKeyContainerName;
+            fileName = (uniqueName ?? OpenUniqueName)(legacy);
         }
-        catch (CryptographicException)
+        catch (CryptographicException ex)
         {
-            /* The container name on the certificate is the file name in every case seen: use it. */
+            throw new CapiKeyNotOpenedException(legacy.Provider, folder, ex.Message);
         }
 
         var path = Path.Combine(folder, fileName);
         return File.Exists(path) ? path : throw new CapiKeyFileMissingException(legacy.Provider, path);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string OpenUniqueName(LegacyKeyProvider legacy)
+    {
+        var parameters = new CspParameters((int)legacy.ProviderType, legacy.Provider, legacy.Container)
+        {
+            Flags = CspProviderFlags.UseExistingKey | CspProviderFlags.NoPrompt
+                | (legacy.MachineKeySet ? CspProviderFlags.UseMachineKeyStore : 0),
+        };
+        using var csp = new RSACryptoServiceProvider(parameters);
+        csp.PersistKeyInCsp = true;
+        return csp.CspKeyContainerInfo.UniqueKeyContainerName;
     }
 
     [SupportedOSPlatform("windows")]

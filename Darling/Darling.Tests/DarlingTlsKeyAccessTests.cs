@@ -817,6 +817,45 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Empty(output.ToString());
     }
 
+    [Fact]
+    public void Run_ALegacyKeyWhoseProviderCannotBeOpened_RefusesWithTheRealReasonAndNoGuessedPath()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The key folders are Windows paths.");
+
+        using var certificate = Make("capi-unopened.corp.test");
+        const string reason = "Smart card is not available";
+        var legacy = new DarlingTlsKeyAccess.LegacyKeyProvider(
+            "Vendor Smart Card Provider", 1, "container-name-on-the-certificate", true);
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => true,
+            (_, _) => new[] { new X509Certificate2(certificate) },
+            _ => new DarlingTlsKeyAccess.AccountResolution(Service, @"NT SERVICE\PerformanceMonitor Darling", null),
+            _ =>
+            {
+                DarlingTlsKeyAccess.CapiKeyFile(legacy, key => throw new CryptographicException(reason));
+                throw new InvalidOperationException("the open was expected to fail");
+            });
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var code = DarlingTlsKeyAccess.Run(Args(certificate.Thumbprint), seams, output, error);
+
+        Assert.Equal(1, code);
+        var said = error.ToString();
+        Assert.Contains(reason, said, StringComparison.Ordinal);
+        Assert.Contains("Vendor Smart Card Provider", said, StringComparison.Ordinal);
+        Assert.Contains($"certutil -store My {certificate.Thumbprint}", said, StringComparison.Ordinal);
+        Assert.Contains("Unique container name", said, StringComparison.Ordinal);
+        var folder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Microsoft", "Crypto", "RSA", "MachineKeys");
+        Assert.Contains(
+            $"icacls \"{Path.Combine(folder, "<unique container name>")}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(R)\"",
+            said, StringComparison.Ordinal);
+        Assert.DoesNotContain("container-name-on-the-certificate", said, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed.", said, StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+    }
+
     /* ---- helpers ---- */
 
     private static DarlingTlsKeyAccess.GrantArgs Args(
