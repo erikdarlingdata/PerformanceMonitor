@@ -473,8 +473,9 @@ public sealed class AlertReadRetrySeamTests
            (GetRunnableQueueSamplesAsync), a forwarder over a private Core sibling like the other twelve and
            seamed under "runnable queue", the name the engine's catch arm records; the per-forwarder loop and
            the name check below cover it without a roster entry. The fifteenth is #5736's Client Timeouts baseline
-           read (GetAttentionBaselineAsync), seamed under "client timeouts". */
-        Assert.Equal(15, forwarders.Count);
+           read (GetAttentionBaselineAsync), seamed under "client timeouts". The sixteenth is #8882's TempDB growth fit read
+           (GetTempDbFilesAsync), seamed under "TempDB growth fit". */
+        Assert.Equal(16, forwarders.Count);
 
         /* No public read is left in the old self-executing shape. The control below proves this pattern
            can match, so its silence here is a real absence. */
@@ -516,7 +517,7 @@ public sealed class AlertReadRetrySeamTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        Assert.Equal(15, seamNames.Count);
+        Assert.Equal(16, seamNames.Count);
         /* One name is shared on purpose (#5736): the Client Timeouts window read and its baseline read both fail into the engine's one
            "client timeouts" catch arm, so both are counted under that name. Every other name stays one read. */
         Assert.Equal(new[] { "client timeouts" },
