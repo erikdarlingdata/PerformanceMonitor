@@ -377,6 +377,94 @@ public sealed class DarlingMcpPersonalTokenTests
         Assert.Contains("Unknown tool", claim.Body, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Review I1: an operator row is served as a reader while adminRole is reader, even when a write-capable file token puts the
+    /// write tools (and the server admin tools) in the start's set.</summary>
+    [Fact]
+    public async Task PersonalOperatorRow_AdminRoleReader_WithAWriteCapableFileToken_IsServedAsReader()
+    {
+        await using var rig = await PersonalMcpRig.StartAsync(Personal(adminRole: McpTokenEntry.ReaderRole), allowWrites: true);
+        var op = rig.AddToken("alice@corp", "ci", McpTokenEntry.OperatorRole);
+        await rig.RefreshAsync();
+
+        Assert.Contains("create_mute_rule", await ToolNamesAsync(rig, PersonalMcpRig.Legacy));
+        var tools = await ToolNamesAsync(rig, op.Value);
+        Assert.DoesNotContain(tools, DarlingMcpWritePolicy.IsWrite);
+        Assert.Equal(
+            (await ToolNamesAsync(rig, PersonalMcpRig.ReaderToken)).OrderBy(n => n, StringComparer.Ordinal),
+            tools.OrderBy(n => n, StringComparer.Ordinal));
+        var call = await rig.PostAsync(op.Value, PersonalMcpRig.ToolsCallJson("create_mute_rule", "{}"));
+        Assert.Contains("Unknown tool", call.Body, StringComparison.OrdinalIgnoreCase);
+
+        var caller = rig.Tokens.PersonalCaller(PersonalMcpRig.RowFor(PersonalTokenFormat.Mint(), "alice@corp", "ci", McpTokenEntry.OperatorRole).Row);
+        Assert.Equal(McpTokenEntry.ReaderRole, caller.Role);
+        Assert.False(caller.Policy.Writes);
+        Assert.Null(caller.Policy.OperatorActor);
+        Assert.Contains("reader role", await rig.InstructionsAsync(op.Value), StringComparison.Ordinal);
+    }
+
+    /// <summary>Review M1: a disposed snapshot or data source while the service is NOT stopping is logged and the supervisor carries on;
+    /// only a stop ends the loop.</summary>
+    [Fact]
+    public async Task PersonalTick_DisposedWhileRunning_IsLogged_AndOnlyAStopEndsTheLoop()
+    {
+        await using var rig = await PersonalMcpRig.StartAsync(Personal());
+        rig.Snapshot.Dispose();
+
+        Assert.False(await rig.Host.PersonalTokenTickStopsAsync(CancellationToken.None));
+        Assert.Contains(rig.Log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("refresh failed", StringComparison.Ordinal));
+
+        using var stopping = new CancellationTokenSource();
+        await stopping.CancelAsync();
+        Assert.True(await rig.Host.PersonalTokenTickStopsAsync(stopping.Token));
+    }
+
+    /// <summary>Review M2: a listener start reloads the snapshot before it serves, so a token revoked while the listener was off is refused
+    /// from the first request, not after the next tick.</summary>
+    [Fact]
+    public async Task ListenerStart_ReloadsTheSnapshot_BeforeServing()
+    {
+        MintedToken? token = null;
+        await using var rig = await PersonalMcpRig.StartAsync(Personal(), beforeStart: async r =>
+        {
+            /* Served live before the stop... */
+            token = r.AddToken("alice@corp", "ci", McpTokenEntry.OperatorRole);
+            await r.RefreshAsync();
+            Assert.Equal(PersonalTokenOutcome.Live, r.Snapshot.Check(token.Value, PersonalMcpRig.T0Offset).Outcome);
+
+            /* ...and revoked while the listener was off: no tick has run since. */
+            r.ReplaceRow(token.TokenId, row => row with { RevokedAt = PersonalMcpRig.T0Offset.AddMinutes(-1), RevokedBy = "person:admin" });
+        });
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, (await rig.PostAsync(token!.Value, PersonalMcpRig.ToolsListJson)).Status);
+    }
+
+    /// <summary>Review M3: with ONLY the legacy token (no named token, so the feature alone turns the per-request path on), the legacy
+    /// token's tools/list, instructions and identity are identical with the feature off and on, with writes off and on.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyTokenOnly_UnchangedWithFeatureOn(bool allowWrites)
+    {
+        await using var off = await PersonalMcpRig.StartAsync(personal: null, withNamedReader: false, allowWrites: allowWrites);
+        await using var on = await PersonalMcpRig.StartAsync(Personal(), withNamedReader: false, allowWrites: allowWrites);
+        on.AddToken("alice@corp", "ci", McpTokenEntry.OperatorRole);
+        await on.RefreshAsync();
+
+        Assert.False(off.Tokens.PerRequest);
+        Assert.True(on.Tokens.PerRequest);
+
+        var offTools = await ToolNamesAsync(off, PersonalMcpRig.Legacy);
+        Assert.Equal(allowWrites, offTools.Contains("create_mute_rule"));
+        Assert.Equal(offTools.OrderBy(n => n, StringComparer.Ordinal), (await ToolNamesAsync(on, PersonalMcpRig.Legacy)).OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal(await off.InstructionsAsync(PersonalMcpRig.Legacy), await on.InstructionsAsync(PersonalMcpRig.Legacy));
+
+        var offCaller = off.Tokens.Match(PersonalMcpRig.Legacy);
+        var onCaller = on.Tokens.Match(PersonalMcpRig.Legacy);
+        Assert.Equal(offCaller?.Policy, onCaller?.Policy);
+        Assert.Equal(ReadCaller.OfMcpIdentity(offCaller?.Name, PersonalMcpRig.Legacy), ReadCaller.OfMcpIdentity(onCaller?.Name, PersonalMcpRig.Legacy));
+        Assert.Equal(StatusCodes.Status401Unauthorized, (await on.PostAsync("wrong-token-value-0123456789abcdef", PersonalMcpRig.ToolsListJson)).Status);
+    }
+
     [Fact]
     public void FrontDoor_NeverServesPersonal()
     {
@@ -435,14 +523,16 @@ internal sealed class PersonalMcpRig : IAsyncDisposable
     /// <summary>Starts the pipeline. <paramref name="storeConnection"/> set: the tools and the snapshot use that store (the snapshot's
     /// production loader on the owner connection); unset: a pool nothing opens and the injected loader.</summary>
     internal static async Task<PersonalMcpRig> StartAsync(PersonalTokenSettings? personal, string legacy = Legacy, bool withAgent = false,
-        McpDataDetail serviceDetail = McpDataDetail.Full, string? storeConnection = null)
+        McpDataDetail serviceDetail = McpDataDetail.Full, string? storeConnection = null, bool withNamedReader = true, bool allowWrites = false,
+        Func<PersonalMcpRig, Task>? beforeStart = null)
     {
         var rig = new PersonalMcpRig();
-        await rig.BuildAsync(personal, legacy, withAgent, serviceDetail, storeConnection);
+        await rig.BuildAsync(personal, legacy, withAgent, serviceDetail, storeConnection, withNamedReader, allowWrites, beforeStart);
         return rig;
     }
 
-    private async Task BuildAsync(PersonalTokenSettings? personal, string legacy, bool withAgent, McpDataDetail serviceDetail, string? storeConnection)
+    private async Task BuildAsync(PersonalTokenSettings? personal, string legacy, bool withAgent, McpDataDetail serviceDetail, string? storeConnection,
+        bool withNamedReader, bool allowWrites, Func<PersonalMcpRig, Task>? beforeStart)
     {
         _ownerSource = NpgsqlDataSource.Create(storeConnection ?? "Host=127.0.0.1;Port=1;Username=u;Database=d");
         Owner.Publish(_ownerSource);
@@ -470,13 +560,18 @@ internal sealed class PersonalMcpRig : IAsyncDisposable
                     return Task.CompletedTask;
                 });
 
-        var named = new List<McpTokenEntry> { new() { Name = "reader-bot", Token = ReaderToken, Role = McpTokenEntry.ReaderRole } };
+        var named = new List<McpTokenEntry>();
+        if (withNamedReader)
+        {
+            named.Add(new McpTokenEntry { Name = "reader-bot", Token = ReaderToken, Role = McpTokenEntry.ReaderRole });
+        }
+
         if (withAgent)
         {
             named.Add(new McpTokenEntry { Name = "triage-bot", Token = AgentToken, Role = McpTokenEntry.AgentRole });
         }
 
-        var mcp = new McpConfig { Tokens = named };
+        var mcp = new McpConfig { Tokens = named, AllowWrites = allowWrites };
         var legacyPolicy = DarlingMcpWritePolicy.ResolveForStart(mcp, legacy, out _);
         Tokens = DarlingMcpTokenSet.Resolve(mcp, legacy, legacyPolicy, null, personal);
 
@@ -516,7 +611,13 @@ internal sealed class PersonalMcpRig : IAsyncDisposable
         /* Behind every gate above: the data detail level this request is served. */
         _app.MapGet(DetailProbePath, (McpDataDetailSetting setting) => setting.Mode.ToString());
 
-        await _app.StartAsync();
+        if (beforeStart is not null)
+        {
+            await beforeStart(this);
+        }
+
+        /* The start's own step: a listener serving personal tokens reloads the snapshot, then serves. */
+        await Host.StartListenerAsync(_app, Tokens.Personal is not null, TestContext.Current.CancellationToken);
         Server = _app.GetTestServer();
     }
 
@@ -536,6 +637,13 @@ internal sealed class PersonalMcpRig : IAsyncDisposable
 
     internal void AddToken(MintedToken token, string subject, string tokenName, string role, DateTimeOffset? expiresAt = null, DateTimeOffset? revokedAt = null) =>
         _rows.Add(RowFor(token, subject, tokenName, role, expiresAt, revokedAt));
+
+    /// <summary>Replaces the row of <paramref name="tokenId"/> in what the test loader returns; the next refresh serves the change.</summary>
+    internal void ReplaceRow(string tokenId, Func<PersonalTokenRow, PersonalTokenRow> change)
+    {
+        var index = _rows.FindIndex(r => r.Row.TokenId == tokenId);
+        _rows[index] = _rows[index] with { Row = change(_rows[index].Row) };
+    }
 
     /// <summary>A value with <paramref name="token"/>'s id and a different secret.</summary>
     internal static string SameIdOtherSecret(MintedToken token)

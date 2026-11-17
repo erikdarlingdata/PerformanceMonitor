@@ -100,12 +100,17 @@ internal sealed class DarlingMcpTokenSet
         _ => new DarlingMcpWritePolicy.Effective(false, false, false, name),
     };
 
-    /// <summary>The caller a live personal token is: named <c>personal:&lt;subject&gt;/&lt;token_name&gt;</c>, served its row's role and the
-    /// personal tokens' own <c>dataDetail</c>.</summary>
+    /// <summary>The caller a live personal token is: named <c>personal:&lt;subject&gt;/&lt;token_name&gt;</c>, served the personal tokens' own
+    /// <c>dataDetail</c> and its row's role, except that an <c>operator</c> row is served <c>operator</c> only while
+    /// <c>mcp.personalTokens.adminRole</c> is operator: a row minted before the setting was lowered is served as a reader, whatever the file
+    /// tokens put in the start's tool set.</summary>
     internal McpCaller PersonalCaller(PersonalTokenRow row)
     {
         var name = PersonalNamePrefix + row.Subject + "/" + row.TokenName;
-        return new McpCaller(name, PolicyForRole(row.Role, name), Personal?.DataDetail, row.Role);
+        var role = string.Equals(row.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal) && Personal?.AdminMayMintOperator == true
+            ? McpTokenEntry.OperatorRole
+            : McpTokenEntry.ReaderRole;
+        return new McpCaller(name, PolicyForRole(role, name), Personal?.DataDetail, role);
     }
 
     /// <summary>The level a call is served (#7023): the service's <c>mcp.dataDetail</c>, or the caller's own <c>dataDetail</c> when that is

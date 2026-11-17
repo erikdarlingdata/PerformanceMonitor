@@ -351,21 +351,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* #8737: a listener that serves personal tokens reloads them on every tick (a revocation reaches the gate within one tick) and
                writes their last-used times. Awaited here, never left running: a stop, or a snapshot the process has disposed, ends the loop. */
-            if (_app is not null && _servesPersonalTokens)
+            if (_app is not null && _servesPersonalTokens && await PersonalTokenTickStopsAsync(stoppingToken))
             {
-                try
-                {
-                    await RefreshPersonalTokensAsync(stoppingToken);
-                }
-                catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
-                {
-                    _logger.LogDebug("The personal MCP token refresh stopped with the service ({Reason})", ex.GetType().Name);
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "The personal MCP token refresh failed; personal tokens are refused until a refresh succeeds");
-                }
+                break;
             }
 
             try
@@ -422,6 +410,45 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         _runningPort = 0;
         _servesPersonalTokens = false;
+    }
+
+    /// <summary>
+    /// One supervisor tick's personal-token work (#8737), awaited. True only when the service is stopping (cancellation, or the snapshot
+    /// disposed with the process): the supervisor loop then ends. Any other failure, an <see cref="ObjectDisposedException"/> from a data
+    /// source the worker replaced included, is logged and the next tick tries again, so it never ends MCP supervision.
+    /// </summary>
+    internal async Task<bool> PersonalTokenTickStopsAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await RefreshPersonalTokensAsync(stoppingToken);
+            return false;
+        }
+        catch (Exception ex) when ((ex is OperationCanceledException or ObjectDisposedException) && stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogDebug("The personal MCP token refresh stopped with the service ({Reason})", ex.GetType().Name);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "The personal MCP token refresh failed; personal tokens are refused until a refresh succeeds");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Starts serving (#8737): a listener that serves personal tokens reloads the snapshot first, so a start, and a restart after the
+    /// listener was toggled off, never serves the copy from before (a token revoked meanwhile would pass until the next tick). A reload that
+    /// fails leaves the snapshot unavailable, which refuses every personal token.
+    /// </summary>
+    internal async Task StartListenerAsync(WebApplication app, bool servesPersonalTokens, CancellationToken cancellationToken)
+    {
+        if (servesPersonalTokens)
+        {
+            await RefreshPersonalTokensAsync(cancellationToken);
+        }
+
+        await app.StartAsync(cancellationToken);
     }
 
     /// <summary>
@@ -1082,7 +1109,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
-            await _app.StartAsync(stoppingToken);
+            await StartListenerAsync(_app, tokenSet.Personal is not null, stoppingToken);
             _runningPort = effectivePort;
             _servesPersonalTokens = tokenSet.Personal is not null;
             return true;
