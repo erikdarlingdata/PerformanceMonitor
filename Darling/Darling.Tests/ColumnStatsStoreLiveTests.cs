@@ -59,7 +59,7 @@ public sealed class ColumnStatsStoreLiveTests
     }
 
     [Fact]
-    public async Task Replace_ThenLoadStatsDates_RoundTrips()
+    public async Task Replace_ThenLoadStored_RoundTrips()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipMessage);
         var ct = TestContext.Current.CancellationToken;
@@ -70,11 +70,14 @@ public sealed class ColumnStatsStoreLiveTests
 
         await ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, key, Db, new[] { Entry(Stat(100, 1), s_t0), Entry(Stat(100, 2, name: "IX_Other"), s_t0.AddHours(1)) }, s_read, ct);
 
-        var dates = await ColumnStatsStore.LoadStatsDatesAsync(pg, key, Db, ct);
-        Assert.Equal(2, dates.Count);
-        Assert.Equal(s_t0, dates[(100, 1)]);
-        Assert.Equal(s_t0.AddHours(1), dates[(100, 2)]);
-        Assert.Empty(await ColumnStatsStore.LoadStatsDatesAsync(pg, "server:8", Db, ct));
+        var stored = await ColumnStatsStore.LoadStoredAsync(pg, key, Db, ct);
+        Assert.Equal(2, stored.Count);
+        Assert.Equal(s_t0, stored[(100, 1)].StatsDate);
+        Assert.Equal(s_t0.AddHours(1), stored[(100, 2)].StatsDate);
+        /* The names it was stored under and the longest prefix's columns, for the rename check. */
+        Assert.Equal(("dbo", "Orders", "IX_Other"), (stored[(100, 2)].SchemaName, stored[(100, 2)].ObjectName, stored[(100, 2)].StatsName));
+        Assert.Equal(new[] { "CustomerId", "Status", "OrderId" }, stored[(100, 1)].Columns);
+        Assert.Empty(await ColumnStatsStore.LoadStoredAsync(pg, "server:8", Db, ct));
         Assert.Equal(6, await CountAsync(pg, "server_id = 7", ct));
     }
 
@@ -93,7 +96,7 @@ public sealed class ColumnStatsStoreLiveTests
         await ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, key, Db, new[] { Entry(stat, s_t0.AddDays(1), densityScale: 2) }, s_read.AddDays(1), ct);
 
         Assert.Equal(3, await CountAsync(pg, "server_id = 7", ct));
-        var stored = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { key }, Db, "dbo", "Orders", ct);
+        var stored = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { key }, Db, 100, ct);
         Assert.Equal(3, stored.Count);
         Assert.All(stored, p => Assert.Equal(s_t0.AddDays(1).AddHours(5), p.LastUpdatedUtc));
         Assert.Equal(0.02, stored[0].AllDensity, 9);
@@ -123,11 +126,11 @@ public sealed class ColumnStatsStoreLiveTests
         var deleted = await ColumnStatsStore.DeleteStatisticsAsync(pg, key, Db, new[] { (100, 2), (200, 1) }, ct);
 
         Assert.Equal(6, deleted);
-        var left = await ColumnStatsStore.LoadStatsDatesAsync(pg, key, Db, ct);
+        var left = await ColumnStatsStore.LoadStoredAsync(pg, key, Db, ct);
         Assert.Equal(new[] { (100, 1) }, left.Keys.ToArray());
 
         Assert.Equal(3, await ColumnStatsStore.DeleteDatabaseAsync(pg, key, Db, ct));
-        Assert.Empty(await ColumnStatsStore.LoadStatsDatesAsync(pg, key, Db, ct));
+        Assert.Empty(await ColumnStatsStore.LoadStoredAsync(pg, key, Db, ct));
     }
 
     [Fact]
@@ -145,20 +148,20 @@ public sealed class ColumnStatsStoreLiveTests
         await ColumnStatsStore.ReplaceStatisticsAsync(pg, 8, agKey, Db, new[] { Entry(Stat(100, 1, name: "Kept"), s_t0.AddDays(1)) }, s_read.AddDays(1), ct);
         await ColumnStatsStore.ReplaceStatisticsAsync(pg, 9, "server:9", Db, new[] { Entry(Stat(100, 3, name: "Elsewhere"), s_t0) }, s_read, ct);
 
-        var byAg = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { agKey }, Db, "dbo", "Orders", ct);
+        var byAg = await ColumnStatsStore.ReadForObjectAsync(pg, new[] { agKey }, Db, 100, ct);
         Assert.Equal(6, byAg.Count);
         Assert.All(byAg.Where(p => p.StatsName == "Kept"), p => Assert.Equal(s_t0.AddDays(1).AddHours(5), p.LastUpdatedUtc));
         Assert.Equal(3, await CountAsync(pg, "stats_id = 1", ct));
         Assert.Equal(3, await CountAsync(pg, "stats_id = 1 AND server_id = 8", ct));
 
         /* The dates load and the deletes go by key, whichever server wrote the row. */
-        Assert.Equal(2, (await ColumnStatsStore.LoadStatsDatesAsync(pg, agKey, Db, ct)).Count);
+        Assert.Equal(2, (await ColumnStatsStore.LoadStoredAsync(pg, agKey, Db, ct)).Count);
         Assert.Equal(3, await ColumnStatsStore.DeleteStatisticsAsync(pg, agKey, Db, new[] { (100, 2) }, ct));
         Assert.Equal(3, await ColumnStatsStore.DeleteDatabaseAsync(pg, agKey, Db, ct));
         Assert.Equal(3, await CountAsync(pg, "true", ct));
 
-        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, new[] { "server:9" }, "Other", "dbo", "Orders", ct));
-        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, Array.Empty<string>(), Db, "dbo", "Orders", ct));
+        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, new[] { "server:9" }, "Other", 100, ct));
+        Assert.Empty(await ColumnStatsStore.ReadForObjectAsync(pg, Array.Empty<string>(), Db, 100, ct));
     }
 
     [Fact]

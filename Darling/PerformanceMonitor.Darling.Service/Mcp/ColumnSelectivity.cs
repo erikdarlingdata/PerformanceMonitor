@@ -294,7 +294,7 @@ LIMIT 1";
         }
 
         var keyTexts = keys.Select(DarlingSchemaCapture.KeyText).Distinct(StringComparer.Ordinal).ToArray();
-        var stored = await ColumnStatsStore.ReadForObjectAsync(connection, keyTexts, database, definition.Schema, definition.Name, cancellationToken);
+        var stored = await ColumnStatsStore.ReadForObjectAsync(connection, keyTexts, database, definition.ObjectId, cancellationToken);
         var run = await ReadNewestRunAsync(postgres, keyTexts, database, cancellationToken);
         var noGrant = await ReadServerRunHadNoGrantAsync(postgres, serverId, cancellationToken);
         var (seen, fullRead) = await ReadStateStampsAsync(postgres, keyTexts, database, cancellationToken);

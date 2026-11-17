@@ -43,26 +43,28 @@ internal static class ColumnStatsStore
     private const int CommandTimeoutSeconds = SchemaVersionStore.WriteCommandTimeoutSeconds;
 
     /// <summary>
-    /// When each stored statistic of the (history key, database) was last updated, by (object id, statistics id): <c>last_updated</c>, the
-    /// raw server-local <c>STATS_DATE</c> the change check compares with (never the UTC display column).
+    /// What is stored of each statistic of the (history key, database), by (object id, statistics id), for the change check:
+    /// <c>last_updated</c> (the raw server-local <c>STATS_DATE</c>, never the UTC display column), the schema, table and statistic names,
+    /// and the column list of the longest stored prefix.
     /// </summary>
-    internal static async Task<IReadOnlyDictionary<(int ObjectId, int StatsId), DateTime>> LoadStatsDatesAsync(
+    internal static async Task<IReadOnlyDictionary<(int ObjectId, int StatsId), StoredStatistic>> LoadStoredAsync(
         NpgsqlConnection c, string historyKey, string database, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(c);
         await using var cmd = new NpgsqlCommand(@"
-SELECT object_id, stats_id, min(last_updated)
+SELECT DISTINCT ON (object_id, stats_id) object_id, stats_id, last_updated, schema_name, object_name, stats_name, columns
 FROM collect.column_stats
 WHERE history_key = $1 AND database_name = $2
-GROUP BY object_id, stats_id", c) { CommandTimeout = CommandTimeoutSeconds };
+ORDER BY object_id, stats_id, prefix_length DESC", c) { CommandTimeout = CommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Text, historyKey);
         Param(cmd, NpgsqlDbType.Text, database);
 
-        var result = new Dictionary<(int ObjectId, int StatsId), DateTime>();
+        var result = new Dictionary<(int ObjectId, int StatsId), StoredStatistic>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            result[(reader.GetInt32(0), reader.GetInt32(1))] = reader.GetDateTime(2);
+            result[(reader.GetInt32(0), reader.GetInt32(1))] = new StoredStatistic(
+                reader.GetDateTime(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetFieldValue<string[]>(6));
         }
 
         return result;
@@ -217,11 +219,11 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
     }
 
     /// <summary>
-    /// Every stored prefix of one table under any of the history keys (text form). The rows of one key are one set whichever server wrote
-    /// them, so the statistics compared for the answer are the current ones of that history.
+    /// Every stored prefix of one table, by its object id, under any of the history keys (text form). The rows of one key are one set
+    /// whichever server wrote them. The object id, not the name, picks the table, so two tables swapped by renames never merge under one name.
     /// </summary>
     internal static async Task<IReadOnlyList<StoredPrefix>> ReadForObjectAsync(
-        NpgsqlConnection c, IReadOnlyList<string> historyKeys, string database, string schema, string name, CancellationToken ct)
+        NpgsqlConnection c, IReadOnlyList<string> historyKeys, string database, int objectId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(c);
         ArgumentNullException.ThrowIfNull(historyKeys);
@@ -233,12 +235,11 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
         await using var cmd = new NpgsqlCommand(@"
 SELECT stats_name, origin, columns, includes_clustering_key, all_density, rows, rows_sampled, last_updated_utc, persisted_sample_percent, read_at
 FROM collect.column_stats
-WHERE history_key = ANY($1) AND database_name = $2 AND schema_name = $3 AND object_name = $4
+WHERE history_key = ANY($1) AND database_name = $2 AND object_id = $3
 ORDER BY stats_name, prefix_length", c) { CommandTimeout = CommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Array | NpgsqlDbType.Text, historyKeys.Distinct(StringComparer.Ordinal).ToArray());
         Param(cmd, NpgsqlDbType.Text, database);
-        Param(cmd, NpgsqlDbType.Text, schema);
-        Param(cmd, NpgsqlDbType.Text, name);
+        Param(cmd, NpgsqlDbType.Integer, objectId);
 
         var result = new List<StoredPrefix>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);

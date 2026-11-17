@@ -66,6 +66,12 @@ public sealed record StoredPrefix(
     float? PersistedSamplePercent,
     DateTime ReadAt);
 
+/// <summary>
+/// What the store holds of one statistic, for the change check: its <c>STATS_DATE</c> as the server gave it, the schema, table and
+/// statistic names it was stored under, and the column list of its longest stored prefix.
+/// </summary>
+public sealed record StoredStatistic(DateTime StatsDate, string SchemaName, string ObjectName, string StatsName, IReadOnlyList<string> Columns);
+
 /// <summary>Whether a statistic needs to be read again compared with what is stored.</summary>
 public enum StatChange { New, Changed, Unchanged }
 
@@ -88,16 +94,8 @@ public static class ColumnStatsModel
     /// </summary>
     public static IReadOnlyList<StatPrefix> MapDensityRows(StatCandidate stat, IReadOnlyList<double> allDensityInOrder)
     {
-        var names = new List<string>(stat.StatColumns);
-        var keyCount = names.Count;
-        foreach (var clustered in stat.ClusteredKeyColumns)
-        {
-            if (!names.Contains(clustered, StringComparer.OrdinalIgnoreCase))
-            {
-                names.Add(clustered);
-            }
-        }
-
+        var names = DensityColumnNames(stat);
+        var keyCount = stat.StatColumns.Count;
         var result = new List<StatPrefix>();
         for (var i = 0; i < allDensityInOrder.Count && i < names.Count; i++)
         {
@@ -111,6 +109,22 @@ public static class ColumnStatsModel
         }
 
         return result;
+    }
+
+    /// <summary>The column names the density vector rows of a statistic describe, in order: its key columns, then the clustering key columns not already among them.</summary>
+    public static IReadOnlyList<string> DensityColumnNames(StatCandidate stat)
+    {
+        ArgumentNullException.ThrowIfNull(stat);
+        var names = new List<string>(stat.StatColumns);
+        foreach (var clustered in stat.ClusteredKeyColumns)
+        {
+            if (!names.Contains(clustered, StringComparer.OrdinalIgnoreCase))
+            {
+                names.Add(clustered);
+            }
+        }
+
+        return names;
     }
 
     /// <summary>All-density is 1 / distinct values, so rows per value is density * rows. Null when either input makes that meaningless.</summary>
@@ -162,5 +176,33 @@ public static class ColumnStatsModel
         }
 
         return current == stored.Value ? StatChange.Unchanged : StatChange.Changed;
+    }
+
+    /// <summary>
+    /// The date check, and then the names: a rename (sp_rename of the table, the statistic or a column, ALTER SCHEMA ... TRANSFER) keeps
+    /// <c>STATS_DATE</c>, so a statistic whose stored schema, table or statistic name differs, or whose stored longest prefix is not the
+    /// leading part of the columns the statistic now has (with the clustering key columns), is read again. Names compare exactly, so a
+    /// change of case is a rename too. A stored prefix shorter than the column list is not a change: DBCC can return fewer rows.
+    /// </summary>
+    public static StatChange Decide(StatCandidate current, StoredStatistic? stored)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+        if (stored is null)
+        {
+            return StatChange.New;
+        }
+
+        if (Decide(current.StatsDate, stored.StatsDate) != StatChange.Unchanged
+            || !string.Equals(current.SchemaName, stored.SchemaName, StringComparison.Ordinal)
+            || !string.Equals(current.ObjectName, stored.ObjectName, StringComparison.Ordinal)
+            || !string.Equals(current.StatsName, stored.StatsName, StringComparison.Ordinal))
+        {
+            return StatChange.Changed;
+        }
+
+        var names = DensityColumnNames(current);
+        return stored.Columns.Count <= names.Count && stored.Columns.SequenceEqual(names.Take(stored.Columns.Count), StringComparer.Ordinal)
+            ? StatChange.Unchanged
+            : StatChange.Changed;
     }
 }

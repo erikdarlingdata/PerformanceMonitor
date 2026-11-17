@@ -31,7 +31,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>column_stats</c>' own scope cover (exclusions win), writable by the schema pass's rules
 /// (<see cref="SchemaWorkPlanner.NotWritableReason"/>). Oldest full read first, a never-read database before any.</para>
 ///
-/// <para><b>Incremental.</b> A statistic is read when it is new or its <c>STATS_DATE</c> differs from the stored one, and the stored
+/// <para><b>Incremental.</b> A statistic is read when it is new, its <c>STATS_DATE</c> differs from the stored one, or a name it was
+/// stored under changed (a renamed schema, table, statistic or column keeps <c>STATS_DATE</c>), and the stored
 /// rows of a statistic that is gone are deleted. A database with no state, a new recovery fork (a restore) or a new history key starts
 /// from nothing: its rows are deleted first, so a baseline cut short continues on the next run with what is still missing. Run now
 /// re-reads every candidate. Statistics are read in batches of <see cref="BatchSize"/>, largest tables first, and each batch is stored
@@ -333,7 +334,7 @@ public static class DarlingColumnStatsCapture
                     advanceState = true;
                 }
 
-                var stored = await TimedStore(() => ColumnStatsStore.LoadStatsDatesAsync(Store, keyText, database, _ct));
+                var stored = await TimedStore(() => ColumnStatsStore.LoadStoredAsync(Store, keyText, database, _ct));
                 var byId = candidates.ToDictionary(c => (c.ObjectId, c.StatsId));
 
                 /* Over the cap the list is not the whole database, so a statistic missing from it is not known to be gone. */
@@ -345,7 +346,7 @@ public static class DarlingColumnStatsCapture
                 }
 
                 var toRead = candidates
-                    .Where(c => _runNow || ColumnStatsModel.Decide(c.StatsDate, stored.TryGetValue((c.ObjectId, c.StatsId), out var at) ? at : null) != StatChange.Unchanged)
+                    .Where(c => _runNow || ColumnStatsModel.Decide(c, stored.GetValueOrDefault((c.ObjectId, c.StatsId))) != StatChange.Unchanged)
                     .ToList();
 
                 complete = true;

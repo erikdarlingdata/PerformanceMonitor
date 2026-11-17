@@ -356,6 +356,25 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
     }
 
     [Fact]
+    public async Task RenamedColumn_IsReadAgain_AndTheNewNameAppears()
+    {
+        await RunAsync(async r =>
+        {
+            await r.StatsAsync();
+            Assert.Equal("1", await r.StatCountAsync("'CreditType' = ANY(columns)"));
+
+            /* sp_rename keeps STATS_DATE; the stored column list no longer matches the catalog, so the statistic is read again. */
+            await ExecuteAsync(r.Db, "EXEC sp_rename N'dbo.Orders.CreditType', N'CreditKind', N'COLUMN';", r.Ct);
+            await r.StatsAsync();
+
+            Assert.Equal("1", (await r.LastRunAsync()).Split('|')[2]);
+            Assert.Equal("0", await r.StatCountAsync("'CreditType' = ANY(columns)"));
+            Assert.Equal("{TeamId,CreditKind}", await r.ScalarAsync(
+                $"SELECT columns::text FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Team_Credit' AND prefix_length = 2"));
+        });
+    }
+
+    [Fact]
     public async Task DroppedStatistic_RowIsDeleted()
     {
         await RunAsync(async r =>

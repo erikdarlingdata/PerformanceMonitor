@@ -305,6 +305,37 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
     }
 
     [Fact]
+    public async Task Renames_KeepStatsDate_AndAreReadAgain()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            var server = rig.Server();
+            await rig.RunAsync(server, ct);
+            rig.Source.Reads.Clear();
+
+            /* sp_rename of a column and of a table, ALTER SCHEMA ... TRANSFER: STATS_DATE stays, the names do not. */
+            rig.Source.Candidates[Sales] =
+            [
+                Stat(100, 1, s_t0, 5000, "Id"),
+                Stat(100, 2, s_t0, 5000, "TeamKey", "Status"),
+                Stat(200, 1, s_t0, 10, "Id") with { ObjectName = "T200Renamed", SchemaName = "archive" },
+            ];
+
+            await rig.RunAsync(server, ct);
+
+            Assert.Equal(new[] { (100, 2), (200, 1) }, rig.Source.ReadIds(Sales).Order().ToArray());
+            Assert.Equal("{TeamKey,Status}", await rig.ScalarAsync("SELECT columns::text FROM collect.column_stats WHERE object_id = 100 AND stats_id = 2 AND prefix_length = 2", ct));
+            Assert.Equal("archive.T200Renamed", await rig.ScalarAsync("SELECT DISTINCT schema_name || '.' || object_name FROM collect.column_stats WHERE object_id = 200", ct));
+
+            /* Read once: the next run sees the new names stored. */
+            rig.Source.Reads.Clear();
+            await rig.RunAsync(server, ct);
+            Assert.Empty(rig.Source.Reads);
+        });
+    }
+
+    [Fact]
     public async Task SecondRun_ReadsOnlyChangedAndNew_DeletesGone()
     {
         await WithRigAsync(async (rig, ct) =>

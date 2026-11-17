@@ -138,4 +138,24 @@ public class ColumnStatsModelTests
         Assert.Equal(StatChange.Unchanged, ColumnStatsModel.Decide(t0, t0));
         Assert.Equal(StatChange.New, ColumnStatsModel.Decide(t0, null));
     }
+
+    [Fact]
+    public void Rename_CountsAsChanged_WithTheSameStatsDate()
+    {
+        var current = Stat(["TeamId", "CreditType"], ["Id"]);
+        var same = new StoredStatistic(current.StatsDate, "dbo", "T", "S", ["TeamId", "CreditType", "Id"]);
+
+        Assert.Equal(StatChange.Unchanged, ColumnStatsModel.Decide(current, same));
+        Assert.Equal(StatChange.New, ColumnStatsModel.Decide(current, null));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { StatsDate = current.StatsDate.AddSeconds(1) }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { SchemaName = "old" }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { ObjectName = "OldTable" }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { StatsName = "OldStat" }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["TeamId", "Credit", "Id"] }));
+        /* A clustering key column renamed, and a change of case only. */
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["TeamId", "CreditType", "OldId"] }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["teamid", "CreditType", "Id"] }));
+        /* DBCC returned fewer rows than the column list: the stored prefix is still the leading part. */
+        Assert.Equal(StatChange.Unchanged, ColumnStatsModel.Decide(current, same with { Columns = ["TeamId", "CreditType"] }));
+    }
 }
