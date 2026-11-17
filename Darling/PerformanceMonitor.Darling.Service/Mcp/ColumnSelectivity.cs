@@ -98,10 +98,12 @@ FROM collect.column_stats_runs
 WHERE server_id = $1
   AND collection_time = (SELECT max(collection_time) FROM collect.column_stats_runs WHERE server_id = $1)";
 
+    /* The writing server's own cursor only: after a failover the old primary keeps stamping its old state row, whose full read says
+       nothing about the new primary's unfinished baseline. */
     private const string LastFullReadSql = @"
 SELECT max(last_full_read_at)
 FROM collect.column_stats_state
-WHERE database_name = $1 AND history_key = ANY($2)";
+WHERE database_name = $1 AND history_key = ANY($2) AND server_id = $3";
 
     /* Equal times (two servers stamping in the same instant) fall to the lower server id, so the answer is the same on every read. */
     private const string WriterSql = @"
@@ -310,7 +312,7 @@ LIMIT 1";
         var stored = await ColumnStatsStore.ReadForObjectAsync(connection, keyTexts, database, definition.ObjectId, cancellationToken);
         var run = await ReadNewestRunAsync(postgres, keyTexts, database, cancellationToken);
         var noGrant = await ReadServerRunHadNoGrantAsync(postgres, serverId, cancellationToken);
-        var fullRead = await ReadLastFullReadAsync(postgres, keyTexts, database, cancellationToken);
+        var fullRead = await ReadLastFullReadAsync(postgres, keyTexts, database, serverId, cancellationToken);
         var traceFlag = false;
         if (run?.Refused is not null || noGrant)
         {
@@ -400,14 +402,15 @@ LIMIT 1";
         return await reader.ReadAsync(ct) && reader.GetInt64(0) > 0 && reader.GetInt64(0) == reader.GetInt64(1);
     }
 
-    /// <summary>The newest full-read time of the database under any of the history keys.</summary>
+    /// <summary>The full-read time of the database in the writing server's own state row, under any of the history keys.</summary>
     private static async Task<DateTime?> ReadLastFullReadAsync(
-        NpgsqlDataSource postgres, string[] keyTexts, string database, CancellationToken ct)
+        NpgsqlDataSource postgres, string[] keyTexts, string database, int writerId, CancellationToken ct)
     {
         await using var cmd = postgres.CreateCommand(LastFullReadSql);
         cmd.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = keyTexts });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = writerId });
         return await cmd.ExecuteScalarAsync(ct) is DateTime value ? value : null;
     }
 }

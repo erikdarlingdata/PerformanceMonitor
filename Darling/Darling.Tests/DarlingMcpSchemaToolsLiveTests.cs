@@ -1207,6 +1207,28 @@ public sealed class DarlingMcpSchemaToolsLiveTests
     }
 
     [Fact]
+    public async Task AfterAFailover_TheNewPrimarysUnfinishedBaseline_IsNotReadYet_NotTheOldPrimarysFullRead()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var agKey = await SeedAgDefinitionAsync(s, ct);
+            var newPrimary = ServerIdHelper.GetDeterministicHashCode("schema-secondary");
+            await EnableSelectivityAsync(s, ct);
+            await EnableSelectivityAsync(s, ct, newPrimary);
+
+            /* The old primary finished its read and keeps stamping its state; the new primary's baseline ran last and has not reached the table. */
+            await SeedRunAsync(s, ct, agKey, null, at: s_statsRead);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(agKey), null, s_statsRead.AddMinutes(30), s_statsRead), ct);
+            await SeedRunAsync(s, ct, agKey, null, serverId: newPrimary, at: s_statsRead.AddMinutes(20));
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(newPrimary, Db, K(agKey), null, s_statsRead.AddMinutes(20), null), ct);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.Equal("not_read_yet", answer.GetProperty("selectivity_status").GetString());
+        });
+    }
+
+    [Fact]
     public async Task PreconditionStatus_ThroughASecondary_UsesThePrimarysOwnList()
     {
         await WithStoreAsync(async (s, ct) =>

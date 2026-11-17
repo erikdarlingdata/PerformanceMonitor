@@ -165,6 +165,34 @@ public sealed class ColumnStatsStoreLiveTests
     }
 
     [Fact]
+    public async Task TwoWritersOfOneHistory_ReplaceTheSameStatistic_BothSucceed_OneSetOfRowsLeft()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, pg) = await OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = pg;
+        var agKey = "ag:" + Guid.NewGuid().ToString("D");
+
+        /* Two registrations that both see the group's database as writable (a listener and its primary node) write the same rows at once.
+           Without the history lock the second DELETE waits on the first's rows, finds nothing once they commit, and its INSERT fails 23505. */
+        await using var other = new NpgsqlConnection(scratch.ConnectionString);
+        await other.OpenAsync(ct);
+        for (var round = 0; round < 25; round++)
+        {
+            var updated = s_t0.AddMinutes(round);
+            await Task.WhenAll(
+                ColumnStatsStore.ReplaceStatisticsAsync(pg, 7, agKey, Db, new[] { Entry(Stat(100, 1), updated), Entry(Stat(100, 2, name: "IX_Other"), updated) }, s_read, ct),
+                ColumnStatsStore.ReplaceStatisticsAsync(other, 8, agKey, Db, new[] { Entry(Stat(100, 1), updated), Entry(Stat(100, 2, name: "IX_Other"), updated) }, s_read, ct));
+        }
+
+        Assert.Equal(6, await CountAsync(pg, "true", ct));
+        Assert.Equal(1, await CountAsync(pg, "stats_id = 1 AND prefix_length = 1", ct));
+        var stored = await ColumnStatsStore.LoadStoredAsync(pg, agKey, Db, ct);
+        Assert.All(stored.Values, s => Assert.Equal(s_t0.AddMinutes(24), s.StatsDate));
+    }
+
+    [Fact]
     public async Task State_UpsertRoundTrips()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipMessage);

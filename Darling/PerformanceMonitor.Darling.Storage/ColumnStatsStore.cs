@@ -91,6 +91,7 @@ ORDER BY object_id, stats_id, prefix_length DESC", c) { CommandTimeout = Command
         }
 
         await using var tx = await c.BeginTransactionAsync(ct);
+        await LockAsync(c, tx, historyKey, database, ct);
         foreach (var (stat, header, prefixes) in batch)
         {
             await using (var delete = new NpgsqlCommand(
@@ -149,28 +150,68 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             return 0;
         }
 
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await LockAsync(c, tx, historyKey, database, ct);
         await using var cmd = new NpgsqlCommand(@"
 DELETE FROM collect.column_stats AS s
 USING unnest($3::integer[], $4::integer[]) AS g (object_id, stats_id)
-WHERE s.history_key = $1 AND s.database_name = $2 AND s.object_id = g.object_id AND s.stats_id = g.stats_id", c)
+WHERE s.history_key = $1 AND s.database_name = $2 AND s.object_id = g.object_id AND s.stats_id = g.stats_id", c, tx)
         { CommandTimeout = CommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Text, historyKey);
         Param(cmd, NpgsqlDbType.Text, database);
         Param(cmd, NpgsqlDbType.Array | NpgsqlDbType.Integer, gone.Select(g => g.ObjectId).ToArray());
         Param(cmd, NpgsqlDbType.Array | NpgsqlDbType.Integer, gone.Select(g => g.StatsId).ToArray());
-        return await cmd.ExecuteNonQueryAsync(ct);
+        var deleted = await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
+        return deleted;
     }
 
-    /// <summary>Deletes every stored row of one database under one history key (a fresh start); returns how many rows went.</summary>
+    /// <summary>Deletes every stored row of one database under one history key, under the history lock; returns how many rows went.</summary>
     internal static async Task<int> DeleteDatabaseAsync(NpgsqlConnection c, string historyKey, string database, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(c);
-        await using var cmd = new NpgsqlCommand("DELETE FROM collect.column_stats WHERE history_key = $1 AND database_name = $2", c)
+        await using var tx = await c.BeginTransactionAsync(ct);
+        var deleted = await DeleteDatabaseAsync(c, tx, historyKey, database, ct);
+        await tx.CommitAsync(ct);
+        return deleted;
+    }
+
+    /// <summary>
+    /// A fresh start of one database, in one transaction under the history lock: every stored row under the state's history key goes, and
+    /// the rows under <paramref name="alsoClearKey"/> too (this server's own key, when the database moved off it), then the state is saved.
+    /// The lock keeps a second writer of the same history (two registrations of one availability group's primary, overlapping runs
+    /// around a failover) from interleaving its replace with this delete; saving the state in the same transaction means the stamp under
+    /// the new key exists before any row is written under it.
+    /// </summary>
+    internal static async Task StartFreshAsync(NpgsqlConnection c, ColumnStatsStateRow state, string? alsoClearKey, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        ArgumentNullException.ThrowIfNull(state);
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await DeleteDatabaseAsync(c, tx, state.HistoryKey, state.Database, ct);
+        if (alsoClearKey is not null && !string.Equals(alsoClearKey, state.HistoryKey, StringComparison.Ordinal))
+        {
+            await DeleteDatabaseAsync(c, tx, alsoClearKey, state.Database, ct);
+        }
+
+        await SaveStateAsync(c, tx, state, ct);
+        await tx.CommitAsync(ct);
+    }
+
+    private static async Task<int> DeleteDatabaseAsync(NpgsqlConnection c, NpgsqlTransaction tx, string historyKey, string database, CancellationToken ct)
+    {
+        await LockAsync(c, tx, historyKey, database, ct);
+        await using var cmd = new NpgsqlCommand("DELETE FROM collect.column_stats WHERE history_key = $1 AND database_name = $2", c, tx)
         { CommandTimeout = CommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Text, historyKey);
         Param(cmd, NpgsqlDbType.Text, database);
         return await cmd.ExecuteNonQueryAsync(ct);
     }
+
+    /* One writer per (history key, database) at a time, the schema versions' lock in its own area: the rows are keyed by history key, so
+       two writers of one history would otherwise both delete a statistic's rows and both insert them, and the second insert fails 23505. */
+    private static Task LockAsync(NpgsqlConnection c, NpgsqlTransaction tx, string historyKey, string database, CancellationToken ct) =>
+        SchemaVersionStore.LockHistoryAsync(c, tx, "column_stats", historyKey, database, ct);
 
     internal static async Task<ColumnStatsStateRow?> LoadStateAsync(NpgsqlConnection c, int serverId, string database, CancellationToken ct)
     {
@@ -197,7 +238,9 @@ WHERE server_id = $1 AND database_name = $2", c) { CommandTimeout = CommandTimeo
             reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
 
-    internal static async Task SaveStateAsync(NpgsqlConnection c, ColumnStatsStateRow s, CancellationToken ct)
+    internal static Task SaveStateAsync(NpgsqlConnection c, ColumnStatsStateRow s, CancellationToken ct) => SaveStateAsync(c, null, s, ct);
+
+    private static async Task SaveStateAsync(NpgsqlConnection c, NpgsqlTransaction? tx, ColumnStatsStateRow s, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(c);
         ArgumentNullException.ThrowIfNull(s);
@@ -207,7 +250,7 @@ INSERT INTO collect.column_stats_state (
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (server_id, database_name) DO UPDATE SET
     history_key = EXCLUDED.history_key, recovery_fork_guid = EXCLUDED.recovery_fork_guid,
-    last_seen_in_scope_at = EXCLUDED.last_seen_in_scope_at, last_full_read_at = EXCLUDED.last_full_read_at", c)
+    last_seen_in_scope_at = EXCLUDED.last_seen_in_scope_at, last_full_read_at = EXCLUDED.last_full_read_at", c, tx)
         { CommandTimeout = CommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Integer, s.ServerId);
         Param(cmd, NpgsqlDbType.Text, s.Database);

@@ -322,16 +322,12 @@ public static class DarlingColumnStatsCapture
                     /* A fresh start replaces the history's rows, whichever server wrote them: after a failover the new primary's baseline
                        removes what the old primary stored. A database that moved from this server's own key (it joined a group) also
                        loses the rows under that key; a group's rows are the group's and are left to its servers and the stamp age. */
-                    await TimedStore(() => ColumnStatsStore.DeleteDatabaseAsync(Store, keyText, database, _ct));
-                    if (keyChanged && state!.HistoryKey == DarlingSchemaCapture.KeyText(new SchemaHistoryKey(_server.ServerId, null, null)))
-                    {
-                        await TimedStore(() => ColumnStatsStore.DeleteDatabaseAsync(Store, state.HistoryKey, database, _ct));
-                    }
-
-                    /* The new key and fork are saved now, not after the last batch: a purge between the two would otherwise find no
-                       stamp under the new key and delete the rows this run is writing. */
-                    await TimedStore(() => ColumnStatsStore.SaveStateAsync(
-                        Store, new ColumnStatsStateRow(_server.ServerId, database, keyText, probe.RecoveryForkGuid ?? state?.RecoveryForkGuid, _runTime, null), _ct));
+                    /* The new key and fork are saved with the deletes, in one transaction under the history lock, not after the last
+                       batch: a purge in between would otherwise find no stamp under the new key and delete the rows this run writes. */
+                    var ownKey = DarlingSchemaCapture.KeyText(new SchemaHistoryKey(_server.ServerId, null, null));
+                    var alsoClear = keyChanged && state!.HistoryKey == ownKey ? ownKey : null;
+                    await TimedStore(() => ColumnStatsStore.StartFreshAsync(
+                        Store, new ColumnStatsStateRow(_server.ServerId, database, keyText, probe.RecoveryForkGuid ?? state?.RecoveryForkGuid, _runTime, null), alsoClear, _ct));
                     advanceState = true;
                 }
 

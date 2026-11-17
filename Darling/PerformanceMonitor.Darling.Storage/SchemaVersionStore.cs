@@ -217,10 +217,21 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { Comm
     private static async Task LockHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaHistoryKey key, string database, CancellationToken ct)
     {
         var keyText = key.AgGroupId is { } ag
-            ? "ag:" + ag.ToString("D") + "|" + database
-            : "server:" + key.ServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + database;
+            ? "ag:" + ag.ToString("D")
+            : "server:" + key.ServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        await LockHistoryAsync(c, tx, "schema_versions", keyText, database, ct);
+    }
+
+    /// <summary>
+    /// The transaction-scoped advisory lock on one (history key, database) of one store area (<paramref name="area"/>, e.g.
+    /// "schema_versions", "column_stats"): <c>pg_advisory_xact_lock</c> on <c>hashtextextended(area|key|database)</c>, held to the end of
+    /// <paramref name="tx"/>. <paramref name="historyKeyText"/> is the key's text form ('server:' and the id, or 'ag:' and the group id).
+    /// </summary>
+    internal static async Task LockHistoryAsync(
+        NpgsqlConnection c, NpgsqlTransaction tx, string area, string historyKeyText, string database, CancellationToken ct)
+    {
         await using var cmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
-        Param(cmd, NpgsqlDbType.Text, "schema_versions|" + keyText);
+        Param(cmd, NpgsqlDbType.Text, area + "|" + historyKeyText + "|" + database);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
