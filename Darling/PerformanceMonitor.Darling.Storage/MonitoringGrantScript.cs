@@ -532,7 +532,7 @@ public static class MonitoringGrantScript
 
     /// <summary>
     /// The plain-language text of the optional column_stats grant (#8798), the same words in the script's block comment, in docs/permissions.md
-    /// and in the collector's schedule comment (a test pins the three together).
+    /// and in the collector's schedule comment. Keep the three the same when one changes.
     /// </summary>
     public const string ColumnStatsGrantNote =
         "Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. "

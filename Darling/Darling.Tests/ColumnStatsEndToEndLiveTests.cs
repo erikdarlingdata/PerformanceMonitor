@@ -40,7 +40,7 @@ public sealed class ColumnStatsEndToEndLiveTests
     private const string Secret = "secret-literal-8798";
     private const string ServerName = "colstats-e2e";
 
-    private const string Setup = """
+    private static readonly string Setup = $"""
 CREATE TABLE dbo.Orders (
     Id int NOT NULL CONSTRAINT PK_Orders PRIMARY KEY CLUSTERED,
     TeamId int NOT NULL,
@@ -51,15 +51,19 @@ CREATE TABLE dbo.Orders (
     Status int NOT NULL,
     [a,b] int NULL);
 INSERT dbo.Orders (Id, TeamId, CreditType, Code, Note, Region, Status, [a,b])
-SELECT n, n % 10, (n / 10) % 3, 'C' + CONVERT(varchar(10), n), CASE WHEN n % 7 = 0 THEN 'secret-literal-8798' ELSE 'plain' END, 'r' + CONVERT(varchar(3), n % 5), n % 4, n % 25
+SELECT n, n % 10, (n / 10) % 3, 'C' + CONVERT(varchar(10), n), CASE WHEN n % 7 = 0 THEN '{Secret}' ELSE 'plain' END, 'r' + CONVERT(varchar(3), n % 5), n % 4, n % 25
 FROM (SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b) AS x;
 /* The clustered key's statistic is made with the table, empty, and has no date until it is updated. */
 UPDATE STATISTICS dbo.Orders PK_Orders WITH FULLSCAN;
 CREATE INDEX IX_Orders_Team_Credit ON dbo.Orders (TeamId, CreditType);
 CREATE UNIQUE INDEX UX_Orders_Code ON dbo.Orders (Code);
 CREATE STATISTICS ST_Orders_Ab ON dbo.Orders ([a,b], Status) WITH FULLSCAN;
-CREATE STATISTICS ST_Orders_Filtered ON dbo.Orders (Region) WHERE Note = 'secret-literal-8798' WITH FULLSCAN;
+CREATE STATISTICS ST_Orders_Filtered ON dbo.Orders (Region) WHERE Note = '{Secret}' WITH FULLSCAN;
 SELECT COUNT(*) FROM dbo.Orders WHERE Status = 2;
+/* A columnstore index's statistic is never read (index types 3 to 6 are left out and counted). */
+CREATE TABLE dbo.Facts (Id int NOT NULL CONSTRAINT PK_Facts PRIMARY KEY CLUSTERED, Amount int NOT NULL);
+INSERT dbo.Facts (Id, Amount) SELECT Id, Id % 13 FROM dbo.Orders;
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
 """;
 
     private static string? SqlConnectionString(string database = "master", string? user = null, string? password = null, string? host = null)
@@ -365,6 +369,20 @@ SELECT COUNT(*) FROM dbo.Orders WHERE Status = 2;
             Assert.Equal("0", await r.StatCountAsync("stats_name = 'ST_Orders_Ab'"));
             Assert.Equal("0", await r.ScalarAsync($"SELECT count(*) FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'ST_Orders_Ab'"));
             Assert.EndsWith("|0|1|0|-|true", await r.LastRunAsync(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task ColumnstoreIndexStatistic_IsCountedAndNotRead()
+    {
+        await RunAsync(async r =>
+        {
+            await r.StatsRunNowAsync();
+
+            Assert.NotEqual("0", await r.ScalarAsync($"SELECT coalesce(max(skipped_xml_spatial_columnstore), 0) FROM collect.column_stats_runs WHERE database_name = '{r.Database}'"));
+            Assert.Equal("0", await r.StatCountAsync("stats_name = 'NCCI_Facts'"));
+            Assert.Equal("0", await r.ScalarAsync($"SELECT count(*) FROM collect.column_stats WHERE database_name = '{r.Database}' AND 'Amount' = ANY(columns)"));
+            Assert.Equal("NCCI_Facts", await SqlScalarAsync(r.Db, "SELECT s.name FROM sys.stats AS s JOIN sys.indexes AS i ON i.object_id = s.object_id AND i.index_id = s.stats_id WHERE i.type = 6", r.Ct) as string);
         });
     }
 

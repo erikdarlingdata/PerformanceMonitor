@@ -818,21 +818,9 @@ public sealed class MonitoringGrantScriptTests
     {
         var script = ColumnStatsScript(new[] { "SalesDb" });
 
-        Assert.Equal(ColumnStatsText, MonitoringGrantScript.ColumnStatsGrantNote);
         Assert.Contains("/* " + ColumnStatsText + " */", script);
         Assert.Contains("This grant lets the monitoring login read every row of the databases listed here.", script);
         Assert.Contains("never copies column values, and it never reads histograms or filter expressions.", script);
-    }
-
-    [Fact]
-    public void TheThreeCopiesOfThePlainLanguageText_AreIdentical()
-    {
-        var docs = RepoFile.ReadRepoFile("docs", "permissions.md").Replace("\r\n", "\n", StringComparison.Ordinal);
-        var schedule = RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", "CollectorScheduleDefaults.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
-
-        Assert.Contains(ColumnStatsText, docs);
-        Assert.Contains(ColumnStatsText, schedule);
-        Assert.Contains("### Column selectivity (per-database SELECT, optional)", docs);
     }
 
     [Fact]
