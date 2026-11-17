@@ -206,13 +206,13 @@ public static class AlertChainLink
             "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" => AlertServerTab.Blocking,
             "Poison Wait" => AlertServerTab.WaitStats,
             "Long-Running Query" or "Client Timeouts" or "Forced Plan Failing" => AlertServerTab.Queries,
-            "tempdb Space" or "Version Store (PVS)" => AlertServerTab.TempDb,
+            "tempdb Space" or "tempdb Log Space" or "tempdb Growth Fit" or "Version Store (PVS)" => AlertServerTab.TempDb,
             "Volume Free Space" => AlertServerTab.FileIo,
             "Database File Growth" => AlertServerTab.SystemEvents,
             "Database State" or "Backup Overdue" or "Log Backup Overdue" or "CHECKDB Overdue" or "Identity Capacity" or "Agent Alert Gaps" => AlertServerTab.Configuration,
             "Failed Agent Job" or "Long-Running Job" or "Agent Not Running" => AlertServerTab.RunningJobs,
             "Collection Stopped" or "Collection Gap At Start" or "Collection Gaps In History" => AlertServerTab.CollectionHealth,
-            "Server Unreachable" or "Server Restored" or "AG Failover" or "AG Replica Disconnected" or "AG Replica Reconnected"
+            "Server Unreachable" or "Server Restored" or "Instance Restarted" or "Memory Dumps" or "AG Failover" or "AG Replica Disconnected" or "AG Replica Reconnected"
                 or "AG Sync Fell Behind" or "AG Database Suspended" => AlertServerTab.Overview,
             _ => AlertServerTab.None
         };

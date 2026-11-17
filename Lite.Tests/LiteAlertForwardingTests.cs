@@ -83,6 +83,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertLongRunningQueryExcludeCdc = true;
         App.AlertExcludedDatabases = new List<string>();
         App.AlertTempDbSpaceEnabled = true;
+        App.AlertTempDbGrowthFitEnabled = true;
         App.AlertTempDbSpaceThresholdPercent = 80;
         App.AlertLowDiskEnabled = true;
         App.AlertLowDiskThresholdPercent = 10;
@@ -152,6 +153,11 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
+
+        public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<TempDbFileInfo>());
+        public Task<InstanceEventInfo> GetInstanceEventsAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new InstanceEventInfo(null, null));
 
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PvsPressureInfo>());
@@ -1347,6 +1353,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertPoisonWaitEnabled = false; Assert.False(settings.PoisonWaitEnabled);
         App.AlertLongRunningQueryEnabled = false; Assert.False(settings.LongRunningQueryEnabled);
         App.AlertTempDbSpaceEnabled = false; Assert.False(settings.TempDbSpaceEnabled);
+        App.AlertTempDbGrowthFitEnabled = false; Assert.False(settings.TempDbGrowthFitEnabled);
         App.AlertLowDiskEnabled = false; Assert.False(settings.LowDiskEnabled);
         App.AlertPvsEnabled = false; Assert.False(settings.PvsEnabled);
         App.AlertLongRunningJobEnabled = false; Assert.False(settings.LongRunningJobEnabled);

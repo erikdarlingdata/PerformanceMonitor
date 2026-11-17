@@ -3482,9 +3482,84 @@ $rung$;";
            summary with its build record. A catalog-only column and new tables created empty: nothing is backfilled here, so the upgrade stays
            fast and the housekeeping tick fills the summary from the daily Query Store summary the store already holds. */
         new Migration(268, "object-usage", V268Sql),
-        /* V269 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
+        /* V269 (#8881): the tempdb log on tempdb_stats, and what holds it. Eleven nullable columns, no DEFAULT, no backfill, plus the alert's switch and bar on config_alert_settings (NOT NULL with a DEFAULT). */
+        new Migration(269, "tempdb-log-space", V269Sql),
+        /* V270 (#8882): tempdb's 'autogrow all files' flag on the database size rows. One nullable boolean column, then the SELECT * view over the table is
+           expanded again. Nothing is backfilled: a row stored before this rung never read the flag, so NULL is the honest value, and the next hourly pass
+           writes it. The same rung adds the TempDB Growth Fit switch column to the alert settings row (default on). */
+        new Migration(270, "database-size-autogrow-all-files", V270Sql),
+        /* V271 (#8884): the Instance Restarted and Memory Dumps alert switches on the alert settings. Two catalog-only boolean columns that default on. */
+        new Migration(271, "instance-event-alert-switches", V271Sql),
+        /* V272 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
         new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
     };
+
+    /// <summary>
+    /// V269 (#8881): the tempdb LOG's space and what holds it, on <c>collect.tempdb_stats</c>, for the TempDB Log Space alert and
+    /// <c>get_tempdb_trend</c>. Nothing read the log before this: the TempDB Space alert and the tempdb finding cover the data files only, and a
+    /// tempdb log that fills stops every session that writes to tempdb, so the first sign was error 9002.
+    ///
+    /// <para>The same row carries the log, not a new table. Both reads that need it (the alert's latest-row read and the trend) already read one
+    /// <c>tempdb_stats</c> row per collection, so one table keeps a collection's data files and log on one clock and costs no join.
+    /// <c>log_total_mb</c>, <c>log_used_mb</c> and <c>log_used_percent</c> come from <c>tempdb.sys.dm_db_log_space_usage</c>,
+    /// <c>log_reuse_wait_desc</c> from <c>sys.databases</c> for database 2, <c>log_truncation_holdup_reason</c> from <c>sys.dm_db_log_stats(2)</c>.
+    /// The six <c>holder_*</c> columns name the oldest active tempdb transaction and its session, filled only while the log is at or above 50
+    /// percent used.</para>
+    ///
+    /// <para>Every column is nullable with no DEFAULT and no backfill, V80 and V81's shape: a catalog-only change that stays instant on a
+    /// compressed hypertable. NULL is the honest value for a row stored before this rung, for an engine that lacks the function, and for a
+    /// holder below the bar. <b>Appended LAST</b> after <c>max_size_mb</c>, in the collector's payload order, because the writer is positional: a
+    /// fresh store (the generated table carries the columns, and this ALTER no-ops there) and an upgraded one share one physical column order.
+    /// The <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_tempdb_stats</c>' pinned <c>SELECT *</c>, the V81 lesson.</para>
+    ///
+    /// <para>The alert's switch and bar are two more columns, on <c>config.config_alert_settings</c>: <c>tempdb_log_space_enabled</c> (boolean NOT NULL
+    /// DEFAULT TRUE) and <c>tempdb_log_space_threshold_percent</c> (integer NOT NULL DEFAULT 80), V20's shape. The service replaces its alert settings from
+    /// that row at every start, so a switch or bar that lived only in darling.json read its default whatever the file said. Both defaults match the
+    /// engine's, so a store upgraded to this rung behaves as it did.</para>
+    /// </summary>
+    private const string V269Sql = @"
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_total_mb numeric(18,2);
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_used_mb numeric(18,2);
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_used_percent numeric(5,2);
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_reuse_wait_desc text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS log_truncation_holdup_reason text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_session_id integer;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_login_name text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_program_name text;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_begin_time timestamp;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_used bigint;
+ALTER TABLE collect.tempdb_stats ADD COLUMN IF NOT EXISTS holder_log_bytes_reserved bigint;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_log_space_enabled boolean NOT NULL DEFAULT TRUE;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_log_space_threshold_percent integer NOT NULL DEFAULT 80;
+CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_stats;";
+
+    /// <summary>
+    /// V270 (#8882): <c>collect.database_size_stats.is_autogrow_all_files</c>, whether the file's filegroup grows all its files together
+    /// (<c>sys.filegroups.is_autogrow_all_files</c>). Collected for tempdb's data files only; NULL on the log file, on every other database,
+    /// on a server before SQL Server 2016 and on a row stored before this rung. One nullable <c>boolean</c>, no DEFAULT, no backfill (V241's shape),
+    /// which is catalog-only and accepted on a compressed hypertable. <b>Appended LAST</b>, after <c>vlf_count</c>, because the writer is a
+    /// positional binary COPY with an explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload,
+    /// and this ALTER no-ops there) and an upgraded one share one physical column order. The trailing <c>CREATE OR REPLACE VIEW</c> re-expands
+    /// <c>v_database_size_stats</c>' pinned <c>SELECT *</c>. An older build writes its own column list, so the column stays NULL for the rows it
+    /// writes. The rung also adds <c>config.config_alert_settings.tempdb_growth_fit_enabled</c>, the TempDB Growth Fit alert's switch, a
+    /// <c>boolean NOT NULL DEFAULT TRUE</c> (<c>notify_connection_changes</c>' shape), so the switch a Viewer saves is the one the service reads back
+    /// at startup.
+    /// </summary>
+    private const string V270Sql = @"
+ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
+CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
+ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V271 (#8884): the two switches of the Instance Restarted and Memory Dumps alerts on <c>config.config_alert_settings</c>, each
+    /// <c>boolean NOT NULL DEFAULT TRUE</c> so an existing store keeps both alerts on. Catalog-only adds, idempotent, no backfill (the DEFAULT fills the
+    /// singleton row). <c>memory_dumps_enabled</c> is the probe's sentinel and is added LAST. An older build never reads the columns and keeps both
+    /// alerts on, so before rolling back past this rung switch both off by hand if you want them off.
+    /// </summary>
+    private const string V271Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS instance_restarted_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS memory_dumps_enabled boolean NOT NULL DEFAULT TRUE;";
 
     /// <summary>
     /// V268 (#8784): object usage over a long window, for <c>get_object_usage</c>.

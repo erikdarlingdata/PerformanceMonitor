@@ -98,6 +98,71 @@ ORDER BY c.database_name, c.file_name";
             CancellationToken.None);
     }
 
+    /// <summary>
+    /// #8882: the tempdb files (database_id 2) of the newest database_size_stats collection, with each file's growth settings and the
+    /// volume's free space from the same collection, for the TempDB Growth Won't Fit alert. The hot table holds the newest collection of
+    /// any server still being collected, so the view is read only for a server with no hot row.
+    /// </summary>
+    public async Task<List<TempDbFileInfo>> GetTempDbFilesAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
+
+        command.CommandText = $@"
+SELECT
+    file_id,
+    file_name,
+    COALESCE(file_type_desc, '') AS file_type_desc,
+    total_size_mb,
+    auto_growth_mb,
+    COALESCE(is_percent_growth, false) AS is_percent_growth,
+    growth_pct,
+    max_size_mb,
+    {VolumeKey.Sql} AS volume_mount_point,
+    volume_total_mb,
+    volume_free_mb,
+    is_autogrow_all_files,
+    collection_time
+FROM {sizeRelation}
+WHERE server_id = $1
+AND   database_id = 2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM {sizeRelation}
+    WHERE server_id = $1
+    AND   database_id = 2
+)
+ORDER BY file_id";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        var items = new List<TempDbFileInfo>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new TempDbFileInfo
+            {
+                FileId = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+                FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                FileTypeDesc = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                TotalSizeMb = reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
+                AutoGrowthMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
+                IsPercentGrowth = !reader.IsDBNull(5) && Convert.ToBoolean(reader.GetValue(5)),
+                GrowthPct = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
+                MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+                VolumeMountPoint = reader.IsDBNull(8) ? null : reader.GetString(8),
+                VolumeTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
+                IsAutogrowAllFiles = reader.IsDBNull(11) ? null : Convert.ToBoolean(reader.GetValue(11)),
+                CollectionTimeUtc = reader.IsDBNull(12) ? null : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc),
+            });
+        }
+
+        return items;
+    }
+
     private async Task<List<DatabaseFileGrowthInfo>> ReadDatabaseFileGrowthAsync(string sql, int serverId, DateTime windowStart)
     {
         using var connection = await OpenConnectionAsync(timer: null, CancellationToken.None, holderMember: nameof(GetDatabaseFileGrowthAsync));
