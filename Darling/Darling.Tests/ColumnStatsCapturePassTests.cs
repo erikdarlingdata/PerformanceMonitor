@@ -216,7 +216,7 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
         source.Candidates[Sales] =
         [
             Stat(100, 1, s_t0, 5000, "Id"),
-            Stat(100, 2, s_t0, 5000, "TeamId", "Status"),
+            Stat(100, 2, s_t0, 5000, "CustomerId", "Status"),
             Stat(200, 1, s_t0, 10, "Id"),
         ];
     }
@@ -318,14 +318,14 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
             rig.Source.Candidates[Sales] =
             [
                 Stat(100, 1, s_t0, 5000, "Id"),
-                Stat(100, 2, s_t0, 5000, "TeamKey", "Status"),
+                Stat(100, 2, s_t0, 5000, "CustomerKey", "Status"),
                 Stat(200, 1, s_t0, 10, "Id") with { ObjectName = "T200Renamed", SchemaName = "archive" },
             ];
 
             await rig.RunAsync(server, ct);
 
             Assert.Equal(new[] { (100, 2), (200, 1) }, rig.Source.ReadIds(Sales).Order().ToArray());
-            Assert.Equal("{TeamKey,Status}", await rig.ScalarAsync("SELECT columns::text FROM collect.column_stats WHERE object_id = 100 AND stats_id = 2 AND prefix_length = 2", ct));
+            Assert.Equal("{CustomerKey,Status}", await rig.ScalarAsync("SELECT columns::text FROM collect.column_stats WHERE object_id = 100 AND stats_id = 2 AND prefix_length = 2", ct));
             Assert.Equal("archive.T200Renamed", await rig.ScalarAsync("SELECT DISTINCT schema_name || '.' || object_name FROM collect.column_stats WHERE object_id = 200", ct));
 
             /* Read once: the next run sees the new names stored. */
@@ -349,7 +349,7 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
             rig.Source.Candidates[Sales] =
             [
                 Stat(100, 1, s_t0, 5000, "Id"),
-                Stat(100, 2, s_t0.AddHours(1), 5000, "TeamId", "Status"),
+                Stat(100, 2, s_t0.AddHours(1), 5000, "CustomerId", "Status"),
                 Stat(300, 1, s_t0, 20, "Id"),
             ];
 
@@ -558,7 +558,7 @@ VALUES (1, $1, $2, $3, $4, true, true, false)", Connection);
             await rig.RunAsync(server, ct);
 
             /* The grant still works for the catalog, but a statistic read before is now refused and nothing else was read. */
-            rig.Source.Candidates[Sales] = [Stat(100, 1, s_t0.AddHours(1), 5000, "Id"), Stat(100, 2, s_t0, 5000, "TeamId", "Status"), Stat(200, 1, s_t0, 10, "Id")];
+            rig.Source.Candidates[Sales] = [Stat(100, 1, s_t0.AddHours(1), 5000, "Id"), Stat(100, 2, s_t0, 5000, "CustomerId", "Status"), Stat(200, 1, s_t0, 10, "Id")];
             rig.Source.Errors[(100, 1)] = (2557, "User 'monitor' does not have permission to run DBCC SHOW_STATISTICS for object 'T100'.");
 
             var result = await rig.RunAsync(server, ct);

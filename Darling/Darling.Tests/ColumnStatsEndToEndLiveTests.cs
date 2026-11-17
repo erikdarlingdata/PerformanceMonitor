@@ -43,19 +43,19 @@ public sealed class ColumnStatsEndToEndLiveTests
     private static readonly string Setup = $"""
 CREATE TABLE dbo.Orders (
     Id int NOT NULL CONSTRAINT PK_Orders PRIMARY KEY CLUSTERED,
-    TeamId int NOT NULL,
-    CreditType int NOT NULL,
+    CustomerId int NOT NULL,
+    OrderType int NOT NULL,
     Code varchar(20) NOT NULL,
     Note varchar(50) NULL,
     Region varchar(10) NULL,
     Status int NOT NULL,
     [a,b] int NULL);
-INSERT dbo.Orders (Id, TeamId, CreditType, Code, Note, Region, Status, [a,b])
+INSERT dbo.Orders (Id, CustomerId, OrderType, Code, Note, Region, Status, [a,b])
 SELECT n, n % 10, (n / 10) % 3, 'C' + CONVERT(varchar(10), n), CASE WHEN n % 7 = 0 THEN '{Secret}' ELSE 'plain' END, 'r' + CONVERT(varchar(3), n % 5), n % 4, n % 25
 FROM (SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b) AS x;
 /* The clustered key's statistic is made with the table, empty, and has no date until it is updated. */
 UPDATE STATISTICS dbo.Orders PK_Orders WITH FULLSCAN;
-CREATE INDEX IX_Orders_Team_Credit ON dbo.Orders (TeamId, CreditType);
+CREATE INDEX IX_Orders_Customer_Type ON dbo.Orders (CustomerId, OrderType);
 CREATE UNIQUE INDEX UX_Orders_Code ON dbo.Orders (Code);
 CREATE STATISTICS ST_Orders_Ab ON dbo.Orders ([a,b], Status) WITH FULLSCAN;
 CREATE STATISTICS ST_Orders_Filtered ON dbo.Orders (Region) WHERE Note = '{Secret}' WITH FULLSCAN;
@@ -266,7 +266,7 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
             Assert.Equal("UX_Orders_Code", code.GetProperty("statistic").GetString());
 
             /* Ten teams over 1000 rows, from a full-scan index statistic. */
-            var team = Column(definition, "TeamId").GetProperty("selectivity");
+            var team = Column(definition, "CustomerId").GetProperty("selectivity");
             Assert.InRange(team.GetProperty("distinct_estimate").GetDouble(), 9.5, 10.5);
             Assert.InRange(team.GetProperty("rows_per_value").GetDouble(), 95, 105);
             Assert.InRange(team.GetProperty("selectivity").GetDouble(), 0.0095, 0.0105);
@@ -287,7 +287,7 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
             Assert.Equal("ST_Orders_Ab", ab.GetProperty("statistic").GetString());
             var combinations = definition.GetProperty("column_combinations").EnumerateArray().ToList();
             Assert.Contains(combinations, c => c.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).SequenceEqual(new[] { "a,b", "Status" }));
-            Assert.Contains(combinations, c => c.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).SequenceEqual(new[] { "TeamId", "CreditType" }));
+            Assert.Contains(combinations, c => c.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).SequenceEqual(new[] { "CustomerId", "OrderType" }));
         });
     }
 
@@ -298,14 +298,14 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
         {
             await r.StatsAsync();
 
-            Assert.Equal("{TeamId,CreditType,Id}", await r.ScalarAsync(
-                $"SELECT columns::text FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Team_Credit' AND prefix_length = 3 AND includes_clustering_key"));
+            Assert.Equal("{CustomerId,OrderType,Id}", await r.ScalarAsync(
+                $"SELECT columns::text FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Customer_Type' AND prefix_length = 3 AND includes_clustering_key"));
             Assert.Equal("0", await r.ScalarAsync(
-                $"SELECT count(*) FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Team_Credit' AND prefix_length < 3 AND includes_clustering_key"));
+                $"SELECT count(*) FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Customer_Type' AND prefix_length < 3 AND includes_clustering_key"));
 
             var definition = await r.DefinitionAsync("dbo.Orders");
             var marked = definition.GetProperty("column_combinations").EnumerateArray()
-                .Single(c => c.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).SequenceEqual(new[] { "TeamId", "CreditType", "Id" }));
+                .Single(c => c.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).SequenceEqual(new[] { "CustomerId", "OrderType", "Id" }));
             Assert.True(marked.GetProperty("includes_clustering_key").GetBoolean());
         });
     }
@@ -347,7 +347,7 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
             Assert.Equal("incremental|" + all + "|0|0|0|-|true", await r.LastRunAsync());
 
             await Task.Delay(1500, r.Ct);
-            await ExecuteAsync(r.Db, "UPDATE STATISTICS dbo.Orders IX_Orders_Team_Credit WITH FULLSCAN;", r.Ct);
+            await ExecuteAsync(r.Db, "UPDATE STATISTICS dbo.Orders IX_Orders_Customer_Type WITH FULLSCAN;", r.Ct);
             await r.StatsAsync();
 
             Assert.Equal("incremental|" + all + "|1|0|0|-|true", await r.LastRunAsync());
@@ -361,16 +361,16 @@ CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Facts ON dbo.Facts (Amount);
         await RunAsync(async r =>
         {
             await r.StatsAsync();
-            Assert.Equal("1", await r.StatCountAsync("'CreditType' = ANY(columns)"));
+            Assert.Equal("1", await r.StatCountAsync("'OrderType' = ANY(columns)"));
 
             /* sp_rename keeps STATS_DATE; the stored column list no longer matches the catalog, so the statistic is read again. */
-            await ExecuteAsync(r.Db, "EXEC sp_rename N'dbo.Orders.CreditType', N'CreditKind', N'COLUMN';", r.Ct);
+            await ExecuteAsync(r.Db, "EXEC sp_rename N'dbo.Orders.OrderType', N'OrderKind', N'COLUMN';", r.Ct);
             await r.StatsAsync();
 
             Assert.Equal("1", (await r.LastRunAsync()).Split('|')[2]);
-            Assert.Equal("0", await r.StatCountAsync("'CreditType' = ANY(columns)"));
-            Assert.Equal("{TeamId,CreditKind}", await r.ScalarAsync(
-                $"SELECT columns::text FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Team_Credit' AND prefix_length = 2"));
+            Assert.Equal("0", await r.StatCountAsync("'OrderType' = ANY(columns)"));
+            Assert.Equal("{CustomerId,OrderKind}", await r.ScalarAsync(
+                $"SELECT columns::text FROM collect.column_stats WHERE database_name = '{r.Database}' AND stats_name = 'IX_Orders_Customer_Type' AND prefix_length = 2"));
         });
     }
 

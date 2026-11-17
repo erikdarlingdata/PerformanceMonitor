@@ -85,10 +85,10 @@ public class ColumnStatsModelTests
     [Fact]
     public void TrailingClusteringKeyRows_AreMarked()
     {
-        var prefixes = ColumnStatsModel.MapDensityRows(Stat(["TeamId", "CreditType"], ["Id"]), [0.5, 0.2, 0.001]);
+        var prefixes = ColumnStatsModel.MapDensityRows(Stat(["CustomerId", "OrderType"], ["Id"]), [0.5, 0.2, 0.001]);
 
         Assert.Equal(3, prefixes.Count);
-        Assert.Equal(["TeamId", "CreditType", "Id"], prefixes[2].Columns);
+        Assert.Equal(["CustomerId", "OrderType", "Id"], prefixes[2].Columns);
         Assert.True(prefixes[2].IncludesClusteringKey);
         Assert.False(prefixes[0].IncludesClusteringKey);
         Assert.False(prefixes[1].IncludesClusteringKey);
@@ -142,8 +142,8 @@ public class ColumnStatsModelTests
     [Fact]
     public void Rename_CountsAsChanged_WithTheSameStatsDate()
     {
-        var current = Stat(["TeamId", "CreditType"], ["Id"]);
-        var same = new StoredStatistic(current.StatsDate, "dbo", "T", "S", ["TeamId", "CreditType", "Id"]);
+        var current = Stat(["CustomerId", "OrderType"], ["Id"]);
+        var same = new StoredStatistic(current.StatsDate, "dbo", "T", "S", ["CustomerId", "OrderType", "Id"]);
 
         Assert.Equal(StatChange.Unchanged, ColumnStatsModel.Decide(current, same));
         Assert.Equal(StatChange.New, ColumnStatsModel.Decide(current, null));
@@ -151,11 +151,11 @@ public class ColumnStatsModelTests
         Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { SchemaName = "old" }));
         Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { ObjectName = "OldTable" }));
         Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { StatsName = "OldStat" }));
-        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["TeamId", "Credit", "Id"] }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["CustomerId", "Type", "Id"] }));
         /* A clustering key column renamed, and a change of case only. */
-        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["TeamId", "CreditType", "OldId"] }));
-        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["teamid", "CreditType", "Id"] }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["CustomerId", "OrderType", "OldId"] }));
+        Assert.Equal(StatChange.Changed, ColumnStatsModel.Decide(current, same with { Columns = ["customerid", "OrderType", "Id"] }));
         /* DBCC returned fewer rows than the column list: the stored prefix is still the leading part. */
-        Assert.Equal(StatChange.Unchanged, ColumnStatsModel.Decide(current, same with { Columns = ["TeamId", "CreditType"] }));
+        Assert.Equal(StatChange.Unchanged, ColumnStatsModel.Decide(current, same with { Columns = ["CustomerId", "OrderType"] }));
     }
 }

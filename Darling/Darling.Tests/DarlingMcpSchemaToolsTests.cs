@@ -107,7 +107,7 @@ public sealed class DarlingMcpSchemaToolsTests
         new(1, name, unique ? "NONCLUSTERED" : "CLUSTERED", unique, pk, uniqueConstraint, keys, Array.Empty<string>(), filter, "NONE", disabled);
 
     private static SchemaObjectDefinition Orders(params SchemaIndex[] indexes) =>
-        new(10, "dbo", "Orders", 'U', s_read, null, null, [Col(1, "Id"), Col(2, "TeamId"), Col(3, "CreditType")], indexes, [], []);
+        new(10, "dbo", "Orders", 'U', s_read, null, null, [Col(1, "Id"), Col(2, "CustomerId"), Col(3, "OrderType")], indexes, [], []);
 
     private static StoredPrefix Prefix(
         string statistic, string[] columns, double density, long rows = 1000, long sampled = 1000, bool clustering = false, float? persisted = null, DateTime? updated = null) =>
@@ -126,8 +126,8 @@ public sealed class DarlingMcpSchemaToolsTests
         var view = ColumnSelectivity.Shape(definition, new[]
         {
             Prefix("PK_Orders", ["Id"], 0.001),
-            Prefix("IX_Team", ["TeamId"], 0.1, sampled: 500),
-            Prefix("IX_Team", ["TeamId", "CreditType"], 0.01, sampled: 500),
+            Prefix("IX_Customer", ["CustomerId"], 0.1, sampled: 500),
+            Prefix("IX_Customer", ["CustomerId", "OrderType"], 0.01, sampled: 500),
         });
 
         var id = Json(view.Columns["Id"]);
@@ -137,7 +137,7 @@ public sealed class DarlingMcpSchemaToolsTests
         Assert.Equal("unique", id.GetProperty("label").GetString());
         Assert.Equal("PK_Orders", id.GetProperty("statistic").GetString());
 
-        var team = Json(view.Columns["TeamId"]);
+        var team = Json(view.Columns["CustomerId"]);
         Assert.Equal(0.01, team.GetProperty("selectivity").GetDouble(), 6);
         Assert.Equal(10.0, team.GetProperty("distinct_estimate").GetDouble(), 6);
         Assert.Equal(100.0, team.GetProperty("rows_per_value").GetDouble(), 6);
@@ -146,7 +146,7 @@ public sealed class DarlingMcpSchemaToolsTests
 
         var combination = Assert.Single(view.Combinations);
         var json = Json(combination);
-        Assert.Equal(new[] { "TeamId", "CreditType" }, json.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "CustomerId", "OrderType" }, json.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.False(json.GetProperty("includes_clustering_key").GetBoolean());
         Assert.Equal(0.1, json.GetProperty("selectivity").GetDouble(), 6);
         Assert.Equal(10.0, json.GetProperty("rows_per_value").GetDouble(), 6);
@@ -157,14 +157,14 @@ public sealed class DarlingMcpSchemaToolsTests
     {
         var view = ColumnSelectivity.Shape(Orders(), new[]
         {
-            Prefix("IX_Team", ["TeamId"], 0.1, sampled: 250, persisted: 30f),
-            Prefix("IX_Credit", ["CreditType"], 0.1, sampled: 250),
+            Prefix("IX_Customer", ["CustomerId"], 0.1, sampled: 250, persisted: 30f),
+            Prefix("IX_Type", ["OrderType"], 0.1, sampled: 250),
             Prefix("IX_Region", ["Region"], 0.1, sampled: 500, persisted: 0f),
         });
 
         /* The persisted percent is the default for the next update; the numbers shown came from 250 of 1000 rows. */
-        Assert.Equal(25.0, Json(view.Columns["TeamId"]).GetProperty("sampled_percent").GetDouble(), 4);
-        Assert.Equal(25.0, Json(view.Columns["CreditType"]).GetProperty("sampled_percent").GetDouble(), 4);
+        Assert.Equal(25.0, Json(view.Columns["CustomerId"]).GetProperty("sampled_percent").GetDouble(), 4);
+        Assert.Equal(25.0, Json(view.Columns["OrderType"]).GetProperty("sampled_percent").GetDouble(), 4);
         Assert.Equal(50.0, Json(view.Columns["Region"]).GetProperty("sampled_percent").GetDouble(), 4);
     }
 
@@ -173,11 +173,11 @@ public sealed class DarlingMcpSchemaToolsTests
     {
         var view = ColumnSelectivity.Shape(Orders(), new[]
         {
-            Prefix("IX_Team", ["TeamId"], 0.1, rows: 0, sampled: 0),
-            Prefix("IX_Credit", ["CreditType"], 0.0),
+            Prefix("IX_Customer", ["CustomerId"], 0.1, rows: 0, sampled: 0),
+            Prefix("IX_Type", ["OrderType"], 0.0),
         });
 
-        foreach (var column in new[] { "TeamId", "CreditType" })
+        foreach (var column in new[] { "CustomerId", "OrderType" })
         {
             var item = Json(view.Columns[column]);
             Assert.Equal(JsonValueKind.Null, item.GetProperty("selectivity").ValueKind);
@@ -192,43 +192,43 @@ public sealed class DarlingMcpSchemaToolsTests
         /* A density of 1 / rows reads as unique on all of them, but only the PK on Id and the unique index on the two columns say so. */
         var definition = Orders(
             Index("PK_Orders", true, true, false, ["Id"]),
-            Index("UQ_TeamCredit", true, false, true, ["TeamId", "CreditType DESC"]),
-            Index("IX_Credit", false, false, false, ["CreditType"]));
+            Index("UQ_CustomerType", true, false, true, ["CustomerId", "OrderType DESC"]),
+            Index("IX_Type", false, false, false, ["OrderType"]));
         var view = ColumnSelectivity.Shape(definition, new[]
         {
             Prefix("PK_Orders", ["Id"], 0.001),
-            Prefix("IX_Team", ["TeamId"], 0.001),
-            Prefix("IX_Credit", ["CreditType"], 0.001),
-            Prefix("UQ_TeamCredit", ["TeamId", "CreditType"], 0.001),
-            Prefix("IX_Team3", ["TeamId", "Id"], 0.001),
-            Prefix("UQ_CreditTeam", ["CreditType", "TeamId"], 0.001),
+            Prefix("IX_Customer", ["CustomerId"], 0.001),
+            Prefix("IX_Type", ["OrderType"], 0.001),
+            Prefix("UQ_CustomerType", ["CustomerId", "OrderType"], 0.001),
+            Prefix("IX_Customer3", ["CustomerId", "Id"], 0.001),
+            Prefix("UQ_TypeCustomer", ["OrderType", "CustomerId"], 0.001),
         });
 
         Assert.Equal("unique", Json(view.Columns["Id"]).GetProperty("label").GetString());
-        Assert.Equal(JsonValueKind.Null, Json(view.Columns["TeamId"]).GetProperty("label").ValueKind);
-        Assert.Equal(JsonValueKind.Null, Json(view.Columns["CreditType"]).GetProperty("label").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Json(view.Columns["CustomerId"]).GetProperty("label").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Json(view.Columns["OrderType"]).GetProperty("label").ValueKind);
         var labels = view.Combinations.Select(Json).ToDictionary(
             c => string.Join(",", c.GetProperty("columns").EnumerateArray().Select(e => e.GetString())),
             c => c.GetProperty("label").ValueKind == JsonValueKind.Null ? null : c.GetProperty("label").GetString());
-        Assert.Equal("unique", labels["TeamId,CreditType"]);
-        Assert.Equal("unique", labels["CreditType,TeamId"]);
-        Assert.Null(labels["TeamId,Id"]);
+        Assert.Equal("unique", labels["CustomerId,OrderType"]);
+        Assert.Equal("unique", labels["OrderType,CustomerId"]);
+        Assert.Null(labels["CustomerId,Id"]);
     }
 
     [Fact]
     public void Unique_IgnoresFilteredAndDisabledUniqueIndexes()
     {
         var definition = Orders(
-            Index("UQ_Filtered", true, false, false, ["TeamId"], filter: "([TeamId]>(0))"),
-            Index("UQ_Off", true, false, false, ["CreditType"], disabled: true));
+            Index("UQ_Filtered", true, false, false, ["CustomerId"], filter: "([CustomerId]>(0))"),
+            Index("UQ_Off", true, false, false, ["OrderType"], disabled: true));
         var view = ColumnSelectivity.Shape(definition, new[]
         {
-            Prefix("IX_Team", ["TeamId"], 0.001),
-            Prefix("IX_Credit", ["CreditType"], 0.001),
+            Prefix("IX_Customer", ["CustomerId"], 0.001),
+            Prefix("IX_Type", ["OrderType"], 0.001),
         });
 
-        Assert.Equal(JsonValueKind.Null, Json(view.Columns["TeamId"]).GetProperty("label").ValueKind);
-        Assert.Equal(JsonValueKind.Null, Json(view.Columns["CreditType"]).GetProperty("label").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Json(view.Columns["CustomerId"]).GetProperty("label").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Json(view.Columns["OrderType"]).GetProperty("label").ValueKind);
     }
 
     [Fact]
@@ -236,21 +236,21 @@ public sealed class DarlingMcpSchemaToolsTests
     {
         var view = ColumnSelectivity.Shape(Orders(), new[]
         {
-            Prefix("IX_Team", ["TeamId"], 0.5, rows: 1_000_000, sampled: 1_000_000),
-            Prefix("IX_Team", ["TeamId", "CreditType"], 0.5, rows: 1_000_000, sampled: 1_000_000),
+            Prefix("IX_Customer", ["CustomerId"], 0.5, rows: 1_000_000, sampled: 1_000_000),
+            Prefix("IX_Customer", ["CustomerId", "OrderType"], 0.5, rows: 1_000_000, sampled: 1_000_000),
         });
 
-        Assert.Equal("low selectivity", Json(view.Columns["TeamId"]).GetProperty("label").GetString());
+        Assert.Equal("low selectivity", Json(view.Columns["CustomerId"]).GetProperty("label").GetString());
         Assert.Equal(JsonValueKind.Null, Json(Assert.Single(view.Combinations)).GetProperty("label").ValueKind);
     }
 
     [Fact]
     public void NoLeadingStatistic_GivesNullWithNote()
     {
-        var view = ColumnSelectivity.Shape(Orders(), new[] { Prefix("IX_Team", ["TeamId"], 0.1) });
+        var view = ColumnSelectivity.Shape(Orders(), new[] { Prefix("IX_Customer", ["CustomerId"], 0.1) });
 
-        Assert.True(view.Columns.ContainsKey("TeamId"));
-        Assert.False(view.Columns.ContainsKey("CreditType"));
+        Assert.True(view.Columns.ContainsKey("CustomerId"));
+        Assert.False(view.Columns.ContainsKey("OrderType"));
         Assert.Equal("no statistic leads with this column", ColumnSelectivity.NoLeadingStatisticNote);
         Assert.Empty(view.Combinations);
     }
@@ -260,13 +260,13 @@ public sealed class DarlingMcpSchemaToolsTests
     {
         var view = ColumnSelectivity.Shape(Orders(), new[]
         {
-            Prefix("IX_Team", ["TeamId"], 0.1),
-            Prefix("IX_Team", ["TeamId", "Id"], 0.001, clustering: true),
+            Prefix("IX_Customer", ["CustomerId"], 0.1),
+            Prefix("IX_Customer", ["CustomerId", "Id"], 0.001, clustering: true),
         });
 
         var combination = Json(Assert.Single(view.Combinations));
         Assert.True(combination.GetProperty("includes_clustering_key").GetBoolean());
-        Assert.Equal(new[] { "TeamId", "Id" }, combination.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "CustomerId", "Id" }, combination.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 
     [Fact]
@@ -274,12 +274,12 @@ public sealed class DarlingMcpSchemaToolsTests
     {
         var view = ColumnSelectivity.Shape(Orders(), new[]
         {
-            Prefix("_WA_Sys_TeamId", ["TeamId"], 0.5, sampled: 100),
-            Prefix("IX_Team", ["TeamId"], 0.1, sampled: 900, updated: s_read.AddDays(-2)),
-            Prefix("IX_Team_New", ["TeamId"], 0.2, sampled: 900, updated: s_read.AddDays(-1)),
+            Prefix("_WA_Sys_CustomerId", ["CustomerId"], 0.5, sampled: 100),
+            Prefix("IX_Customer", ["CustomerId"], 0.1, sampled: 900, updated: s_read.AddDays(-2)),
+            Prefix("IX_Customer_New", ["CustomerId"], 0.2, sampled: 900, updated: s_read.AddDays(-1)),
         });
 
-        Assert.Equal("IX_Team_New", Json(view.Columns["TeamId"]).GetProperty("statistic").GetString());
+        Assert.Equal("IX_Customer_New", Json(view.Columns["CustomerId"]).GetProperty("statistic").GetString());
     }
 
     private static SelectivityFacts Facts(
