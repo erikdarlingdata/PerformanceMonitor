@@ -42,7 +42,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// re-reads every candidate. Statistics are read in batches of <see cref="BatchSize"/>, largest tables first, and each batch is stored
 /// before the next starts.</para>
 ///
-/// <para><b>Permissions.</b> A database where the login lacks SELECT is skipped (<c>refused = no_select</c>) and named in the note. The
+/// <para><b>Permissions.</b> A database where the login lacks SELECT is skipped (<c>refused = no_select</c>) and named in the note, with one
+/// run row until the answer changes (the newest row keeps the refusal for the status in get_object_definition). The
 /// note names a precondition only when no database had the grant or a database in <c>column_stats</c>' own list lacked it: an empty list
 /// means every database while the grant goes to a few, so a missing grant is normal. Trace flag 9485 makes SELECT insufficient for DBCC
 /// SHOW_STATISTICS; while it is on, a database where nothing could be read (no statistic read this run, and nothing stored or a stored

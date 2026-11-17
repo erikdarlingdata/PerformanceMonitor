@@ -88,7 +88,7 @@ The principal is the SQL login that the server entry uses. With Windows authenti
 - For a SQL Server on the same machine, it is `NT SERVICE\PerformanceMonitor Darling`.
 - For a remote SQL Server, it is the machine account (`DOMAIN\MACHINE$`).
 
-`--finops` adds the FinOps per-database grants. `--column-stats-databases <db1,db2>` adds the optional per-database `SELECT` for the column_stats collector, in the databases you list (see [Column selectivity](#column-selectivity-per-database-select-optional)). `--azure` prints the Azure SQL Database form, and a `name.database.windows.net` host does too. An Azure SQL Managed Instance host has a zone label before `database.windows.net`, so it gets the on-premises form. The script has no password, only a placeholder. You can run it a second time with no harm.
+`--finops` adds the FinOps per-database grants. `--column-stats-databases <db>`, once per database, adds the optional per-database `SELECT` for the column_stats collector, in the databases you list (see [Column selectivity](#column-selectivity-per-database-select-optional)). `--azure` prints the Azure SQL Database form, and a `name.database.windows.net` host does too. An Azure SQL Managed Instance host has a zone label before `database.windows.net`, so it gets the on-premises form. The script has no password, only a placeholder. You can run it a second time with no harm.
 
 The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. On Amazon RDS it checks the other three, because RDS refuses `CONNECT ANY DATABASE`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
 
@@ -203,12 +203,12 @@ IF DATABASE_PRINCIPAL_ID(N'YourLogin') IS NULL
 GRANT SELECT TO [YourLogin];
 ```
 
-On Azure SQL Database there are no server logins and the monitoring user is a contained user of each database, so the grant is `GRANT SELECT TO [YourUser];` run in each listed database. `--grant-script --azure --column-stats-databases <db1,db2>` adds that statement to the Azure script, which you run in each of them.
+On Azure SQL Database there are no server logins and the monitoring user is a contained user of each database, so the grant is `GRANT SELECT TO [YourUser];` run in each listed database. `--grant-script --azure --column-stats-databases <db>` adds that statement to the Azure script, which you run in each of them.
 
-Or let Darling print the block. `--column-stats-databases <db1,db2>` adds one guarded block for each listed database to the script from `--grant-script`. It creates the login's user in the database when it is missing and grants `SELECT` there, and it skips a database that does not exist with a message. With no list the script has no such block:
+Or let Darling print the block. `--column-stats-databases <db>`, given once for each database, adds one guarded block for each listed database to the script from `--grant-script`. It creates the login's user in the database when it is missing and grants `SELECT` there, and it skips a database that does not exist with a message. Each value is one database name taken whole, so a name that holds a comma or a space works when you quote it; a comma does not separate names. With no list the script has no such block:
 
 ```
-PerformanceMonitor.Darling.Service.exe --grant-script <server-name> --column-stats-databases SalesDb,Hr
+PerformanceMonitor.Darling.Service.exe --grant-script <server-name> --column-stats-databases SalesDb --column-stats-databases Hr
 ```
 
 The service's connection test (`test_connect`) checks the grant only when `column_stats` is enabled for that server with an explicit database list, and only on SQL Server targets. It then names each listed database where the login has no `SELECT`, with the statements that add it. The CLI's `--test-connection` does not check it, because it reads no collector settings, and neither does the Viewer's Add Server dialog, which has none yet.
