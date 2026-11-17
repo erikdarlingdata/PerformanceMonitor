@@ -117,16 +117,39 @@ public sealed class DarlingMcpPgIndexTools
                    as "nothing to reclaim" when the truth is "nothing measurable". Its own token, for the
                    reason EXTENSION_MISSING has one (#3240) - a refusal with its own cause and its own
                    remedy bands apart rather than folding into the nearest existing label. */
+                /* #8926: the refusal needs ROWS in this window that the filter removed. Coverage is measured over the
+                   last 48 hours and the rows over the window asked for, and this collector runs once a day, so a window
+                   that misses the run holds no rows of any kind. Then the filter excluded nothing and the plain read's
+                   "widen it" answer is the right one. One unfiltered row is enough to tell the two states apart. */
+                var windowHoldsRows = false;
+
                 if (answered_only && coverage.Candidates.IndexCount > 0)
                 {
+                    var probe = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
+                        postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, 1,
+                        false, cancellationToken);
+
+                    windowHoldsRows = probe.Count > 0;
+                }
+
+                if (windowHoldsRows)
+                {
+                    var trustedElsewhere = coverage.Trusted.IndexCount > 0;
+                    var candidateText = CountText.Plural(coverage.Candidates.IndexCount, "candidate btree index", "candidate btree indexes");
+                    var lead = trustedElsewhere
+                        ? $"answered_only excluded every row in this window: {resolved.DisplayName} has {candidateText} in the last "
+                            + $"{PgIndexBloatCoverage.EvidenceHours.ToString(CultureInfo.InvariantCulture)} hours, {coverage.Trusted.IndexCount.ToString(CultureInfo.InvariantCulture)} of them with a "
+                            + "trusted bloat answer, but none of the rows inside this window carries one. Widen the window to reach them, or re-run without "
+                            + "answered_only to see the rows and their reasons. "
+                        : $"answered_only excluded every row: {resolved.DisplayName} has {candidateText} in this window and "
+                            + "NOT ONE of them has a trusted bloat answer. This is not a clean bill of health "
+                            + "and it is not an empty server - the suppression breakdown below says why each "
+                            + "index has no answer and which reasons are remediable. Re-run without "
+                            + "answered_only to see the rows and their reasons. ";
+
                     return McpHelpers.Status(
                         "no_answers",
-                        $"answered_only excluded every row: {resolved.DisplayName} has "
-                        + $"{CountText.Plural(coverage.Candidates.IndexCount, "candidate btree index", "candidate btree indexes")} in this window and "
-                        + "NOT ONE of them has a trusted bloat answer. This is not a clean bill of health "
-                        + "and it is not an empty server - the suppression breakdown below says why each "
-                        + "index has no answer and which reasons are remediable. Re-run without "
-                        + "answered_only to see the rows and their reasons. " + coverage.Message,
+                        lead + coverage.Message,
                         new
                         {
                             arm = coverage.Arm.ToString(),
@@ -144,6 +167,7 @@ public sealed class DarlingMcpPgIndexTools
                             }),
                         });
                 }
+
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
