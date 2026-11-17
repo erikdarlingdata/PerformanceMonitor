@@ -9,6 +9,8 @@
 using System;
 using System.Linq;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http;
+using PerformanceMonitor.Darling.Service;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -35,8 +37,53 @@ public sealed class QueryStoreTopRoundingLiveTests
     [Fact]
     public async Task GetQueryStoreTop_WritesTheAveragesToTwoPlaces()
     {
+        await WithSeededStoreAsync(async (source, ct) =>
+        {
+            var json = await DarlingMcpDataTools.GetQueryStoreTop(source, ServerName);
+            Assert.Empty(McpReplyFloatNoiseLiveTests.NoisyNumbers(json));
+            var row = Assert.Single(JsonNode.Parse(json)!["queries"]!.AsArray())!;
+            Assert.Equal(7, (long)row["execution_count"]!);
+            /* (3 * 1000 + 4 * 1) / 7 microseconds is 429.142857 us, so 0.43 ms: rounded to two places, not 0.4291428571428571. */
+            Assert.Equal(0.43, (double)row["avg_duration_ms"]!, 5);
+            Assert.Equal(0.39, (double)row["avg_cpu_ms"]!, 5);
+            Assert.Equal(43.43, (double)row["avg_logical_reads"]!, 5);
+            Assert.Equal(0.57, (double)row["avg_logical_writes"]!, 5);
+            Assert.Equal(4.86, (double)row["avg_physical_reads"]!, 5);
+            Assert.Equal(1.57, (double)row["avg_rowcount"]!, 5);
+        });
+    }
+
+    /// <summary>
+    /// The rounding is for the MCP reply only. The web compare page re-weights and divides these averages, so a plan averaging under
+    /// 5 microseconds would arrive as 0 and its delta would show a dash. The same rows through the web route keep full precision.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreTop_WebRoute_KeepsTheAveragesAtFullPrecision()
+    {
+        await WithSeededStoreAsync(async (source, ct) =>
+        {
+            var json = await DarlingWebEndpoints.BuildReadDispatch()["get_query_store_top"](new DefaultHttpContext(), source, null!);
+            var row = Assert.Single(JsonNode.Parse(json)!["queries"]!.AsArray())!;
+            Assert.Equal(7, (long)row["execution_count"]!);
+            AssertUnrounded(3004 / 7.0 / 1000, (double)row["avg_duration_ms"]!);
+            AssertUnrounded(2704 / 7.0 / 1000, (double)row["avg_cpu_ms"]!);
+            AssertUnrounded(304 / 7.0, (double)row["avg_logical_reads"]!);
+            AssertUnrounded(4 / 7.0, (double)row["avg_logical_writes"]!);
+            AssertUnrounded(34 / 7.0, (double)row["avg_physical_reads"]!);
+            AssertUnrounded(11 / 7.0, (double)row["avg_rowcount"]!);
+        });
+    }
+
+    private static void AssertUnrounded(double expected, double actual)
+    {
+        Assert.NotEqual(Math.Round(expected, 2), expected);
+        Assert.Equal(expected, actual, 9);
+    }
+
+    private static async Task WithSeededStoreAsync(Func<NpgsqlDataSource, System.Threading.CancellationToken, Task> body)
+    {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the Query Store rounding test (it mints its own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the Query Store rounding tests (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
@@ -79,16 +126,6 @@ public sealed class QueryStoreTopRoundingLiveTests
             await command.ExecuteNonQueryAsync(ct);
         }
 
-        var json = await DarlingMcpDataTools.GetQueryStoreTop(source, ServerName);
-        Assert.Empty(McpReplyFloatNoiseLiveTests.NoisyNumbers(json));
-        var row = Assert.Single(JsonNode.Parse(json)!["queries"]!.AsArray())!;
-        Assert.Equal(7, (long)row["execution_count"]!);
-        /* (3 * 1000 + 4 * 1) / 7 microseconds is 429.142857 us, so 0.43 ms: rounded to two places, not 0.4291428571428571. */
-        Assert.Equal(0.43, (double)row["avg_duration_ms"]!, 5);
-        Assert.Equal(0.39, (double)row["avg_cpu_ms"]!, 5);
-        Assert.Equal(43.43, (double)row["avg_logical_reads"]!, 5);
-        Assert.Equal(0.57, (double)row["avg_logical_writes"]!, 5);
-        Assert.Equal(4.86, (double)row["avg_physical_reads"]!, 5);
-        Assert.Equal(1.57, (double)row["avg_rowcount"]!, 5);
+        await body(source, ct);
     }
 }

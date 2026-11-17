@@ -1630,10 +1630,10 @@ public sealed class DarlingMcpDataTools
     internal static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
         string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
-        int? responseByteBudget = McpResponseBudget.DefaultBytes) =>
+        int? responseByteBudget = McpResponseBudget.DefaultBytes, bool roundAverages = true) =>
     #pragma warning restore CA1068
         GetQueryStoreTop(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag, responseByteBudget);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag, responseByteBudget, roundAverages);
 
     /// <summary>
     /// #5245: <see cref="GetQueryStoreTop(NpgsqlDataSource,string,int,int,string,string,string,string,bool,int,CancellationToken)"/>
@@ -1646,7 +1646,7 @@ public sealed class DarlingMcpDataTools
     internal static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of,
         string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
-        int? responseByteBudget = McpResponseBudget.DefaultBytes)
+        int? responseByteBudget = McpResponseBudget.DefaultBytes, bool roundAverages = true)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1797,6 +1797,7 @@ public sealed class DarlingMcpDataTools
                     WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken, requestedStart);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
+            double Average(double value) => roundAverages ? Math.Round(value, 2) : value;
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -1807,12 +1808,12 @@ public sealed class DarlingMcpDataTools
                 execution_type = r.ExecutionTypeDesc,
                 module_name = r.ModuleName,
                 execution_count = r.TotalExecutions,
-                avg_duration_ms = Math.Round(r.AvgDurationMs, 2), // #8902: two places, as get_top_queries_by_cpu writes it
-                avg_cpu_ms = Math.Round(r.AvgCpuTimeMs, 2),
-                avg_logical_reads = Math.Round(r.AvgLogicalReads, 2),
-                avg_logical_writes = Math.Round(r.AvgLogicalWrites, 2),
-                avg_physical_reads = Math.Round(r.AvgPhysicalReads, 2),
-                avg_rowcount = Math.Round(r.AvgRowcount, 2),
+                avg_duration_ms = Average(r.AvgDurationMs), // #8902: two places for the MCP reply; the web route keeps full precision (roundAverages false)
+                avg_cpu_ms = Average(r.AvgCpuTimeMs),
+                avg_logical_reads = Average(r.AvgLogicalReads),
+                avg_logical_writes = Average(r.AvgLogicalWrites),
+                avg_physical_reads = Average(r.AvgPhysicalReads),
+                avg_rowcount = Average(r.AvgRowcount),
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
                 query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, previewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > previewLength,
