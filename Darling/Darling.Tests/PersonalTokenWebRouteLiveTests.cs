@@ -165,7 +165,8 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
             return new Rig(app, app.GetTestServer(), owner, snapshot, network);
         }
 
-        public async Task<Reply> SendAsync(string method, string path, Person? who, string? contentType = Json, string? body = null, string host = "localhost")
+        public async Task<Reply> SendAsync(string method, string path, Person? who, string? contentType = Json, string? body = null, string host = "localhost",
+            CancellationToken? abort = null)
         {
             var context = await _server.SendAsync(c =>
             {
@@ -190,7 +191,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
                 }
 
                 c.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body ?? string.Empty));
-            }, TestContext.Current.CancellationToken);
+            }, abort ?? TestContext.Current.CancellationToken);
             using var reader = new StreamReader(context.Response.Body);
             return new Reply(context.Response.StatusCode, await reader.ReadToEndAsync(TestContext.Current.CancellationToken), context);
         }
@@ -707,6 +708,69 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         /* No tick: the route refreshed the snapshot before it answered. */
         Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check(value, DateTimeOffset.UtcNow).Outcome);
         Assert.Equal(404, (await rig.SendAsync("POST", "/api/mcp-tokens/" + id + "/revoke", vera)).Status);
+    }
+
+    /// <summary>
+    /// I3: a revoke that has committed reaches the MCP snapshot even when the caller goes away before the refresh. The snapshot's refresh gate is
+    /// held by a refresh of a second store whose table the test has locked, so the route's own refresh waits behind it; once the revoke is
+    /// committed the request is aborted, then the lock is let go. The route's refresh still runs, and the token is Dead.
+    /// </summary>
+    [Fact]
+    public async Task Revoke_RequestAbortedAfterTheCommit_TheSnapshotStillSeesItDead()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the personal token route live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(Settings());
+        var vera = PersonFor("revoke-aborted");
+        var created = await rig.CreateAsync(vera, "laptop");
+        var value = (string)created.Body!["token"]!;
+        var id = (string)created.Body["record"]!["id"]!;
+
+        await using var other = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var migrate = new NpgsqlConnection(other.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        await using var holder = new NpgsqlConnection(other.ConnectionString);
+        await holder.OpenAsync(ct);
+        await using var lockTransaction = await holder.BeginTransactionAsync(ct);
+        await using (var lockTable = new NpgsqlCommand("LOCK TABLE config.mcp_personal_token IN ACCESS EXCLUSIVE MODE", holder, lockTransaction))
+        {
+            await lockTable.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var otherSource = NpgsqlDataSource.Create(other.ConnectionString);
+        var otherOwner = new StoreOwnerSource();
+        otherOwner.Publish(otherSource);
+        var blocking = rig.Snapshot.RefreshAsync(otherOwner, NullLogger.Instance, CancellationToken.None);
+        /* Read from another session: inside the lock's transaction pg_stat_activity is one cached snapshot. */
+        var otherDatabase = new NpgsqlConnectionStringBuilder(other.ConnectionString).Database;
+        await WaitUntilAsync(async () => await rig.ScalarAsync(
+            $"SELECT count(*) FROM pg_stat_activity WHERE datname = '{otherDatabase}' AND wait_event_type = 'Lock'") != "0", ct);
+
+        using var abort = new CancellationTokenSource();
+        var revoke = rig.SendAsync("POST", "/api/mcp-tokens/" + id + "/revoke", vera, abort: abort.Token);
+        await WaitUntilAsync(async () => await rig.ScalarAsync($"SELECT count(*) FROM config.mcp_personal_token WHERE token_id = '{id}' AND revoked_at IS NOT NULL") == "1", ct);
+        await abort.CancelAsync();
+        await lockTransaction.RollbackAsync(ct);
+        await blocking;
+        /* The test host answers an aborted request with an IOException. */
+        await Assert.ThrowsAnyAsync<IOException>(() => revoke);
+
+        await WaitUntilAsync(() => Task.FromResult(rig.Snapshot.Check(value, DateTimeOffset.UtcNow).Outcome == PersonalTokenOutcome.Dead), ct);
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!await condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the condition did not hold within 15 seconds");
+            await Task.Delay(50, ct);
+        }
     }
 
     [Fact]

@@ -46,11 +46,15 @@ public static partial class DarlingWebEndpoints
     /// <c>{token, record}</c>, the one place the value ever appears, or 429 <c>too_many_recent</c> once the person has created
     /// <see cref="PersonalTokenStore.RecentCreatesPerSlot"/> times the cap in the last 24 hours. <c>POST /api/mcp-tokens/{id}/revoke</c> answers 204; a token that is absent,
     /// already dead or not the caller's is one 404 answer, so it never shows that an id exists. Each POST needs a JSON content type. After a
-    /// successful write the snapshot is refreshed before the answer, so the MCP gate sees the change at once.</para>
+    /// successful write the service log line is written, then the snapshot is refreshed before the answer, so the MCP gate sees the change at once.
+    /// The write has committed by then, so the refresh runs on the host's stopping token, not the request's: a caller that goes away cannot leave a
+    /// revoked token live in the gate until the next tick (the sign-in path does the same).</para>
     /// </summary>
     internal static void MapPersonalTokens(WebApplication app, StoreOwnerSource? ownerSource, DarlingPersonalTokenSnapshot? snapshot,
         PersonalTokenSettings? settings, ILogger logger, TimeProvider clock)
     {
+        var hostStopping = app.Lifetime.ApplicationStopping;
+
         static IResult Refusal(string code, string message, int status) =>
             JsonNodeResult(new JsonObject { ["error"] = code, ["message"] = message }, status);
 
@@ -240,9 +244,10 @@ public static partial class DarlingWebEndpoints
                             StatusCodes.Status429TooManyRequests);
                 }
 
-                /* R6: the MCP gate reads the snapshot, so it holds the new token before the caller sees its value. */
-                await snapshot.RefreshAsync(ownerSource!, logger, context.RequestAborted);
+                /* R6: the MCP gate reads the snapshot, so it holds the new token before the caller sees its value. The row has committed: log
+                   it, then refresh on the host's token, so a caller that goes away now cannot skip either. */
                 logger.LogInformation("Personal MCP token {TokenName} ({TokenId}) was created for {Subject} with role {Role}", name, minted.TokenId, seat.EditorPrincipal, role);
+                await snapshot.RefreshAsync(ownerSource!, logger, hostStopping);
 
                 var record = new PersonalTokenRow(minted.TokenId, ownerKey, seat.EditorPrincipal, name!, role, now, now.AddDays(lifetime), null, null, null, null);
                 return JsonNodeResult(new JsonObject
@@ -299,8 +304,10 @@ public static partial class DarlingWebEndpoints
                     return Refusal("not_found", "No live token has that id.", StatusCodes.Status404NotFound);
                 }
 
-                await snapshot.RefreshAsync(ownerSource!, logger, context.RequestAborted);
+                /* The revoke has committed: log it, then refresh on the host's token, never the request's, so the gate refuses the token now
+                   even when the caller has gone away. */
                 logger.LogInformation("Personal MCP token {TokenId} was revoked by {Subject}", id, seat.EditorPrincipal);
+                await snapshot.RefreshAsync(ownerSource!, logger, hostStopping);
                 return Results.NoContent();
             });
         });
