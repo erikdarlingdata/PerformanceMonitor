@@ -276,7 +276,7 @@ public sealed partial class DarlingWorker
            (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
         var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
-        /* #8967: the older attention rows. V276 swapped a populated plain collect.attention_events to collect.attention_events_legacy with a rename,
+        /* #8967: the older attention rows. V277 swapped a populated plain collect.attention_events to collect.attention_events_legacy with a rename,
            and this copies the rows still inside retention into the new table in short, paced batches, then drops the legacy table. It runs
            whenever the legacy table exists, whatever the TimescaleDB mode, resumes at its last committed batch after a restart, never throws, and a
            store with no legacy table finishes it at once. Drained with the other background work. */
@@ -944,6 +944,8 @@ public sealed partial class DarlingWorker
             identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
             resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
             digestWindowReason: muteRuleService.DigestWindowReason,
+            /* #9000: the Store Growth switch and its two floors, read live. */
+            storeGrowthSettings: () => new StoreGrowthSettings(alertSettings.SelfStoreGrowthEnabled, alertSettings.SelfStoreGrowthFloorGb, alertSettings.SelfStoreGrowthObjectFloorGb),
             /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
             agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
             /* #6873: the three database protection switches, read live. Off until an operator turns each on. */

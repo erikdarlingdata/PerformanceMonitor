@@ -54,23 +54,7 @@ public sealed partial class DarlingWorker
     {
         var (storeSizeBytes, storeSizeEstimated) = await ReadStoreSizeBytesAsync(cancellationToken);
 
-        long? freeBytes = null;
-        long? totalBytes = null;
-        if (config.Postgres.Managed && OperatingSystem.IsWindows())
-        {
-            try
-            {
-                var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-                (freeBytes, totalBytes) = ReadStoreVolumeSpace(dataDirectory);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* Best-effort: an unreadable drive just means no disk signal this tick. */
-                /* NOT counted by #3013's swallowed-read counter: a local filesystem read, not a store read. #3013's
-                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on a volume read. */
-                _logger.LogDebug("Store disk-pressure check: could not read the store volume free space: {Message}", ex.Message);
-            }
-        }
+        var (freeBytes, totalBytes) = TryReadStoreVolumeSpace(config);
 
         /* EvaluateDiskPressureAsync (not ApplyDiskPressureAsync) so a throwing seam — e.g. a mute rule's
            Matches() in the pre-deliver mute check — is isolated inside the evaluator, exactly like the
@@ -78,6 +62,31 @@ public sealed partial class DarlingWorker
            un-isolated throw here would stop collection for the whole fleet. */
         await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken, storeSizeEstimated);
     }
+
+    /// <summary>The store volume's free and total bytes, or null for both when the service cannot see them (a remote store, or an unreadable
+    /// drive). Best-effort: an unreadable drive just means no disk signal this tick.</summary>
+    private (long? FreeBytes, long? TotalBytes) TryReadStoreVolumeSpace(DarlingConfig config)
+    {
+        if (config.Postgres.Managed && OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+                var (free, total) = ReadStoreVolumeSpace(dataDirectory);
+                return (free, total);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* NOT counted by #3013's swallowed-read counter: a local filesystem read, not a store read. #3013's
+                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on a volume read. */
+                _logger.LogDebug("Store volume check: could not read the store volume free space: {Message}", ex.Message);
+            }
+        }
+
+        return (null, null);
+    }
+
+    private long? TryReadStoreFreeBytes(DarlingConfig config) => TryReadStoreVolumeSpace(config).FreeBytes;
 
     /// <summary>
     /// The free and total bytes of the volume that holds the store's data directory, for the disk-pressure

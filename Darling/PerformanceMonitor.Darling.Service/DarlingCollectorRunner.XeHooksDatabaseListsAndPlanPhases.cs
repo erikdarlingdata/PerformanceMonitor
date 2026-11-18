@@ -721,7 +721,7 @@ public sealed partial class DarlingCollectorRunner
             cache.AddPending(key, digest, result.Bytes, now);
 
             /* The marker of a plan withheld for its own sake is a verdict on this one plan, not the shape's plan. */
-            if (!string.Equals(result.PlanXml, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
+            if (!SensitiveStatements.IsWithheldPlan(result.PlanXml))
             {
                 RecordFetchedShape(serverId, row, digest, shapes, pendingShapes, fetchedByShape, now);
             }

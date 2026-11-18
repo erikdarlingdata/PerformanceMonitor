@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
+using System.Data.Common;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -28,6 +30,10 @@ namespace Darling.Tests;
 /// statements that differ only in their literals, plus procedures, go through the runner's partition, the plan fetch's
 /// bookkeeping and the collector's own <c>WritePayload</c>, <c>PgCollectorRowWriter</c> and <c>PayloadDimensionWriter</c>.
 /// The store must hold one plan per statement shape, and every stored row must still resolve a plan.
+///
+/// <para>The inline capture (Azure SQL Database, and any store with <c>queryStatsDeferredPlanFetch</c> off) has its own cases
+/// below. They run the runner's real <c>RunAsync</c> against a fake target that renders each plan in the main read, so both
+/// write sites (the server-scoped write and the Azure per-database write) go through <c>LinkInlineQueryStatsPlansByShape</c>.</para>
 /// </summary>
 public sealed class QueryStatsPlanShapeReuseLiveTests
 {
@@ -232,5 +238,265 @@ public sealed class QueryStatsPlanShapeReuseLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
+    }
+
+    private const int InlineVariantsPerShape = 30;
+    private const int InlineProcedures = 10;
+    private const int InlineServerScopedId = -899401;
+    private const int InlineAzureId = -899402;
+
+    private static readonly string[] InlineAzureDatabases = ["alpha", "zeta"];
+
+    [Fact]
+    public async Task InlineCapture_ServerScopedWrite_TenRunsOfLiteralOnlyVariants_StoreOnePlanPerShape()
+    {
+        await RunInlineTenRunsAsync(azure: false);
+    }
+
+    [Fact]
+    public async Task InlineCapture_AzurePerDatabaseWrite_TenRunsOfLiteralOnlyVariants_StoreOnePlanPerShapePerDatabase()
+    {
+        await RunInlineTenRunsAsync(azure: true);
+    }
+
+    private static async Task RunInlineTenRunsAsync(bool azure)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await migrate.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(migrate, ct);
+            }
+
+            /* The service signs in with the store's search path, which the unqualified COPY target needs. */
+            await using var source = NpgsqlDataSource.Create(DarlingStoreConnection.EnsureStoreSearchPath(scratch.ConnectionString));
+            var target = new InlineFakeTarget();
+            var serverId = azure ? InlineAzureId : InlineServerScopedId;
+            /* queryStatsDeferredPlanFetch off: the server-scoped path takes the inline capture, as Azure SQL Database always does. */
+            var runner = new DarlingCollectorRunner(source, new CollectorDeltaCalculator(), queryStatsDeferredPlanFetch: () => false)
+            {
+                TargetProviderOverrideForTests = _ => new InlineFakeTargetProvider(target),
+                AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(InlineAzureDatabases.ToList()),
+            };
+            var server = new ServerRuntime
+            {
+                Config = new MonitoredServer { Name = "t8994", Host = "t8994" },
+                ConnectionString = "Server=target;Database=master",
+                Target = new CollectorTargetInfo { IsAzureSqlDb = azure, Engine = CollectorTargetEngine.SqlServer },
+                StorageName = "t8994",
+                ServerId = serverId,
+            };
+
+            var plansPerRun = new List<long>();
+            var planRowsPerRun = new List<long>();
+            var planBytesPerRun = new List<long>();
+            var storedRows = 0L;
+            for (var run = 0; run < Runs; run++)
+            {
+                target.Run = run;
+                var plansBefore = await ScalarAsync(source, "SELECT count(*) FROM query_plan_dim", ct);
+                var result = await runner.RunAsync(QueryStatsCollector.Instance, server, ct);
+
+                var plansAfter = await ScalarAsync(source, "SELECT count(*) FROM query_plan_dim", ct);
+                plansPerRun.Add(plansAfter - plansBefore);
+                planRowsPerRun.Add(plansAfter);
+                planBytesPerRun.Add(await ScalarAsync(source, "SELECT coalesce(sum(pg_column_size(d.*)), 0) FROM query_plan_dim AS d", ct));
+                storedRows += result.Rows;
+            }
+
+            var summary = (azure ? "azure per-database write" : "server-scoped write")
+                + "; plans added per run " + string.Join(",", plansPerRun)
+                + "; query_plan_dim rows after each run " + string.Join(",", planRowsPerRun)
+                + "; query_plan_dim bytes after each run " + string.Join(",", planBytesPerRun);
+            TestContext.Current.TestOutputHelper?.WriteLine(summary);
+
+            /* One plan per ad hoc shape and per procedure (per database on Azure), all stored by the first run. */
+            var expected = (Shapes + InlineProcedures) * (azure ? InlineAzureDatabases.Length : 1);
+            Assert.True(plansPerRun[0] == expected, summary);
+            Assert.True(plansPerRun.Skip(1).All(n => n == 0), summary);
+
+            /* Every row of every run still resolves a plan through the view readers use. */
+            Assert.True(storedRows > 0, summary);
+            Assert.Equal(storedRows, await ScalarAsync(source,
+                "SELECT count(*) FROM v_query_stats WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture)
+                + " AND (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task<long> ScalarAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
+    {
+        await using var connection = await source.OpenConnectionAsync(ct);
+        return await ScalarAsync(connection, sql, ct);
+    }
+
+    /// <summary>What the fake target serves: the run the test is on, and a handle counter that never repeats.</summary>
+    private sealed class InlineFakeTarget
+    {
+        public int Run { get; set; }
+
+        private int _nextHandle;
+
+        public int NextHandle() => Interlocked.Increment(ref _nextHandle);
+    }
+
+    private sealed class InlineFakeTargetProvider(InlineFakeTarget state) : ITargetProvider
+    {
+        public CollectorTargetEngine Engine => CollectorTargetEngine.SqlServer;
+
+        public DbConnection CreateConnection(string connectionString) => new InlineFakeConnection(connectionString);
+
+        public DbCommand CreateCommand(CollectorQuery query, DbConnection connection, int commandTimeoutSeconds) =>
+            new InlineFakeCommand(query.Text, (InlineFakeConnection)connection, state);
+
+        public CollectorTargetFault Classify(Exception exception, bool yieldsOnLockTimeout) => CollectorTargetFault.Unclassified;
+
+        public string WithDatabase(string connectionString, string databaseName) => "db=" + databaseName;
+
+        public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
+            string connectionString, IReadOnlyList<string>? excludedDatabases, IReadOnlyList<string>? databaseScope) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class InlineFakeConnection(string connectionString) : DbConnection
+    {
+        private string _cs = connectionString;
+
+        public string DatabaseName => _cs.StartsWith("db=", StringComparison.Ordinal) ? _cs[3..] : "app";
+
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public override string ConnectionString { get => _cs; set => _cs = value ?? string.Empty; }
+        public override string Database => string.Empty;
+        public override string DataSource => string.Empty;
+        public override string ServerVersion => string.Empty;
+        public override ConnectionState State => ConnectionState.Open;
+        public override void ChangeDatabase(string databaseName) { }
+        public override void Close() { }
+        public override void Open() { }
+        public override Task OpenAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) => throw new NotSupportedException();
+        protected override DbCommand CreateDbCommand() => throw new NotSupportedException();
+    }
+
+    private sealed class InlineFakeCommand(string text, InlineFakeConnection owner, InlineFakeTarget state) : DbCommand
+    {
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public override string CommandText { get; set; } = text;
+        public override int CommandTimeout { get; set; }
+        public override CommandType CommandType { get; set; }
+        public override bool DesignTimeVisible { get; set; }
+        public override UpdateRowSource UpdatedRowSource { get; set; }
+        protected override DbConnection? DbConnection { get => owner; set { } }
+        protected override DbParameterCollection DbParameterCollection => throw new NotSupportedException();
+        protected override DbTransaction? DbTransaction { get; set; }
+        public override void Cancel() { }
+        public override int ExecuteNonQuery() => throw new NotSupportedException();
+        public override object? ExecuteScalar() => null;
+        public override void Prepare() { }
+        protected override DbParameter CreateDbParameter() => throw new NotSupportedException();
+        protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) => throw new NotSupportedException();
+
+        protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
+        {
+            /* The server-scoped path reads statement text in a second query. It gets none: the rows keep the text of the main read. */
+            if (CommandText.Contains("sys.dm_exec_sql_text(k.plan_handle)", StringComparison.Ordinal))
+            {
+                var texts = new DataTable();
+                texts.Columns.Add("ord", typeof(int));
+                texts.Columns.Add("text", typeof(string));
+                return Task.FromResult<DbDataReader>(texts.CreateDataReader());
+            }
+
+            return Task.FromResult<DbDataReader>(MainRead(owner.DatabaseName, state));
+        }
+    }
+
+    /// <summary>
+    /// The main read in the 46-column shape of the inline capture: 44 candidate columns, then the plan and its size. Every ad hoc
+    /// execution is a new plan_handle whose plan carries its own literal. Procedures keep their handle and their plan.
+    /// </summary>
+    private static DbDataReader MainRead(string database, InlineFakeTarget state)
+    {
+        var table = new DataTable();
+        var stringColumns = new HashSet<int> { 0, 1, 2, 36, 37, 38, 42, 44 };
+        for (var i = 0; i < 46; i++)
+        {
+            var type = stringColumns.Contains(i) ? typeof(string)
+                : i is 3 or 4 ? typeof(DateTime)
+                : i is 40 or 41 or 43 ? typeof(int)
+                : typeof(long);
+            table.Columns.Add("c" + i.ToString(CultureInfo.InvariantCulture), type);
+        }
+
+        var now = DateTime.UtcNow;
+        var created = new DateTime(2031, 4, 10, 11, 0, 0, DateTimeKind.Utc);
+        var executions = state.Run + 1L;
+
+        void AddRow(string handlePrefix, int handle, string queryHash, string planHash, string queryText)
+        {
+            var values = new object?[46];
+            for (var i = 0; i < 46; i++)
+            {
+                values[i] = table.Columns[i].DataType == typeof(long) ? 0L : DBNull.Value;
+            }
+
+            var hex = handle.ToString("X8", CultureInfo.InvariantCulture);
+            var plan = PlanFor(new QueryStatsCollector.Row { QueryHash = queryHash, QueryPlanHash = planHash, QueryText = queryText });
+            values[0] = database;
+            values[1] = queryHash;
+            values[2] = planHash;
+            values[3] = created;
+            values[4] = now;
+            values[5] = executions;
+            values[6] = executions * 1000L;
+            values[7] = executions * 2000L;
+            values[36] = "0x02" + hex;
+            values[37] = handlePrefix + hex;
+            values[38] = queryText;
+            values[39] = 1L;
+            values[40] = 0;
+            values[41] = -1;
+            values[43] = 3600;
+            values[44] = plan;
+            values[45] = plan.Length * 2L;
+            table.Rows.Add(values);
+        }
+
+        /* Handles are unique across databases, so the delta keys of two databases never meet. */
+        var dbSalt = database == "alpha" ? 1 : database == "zeta" ? 2 : 0;
+        for (var v = 0; v < InlineVariantsPerShape; v++)
+        {
+            for (var s = 0; s < Shapes; s++)
+            {
+                var n = state.NextHandle();
+                AddRow(
+                    "0x06", n,
+                    "0xA" + s.ToString("X15", CultureInfo.InvariantCulture),
+                    "0xB" + s.ToString("X15", CultureInfo.InvariantCulture),
+                    "SELECT * FROM dbo.t" + s.ToString(CultureInfo.InvariantCulture) + " WHERE id = " + n.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        for (var p = 0; p < InlineProcedures; p++)
+        {
+            AddRow(
+                "0x05", dbSalt * 1000 + p,
+                "0xC" + p.ToString("X15", CultureInfo.InvariantCulture),
+                "0xD" + p.ToString("X15", CultureInfo.InvariantCulture),
+                "SELECT * FROM " + database + ".dbo.p" + p.ToString(CultureInfo.InvariantCulture) + " WHERE id = @id");
+        }
+
+        return table.CreateDataReader();
     }
 }

@@ -152,6 +152,8 @@ public static class AlertFamily
         /* #8950: store tables past their autovacuum start point with no vacuum in 24 hours, or with autovacuum cancelled
            repeatedly, on two hourly reads in a row. */
         ["Store Vacuum Stalled"] = SelfMonitor,
+        /* #9000: the store or one object growing at least 3 times its own typical day, over a size floor. */
+        ["Store Growth"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,

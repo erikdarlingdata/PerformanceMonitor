@@ -3195,7 +3195,7 @@ $rung$;";
     }
 
     /// <summary>
-    /// V276 (#8967): <c>collect.attention_events</c> becomes a TimescaleDB hypertable on a store that has the extension and rows, by
+    /// V277 (#8967): <c>collect.attention_events</c> becomes a TimescaleDB hypertable on a store that has the extension and rows, by
     /// SWAP, not by <c>migrate_data</c>. The table keeps about 0.7 GB a day for 30 days, and <c>create_hypertable(..., migrate_data =&gt; true)</c>
     /// holds ACCESS EXCLUSIVE for the whole rewrite (past <see cref="MigrationCommandTimeoutSeconds"/> on a big store, which would fail
     /// this startup-critical rung on every start). So the rung only renames, which is catalog-only: the populated plain table and its index
@@ -3217,7 +3217,7 @@ $rung$;";
     /// owns the table. An older build ignores the legacy table, so the Viewer, the web pages and the tools show only the rows written since the
     /// swap until the copy ends.</para>
     /// </summary>
-    private static readonly string V276Sql = AttentionSwapSql((MigrationCommandTimeoutSeconds - 20) + "s") + @"
+    private static readonly string V277Sql = AttentionSwapSql((MigrationCommandTimeoutSeconds - 20) + "s") + @"
 
 CREATE TABLE IF NOT EXISTS collect.attention_events_legacy_copy (
     next_page bigint NOT NULL,
@@ -3226,9 +3226,9 @@ CREATE TABLE IF NOT EXISTS collect.attention_events_legacy_copy (
 );";
 
     /// <summary>
-    /// The swap of <c>collect.attention_events</c> to a table a hypertable can replace (#8967), shared by V276 and
+    /// The swap of <c>collect.attention_events</c> to a table a hypertable can replace (#8967), shared by V277 and
     /// <c>TimescaleSupport.ConvertToHypertablesAsync</c>. Runs in a transaction, because the lock timeout is <c>SET LOCAL</c>. Catalog-only:
-    /// two renames, one CREATE TABLE ... LIKE and one CREATE INDEX on the new empty table. See <see cref="V276Sql"/> for when it does nothing.
+    /// two renames, one CREATE TABLE ... LIKE and one CREATE INDEX on the new empty table. See <see cref="V277Sql"/> for when it does nothing.
     /// The hypertable check goes through <c>EXECUTE</c> so <c>timescaledb_information</c> is parsed only on a store that has it.
     /// </summary>
     internal static string AttentionSwapSql(string lockTimeout) => "SET LOCAL lock_timeout = '" + lockTimeout + @"';
@@ -3599,8 +3599,10 @@ $swap$;";
         new Migration(274, "trigram-index-store-options", V274Sql),
         /* V275 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
         new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
-        /* V276 (#8967): attention_events becomes a hypertable by swap: a catalog-only rename of the populated plain table to _legacy, an empty table in its place, and the copy-progress table. */
-        new Migration(276, "attention-events-hypertable-swap", V276Sql),
+        /* V276 (#9000): the Store Growth alert's switch and its two size floors on the alert settings. Three catalog-only columns with defaults, no backfill. */
+        new Migration(276, "store-growth-alert-settings", V276Sql),
+        /* V277 (#8967): attention_events becomes a hypertable by swap: a catalog-only rename of the populated plain table to _legacy, an empty table in its place, and the copy-progress table. */
+        new Migration(277, "attention-events-hypertable-swap", V277Sql),
     };
 
     /// <summary>
@@ -3658,6 +3660,19 @@ CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_st
 ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
 CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
 ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V276 (#9000): the Store Growth alert's settings on <c>config.config_alert_settings</c>: <c>self_store_growth_enabled</c> (<c>boolean NOT NULL DEFAULT TRUE</c>),
+    /// <c>self_store_growth_floor_gb</c> (<c>integer NOT NULL DEFAULT 5</c>, the whole store's daily growth floor in GB) and <c>self_store_growth_object_floor_gb</c>
+    /// (<c>integer NOT NULL DEFAULT 2</c>, one object's). Catalog-only adds, idempotent, no backfill (the DEFAULTs fill the singleton row). A floor of 0 removes that floor.
+    /// <c>self_store_growth_object_floor_gb</c> is the probe's sentinel and is added LAST. An older build never reads the columns and has no Store Growth alert,
+    /// so rolling back past this rung loses the alert and nothing else.
+    /// </summary>
+    private const string V276Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS self_store_growth_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS self_store_growth_floor_gb integer NOT NULL DEFAULT 5,
+    ADD COLUMN IF NOT EXISTS self_store_growth_object_floor_gb integer NOT NULL DEFAULT 2;";
 
     /// <summary>
     /// V274 (#8978): <c>config.config_service.query_text_trigram_index_enabled</c> and <c>query_store_text_trigram_index_enabled</c>, the

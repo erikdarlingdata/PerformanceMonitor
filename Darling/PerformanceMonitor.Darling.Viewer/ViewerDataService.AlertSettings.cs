@@ -113,7 +113,9 @@ public sealed partial class ViewerDataService
         /* #8882 (V270): the TempDB Growth Fit alert's switch, APPENDED for the same reason and under the same connect-time store gate. */
         "tempdb_growth_fit_enabled, " +
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches, APPENDED for the same reason and under the same connect-time store gate. */
-        "instance_restarted_enabled, memory_dumps_enabled";
+        "instance_restarted_enabled, memory_dumps_enabled, " +
+        /* #9000 (V276): the Store Growth switch and its two floors, APPENDED for the same reason and under the same connect-time store gate. */
+        "self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb";
 
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
@@ -131,7 +133,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -238,6 +240,9 @@ ON CONFLICT (id) DO UPDATE SET
     tempdb_growth_fit_enabled = EXCLUDED.tempdb_growth_fit_enabled,
     instance_restarted_enabled = EXCLUDED.instance_restarted_enabled,
     memory_dumps_enabled = EXCLUDED.memory_dumps_enabled,
+    self_store_growth_enabled = EXCLUDED.self_store_growth_enabled,
+    self_store_growth_floor_gb = EXCLUDED.self_store_growth_floor_gb,
+    self_store_growth_object_floor_gb = EXCLUDED.self_store_growth_object_floor_gb,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -397,6 +402,9 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.TempDbGrowthFitEnabled });                                                                   // $102 (#8882, V270)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.InstanceRestartedEnabled });                                                                 // $103 (#8884, V271)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.MemoryDumpsEnabled });                                                                       // $104 (#8884, V271)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.SelfStoreGrowthEnabled });                                                                   // $105 (#9000, V276)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Max(0, r.SelfStoreGrowthFloorGb) });                                                       // $106 (#9000, V276)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Max(0, r.SelfStoreGrowthObjectFloorGb) });                                                 // $107 (#9000, V276)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -533,6 +541,10 @@ ON CONFLICT (id) DO UPDATE SET
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches appended at ordinals 102-103. */
         InstanceRestartedEnabled = reader.GetBoolean(102),
         MemoryDumpsEnabled = reader.GetBoolean(103),
+        /* #9000 (V276): the Store Growth switch and its two floors at ordinals 104-106. */
+        SelfStoreGrowthEnabled = reader.GetBoolean(104),
+        SelfStoreGrowthFloorGb = reader.GetInt32(105),
+        SelfStoreGrowthObjectFloorGb = reader.GetInt32(106),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -595,6 +607,12 @@ public sealed class AlertSettingsRow
     /// <c>SelfDiskWarnGbFloorRungTests</c> pins the two equal so a moved shipped default cannot leave this
     /// row seeding a floor no surface reports.</summary>
     public int SelfDiskFreeWarnGb { get; set; } = 50;
+
+    /// <summary>#9000 (V276): the Store Growth alert's switch and its two daily growth floors in GB (the whole store, then one object). 0 removes a
+    /// floor. The defaults mirror the V276 DDL defaults.</summary>
+    public bool SelfStoreGrowthEnabled { get; set; } = true;
+    public int SelfStoreGrowthFloorGb { get; set; } = 5;
+    public int SelfStoreGrowthObjectFloorGb { get; set; } = 2;
     public int CollectionStaleMinutes { get; set; } = 30;
     public int CollectionFailureThreshold { get; set; } = 10;
     public int DiskCriticalFreePercent { get; set; } = 3;
@@ -925,6 +943,9 @@ public sealed class AlertSettingsRow
             && CheckDbOverdueThresholdHours == other.CheckDbOverdueThresholdHours
             && TempDbGrowthFitEnabled == other.TempDbGrowthFitEnabled
             && InstanceRestartedEnabled == other.InstanceRestartedEnabled
-            && MemoryDumpsEnabled == other.MemoryDumpsEnabled;
+            && MemoryDumpsEnabled == other.MemoryDumpsEnabled
+            && SelfStoreGrowthEnabled == other.SelfStoreGrowthEnabled
+            && SelfStoreGrowthFloorGb == other.SelfStoreGrowthFloorGb
+            && SelfStoreGrowthObjectFloorGb == other.SelfStoreGrowthObjectFloorGb;
     }
 }
