@@ -111,13 +111,15 @@ WITH deduped AS
     -- collection_time >= $2. The extra day is slack against clock skew between the monitored server's
     -- interval clock and ours.
     --
-    -- The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
-    -- collection_time exceeds its interval start by the interval's own length -- at most 1 day, since
-    -- Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus however long the
-    -- collector was behind, which nothing bounds. So 30 days is 1 day of engine maximum and 29 of
-    -- collector-outage allowance. A month-long outage that then back-collects an interval straddling an
-    -- old window's edge could still omit that one bar; the data stays in the store, and the alternative
-    -- (no ceiling) makes every historical window scan to the present.
+    -- The CEILING is a month rather than tight. A row's collection_time exceeds its interval start by the
+    -- interval's own length -- at most 1 day, since Query Store's INTERVAL_LENGTH_MINUTES accepts only
+    -- 1/5/10/15/30/60/1440 -- plus how far behind the collector was. QueryStoreCollectionCeiling bounds that
+    -- for the rows this collector writes, but the parquet archive keeps months of rows, and rows earlier
+    -- collector versions wrote can trail by longer (a wider backlog window, an uncapped replica look-back).
+    -- So 30 days is 1 day of engine maximum and 29 of collector-outage allowance. A month-long outage that
+    -- then back-collected an interval straddling an old window's edge could still omit that one bar; the
+    -- data stays in the store, and the alternative (no ceiling) makes every historical window scan to the
+    -- present.
     AND   collection_time >= $2 - INTERVAL '1 day'
     AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + @"
 )

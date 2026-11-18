@@ -150,6 +150,34 @@ public sealed class QueryStoreReplicaRoutingTests
         Assert.Equal(expected, QueryStoreReplicaRouting.Decide(input).Reason);
     }
 
+    [Theory]
+    [InlineData(3600, false, 65)]
+    [InlineData(7200, false, 65)]
+    [InlineData(7200, true, 70)]
+    [InlineData(int.MaxValue, true, 70)]
+    public void LookBack_TakesAFlushSlowerThanAnHourAsAnHour(int flush, bool capturing, int minutes)
+    {
+        /* #8570: MaxLookBack bounds how late a look-back read stores a row, and the raw Query Store reads' collection_time
+           ceiling covers it, so no flush interval may widen the look-back past it. */
+        var lookBack = QueryStoreReplicaRouting.LookBackFor(flush, capturing);
+
+        Assert.Equal(TimeSpan.FromMinutes(minutes), lookBack);
+        Assert.True(lookBack <= QueryStoreReplicaRouting.MaxLookBack);
+    }
+
+    [Fact]
+    public void APrimaryFlushingSlowerThanAnHour_FallsBackWithTheCappedLookBack()
+    {
+        var input = Healthy() with { Primary = new QueryStorePrimaryDatabaseState("Sales", 7200) };
+
+        var d = QueryStoreReplicaRouting.Decide(input);
+
+        Assert.Equal(QueryStoreRouteReason.FlushTooSlow, d.Reason);
+        Assert.Equal(QueryStoreReadSource.Primary, d.Source);
+        Assert.True(d.UsesLookBack);
+        Assert.Equal(TimeSpan.FromMinutes(65), d.LookBack);
+    }
+
     [Fact]
     public void UnreadableReplicaFlush_ReadsThePrimary()
     {

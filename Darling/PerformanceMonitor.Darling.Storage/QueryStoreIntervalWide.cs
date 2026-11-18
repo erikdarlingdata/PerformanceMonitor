@@ -877,28 +877,15 @@ SELECT EXISTS
     /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
     public const string CollectionFloorSlackSql = "interval '1 hour'";
 
-    /// <summary>
-    /// The longest a raw row's <c>collection_time</c> can trail its interval's start (#8570): one interval length
-    /// (<see cref="IntervalSpanMargin"/>), plus the collector's catch-up cap (<see cref="WatermarkPolicy.MaxCatchup"/>), plus an hour of
-    /// slack. The live collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>, and the cutoff is never more than
-    /// <see cref="WatermarkPolicy.MaxCatchup"/> before the row's <c>collection_time</c> (<c>WatermarkPolicy.ClampCatchup</c>, and
-    /// <c>C - 60 minutes</c> with no watermark), so a live row is collected less than the cap after its interval ends. A backfill slice
-    /// spans at most <c>QueryStoreBackfillState.MaxSliceSpan</c> (no more than the cap), keeps intervals ending after its floor and stamps
-    /// its ceiling as <c>collection_time</c>, so the same holds for it. An outage does not widen the bound: the clamp drops the backlog
-    /// from the live read and backfill collects it at backdated times. The two values the collector compared are the two stored ones, so
-    /// clock skew adds nothing.
-    /// </summary>
-    public static readonly TimeSpan CollectionCeiling = TimeSpan.FromHours(int.Parse(CollectionCeilingHours, System.Globalization.CultureInfo.InvariantCulture));
-
-    /// <summary><see cref="CollectionCeiling"/> in hours, as text: the raw reads interpolate <see cref="CollectionCeilingSql"/> into
-    /// constant SQL, so the one definition is a constant string. Hours, because the same span in minutes is the text of
-    /// <see cref="PurgeEdgeMarginSql"/>, which <see cref="WithEdgeMargin"/> rewrites.</summary>
-    private const string CollectionCeilingHours = "26";
+    /// <summary>The longest a raw row's <c>collection_time</c> can trail its interval's start: <see cref="QueryStoreCollectionCeiling.Span"/>,
+    /// which covers one interval (<see cref="IntervalSpanMargin"/>), the collector's catch-up cap and its replica look-back.</summary>
+    public static readonly TimeSpan CollectionCeiling = QueryStoreCollectionCeiling.Span;
 
     /// <summary>The <c>collection_time</c> ceiling beside an interval-start-placed window (#7776, #7814): <see cref="CollectionCeiling"/>
     /// above the window end, so it drops no row the window keeps. It is chunk exclusion, not a filter: a historical window reads the chunks
-    /// collected within a day of it rather than every chunk through the present.</summary>
-    public const string CollectionCeilingSql = "interval '" + CollectionCeilingHours + " hours'";
+    /// collected within about a day of it rather than every chunk through the present. Hours, because the same span in minutes could be the
+    /// text of <see cref="PurgeEdgeMarginSql"/>, which <see cref="WithEdgeMargin"/> rewrites.</summary>
+    public const string CollectionCeilingSql = "interval '" + QueryStoreCollectionCeiling.Hours + " hours'";
 
     /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
     /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is
