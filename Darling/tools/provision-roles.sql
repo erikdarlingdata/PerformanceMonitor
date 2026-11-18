@@ -1252,9 +1252,31 @@ BEGIN
 END $web_groups$;
 -- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
 DO $personal_token$
+DECLARE
+    r text;
+    c text;
 BEGIN
     IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
-        REVOKE ALL ON config.mcp_personal_token FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('config.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('config.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('config.mcp_personal_token'))
+              AND (rolname IN ('admin', 'viewer', 'web', 'mcp') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON config.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
     END IF;
 END $personal_token$;
 
@@ -4122,8 +4144,30 @@ BEGIN
 END $web_groups$;
 -- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
 DO $personal_token$
+DECLARE
+    r text;
+    c text;
 BEGIN
     IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
-        REVOKE ALL ON config.mcp_personal_token FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('config.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('config.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('config.mcp_personal_token'))
+              AND (rolname IN ('admin', 'viewer', 'web', 'mcp') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON config.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
     END IF;
 END $personal_token$;

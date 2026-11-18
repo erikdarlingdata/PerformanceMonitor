@@ -19,11 +19,13 @@ public static class PersonalTokenSchema
 
     /// <summary>
     /// The table, its index and the owner-only lockdown, applied atomically by the migration runner. Every statement is written literally, with
-    /// no dynamic SQL. The trigger function follows <c>config.password_key_owner_only()</c> (V165, which guards <c>config.pseudonym_key</c>):
+    /// no dynamic SQL except the revoke block, which finds the roles holding a grant at run time (<see cref="RevokeFromEveryRoleSql"/>). The trigger function follows <c>config.password_key_owner_only()</c> (V165, which guards <c>config.pseudonym_key</c>):
     /// it tests <c>pg_has_role(session_user, &lt;table owner&gt;, 'USAGE')</c>, so a later GRANT made by mistake still cannot write. It has its
     /// own function, because the shared one raises <c>PW010</c> with a password-key message and these rows raise <c>42501</c>.
     /// </summary>
-    public const string CreateSql = """
+    public static readonly string CreateSql = CreateSqlHead + RevokeFromEveryRoleSql("config", "admin", "viewer", "web", "mcp") + CreateSqlTail;
+
+    private const string CreateSqlHead = """
 CREATE TABLE IF NOT EXISTS config.mcp_personal_token
 (
     token_id text NOT NULL,
@@ -49,22 +51,9 @@ CREATE INDEX IF NOT EXISTS mcp_personal_token_owner_key ON config.mcp_personal_t
 
 REVOKE ALL ON config.mcp_personal_token FROM PUBLIC;
 
-DO $do$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
-        REVOKE ALL ON config.mcp_personal_token FROM admin;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
-        REVOKE ALL ON config.mcp_personal_token FROM viewer;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
-        REVOKE ALL ON config.mcp_personal_token FROM web;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
-        REVOKE ALL ON config.mcp_personal_token FROM mcp;
-    END IF;
-END
-$do$;
+""";
+
+    private const string CreateSqlTail = """
 
 CREATE OR REPLACE FUNCTION config.mcp_personal_token_owner_only() RETURNS trigger
 LANGUAGE plpgsql
@@ -105,14 +94,46 @@ ALTER TABLE config.mcp_personal_token ENABLE ALWAYS TRIGGER trg_mcp_personal_tok
 """;
 
     /// <summary>
-    /// The managed-roles re-revoke: takes every privilege on the table from PUBLIC and the four roles, and grants nothing back. It runs after every
-    /// blanket grant, so none of them can put a privilege back. Guarded, so a store below V275 is left alone.
+    /// The managed-roles re-revoke: takes every privilege on the table, and on each of its columns, from PUBLIC, the four roles and every other role
+    /// that holds a grant on it, and grants nothing back. It runs after every blanket grant, so none of them can put a privilege back. Guarded, so a
+    /// store below V275 is left alone.
     /// </summary>
-    public static string ReassertPermissionsSql(string config, string admin, string viewer, string web, string mcp) => $"""
+    public static string ReassertPermissionsSql(string config, string admin, string viewer, string web, string mcp) =>
+        RevokeFromEveryRoleSql(config, admin, viewer, web, mcp);
+
+    /// <summary>
+    /// Closes the table to every role but its owner, in the pattern of <c>config.harden_web_access_groups()</c>: custom default privileges can grant a
+    /// new <c>config</c> table to roles beyond the product's four logins, so the roles to strip are PUBLIC, the four named ones and whatever
+    /// <c>aclexplode</c> finds on the table or its columns. Used by the rung and by the managed-roles batch (and mirrored in
+    /// <c>Darling/tools/provision-roles.sql</c>). Guarded on the table existing.
+    /// </summary>
+    internal static string RevokeFromEveryRoleSql(string config, string admin, string viewer, string web, string mcp) => $"""
 DO $personal_token$
+DECLARE
+    r text;
+    c text;
 BEGIN
     IF pg_catalog.to_regclass('{config}.mcp_personal_token') IS NOT NULL THEN
-        REVOKE ALL ON {config}.mcp_personal_token FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('{config}.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('{config}.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('{config}.mcp_personal_token'))
+              AND (rolname IN ('{admin}', '{viewer}', '{web}', '{mcp}') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON {config}.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('{config}.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON {config}.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
     END IF;
 END $personal_token$;
 """;

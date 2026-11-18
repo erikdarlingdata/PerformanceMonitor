@@ -226,7 +226,7 @@ With [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) on, a person s
 
 **Lifetime and cap.** A token lives at most `maxLifetimeDays` (30 by default) and a person holds at most `maxTokensPerPerson` (5 by default). A person can also create at most four times `maxTokensPerPerson` tokens in any 24 hours, revoked ones included; past that, a create answers 429 `too_many_recent`. Dead tokens, expired or revoked, are deleted 30 days later. A lower `maxLifetimeDays` binds at once: a token older than the new limit is refused at the MCP gate, and the start sweep then cuts its stored expiry. A token made near the end of a browser session lives its full lifetime, up to `maxLifetimeDays`, not only until the session ends.
 
-**The switch.** `enabled: false` refuses every personal token at once and keeps the rows. Turning it back on serves again every token that has not expired and was not revoked.
+**The switch.** `enabled: false` refuses every personal token at once and keeps the rows. Turning it back on serves again every token that has not expired and was not revoked. Turning `enabled` off does not revoke anything: revoke first if you mean to end the tokens. While the feature is off, a sign-in at a lower seat revokes nothing either, and the start sweep does not run.
 
 **What revokes a token.**
 

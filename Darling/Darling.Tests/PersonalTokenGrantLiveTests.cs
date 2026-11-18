@@ -25,7 +25,9 @@ namespace Darling.Tests;
 [Collection("pg-cluster-roles")]
 public sealed class PersonalTokenGrantLiveTests
 {
-    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "web", "mcp"];
+    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "web", "mcp", StrayRole];
+
+    private const string StrayRole = "ptk8737stray";
 
     private const string InsertSql = "INSERT INTO config.mcp_personal_token (token_id, secret_sha256, owner_key, subject, token_name, role, created_at, expires_at) VALUES ('0123456789abcdef', decode(repeat('ab', 32), 'hex'), 'owner', 'subject', 'name', 'reader', now(), now() + interval '1 day')";
 
@@ -130,6 +132,50 @@ public sealed class PersonalTokenGrantLiveTests
         await ExecAsync(owner, "UPDATE config.mcp_personal_token SET last_used_at = now()", ct);
         await ExecAsync(owner, "DELETE FROM config.mcp_personal_token", ct);
         await ExecAsync(owner, "TRUNCATE config.mcp_personal_token", ct);
+    });
+
+    private static async Task GrantStrayAsync(NpgsqlConnection owner, CancellationToken ct)
+    {
+        await ExecAsync(owner, $"CREATE ROLE {StrayRole} NOLOGIN", ct);
+        await ExecAsync(owner, $"GRANT USAGE ON SCHEMA config TO {StrayRole}", ct);
+        await ExecAsync(owner, $"GRANT SELECT ON config.mcp_personal_token TO {StrayRole}", ct);
+        await ExecAsync(owner, $"GRANT UPDATE (token_name) ON config.mcp_personal_token TO {StrayRole}", ct);
+        Assert.Equal("True", await ScalarAsync(owner, $"SELECT has_table_privilege('{StrayRole}', 'config.mcp_personal_token', 'SELECT')", ct));
+    }
+
+    private static async Task AssertStrayLostEverythingAsync(NpgsqlConnection owner, CancellationToken ct)
+    {
+        Assert.Equal("False", await ScalarAsync(owner, $"SELECT has_table_privilege('{StrayRole}', 'config.mcp_personal_token', 'SELECT')", ct));
+        Assert.Equal("False", await ScalarAsync(owner, $"SELECT has_column_privilege('{StrayRole}', 'config.mcp_personal_token', 'token_name', 'UPDATE')", ct));
+        Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM pg_attribute AS a CROSS JOIN LATERAL aclexplode(a.attacl) AS x "
+            + $"WHERE a.attrelid = 'config.mcp_personal_token'::regclass AND x.grantee = '{StrayRole}'::regrole", ct));
+    }
+
+    /// <summary>A role beyond the four logins that holds a grant on the table (custom default privileges can give one) loses it, table and column
+    /// grants both, when the managed-roles batch runs again (the access group tables' pattern).</summary>
+    [Fact]
+    public Task StrayRoleGrant_IsRevokedByTheManagedBatch() => WithProvisionedStoreAsync(async (owner, scratch, ct) =>
+    {
+        await GrantStrayAsync(owner, ct);
+        var ownerRole = new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling";
+
+        await ExecAsync(owner,
+            DarlingManagedRoles.BuildProvisioningSql(
+                ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName), ProvisioningTestSecrets.Web), ct);
+
+        await AssertStrayLostEverythingAsync(owner, ct);
+    });
+
+    /// <summary>The same, when the rung's own SQL runs (a store migrated with such a grant already in place).</summary>
+    [Fact]
+    public Task StrayRoleGrant_IsRevokedByTheRung() => WithProvisionedStoreAsync(async (owner, scratch, ct) =>
+    {
+        await GrantStrayAsync(owner, ct);
+
+        await ExecAsync(owner, PersonalTokenSchema.CreateSql, ct);
+
+        await AssertStrayLostEverythingAsync(owner, ct);
     });
 
     /// <summary>E3: a GRANT of every write made by mistake still leaves each write refused by the owner-only trigger.</summary>
