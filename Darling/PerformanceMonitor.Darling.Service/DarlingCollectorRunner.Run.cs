@@ -1218,7 +1218,25 @@ public sealed partial class DarlingCollectorRunner
                     {
                         var storageSlice = Stopwatch.StartNew();
                         PerDatabaseWriteFaultForTests?.Invoke(databaseName);
-                        rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
+
+                        /* #8994: query_stats on Azure SQL Database always captures inline. This database's rows link to their
+                           shapes' stored plans, and the shapes it stores count only once its batch committed. */
+                        var inlineShapes = LinkInlineQueryStatsPlansByShape(server, context, batch);
+                        var batchCommitted = false;
+                        try
+                        {
+                            rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
+                            batchCommitted = true;
+                        }
+                        finally
+                        {
+                            if (inlineShapes is not null
+                                && _queryStatsShapeCaches.TryGetValue(server.ServerId, out var inlineShapeCache))
+                            {
+                                inlineShapeCache.Settle(inlineShapes, batchCommitted, DateTime.UtcNow);
+                            }
+                        }
+
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
                     }
@@ -2506,6 +2524,9 @@ public sealed partial class DarlingCollectorRunner
                 var committed = false;
                 try
                 {
+                    /* #8994: the inline capture's rows link to their shapes' stored plans. Those shapes settle below with the
+                       deferred fetch's. */
+                    pendingShapeKeys ??= LinkInlineQueryStatsPlansByShape(server, context, rows);
                     rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
                     committed = true;
                 }

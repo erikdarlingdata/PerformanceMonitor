@@ -97,6 +97,15 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         public string? KnownPlanDigest { get; set; }
 
         /// <summary>
+        /// #8994: true when the inline capture's <see cref="QueryPlanXml"/> is the statement filter's whole-plan marker
+        /// (<see cref="SensitiveStatements.PlaceholderText"/>), not this statement's plan: the read's filter budget ran out
+        /// before or during the plan, or the plan was withheld whole for its own sake (its judge threw, it cannot be parsed).
+        /// A host must not remember the marker as the plan of this statement's shape. The deferred fetch learns the same from <see cref="ReadPlanFetchAsync"/>. False on every row of
+        /// a host that captures no plans inline (Lite never sets <see cref="CollectorContext.CapturePlanXml"/>).
+        /// </summary>
+        public bool QueryPlanXmlIsPlaceholder { get; set; }
+
+        /// <summary>
         /// #7419: the digest the host's store already holds for this row's statement text, set by a host that reads the
         /// text in a second query (<see cref="CollectorContext.DeferTextFetch"/>) and recognizes the statement from an
         /// earlier commit. When set, <see cref="QueryText"/> is null and the writer stores the digest instead of the text
@@ -1054,7 +1063,7 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new Row
+            var row = new Row
             {
                 DatabaseName = reader.IsDBNull(0) ? null : reader.GetString(0),
                 QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -1116,7 +1125,13 @@ OPTION(RECOMPILE);";
                 QueryPlanXmlBytes = inlinePlan && !reader.IsDBNull(45)
                     ? Convert.ToInt64(reader.GetValue(45), CultureInfo.InvariantCulture)
                     : null,
-            });
+            };
+
+            /* #8994: the filter hands back its whole-plan marker both when the read's budget ran out (TryXml false) and when
+               the plan was withheld whole for its own sake. Either way the row holds no plan of this statement, and the host
+               must not remember the marker as its shape's plan. */
+            row.QueryPlanXmlIsPlaceholder = SensitiveStatements.IsWithheldPlan(row.QueryPlanXml);
+            rows.Add(row);
         }
 
         return SkipIdleAndRank(rows, context);
