@@ -3318,6 +3318,34 @@ BEGIN
 END
 $$;";
 
+    /// <summary>
+    /// V280 (#8570): <c>idx_plan_correction_server_db_query_time</c> on <c>collect.plan_correction (server_id, database_name, query_id,
+    /// collection_time DESC) WHERE recommendation_name IS NOT NULL</c>, for the recommendation half of the force-plan target read
+    /// (<c>DarlingForcePlanTargetStateReader.SqlTemplate</c>'s <c>apc_latest</c>). That half wants the newest recommendation row of
+    /// each target query. Through V46's <c>idx_plan_correction_time (server_id, collection_time)</c> it read the server's whole 24 hours
+    /// of captures and dropped the rows of other queries afterwards, because no index led on the database and the query. The partial
+    /// index holds only the rows that carry a recommendation, and the statement's own <c>recommendation_name IS NOT NULL</c> filter
+    /// implies the predicate, so the planner seeks each target query's rows newest first.
+    ///
+    /// <para><b>Cost, measured on PostgreSQL 18 with TimescaleDB 2.30</b> (10 servers, 3.3M rows in 31 daily chunks, 28 of them compressed, the newest two uncompressed at about 69,000 recommendation rows per
+    /// server per day, 1.4M rows): the build took 3.3 s and the index is 56 MB over the three uncompressed chunks, against 18 MB for V46's
+    /// <c>idx_plan_correction_time</c> on the same chunks. The recommendation half of the read went from 79 to 143 ms and 14,000 shared
+    /// buffers to 3 to 10 ms and 1,500 buffers. A 69,000-row insert of all-recommendation rows into the newest chunk went from 0.54 s to
+    /// 0.86 s (median of three), one more and wider btree on every row that carries a recommendation. Compressing a chunk drops its rows
+    /// from the index, so the size stays bounded by the uncompressed window. Plain <c>CREATE INDEX IF NOT
+    /// EXISTS</c>, V220's shape: <c>MigrateAsync</c> runs the rung in one transaction, where neither <c>CONCURRENTLY</c> nor
+    /// <c>timescaledb.transaction_per_chunk</c> can run. A compressed chunk's index is an empty shell, so the build touches only the
+    /// uncompressed chunks. It holds a SHARE lock on them, which blocks the collector's inserts for the build's length, so the lock
+    /// timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's and V220's. The statement is valid on a plain
+    /// table (a store without TimescaleDB) and on a hypertable. A fresh store runs every rung, so it gets the index too. Additive: an
+    /// older build never reads it, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private static readonly string V280Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
+    ON collect.plan_correction (server_id, database_name, query_id, collection_time DESC)
+    WHERE recommendation_name IS NOT NULL;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3661,6 +3689,9 @@ $$;";
         /* V279 (#8570): the corrected Query Store hourly aggregate's compression order becomes query_hash then bucket, so one query's
            hours sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
         new Migration(279, "qs-corrected-hourly-compress-orderby", V279Sql),
+        /* V280 (#8570): the plan_correction recommendation index, so the force-plan target read seeks each target query's newest recommendation
+           instead of reading a day of captures. Built on the uncompressed chunks only. */
+        new Migration(280, "plan-correction-recommendation-index", V280Sql),
     };
 
     /// <summary>

@@ -41,8 +41,10 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// changes shape silently); until it has run, the cost ceiling is one server's day of
 /// <c>query_store_stats</c> hashed on (database, query, plan, collection_time), once per tool call, only
 /// when the result carries force-plan targets.
-/// <c>plan_correction</c> is small (one row per open recommendation per capture) and
-/// <c>idx_plan_correction_time</c> covers the server/time bound.</para>
+/// <c>plan_correction</c> is not small on a large store: it holds one row per open recommendation per capture, which is millions of rows
+/// in the uncompressed day or two. The recommendation half reads it through <c>idx_plan_correction_server_db_query_time</c> (V280, <c>server_id,
+/// database_name, query_id, collection_time DESC</c> where <c>recommendation_name IS NOT NULL</c>), so it seeks each target query's rows
+/// newest first and never reads the server's whole day. The enablement half's per-database probe reads <c>idx_plan_correction_time</c>.</para>
 ///
 /// <para><b>The enablement half stops at one row per target database (#8570).</b> It used to number every
 /// <c>plan_correction</c> row of the server's whole lookback by database and keep the first, which hashed and
@@ -52,8 +54,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// collector schedule, or none at all) goes to ONE numbered pass over the lookback for just those databases, which
 /// is the old cost and not N walks of the whole window, and which does not run when every database was found.
 /// MATERIALIZED so the join to the targets reads the two branches once, not once per target row. The
-/// answer is the same as before. The recommendation half still reads the server's lookback, because no index leads
-/// on (server, database, query).</para>
+/// answer is the same as before. The recommendation half had no index that led on (server, database, query) until V280, and read the server's lookback.</para>
 ///
 /// <para><b>The VALUES rows carry casts.</b> Postgres types a <c>VALUES</c> column from its first row and
 /// an untyped parameter there is <c>unknown</c>, so every row spells <c>$n::text, $n::bigint, $n::bigint</c>;
