@@ -1607,7 +1607,7 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         /* #8884, bound last in the order the V271 columns were appended. Both switches seed from darling.json, which defaults them on. */
         command.Parameters.AddWithValue(a.InstanceRestartedEnabled);
         command.Parameters.AddWithValue(a.MemoryDumpsEnabled);
-        /* #9000 (V275), bound last in the order the columns were appended. */
+        /* #9000 (V276), bound last in the order the columns were appended. */
         command.Parameters.AddWithValue(a.SelfStoreGrowthEnabled);
         command.Parameters.AddWithValue(a.SelfStoreGrowthFloorGb);
         command.Parameters.AddWithValue(a.SelfStoreGrowthObjectFloorGb);
@@ -2498,7 +2498,7 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             /* #8884 (V271): the Instance Restarted and Memory Dumps switches at 102-103. */
             InstanceRestartedEnabled = reader.GetBoolean(102),
             MemoryDumpsEnabled = reader.GetBoolean(103),
-            /* #9000 (V275): the Store Growth switch and its two floors at 104-106. */
+            /* #9000 (V276): the Store Growth switch and its two floors at 104-106. */
             SelfStoreGrowthEnabled = reader.GetBoolean(104),
             SelfStoreGrowthFloorGb = reader.GetInt32(105),
             SelfStoreGrowthObjectFloorGb = reader.GetInt32(106),

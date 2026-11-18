@@ -460,6 +460,21 @@
     // cover all servers. Set false to refuse those calls. The claim-based Level 2 and 3 tools are not affected.
     // "allowAgentMuteRules": false,
 
+    // Personal MCP tokens (#8737): a person signed in to the web dashboard (web.network.oidc) mints their own short-lived MCP token.
+    // Default off. Served only with web.enabled true in darling.json, web.network.oidc configured, no front door and "allowTokenlessLoopback" off;
+    // otherwise the start logs one warning and the feature stays off. A number outside its range is clamped (1-365 days, 1-50 tokens)
+    // and an "adminRole" other than "operator" or "reader" is served as "reader", each with a warning. "dataDetail" (full, maskLiterals
+    // or metadataOnly) can only narrow "dataDetail" above; an unrecognized value leaves personal tokens off. "adminRole" "reader" (the
+    // default) keeps every personal token read-only. Set "operator" to let an admin mint an operator token: it gets the write tools whatever
+    // "allowWrites" and web.allowAdminWrites say, as a named operator token does (the server registry tools still need "allowWrites" and
+    // "allowServerAdmin"). With OIDC and no role mapping, every person who can sign in is an admin.
+    "personalTokens": {
+      "enabled": false,
+      "maxLifetimeDays": 30,
+      "maxTokensPerPerson": 5,
+      "adminRole": "reader"
+    },
+
     // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
     // Each token has a name (1-64 of A-Za-z0-9._:-) and a role: "operator" (the reads and the write tools, with
     // "allowWrites" off too), "agent" (the reads, the investigation tools and the Level 2 action tools, with

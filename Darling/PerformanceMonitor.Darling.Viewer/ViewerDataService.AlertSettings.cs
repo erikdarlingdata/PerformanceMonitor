@@ -114,7 +114,7 @@ public sealed partial class ViewerDataService
         "tempdb_growth_fit_enabled, " +
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches, APPENDED for the same reason and under the same connect-time store gate. */
         "instance_restarted_enabled, memory_dumps_enabled, " +
-        /* #9000 (V275): the Store Growth switch and its two floors, APPENDED for the same reason and under the same connect-time store gate. */
+        /* #9000 (V276): the Store Growth switch and its two floors, APPENDED for the same reason and under the same connect-time store gate. */
         "self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb";
 
 
@@ -402,9 +402,9 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.TempDbGrowthFitEnabled });                                                                   // $102 (#8882, V270)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.InstanceRestartedEnabled });                                                                 // $103 (#8884, V271)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.MemoryDumpsEnabled });                                                                       // $104 (#8884, V271)
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.SelfStoreGrowthEnabled });                                                                   // $105 (#9000, V275)
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Max(0, r.SelfStoreGrowthFloorGb) });                                                       // $106 (#9000, V275)
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Max(0, r.SelfStoreGrowthObjectFloorGb) });                                                 // $107 (#9000, V275)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.SelfStoreGrowthEnabled });                                                                   // $105 (#9000, V276)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Max(0, r.SelfStoreGrowthFloorGb) });                                                       // $106 (#9000, V276)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Max(0, r.SelfStoreGrowthObjectFloorGb) });                                                 // $107 (#9000, V276)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -541,7 +541,7 @@ ON CONFLICT (id) DO UPDATE SET
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches appended at ordinals 102-103. */
         InstanceRestartedEnabled = reader.GetBoolean(102),
         MemoryDumpsEnabled = reader.GetBoolean(103),
-        /* #9000 (V275): the Store Growth switch and its two floors at ordinals 104-106. */
+        /* #9000 (V276): the Store Growth switch and its two floors at ordinals 104-106. */
         SelfStoreGrowthEnabled = reader.GetBoolean(104),
         SelfStoreGrowthFloorGb = reader.GetInt32(105),
         SelfStoreGrowthObjectFloorGb = reader.GetInt32(106),
@@ -608,8 +608,8 @@ public sealed class AlertSettingsRow
     /// row seeding a floor no surface reports.</summary>
     public int SelfDiskFreeWarnGb { get; set; } = 50;
 
-    /// <summary>#9000 (V275): the Store Growth alert's switch and its two daily growth floors in GB (the whole store, then one object). 0 removes a
-    /// floor. The defaults mirror the V275 DDL defaults.</summary>
+    /// <summary>#9000 (V276): the Store Growth alert's switch and its two daily growth floors in GB (the whole store, then one object). 0 removes a
+    /// floor. The defaults mirror the V276 DDL defaults.</summary>
     public bool SelfStoreGrowthEnabled { get; set; } = true;
     public int SelfStoreGrowthFloorGb { get; set; } = 5;
     public int SelfStoreGrowthObjectFloorGb { get; set; } = 2;

@@ -711,7 +711,7 @@ LIMIT 1";
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches (boolean NOT NULL, default on). APPENDED, same reason. */
         bool InstanceRestartedEnabled,
         bool MemoryDumpsEnabled,
-        /* #9000 (V275): the Store Growth switch and its two floors in GB. APPENDED, same reason. */
+        /* #9000 (V276): the Store Growth switch and its two floors in GB. APPENDED, same reason. */
         bool SelfStoreGrowthEnabled,
         int SelfStoreGrowthFloorGb,
         int SelfStoreGrowthObjectFloorGb);
@@ -851,7 +851,7 @@ WHERE id = 1";
             reader.GetBoolean(101),
             /* #8884 (V271): the Instance Restarted and Memory Dumps switches at 102-103. */
             reader.GetBoolean(102), reader.GetBoolean(103),
-            /* #9000 (V275): the Store Growth switch and its two floors at 104-106. */
+            /* #9000 (V276): the Store Growth switch and its two floors at 104-106. */
             reader.GetBoolean(104), reader.GetInt32(105), reader.GetInt32(106));
     }
 

@@ -849,9 +849,11 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // (the probe's sentinel is the Query Store one) and the re-run of V274 adds them back as NULL. Safe on a store that never had them.
         new(274, "hasTrigramIndexStoreOptions",
             @"ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_text_trigram_index_enabled, DROP COLUMN IF EXISTS query_store_text_trigram_index_enabled;"),
-        // V275 (#9000): the Store Growth alert's switch and two floors on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
-        // (the probe's sentinel is the object floor one) and the re-run of V275 adds them back on their defaults. Safe on a store that never had them.
-        new(275, "hasStoreGrowthAlertSettings",
+        // V275 (#8737): the personal MCP token table. The rewind drops it (its triggers go with it); a re-run of V275 creates it again.
+        new(275, "hasPersonalTokens", "DROP TABLE IF EXISTS config.mcp_personal_token;"),
+        // V276 (#9000): the Store Growth alert's switch and two floors on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
+        // (the probe's sentinel is the object floor one) and the re-run of V276 adds them back on their defaults. Safe on a store that never had them.
+        new(276, "hasStoreGrowthAlertSettings",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS self_store_growth_enabled, DROP COLUMN IF EXISTS self_store_growth_floor_gb, DROP COLUMN IF EXISTS self_store_growth_object_floor_gb;"),
     ];
 

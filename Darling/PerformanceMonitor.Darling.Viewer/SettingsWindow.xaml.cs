@@ -1455,7 +1455,7 @@ public partial class SettingsWindow : Window
            constant lives on the Service assembly the viewer does not reference, and the V126 rung test
            pins this literal equal to it. */
         AlertSelfDiskWarnGbBox.Text = "50";
-        /* #9000: the V275 defaults. */
+        /* #9000: the V276 defaults. */
         AlertSelfStoreGrowthCheckBox.IsChecked = true;
         AlertSelfStoreGrowthFloorGbBox.Text = "5";
         AlertSelfStoreGrowthObjectFloorGbBox.Text = "2";

@@ -109,6 +109,10 @@ A refused sign-in POST to `/auth/login` answers 403 before the form is read, wit
 
 `--validate-config` prints the mode when it is not `on`, fails on an unknown value and on `off` without OIDC configured or without an exposed dashboard, and notes `loopback` with an exposed dashboard, whether or not `trustedProxies` is set. With `web.enabled` false in `darling.json` it prints one INFO line instead, because `web.enabled` only seeds the dashboard's first run and the setting is not checked then. Set `web.enabled` to true to check it when the store has the dashboard enabled.
 
+### Personal MCP token routes
+
+The web login does one more thing by itself when [`mcp.personalTokens`](configuration-mcp.md#personal-tokens) is on: it serves `/api/mcp-tokens` and `/api/mcp-tokens/{id}/revoke`. These routes are not on the `web.allowAdminWrites` arm. A read-only OpenID Connect seat may POST exactly these two routes, with the same Host, SameSite and JSON checks as every other write, and the write it opens is these two routes and, for a seat with an owner key, the two proposal presses (#7109), which that seat already had. A front door answers `/api/mcp-tokens*` with 404 and never forwards it. See [My MCP tokens](web-dashboard.md#my-mcp-tokens).
+
 ### Viewer-managed team access groups
 
 Advanced web access starts off. A Viewer administrator can select **Enable advanced web access** in the sidebar to show **Web Access Groups** and allow group-token sign-in alongside existing dashboard sign-in methods. Clearing the checkbox hides group management, blocks group-token sign-in and invalidates group sessions. Re-enabling access lets users sign in again with their existing enabled group tokens. Every flip of the switch writes a row to the group journal, `config.web_access_group_events`, with the database role that made it and when.

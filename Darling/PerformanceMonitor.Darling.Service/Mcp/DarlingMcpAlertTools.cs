@@ -646,7 +646,7 @@ public sealed partial class DarlingMcpAlertTools
                AND free space below this many GB (0 removes the floor), so a large store volume at a low
                percent stops paging CRITICAL. The pvs.floor_gb composition, not low_disk's OR pair. */
             disk_free_warn_gb = s.SelfDiskFreeWarnGb,
-            /* #9000 (V275): the Store Growth alert. It fires when the store or one object grew at least this many GB in the last 24 hours AND at
+            /* #9000 (V276): the Store Growth alert. It fires when the store or one object grew at least this many GB in the last 24 hours AND at
                least 3 times its own typical day. A floor of 0 removes that floor. */
             store_growth_enabled = s.SelfStoreGrowthEnabled,
             store_growth_floor_gb = s.SelfStoreGrowthFloorGb,

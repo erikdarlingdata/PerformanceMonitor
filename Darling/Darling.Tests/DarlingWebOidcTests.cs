@@ -903,6 +903,40 @@ public sealed class DarlingWebOidcTests
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(
             new DarlingWebSeat("who", canEdit, hasOwnerKey ? new string('k', DarlingWebSeat.OwnerKeyLength) : null), method, path));
 
+    private const string TokenId = "0123456789abcdef";
+
+    [Theory]
+    [InlineData("/api/mcp-tokens", true)]
+    [InlineData("/api/mcp-tokens/" + TokenId + "/revoke", true)]
+    [InlineData("/API/MCP-Tokens/" + TokenId + "/Revoke", true)]               // routing ignores case, so the gate does too
+    [InlineData("/api/mcp-tokens/", false)]                                    // trailing slash
+    [InlineData("/api/mcp-tokens/" + TokenId + "/revoke/", false)]
+    [InlineData("/api/mcp-tokens/0123456789ABCDEF/revoke", false)]             // an uppercase id
+    [InlineData("/api/mcp-tokens/0123456789abcde/revoke", false)]              // 15 characters
+    [InlineData("/api/mcp-tokens/0123456789abcdef0/revoke", false)]            // 17 characters
+    [InlineData("/api/mcp-tokens/0123456789abcdeg/revoke", false)]             // not hex
+    [InlineData("/api/mcp-tokens/x/revoke/extra", false)]
+    [InlineData("/api/mcp-tokens/" + TokenId, false)]                          // no verb
+    [InlineData("/api/mcp-tokens/" + TokenId + "/delete", false)]
+    [InlineData("/api/mcp-tokens//revoke", false)]
+    [InlineData("/api/mcp-tokens-other", false)]
+    [InlineData("/x/api/mcp-tokens", false)]
+    public void IsPersonalTokenWritePath_Shapes(string path, bool expected)
+        => Assert.Equal(expected, DarlingWebSeat.IsPersonalTokenWritePath(path));
+
+    [Theory]
+    [InlineData(false, true, "POST", "/api/mcp-tokens", true)]                 // a read-only OIDC seat makes its own token
+    [InlineData(false, true, "POST", "/api/mcp-tokens/" + TokenId + "/revoke", true)]
+    [InlineData(false, false, "POST", "/api/mcp-tokens", false)]               // a seat with no owner key names nobody
+    [InlineData(false, false, "POST", "/api/mcp-tokens/" + TokenId + "/revoke", false)]
+    [InlineData(false, true, "PUT", "/api/mcp-tokens", false)]
+    [InlineData(false, true, "DELETE", "/api/mcp-tokens/" + TokenId, false)]
+    [InlineData(false, true, "POST", "/api/mcp-tokens/" + TokenId + "/revoke/", false)]
+    [InlineData(true, false, "POST", "/api/mcp-tokens", true)]                 // the edit seat is unchanged
+    public void IsRequestAllowed_PersonalTokenException(bool canEdit, bool hasOwnerKey, string method, string path, bool expected)
+        => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(
+            new DarlingWebSeat("who", canEdit, hasOwnerKey ? new string('k', DarlingWebSeat.OwnerKeyLength) : null), method, path));
+
     /* ---- THE TRANSACTION COOKIE ---- */
 
     private static readonly byte[] SessionKey = RandomNumberGenerator.GetBytes(32);

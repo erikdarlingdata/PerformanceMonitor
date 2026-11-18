@@ -20,7 +20,9 @@ internal static class DarlingWebMe
     /// <param name="oidcRoleMapping">Whether the OIDC sign-in configured on this host has a role mapping; null when none is configured.
     /// Reported as <c>role_mapping</c> for an OIDC session only: a null <c>granted_by</c> alone cannot say "no mapping", because a sign-in
     /// without an owner key carries no grant.</param>
-    internal static JsonObject Describe(DarlingWebSeat seat, bool? oidcRoleMapping)
+    /// <param name="personalTokensServed">Whether this host serves personal MCP tokens: a store with the feature on, never a front door. The page
+    /// shows its token list only when this is true and the session is an OIDC one or an administrator's.</param>
+    internal static JsonObject Describe(DarlingWebSeat seat, bool? oidcRoleMapping, bool personalTokensServed)
     {
         var method = seat.GroupId is not null ? "managed_group"
             : seat.TokenName is not null ? "named_token"
@@ -39,6 +41,7 @@ internal static class DarlingWebMe
             ["token_name"] = method == "named_token" ? seat.TokenName : null,
             ["group_name"] = method == "managed_group" ? seat.TokenName : null,
             ["expires_at"] = seat.SessionExpiresAt?.UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
+            ["personal_tokens"] = personalTokensServed && (oidc || seat.CanEdit),
         };
     }
 }

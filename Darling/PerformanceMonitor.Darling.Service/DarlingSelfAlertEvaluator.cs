@@ -1357,7 +1357,7 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<StoreGrowthSettings>? storeGrowthSettings = null)
     {
         _digestWindowReason = digestWindowReason;
-        /* #9000: unsupplied falls back to the V275 column defaults (on, 5 GB for the store, 2 GB for one object). */
+        /* #9000: unsupplied falls back to the V276 column defaults (on, 5 GB for the store, 2 GB for one object). */
         _storeGrowthSettings = storeGrowthSettings ?? (() => new StoreGrowthSettings(true, 5, 2));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
