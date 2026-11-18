@@ -926,33 +926,37 @@ ORDER BY collection_time DESC
 
         var runs = await QueryAttentionAsync(connection, AttentionWindowSql.Runs("collection_log"), serverId, floor,
             r => r.GetDateTime(0), cancellationToken);
-        var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts("attention_events"), serverId, floor,
-            r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)), cancellationToken);
-        var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups("attention_events"), serverId, floor,
-            r => new AttentionSampleGroup(
-                r.GetDateTime(0),
-                r.IsDBNull(1) ? null : r.GetString(1),
-                r.IsDBNull(2) ? null : r.GetString(2),
-                r.GetInt64(3),
-                r.GetInt64(4),
-                r.GetInt64(5),
-                r.GetInt64(6)), cancellationToken);
-        /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
-           a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
-        var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);
-        /* Final round of #5714 (L2): the lists are bounded like the count is, > floor AND <= newest + RowSkewSeconds (the MCP read's cut). */
-        var topCeiling = AttentionEvaluator.TopListCeiling(runs);
-        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("attention_events", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)), cancellationToken);
-        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
-        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+        /* #9024: while the store 277 copy runs, the older rows are in the legacy table, so the events read through the relation that counts each row once. */
+        return await AttentionReadRelation.ReadAsync(connection, async events =>
+        {
+            var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts(events), serverId, floor,
+                r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)), cancellationToken);
+            var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups(events), serverId, floor,
+                r => new AttentionSampleGroup(
+                    r.GetDateTime(0),
+                    r.IsDBNull(1) ? null : r.GetString(1),
+                    r.IsDBNull(2) ? null : r.GetString(2),
+                    r.GetInt64(3),
+                    r.GetInt64(4),
+                    r.GetInt64(5),
+                    r.GetInt64(6)), cancellationToken);
+            /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
+               a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
+            var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);
+            /* Final round of #5714 (L2): the lists are bounded like the count is, > floor AND <= newest + RowSkewSeconds (the MCP read's cut). */
+            var topCeiling = AttentionEvaluator.TopListCeiling(runs);
+            var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements(events, bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)), cancellationToken);
+            var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy(events, "database_name", bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+            var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy(events, "client_app_name", bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), serverId, topFloor, topCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+            var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), serverId, topFloor, topCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
+            return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
+        }, cancellationToken);
     }
 
     /// <summary>The deadline of the Client Timeouts baseline read (#5736): a 7-day range of one server, run about once a day.</summary>
@@ -980,20 +984,26 @@ ORDER BY collection_time DESC
         var from = to.AddDays(-AttentionBaselineMath.LookbackDays);
 
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection)
+        /* #9024: the baseline is a 7-day read, so during the store 277 copy it must see the rows still waiting in the legacy table. */
+        var minutes = await AttentionReadRelation.ReadAsync(connection, async events =>
         {
-            CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
-        };
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
+            await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", events), connection)
+            {
+                CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
+            };
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
 
-        var minutes = new List<AttentionMinute>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            minutes.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
-        }
+            var rows = new List<AttentionMinute>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
+            }
+
+            return rows;
+        }, cancellationToken);
 
         return AttentionBaselineMath.Compute(minutes);
     }

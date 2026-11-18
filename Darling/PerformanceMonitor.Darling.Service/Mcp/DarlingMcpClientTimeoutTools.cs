@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -153,51 +154,55 @@ public sealed class DarlingMcpClientTimeoutTools
         }
 
         var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), floor, ceiling, r => r.GetDateTime(0));
-        var counts = await Query(AttentionWindowSql.Counts("attention_events", bounded: true), floor, rowCeiling,
-            r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
-        var groups = await Query(AttentionWindowSql.SampleGroups("attention_events", bounded: true), floor, rowCeiling,
-            r => new AttentionSampleGroup(
-                r.GetDateTime(0),
-                r.IsDBNull(1) ? null : r.GetString(1),
-                r.IsDBNull(2) ? null : r.GetString(2),
-                r.GetInt64(3),
-                r.GetInt64(4),
-                r.GetInt64(5),
-                r.GetInt64(6)));
-
-        /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
-        var span = ClientTimeoutsRead.DetailSpan(runs);
-        if (span is null)
+        /* #9024: while the store 277 copy runs, the older rows are in the legacy table, so the events read through the relation that counts each row once. */
+        return await AttentionReadRelation.ReadAsync<(AttentionWindow Window, List<ClientTimeoutSample> Samples)>(connection, async events =>
         {
-            return (new AttentionWindow(runs, counts, groups, [], [], []), []);
-        }
+            var counts = await Query(AttentionWindowSql.Counts(events, bounded: true), floor, rowCeiling,
+                r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
+            var groups = await Query(AttentionWindowSql.SampleGroups(events, bounded: true), floor, rowCeiling,
+                r => new AttentionSampleGroup(
+                    r.GetDateTime(0),
+                    r.IsDBNull(1) ? null : r.GetString(1),
+                    r.IsDBNull(2) ? null : r.GetString(2),
+                    r.GetInt64(3),
+                    r.GetInt64(4),
+                    r.GetInt64(5),
+                    r.GetInt64(6)));
 
-        var spanFloor = DateTime.SpecifyKind(span.Value.Floor, DateTimeKind.Unspecified);
-        var spanCeiling = DateTime.SpecifyKind(span.Value.Ceiling, DateTimeKind.Unspecified);
+            /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
+            var span = ClientTimeoutsRead.DetailSpan(runs);
+            if (span is null)
+            {
+                return (new AttentionWindow(runs, counts, groups, [], [], []), []);
+            }
 
-        var statements = await Query(AttentionWindowSql.TopStatements("attention_events", bounded: true), spanFloor, spanCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)));
-        var databases = await Query(AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), spanFloor, spanCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var applications = await Query(AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), spanFloor, spanCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var hosts = await Query(AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), spanFloor, spanCeiling,
-            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var samples = await Query(AttentionWindowSql.Samples("attention_events", sampleLimit + 1), spanFloor, spanCeiling,
-            r => new ClientTimeoutSample(
-                r.IsDBNull(0) ? null : r.GetDateTime(0),
-                r.GetDateTime(1),
-                r.IsDBNull(2) ? null : r.GetString(2),
-                r.IsDBNull(3) ? null : r.GetString(3),
-                r.IsDBNull(4) ? null : r.GetString(4),
-                r.IsDBNull(5) ? null : r.GetInt32(5),
-                r.IsDBNull(6) ? null : r.GetInt64(6),
-                r.IsDBNull(7) ? null : r.GetString(7),
-                r.IsDBNull(8) ? null : r.GetString(8),
-                r.GetBoolean(9),
-                r.GetBoolean(10),
-                r.GetBoolean(11)));
+            var spanFloor = DateTime.SpecifyKind(span.Value.Floor, DateTimeKind.Unspecified);
+            var spanCeiling = DateTime.SpecifyKind(span.Value.Ceiling, DateTimeKind.Unspecified);
 
-        return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
+            var statements = await Query(AttentionWindowSql.TopStatements(events, bounded: true), spanFloor, spanCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)));
+            var databases = await Query(AttentionWindowSql.TopBy(events, "database_name", bounded: true), spanFloor, spanCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+            var applications = await Query(AttentionWindowSql.TopBy(events, "client_app_name", bounded: true), spanFloor, spanCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+            var hosts = await Query(AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), spanFloor, spanCeiling,
+                r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+            var samples = await Query(AttentionWindowSql.Samples(events, sampleLimit + 1), spanFloor, spanCeiling,
+                r => new ClientTimeoutSample(
+                    r.IsDBNull(0) ? null : r.GetDateTime(0),
+                    r.GetDateTime(1),
+                    r.IsDBNull(2) ? null : r.GetString(2),
+                    r.IsDBNull(3) ? null : r.GetString(3),
+                    r.IsDBNull(4) ? null : r.GetString(4),
+                    r.IsDBNull(5) ? null : r.GetInt32(5),
+                    r.IsDBNull(6) ? null : r.GetInt64(6),
+                    r.IsDBNull(7) ? null : r.GetString(7),
+                    r.IsDBNull(8) ? null : r.GetString(8),
+                    r.GetBoolean(9),
+                    r.GetBoolean(10),
+                    r.GetBoolean(11)));
+
+            return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
+        }, cancellationToken);
     }
 }
