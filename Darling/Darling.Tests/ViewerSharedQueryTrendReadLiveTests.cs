@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// Every test mints its own scratch database (the <c>ViewerTrendRoutingLivePostgresTests</c> pattern), so the class
 /// is not in the <c>live-postgres</c> collection.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE and drop its own scratch database through ScratchPostgres. */
 public sealed class ViewerSharedQueryTrendReadLiveTests
 {
     private const int ServerId = -854901;
