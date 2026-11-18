@@ -319,7 +319,19 @@ public sealed class DarlingMcpPgPlanTools
 
         var precondition = await DarlingRuntimePrecondition.StatusAsync(
             postgres, serverId, displayName, "pg_plan_capture", cancellationToken);
-        if (precondition != null)
+
+        /* #8982: pg_plan_capture declares no extension, so its EXTENSION_MISSING run is the stand-down it records when readiness says
+           auto_explain is not loaded. The readiness answer below names every unmet facet, which says more than that one run, so it
+           goes first. When readiness has no unmet facet left (auto_explain was loaded after the stand-down and the next capture run
+           has not happened yet), the stand-down is stale: the answer is the one for a target whose capture is set up, never the
+           generic missing-extension text. */
+        var stoodDownOnReadiness = precondition != null
+            && string.Equals(
+                await DarlingRuntimePrecondition.LatestStatusAsync(postgres, serverId, "pg_plan_capture", cancellationToken),
+                PerformanceMonitor.Collectors.CollectorRuntimePrecondition.ExtensionMissingStatus,
+                StringComparison.OrdinalIgnoreCase);
+
+        if (precondition != null && !stoodDownOnReadiness)
         {
             return precondition;
         }
