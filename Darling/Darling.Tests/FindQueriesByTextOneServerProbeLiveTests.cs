@@ -25,8 +25,8 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test creates its own scratch database through ScratchPostgres and
    works entirely inside it, so it cannot race live collection. Each test builds the trigram index on its own tracker, never the process-wide one. */
 /// <summary>
-/// #8570: with the plan-cache text index <c>Ready</c>, the one-server scope of <c>find_queries_by_text</c> reads the matched digests first and each
-/// span reads the server's samples by them (<c>sample_read</c> <c>probe</c>, <c>matched_texts</c> the count). More texts than
+/// #8570: with the plan-cache text index <c>Ready</c>, the one-server scope of <c>find_queries_by_text</c> reads the matched digests while the Query Store
+/// source runs, and each span reads the server's samples by them (<c>sample_read</c> <c>probe</c>, <c>matched_texts</c> the count). More texts than
 /// <see cref="DarlingMcpFindQueriesByTextTools.ProbeDigestCap"/>, or a match read that runs out of its own timeout, take the span read
 /// (<c>sample_read</c> <c>plain</c>). Either way the rows are the span read's rows in its order, and with the index not ready the reply carries
 /// neither field. The fixture is <see cref="FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync"/>: 3000 texts, server ix-a with a sample for
@@ -192,8 +192,7 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
         Assert.All(bound, type => Assert.Equal(NpgsqlDbType.Text, type));
     }
 
-    /// <summary>The match read runs out of its own timeout (a sleep inside it, past a 100 ms timeout): its savepoint is rolled back and the search
-    /// takes the span read in the same transaction and budget.</summary>
+    /// <summary>The match read runs out of its own timeout (a sleep inside it, past a 100 ms timeout): the search takes the span read.</summary>
     [Fact]
     public async Task IndexReady_TheMatchReadRunsOut_TakesTheSpanRead()
     {
@@ -213,6 +212,36 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
         Assert.Equal(["0xA001@Sales"], Keys(planCache));
         AssertSameRows(planCache, plain);
         Assert.All(bound, type => Assert.Equal(NpgsqlDbType.Text, type));
+    }
+
+    /// <summary>The match read runs while the Query Store source does: the Query Store statement is held until the match read has started, which it
+    /// can do only if it does not wait for that source to finish. The hold gives up after 30 s, so a match read that waits fails the test rather
+    /// than hanging it.</summary>
+    [Fact]
+    public async Task IndexReady_TheMatchReadRunsWhileTheQueryStoreSourceDoes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tracker = await FindQueriesByTextIndexScopeLiveTests.BuildIndexAsync(data, ct);
+        var matchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var matchStartedFirst = false;
+        var queryStoreBudget = Roomy with
+        {
+            BeforeStatement = async (_, _, token) =>
+                matchStartedFirst = await Task.WhenAny(matchStarted.Task, Task.Delay(TimeSpan.FromSeconds(30), token)) == matchStarted.Task,
+        };
+        var planCacheBudget = Roomy with { MatchStarting = () => matchStarted.TrySetResult() };
+
+        var reply = JsonDocument.Parse(await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
+            data, RarePattern, "ix-a", null, 20, McpDataDetail.Full, queryStoreBudget, planCacheBudget, ct, tracker)).RootElement;
+        var planCache = reply.GetProperty("sources").GetProperty("plan_cache");
+
+        Assert.True(matchStartedFirst, "the Query Store statement ran before the match read started, so the match read waited for that source");
+        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.Equal(DarlingMcpFindQueriesByTextTools.SampleReadProbe, planCache.GetProperty("sample_read").GetString());
+        Assert.Equal(1, planCache.GetProperty("matched_texts").GetInt32());
+        Assert.Equal(["0xA001@Sales"], Keys(planCache));
     }
 
     [Fact]

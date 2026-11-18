@@ -70,10 +70,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// under the cap, how many texts matched (<c>matched_texts</c>). Measured on a seeded large store: see <see cref="ProbeDigestCap"/>.</para>
 ///
 /// <para><b>#8570: one server's plan-cache text through the same probe.</b> When the plan-cache text index is <c>Ready</c>, the one-server search reads the
-/// matched digests first (<see cref="MatchedDigestsSql"/>, in a savepoint under its own timeout, <see cref="MatchBudgetMilliseconds"/>) and, when they fit
-/// under <see cref="ProbeDigestCap"/>, reads each span's samples of the server by them (<see cref="PlanCacheProbeSql"/>), so no span tests a text. Past the
-/// cap, or when the match read runs out of its timeout or the server refuses it, the savepoint is rolled back and each span tests its distinct texts
-/// against the pattern (<see cref="PlanCacheSql"/>), which is also the read with the index off. Measured on a seeded store (350,000 texts, 5.7 million
+/// matched digests (<see cref="MatchedDigestsSql"/>, under its own timeout, <see cref="MatchBudgetMilliseconds"/>) on a connection of its own while the
+/// Query Store source runs, and, when they fit under <see cref="ProbeDigestCap"/>, reads each span's samples of the server by them
+/// (<see cref="PlanCacheProbeSql"/>), so no span tests a text. Past the cap, or when the match read runs out of its timeout or fails, each span tests its
+/// distinct texts against the pattern (<see cref="PlanCacheSql"/>), which is also the read with the index off. Measured on a seeded store (350,000 texts, 5.7 million
 /// samples, three of five chunks compressed), one server: 0.30 s cold and about 0.2 s warm through the probe, against 0.73 s cold and 0.37 to 0.53 s warm
 /// through the span read, of which the match read took 18 to 42 ms. With the index ready the reply's <c>plan_cache</c> source says which read served it
 /// (<c>sample_read</c>: <c>probe</c> or <c>plain</c>) and, under the cap, how many texts matched (<c>matched_texts</c>); with it off the reply carries neither.</para>
@@ -98,8 +98,8 @@ public sealed class DarlingMcpFindQueriesByTextTools
     /// <summary>The time each source's statement may run: 4 s, so two sources stay under 10 s.</summary>
     public const int BudgetMilliseconds = 4000;
 
-    /// <summary>#8570: the time the one-server search's match read may take before the search falls back to the span read: 1 s, so a match read that
-    /// is slow on a store leaves most of the source's budget to the read that does not need it.</summary>
+    /// <summary>#8570: the time the one-server search's match read may take before the search falls back to the span read: 1 s. The match read runs
+    /// while the Query Store source does, on a connection of its own, so its time is not taken from the plan-cache source's budget.</summary>
     public const int MatchBudgetMilliseconds = 1000;
 
     /// <summary>Characters of text returned around the first match.</summary>
@@ -132,9 +132,13 @@ public sealed class DarlingMcpFindQueriesByTextTools
         /// <summary>#8570: the one-server match read's own timeout; <see cref="MatchBudgetMilliseconds"/> unless a test sets it.</summary>
         public int MatchMilliseconds { get; init; } = MatchBudgetMilliseconds;
 
-        /// <summary>#8570 test seam: a <c>SELECT pg_sleep(...)</c> run inside the match read's savepoint, under its timeout, so a test makes the match
+        /// <summary>#8570 test seam: a <c>SELECT pg_sleep(...)</c> run in the match read's transaction, under its timeout, so a test makes the match
         /// read run out deterministically and the search fall back to the span read.</summary>
         public double MatchTestDelaySeconds { get; init; }
+
+        /// <summary>#8570 test seam: called once the match read's timeout is set, just before its statements run, so a test can hold the Query Store
+        /// source until the match read has started and so show the two run together.</summary>
+        public Action? MatchStarting { get; init; }
     }
 
     /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1. The whole text comes back so the judge
@@ -540,43 +544,43 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             var escaped = EscapeLike(text);
             var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
 
-            var queryStore = await RunSourceAsync(
-                postgres, QueryStoreSql, queryStoreBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon,
-                QueryStoreStoppedAdvice(database, (queryStoreTextTracker ?? QueryStoreTextTrigramIndex.SharedTracker).Read()),
-                r => (Database: r.GetString(0), QueryId: r.GetInt64(1), Hash: r.IsDBNull(2) ? null : r.GetString(2), LastSeen: r.GetDateTime(3),
-                    Stored: r.IsDBNull(4) ? null : r.GetString(4)),
-                raw =>
-                {
-                    var (textLength, excerpt) = Shape(raw.Stored, text);
-                    return new
-                    {
-                        database_name = raw.Database,
-                        query_id = raw.QueryId,
-                        query_hash = raw.Hash,
-                        last_seen_at = Utc(raw.LastSeen),
-                        text_length = textLength,
-                        excerpt,
-                    };
-                }, cancellationToken);
-
-            /* #8570: with the plan-cache text index Ready the matched digests are read first and each span reads the server's samples by them.
-               The index state is read only when the option is on, so a store with it off pays nothing for it; a read that fails is not Ready. */
-            var indexTracker = tracker ?? QueryTextTrigramIndexTracker.Shared;
-            var indexOption = indexTracker.Read();
-            var probeWanted = false;
-            if (indexOption.Configured && indexOption.Enabled)
+            /* #8570: with the plan-cache text index Ready the matched digests are read first and each span reads the server's samples by them. The
+               index state and the match read run on a connection of their own while the Query Store source runs, so the match read's time is spent
+               alongside that source and not out of the plan-cache source's budget. The index state is read only when the option is on, so a store
+               with it off pays nothing for it. */
+            using var matchCancel = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var matchAhead = ReadMatchAheadAsync(postgres, tracker ?? QueryTextTrigramIndexTracker.Shared, escaped, planCacheBudget, matchCancel.Token);
+            object queryStore;
+            try
             {
-                try
-                {
-                    await using var healthConnection = await postgres.OpenConnectionAsync(cancellationToken);
-                    var health = await QueryTextTrigramIndex.ReadHealthAsync(healthConnection, indexTracker, cancellationToken);
-                    probeWanted = health.Status == TrigramIndexStatus.Ready;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    probeWanted = false;
-                }
+                queryStore = await RunSourceAsync(
+                    postgres, QueryStoreSql, queryStoreBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon,
+                    QueryStoreStoppedAdvice(database, (queryStoreTextTracker ?? QueryStoreTextTrigramIndex.SharedTracker).Read()),
+                    r => (Database: r.GetString(0), QueryId: r.GetInt64(1), Hash: r.IsDBNull(2) ? null : r.GetString(2), LastSeen: r.GetDateTime(3),
+                        Stored: r.IsDBNull(4) ? null : r.GetString(4)),
+                    raw =>
+                    {
+                        var (textLength, excerpt) = Shape(raw.Stored, text);
+                        return new
+                        {
+                            database_name = raw.Database,
+                            query_id = raw.QueryId,
+                            query_hash = raw.Hash,
+                            last_seen_at = Utc(raw.LastSeen),
+                            text_length = textLength,
+                            excerpt,
+                        };
+                    }, cancellationToken);
             }
+            catch
+            {
+                /* The Query Store source threw, so nothing reads the match read's answer: it is cancelled and waited out before the error goes on. */
+                await matchCancel.CancelAsync();
+                await Task.WhenAny(matchAhead);
+                throw;
+            }
+
+            var (probeWanted, matched) = await matchAhead;
 
             /* The raw window newest span first, one statement per span inside the one transaction and budget (see RawTierSpanCount): the rows
                a span finds are kept whatever happens to the spans after it, and a span already-found statements ran in again does not list them
@@ -585,48 +589,45 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             var spans = RawTierSpans(floor, now);
             var judgedDigests = new List<byte[]>();
             var judgedVerdicts = new List<bool>();
+
+            /* The match read's answer: the probe under the cap, the span read past it or when the match read gave up. */
             int? matchedTexts = null;
             string? sampleRead = null;
             byte[][]? digests = null;
+            if (probeWanted)
+            {
+                if (matched is null || matched.Count > ProbeDigestCap)
+                {
+                    sampleRead = SampleReadPlain;
+                }
+                else
+                {
+                    sampleRead = SampleReadProbe;
+                    matchedTexts = matched.Count;
+                    digests = matched.ToArray();
+                }
+            }
+
             var planCacheOutcome = await RunSourceAsync<PlanCacheHit, object>(
                 postgres, planCacheBudget, limit,
-                async (connection, transaction, step, collected, ct) =>
+                (_, _, step, collected, _) =>
                 {
-                    if (step == 0 && probeWanted)
+                    /* No text matched, so no sample statement runs. */
+                    if (digests is { Length: 0 } || step >= spans.Count || collected.Count > limit)
                     {
-                        /* The match read, in the same budget: the probe under the cap, the span read past it or when the match read gave up. */
-                        var matched = await TryReadMatchedDigestsAsync(connection, transaction, escaped, planCacheBudget, ct);
-                        if (matched is null || matched.Count > ProbeDigestCap)
-                        {
-                            sampleRead = SampleReadPlain;
-                        }
-                        else
-                        {
-                            sampleRead = SampleReadProbe;
-                            matchedTexts = matched.Count;
-                            if (matched.Count == 0)
-                            {
-                                return null;
-                            }
-
-                            digests = matched.ToArray();
-                        }
-                    }
-
-                    if (step >= spans.Count || collected.Count > limit)
-                    {
-                        return null;
+                        return Task.FromResult<SourceStatement?>(null);
                     }
 
                     var span = spans[step];
                     var wanted = limit + 1 - collected.Count;
                     if (digests is { } probed)
                     {
-                        return new SourceStatement(PlanCacheProbeSql, p => BindPlanCacheProbeSpan(p, resolved.ServerId, database, probed, wanted, span, collected));
+                        return Task.FromResult<SourceStatement?>(
+                            new SourceStatement(PlanCacheProbeSql, p => BindPlanCacheProbeSpan(p, resolved.ServerId, database, probed, wanted, span, collected)));
                     }
 
-                    return new SourceStatement(
-                        PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected, judgedDigests, judgedVerdicts));
+                    return Task.FromResult<SourceStatement?>(new SourceStatement(
+                        PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected, judgedDigests, judgedVerdicts)));
                 },
                 StoppedAdvice(database),
                 completedSpans => completedSpans == 0
@@ -1173,8 +1174,8 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             shaped);
     }
 
-    /// <summary>#7849: the digests of the texts the pattern matches, at most <see cref="ProbeDigestCap"/> + 1 of them, in the source's transaction so
-    /// one budget covers this read and the sample read after it.</summary>
+    /// <summary>#7849: the digests of the texts the pattern matches, at most <see cref="ProbeDigestCap"/> + 1 of them, in the caller's transaction: the
+    /// all-servers source's, so one budget covers this read and the sample read after it, or the one-server match read's own.</summary>
     private static async Task<List<byte[]>> ReadMatchedDigestsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string escaped, CancellationToken cancellationToken)
     {
         var digests = new List<byte[]>();
@@ -1190,39 +1191,59 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
         return digests;
     }
 
-    /// <summary>#8570: the one-server search's match read, <see cref="ReadMatchedDigestsAsync"/> in a savepoint under its own timeout (the smaller of
-    /// <see cref="SourceBudget.MatchMilliseconds"/> and the source's budget). Null when the read ran out of that timeout or the server refused it: the
-    /// savepoint is rolled back, which puts the source's timeout back and leaves the transaction usable, and the search takes the span read. A
-    /// caller's cancellation is not caught.</summary>
-    private static async Task<List<byte[]>?> TryReadMatchedDigestsAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, string escaped, SourceBudget budget, CancellationToken cancellationToken)
+    /// <summary>#8570: the one-server search's match read, started before the Query Store source on a connection of its own so the two run together.
+    /// The plan-cache text index state comes first, read only when the option is on. When the index is <c>Ready</c>, <see cref="ReadMatchedDigestsAsync"/>
+    /// runs in a transaction under its own timeout, the smaller of <see cref="SourceBudget.MatchMilliseconds"/> and the source's budget. <c>Probe</c> is
+    /// false when the index is not <c>Ready</c> or its state could not be read, and the search reads as it does with the index off. <c>Matched</c> is
+    /// null when the match read ran out of its timeout or failed, and the search takes the span read. A caller's cancellation is not caught.</summary>
+    private static async Task<(bool Probe, List<byte[]>? Matched)> ReadMatchAheadAsync(
+        NpgsqlDataSource postgres, QueryTextTrigramIndexTracker tracker, string escaped, SourceBudget budget, CancellationToken cancellationToken)
     {
-        const string savepoint = "match";
-        await transaction.SaveAsync(savepoint, cancellationToken);
+        var option = tracker.Read();
+        if (!option.Configured || !option.Enabled)
+        {
+            return (false, null);
+        }
+
         try
         {
-            var timeout = Math.Max(1, Math.Min(budget.MatchMilliseconds, budget.Milliseconds));
-            var setSql = "SET LOCAL statement_timeout = " + timeout.ToString(CultureInfo.InvariantCulture);
-            await using (var set = new NpgsqlCommand(setSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            var health = await QueryTextTrigramIndex.ReadHealthAsync(connection, tracker, cancellationToken);
+            if (health.Status != TrigramIndexStatus.Ready)
             {
-                await set.ExecuteNonQueryAsync(cancellationToken);
+                return (false, null);
             }
 
-            if (budget.MatchTestDelaySeconds > 0)
+            try
             {
-                var delaySql = "SELECT pg_sleep(" + budget.MatchTestDelaySeconds.ToString(CultureInfo.InvariantCulture) + ")";
-                await using var delay = new NpgsqlCommand(delaySql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
-                await delay.ExecuteNonQueryAsync(cancellationToken);
-            }
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                var timeout = Math.Max(1, Math.Min(budget.MatchMilliseconds, budget.Milliseconds));
+                var setSql = "SET LOCAL statement_timeout = " + timeout.ToString(CultureInfo.InvariantCulture);
+                await using (var set = new NpgsqlCommand(setSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+                {
+                    await set.ExecuteNonQueryAsync(cancellationToken);
+                }
 
-            var matched = await ReadMatchedDigestsAsync(connection, transaction, escaped, cancellationToken);
-            await transaction.ReleaseAsync(savepoint, cancellationToken);
-            return matched;
+                budget.MatchStarting?.Invoke();
+                if (budget.MatchTestDelaySeconds > 0)
+                {
+                    var delaySql = "SELECT pg_sleep(" + budget.MatchTestDelaySeconds.ToString(CultureInfo.InvariantCulture) + ")";
+                    await using var delay = new NpgsqlCommand(delaySql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+                    await delay.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                var matched = await ReadMatchedDigestsAsync(connection, transaction, escaped, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return (true, matched);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && !cancellationToken.IsCancellationRequested)
+            {
+                return (true, null);
+            }
         }
-        catch (PostgresException) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (ex is not OperationCanceledException && !cancellationToken.IsCancellationRequested)
         {
-            await transaction.RollbackAsync(savepoint, cancellationToken);
-            return null;
+            return (false, null);
         }
     }
 }
