@@ -36,7 +36,7 @@ public sealed record PersonalTokenSecretRow(PersonalTokenRow Row, byte[] SecretS
 
 public enum PersonalTokenCreateOutcome { Created, NameTaken, AtCap, TooManyRecent }
 
-/// <summary>A list of tokens, newest <see cref="PersonalTokenStore.ListLimit"/> at most, oldest first; <see cref="Truncated"/> when older rows were left out.</summary>
+/// <summary>A list of tokens, <see cref="PersonalTokenStore.ListLimit"/> at most, oldest first; <see cref="Truncated"/> when rows were left out: dead rows first, then the oldest live ones.</summary>
 public sealed record PersonalTokenPage(IReadOnlyList<PersonalTokenRow> Rows, bool Truncated);
 
 /// <summary>
@@ -199,7 +199,7 @@ WHERE t.token_id = v.token_id";
 
     /// <summary>
     /// The tokens of one owner key, or of everyone when <paramref name="ownerKey"/> is null: <see cref="ListLimit"/> rows, live ones first and then
-    /// the newest, handed back oldest first, and whether rows were left out (read with one more row than it answers, #3699). A live token at
+    /// the newest, handed back oldest first, and whether rows were left out (dead rows first, then the oldest live ones) (read with one more row than it answers, #3699). A live token at
     /// <paramref name="now"/> is never the one left out while a dead one is kept. Never selects the hash.
     /// </summary>
     public static async Task<PersonalTokenPage> ListAsync(NpgsqlDataSource owner, string? ownerKey, DateTimeOffset now, CancellationToken ct)

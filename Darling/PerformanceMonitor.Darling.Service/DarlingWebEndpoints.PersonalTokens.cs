@@ -38,8 +38,8 @@ public static partial class DarlingWebEndpoints
     /// is null (the feature is off or cannot be served here), and 503 when the owner connection is not published yet or the store has not been
     /// migrated to the table (<see cref="PersonalTokenStore.IsMissingTable"/>).
     /// <para><c>GET /api/mcp-tokens</c> answers <c>{tokens, truncated, max_lifetime_days, allowed_roles}</c>: the caller's own rows, or with
-    /// <c>?all=1</c> (an admin seat only) every row with its <c>subject</c>; the newest <see cref="PersonalTokenStore.ListLimit"/> at most, with
-    /// <c>truncated</c> true when older rows were left out. <c>POST /api/mcp-tokens</c> with <c>{name, lifetime_days, role}</c> answers 201
+    /// <c>?all=1</c> (an admin seat only) every row with its <c>subject</c>; <see cref="PersonalTokenStore.ListLimit"/> rows at most, live ones first, with
+    /// <c>truncated</c> true when rows were left out (dead rows first, then the oldest live ones). <c>POST /api/mcp-tokens</c> with <c>{name, lifetime_days, role}</c> answers 201
     /// <c>{token, record}</c>, the one place the value ever appears, or 429 <c>too_many_recent</c> once the person has created
     /// <see cref="PersonalTokenStore.RecentCreatesPerSlot"/> times the cap in the last 24 hours. <c>POST /api/mcp-tokens/{id}/revoke</c> answers 204; a token that is absent,
     /// already dead or not the caller's is one 404 answer, so it never shows that an id exists. Each POST needs a JSON content type. After a

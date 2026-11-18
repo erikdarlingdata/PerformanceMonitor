@@ -161,7 +161,7 @@ export function renderMcpTokens(host, me) {
     }
     const table = tokenTable(res.data.tokens, withSubject, (row) => revoke(row, withSubject));
     mount(target, res.data.truncated === true
-      ? [noticeStrip("Only the newest " + res.data.tokens.length + " tokens are shown; older ones are left out."), table]
+      ? [noticeStrip("Only " + res.data.tokens.length + " tokens are shown; expired and revoked ones are left out first, then the oldest active ones."), table]
       : table);
   };
 
