@@ -640,6 +640,23 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         GetQueryFleetSummary(postgres, query_hash, hours_back, as_of, limit, McpResponseBudget.DefaultBytes, cancellationToken);
 
     /// <summary>
+    /// Waits on both source reads. When one read is cancelled (the caller cancelled, or the deadline cut the call) and the
+    /// other faulted, <see cref="Task.WhenAll(Task[])"/> surfaces the fault; this surfaces the cancellation instead, so a
+    /// cut call reaches the caller as a cancellation and not as a tool error.
+    /// </summary>
+    internal static async Task AwaitBothReadsAsync(Task planRead, Task qsRead)
+    {
+        try
+        {
+            await Task.WhenAll(planRead, qsRead);
+        }
+        catch (Exception) when (planRead.IsCanceled || qsRead.IsCanceled)
+        {
+            await (planRead.IsCanceled ? planRead : qsRead);
+        }
+    }
+
+    /// <summary>
     /// get_query_fleet_summary under an explicit <paramref name="responseByteBudget"/> (#8812): the MCP tool passes the shared 32 KB budget
     /// and answers cut to it with <c>budget_truncated</c> and <c>budget_note</c>, entry count and server count following the cut. The web
     /// viewer's <c>/api/read</c> mirror passes none and keeps every entry <c>limit</c> allows.
@@ -682,7 +699,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             var qsStart = windowEnd.AddHours(-qsHours);
             var planRead = ReadPlanCacheSourceAsync(postgres, coverage, tier, hash, start, windowEnd, limit, cancellationToken);
             var qsRead = ReadQueryStoreSourceAsync(postgres, coverage, hash, qsStart, windowEnd, limit, cancellationToken);
-            await Task.WhenAll(planRead, qsRead);
+            await AwaitBothReadsAsync(planRead, qsRead);
             var (planRows, planPairs) = await planRead;
             var (qsRoute, qsRows, qsPairs) = await qsRead;
             var qsCut = hours_back > QueryStoreMaxHours;
