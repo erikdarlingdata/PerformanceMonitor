@@ -772,34 +772,39 @@ LIMIT 1";
                 ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthByServerSql, plan.HoleHours)
                 : FleetCollectionHealthByServerComposedSql)
             : null;
-        await using var command = _dataSource.CreateCommand(composedSql ?? FleetCollectionHealthByServerSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
-        if (plan.Usable)
-        {
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
-            if (plan.HoleHours.Count > 0)
-            {
-                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
-            }
-        }
-
         var byServer = new Dictionary<int, List<CollectorHealthRow>>();
-        await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
         {
-            while (await reader.ReadAsync(CancellationToken.None))
+            /* #8570: the read runs in a short transaction of its own with a larger work_mem (as #5812 does), so a store left at the
+               4 MB default does not pick a sort-based aggregate for the grouping; the scope is disposed after the reader closes. */
+            await using var workMemScope = await CollectionHealthRollupSupport.OpenWorkMemReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
+            await using var command = workMemScope.CreateCommand(composedSql ?? FleetCollectionHealthByServerSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            if (plan.Usable)
             {
-                var serverId = reader.GetInt32(0);
-                if (!byServer.TryGetValue(serverId, out var rows))
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
+                if (plan.HoleHours.Count > 0)
                 {
-                    rows = new List<CollectorHealthRow>();
-                    byServer[serverId] = rows;
+                    command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
                 }
+            }
 
-                var row = MapFleetByServerRow(reader);
-                row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
-                row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
-                rows.Add(row);
+            await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
+            {
+                while (await reader.ReadAsync(CancellationToken.None))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!byServer.TryGetValue(serverId, out var rows))
+                    {
+                        rows = new List<CollectorHealthRow>();
+                        byServer[serverId] = rows;
+                    }
+
+                    var row = MapFleetByServerRow(reader);
+                    row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
+                    row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
+                    rows.Add(row);
+                }
             }
         }
 

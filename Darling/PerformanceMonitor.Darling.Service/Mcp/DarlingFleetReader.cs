@@ -2462,30 +2462,35 @@ AND   {SqlServerCollectedTargetSql}";
         var headEnd = CeilingHour(windowStart);
         var plan = await CollectionHealthRollupPlanAsync(postgres, headEnd, cancellationToken);
         var composedSql = plan.Usable ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthSql, plan.HoleHours) : null;
-        await using var command = postgres.CreateCommand(composedSql ?? FleetCollectionHealthSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddTimestamp(command, windowStart);
-        if (plan.Usable)
-        {
-            AddTimestamp(command, headEnd);
-            if (plan.HoleHours.Count > 0)
-            {
-                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
-            }
-        }
         var rows = new List<(int ServerId, CollectorHealth Health)>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            while (await reader.ReadAsync(cancellationToken))
+            /* #8570: the read runs in a short transaction of its own with a larger work_mem (as #5812 does), so a store left at the
+               4 MB default does not pick a sort-based aggregate for the grouping; the scope is disposed after the reader closes. */
+            await using var workMemScope = await CollectionHealthRollupSupport.OpenWorkMemReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            await using var command = workMemScope.CreateCommand(composedSql ?? FleetCollectionHealthSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddTimestamp(command, windowStart);
+            if (plan.Usable)
             {
-                var serverId = reader.GetInt32(0);
-                if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+                AddTimestamp(command, headEnd);
+                if (plan.HoleHours.Count > 0)
                 {
-                    serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
-                    overridesByServer[serverId] = serverOverrides;
+                    command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
                 }
+            }
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+                    {
+                        serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
+                        overridesByServer[serverId] = serverOverrides;
+                    }
 
-                rows.Add((serverId, MapFleetHealthRow(reader, serverId, serverOverrides)));
+                    rows.Add((serverId, MapFleetHealthRow(reader, serverId, serverOverrides)));
+                }
             }
         }
 

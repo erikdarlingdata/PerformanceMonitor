@@ -39,7 +39,7 @@ public sealed class FleetCollectionHealthRawReadLiveTests
 
     /// <summary>The raw read as it was before #8570: one level, every aggregate over every row of the window. Kept as the
     /// reference the two-level read must equal row for row.</summary>
-    private const string OneLevelRawSql = $@"
+    internal const string OneLevelRawSql = $@"
 SELECT
     server_id,
     collector_name,
@@ -165,7 +165,10 @@ FROM n CROSS JOIN LATERAL generate_series(n.u - INTERVAL '{days - 1} days', n.u,
     private static async Task<SortedDictionary<string, string>> ReadRowsAsync(
         NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, IReadOnlyList<DateTime>? holeHours, CancellationToken ct)
     {
-        await using var command = postgres.CreateCommand(sql);
+        /* Every read here goes through the scope the service and the viewer use (#8570), so the equality below holds with the
+           larger work_mem the production read runs with. */
+        await using var scope = await CollectionHealthRollupSupport.OpenWorkMemReadAsync(postgres, 120, ct);
+        await using var command = scope.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
         if (headEnd is { } h)
         {
@@ -302,5 +305,39 @@ FROM n CROSS JOIN LATERAL generate_series(n.u - INTERVAL '{days - 1} days', n.u,
             var viewerSql = CollectionHealthRollupSupport.ComposeFleetSql(ViewerDataService.FleetCollectionHealthByServerSql, plan.HoleHours);
             AssertSameRows(reference, await ReadRowsAsync(postgres, serviceSql, windowStart, headEnd, plan.HoleHours, ct));
             AssertSameRows(reference, await ReadRowsAsync(postgres, viewerSql, windowStart, headEnd, plan.HoleHours, ct));
+        });
+
+    /// <summary>The read's larger work memory (#8570) holds inside its own transaction only: the statement runs with 64MB,
+    /// and the pooled connection it used reports the server's own value again once the scope is disposed, so no later
+    /// statement on that connection inherits it. The pool is one connection, so the read and the check share it.</summary>
+    [Fact]
+    public Task WorkMemRead_RunsWithTheLargerValue_AndLeavesThePooledConnectionAtTheServersValue_AgainstDevPostgres() =>
+        RunLiveAsync(async (connection, _, _, ct) =>
+        {
+            var builder = new NpgsqlConnectionStringBuilder(connection.ConnectionString) { MaxPoolSize = 1, Pooling = true };
+            await using var pooled = NpgsqlDataSource.Create(builder.ConnectionString);
+
+            async Task<string> ShowWorkMemAsync()
+            {
+                await using var show = pooled.CreateCommand("SHOW work_mem");
+                return (string)(await show.ExecuteScalarAsync(ct))!;
+            }
+
+            var serverValue = await ShowWorkMemAsync();
+            Assert.NotEqual("64MB", serverValue);
+
+            var windowStart = NaiveUtcNow().AddDays(-7).AddMinutes(-23);
+            await using (var scope = await CollectionHealthRollupSupport.OpenWorkMemReadAsync(pooled, 120, ct))
+            {
+                await using var inside = scope.CreateCommand("SHOW work_mem");
+                Assert.Equal("64MB", (string)(await inside.ExecuteScalarAsync(ct))!);
+
+                await using var read = scope.CreateCommand(DarlingFleetReader.FleetCollectionHealthSql);
+                read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+            }
+
+            Assert.Equal(serverValue, await ShowWorkMemAsync());
         });
 }

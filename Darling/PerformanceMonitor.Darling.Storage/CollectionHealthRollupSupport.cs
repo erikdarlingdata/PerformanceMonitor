@@ -67,6 +67,68 @@ public static class CollectionHealthRollupSupport
     public const string PartialFailureNoteMatchSql =
         "error_message LIKE '%" + PartialDatabaseFailureNote.Marker + "%'";
 
+    /// <summary>The work memory the fleet collection-health reads run with (#8570), set with <c>SET LOCAL</c> inside
+    /// <see cref="OpenWorkMemReadAsync"/>'s transaction only. The two-level raw read groups the whole window, and at the
+    /// PostgreSQL default of 4 MB the planner over-counts the groups and picks a sort instead of a hash aggregate, which
+    /// runs two to three times longer than the one-level read it replaced. At 64 MB it picks the hash aggregate. The same
+    /// reasoning and the same value as <c>PgFactCollector.PlanRegressionWorkMemSql</c> (#5812), which lives in an assembly
+    /// the service and the viewer both reach only through this one.</summary>
+    public const string FleetReadWorkMemSql = "SET LOCAL work_mem = '64MB'";
+
+    /// <summary>One short transaction that has run <see cref="FleetReadWorkMemSql"/>, on a connection of its own. Disposing it
+    /// rolls the transaction back, which drops the <c>SET LOCAL</c>, before the connection goes back to the pool, so a pooled
+    /// connection never keeps the larger value.</summary>
+    public sealed class WorkMemReadScope : IAsyncDisposable
+    {
+        private readonly NpgsqlConnection _connection;
+        private readonly NpgsqlTransaction _transaction;
+
+        internal WorkMemReadScope(NpgsqlConnection connection, NpgsqlTransaction transaction)
+        {
+            _connection = connection;
+            _transaction = transaction;
+        }
+
+        /// <summary>A command on the scope's connection and transaction.</summary>
+        public NpgsqlCommand CreateCommand(string sql) => new(sql, _connection, _transaction);
+
+        /// <inheritdoc />
+        public async ValueTask DisposeAsync()
+        {
+            await _transaction.DisposeAsync();
+            await _connection.DisposeAsync();
+        }
+    }
+
+    /// <summary>Opens a connection, begins a transaction and runs <see cref="FleetReadWorkMemSql"/> in it, so the fleet
+    /// collection-health read the caller runs next gets its own work memory (#8570, as #5812 does for the plan regression
+    /// read). The caller disposes the scope after the reader has closed.</summary>
+    public static async Task<WorkMemReadScope> OpenWorkMemReadAsync(
+        NpgsqlDataSource postgres, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        try
+        {
+            var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await using var workMem = new NpgsqlCommand(FleetReadWorkMemSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                await workMem.ExecuteNonQueryAsync(cancellationToken);
+                return new WorkMemReadScope(connection, transaction);
+            }
+            catch
+            {
+                await transaction.DisposeAsync();
+                throw;
+            }
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
     /// <summary>
     /// The fleet collection-health raw read, in two levels (#8570), shared by the service's
     /// <c>DarlingFleetReader.FleetCollectionHealthSql</c> and the viewer's <c>FleetCollectionHealthByServerSql</c> so
