@@ -932,6 +932,9 @@ public sealed class DarlingMcpStoreMetricsTools
                 last_failed_at = health.LastFailedUtc?.ToString("o", CultureInfo.InvariantCulture),
                 next_attempt_at = health.NextAttemptUtc?.ToString("o", CultureInfo.InvariantCulture),
                 operator_statement = health.OperatorStatement,
+                /* The index on the text alone, which this one replaces: it serves the search until this one is valid, then the pass drops it. */
+                replaced_index_name = QueryStoreTextTrigramIndex.ReplacedIndexName,
+                replaced_index_exists = health.ReplacedIndexExists,
                 note = QueryStoreTextTrigramIndex.Note(health),
             };
 

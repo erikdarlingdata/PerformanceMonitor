@@ -59,9 +59,13 @@ public enum TrigramIndexStatus
 /// <param name="SampleIndexValid">Null when the sample index on <c>collect.query_stats</c> does not exist, otherwise its <c>pg_index.indisvalid</c>.</param>
 /// <param name="SampleIndexSizeBytes">The sample index's size over the table and its chunks, null when it does not exist.</param>
 /// <param name="SampleBuildRunning">Whether a backend this login can see is building an index on <c>collect.query_stats</c> or one of its chunks.</param>
+/// <param name="KeyExtensionSchema">#8570, the Query Store text index only: the schema <c>btree_gin</c> is installed in (the operator class of its
+/// server key), null when it is not installed.</param>
+/// <param name="ReplacedIndexExists">#8570, the Query Store text index only: whether the index it replaces, on the text alone, still exists.</param>
 public sealed record TrigramCatalogState(
     bool TableExists, bool? IndexValid, long? IndexSizeBytes, string? ExtensionSchema, bool ExtensionAvailable, bool BuildRunning,
-    bool? SampleIndexValid = null, long? SampleIndexSizeBytes = null, bool SampleBuildRunning = false);
+    bool? SampleIndexValid = null, long? SampleIndexSizeBytes = null, bool SampleBuildRunning = false,
+    string? KeyExtensionSchema = null, bool ReplacedIndexExists = false);
 
 /// <summary>The store health read's answer for the trigram index.</summary>
 public sealed record TrigramIndexHealth(
@@ -83,7 +87,8 @@ public sealed record TrigramIndexHealth(
     bool SampleIndexExists = false,
     bool? SampleIndexValid = null,
     long? SampleIndexSizeBytes = null,
-    string? OptionSource = null);
+    string? OptionSource = null,
+    bool ReplacedIndexExists = false);
 
 /// <summary>
 /// What this process remembers about the trigram index between passes: whether the option is on, whether a build or a drop is
@@ -762,8 +767,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             return TrigramIndexStatus.Unconfigured;
         }
 
-        /* #7849: the sample index is part of the same state. Either index present means there is something to drop. */
-        var exists = state.IndexValid is not null || state.SampleIndexValid is not null;
+        /* #7849: the sample index is part of the same state, and #8570 the index the Query Store text index replaces. Any of them present
+           means there is something to drop. */
+        var exists = state.IndexValid is not null || state.SampleIndexValid is not null || state.ReplacedIndexExists;
         if (!snapshot.Enabled)
         {
             if (!exists)

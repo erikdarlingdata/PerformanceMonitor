@@ -255,13 +255,13 @@ public sealed class DarlingConfig
     public bool QueryTextTrigramIndexResolved => ResolveTrigramIndexOption(QueryTextTrigramIndexStoreValue, QueryTextTrigramIndexEnabled);
 
     /// <summary>
-    /// Whether the service builds a <c>pg_trgm</c> GIN index on the Query Store text (<c>collect.query_store_text.query_sql_text</c>, #8570),
-    /// which <c>find_queries_by_text</c> searches a server's Query Store text through. Default FALSE: on a seeded store of 1,000,000 texts of
-    /// about 300 characters the index is 398 MB (92% of the table), a build takes about 33 seconds and it adds about 0.07 ms to each inserted
-    /// row; the cost grows with the store's text. The liveness touch of <c>last_seen</c> stays a HOT update when the page has room, so it
-    /// writes nothing to the index. When true the service creates the <c>pg_trgm</c> extension if the store login can, then builds the index
-    /// with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never ahead of collection. When false the
-    /// service drops the index if it exists. A failed build is dropped, reported by <c>get_store_metrics</c> (<c>query_store_text_index</c>)
+    /// Whether the service builds a GIN index on the Query Store text keyed by server (<c>collect.query_store_text (server_id,
+    /// query_sql_text)</c>, <c>btree_gin</c> and <c>pg_trgm</c>, #8570), which <c>find_queries_by_text</c> searches a server's Query Store
+    /// text through. Default FALSE: on a seeded store of 1,000,000 texts of about 250 characters the index is 315 MB (86% of the table), a
+    /// build takes about 30 seconds and it adds about 0.02 ms to each inserted row; the cost grows with the store's text. The liveness touch of <c>last_seen</c> stays a HOT update when the page has room, so it
+    /// writes nothing to the index. When true the service creates the <c>pg_trgm</c> and <c>btree_gin</c> extensions if the store login can,
+    /// then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never ahead of
+    /// collection, and then drops the index on the text alone that it replaces. When false the service drops both if they exist. A failed build is dropped, reported by <c>get_store_metrics</c> (<c>query_store_text_index</c>)
     /// and retried with a growing wait. Independent of <see cref="QueryTextTrigramIndexEnabled"/>. #8978: this file value is the fallback.
     /// While <c>config.config_service.query_store_text_trigram_index_enabled</c> is NULL (the default; it is never seeded from the file) the
     /// file governs and an edit takes effect on the next restart; a store value (written by <c>update_service_flags</c>) overrides it and

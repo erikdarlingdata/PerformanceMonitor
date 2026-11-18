@@ -26,7 +26,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #8570 on a real store: once the opt-in trigram index on the Query Store text is ready, the one-server Query Store source of
 /// <c>find_queries_by_text</c> reads it for a pattern that is rare on the server, keeps the key-order walk for a common one, and answers
-/// with the same rows as without the index: the same matches in the same order, the same cap and the same excerpts.
+/// with the same rows as without the index: the same matches in the same order, the same cap and the same excerpts. A store an earlier
+/// build indexed on the text alone answers the same through the index keyed by server, which applies the server inside the index.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test creates its own scratch database through ScratchPostgres and
    works entirely inside it, so it cannot race live collection. The index is built on the test's own tracker and the tool is handed it,
@@ -234,6 +235,27 @@ ORDER BY q, s");
         }
     }
 
+    private static IEnumerable<JsonElement> Nodes(JsonElement node)
+    {
+        yield return node;
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                foreach (var inner in Nodes(child))
+                {
+                    yield return inner;
+                }
+            }
+        }
+    }
+
+    private static double RowsRemovedByFilter(JsonElement plan) =>
+        Nodes(plan).Sum(n => n.TryGetProperty("Rows Removed by Filter", out var removed) ? removed.GetDouble() : 0);
+
+    private static string IndexCondition(JsonElement plan, string index) =>
+        Nodes(plan).First(n => n.TryGetProperty("Index Name", out var name) && name.GetString() == index).GetProperty("Index Cond").GetString()!;
+
     private static long Buffers(JsonElement plan) =>
         plan.GetProperty("Shared Hit Blocks").GetInt64() + plan.GetProperty("Shared Read Blocks").GetInt64();
 
@@ -267,5 +289,56 @@ ORDER BY q, s");
         Assert.DoesNotContain(QueryStoreTextTrigramIndex.IndexBareName, IndexNames(common));
         Assert.Contains("query_store_text_pkey", IndexNames(common));
         Assert.Equal(21.0, common.GetProperty("Actual Rows").GetDouble());
+    }
+
+    /// <summary>A store an earlier build indexed on the text alone, then this build's pass: every case answers with the same rows as through
+    /// the replaced index, and the one-server plan reads the index keyed by server with the server in its condition, so the other servers'
+    /// matches never reach the table (through the replaced index they are read, rechecked and then filtered out).</summary>
+    [Fact]
+    public async Task TheServerKeyedIndex_AnswersAsTheIndexOnTheTextAloneDid_AndAppliesTheServerInsideTheIndex()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, data, admin) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _d = data;
+        await using var _a = admin;
+
+        await QueryStoreTextTrigramIndexLiveTests.CreateReplacedIndexAsync(admin, ct);
+        await DarlingMcpTestData.ExecAsync(admin, ct, "ANALYZE collect.query_store_text");
+        const string replaced = "ix_query_store_text_trgm";
+        var off = new QueryTextTrigramIndexTracker();
+        off.Configure(false);
+        var before = new List<string>();
+        foreach (var (pattern, database, limit) in Cases)
+        {
+            before.Add(await QueryStoreSourceAsync(data, pattern, database, limit, off, ct));
+        }
+
+        var rareBefore = await ExplainAsync(admin, "Col_12 FROM", 20, ct);
+        Assert.Contains(replaced, IndexNames(rareBefore));
+        Assert.DoesNotContain("server_id", IndexCondition(rareBefore, replaced), StringComparison.Ordinal);
+        Assert.True(RowsRemovedByFilter(rareBefore) > 0, "the index on the text alone hands back the other servers' matches for the filter");
+
+        var ready = await BuildAsync(data, admin, ct);
+        await using (var gone = new NpgsqlCommand($"SELECT to_regclass('{QueryStoreTextTrigramIndex.ReplacedIndexName}') IS NULL", admin))
+        {
+            Assert.True((bool)(await gone.ExecuteScalarAsync(ct))!);
+        }
+
+        for (var i = 0; i < Cases.Length; i++)
+        {
+            var (pattern, database, limit) = Cases[i];
+            var after = await QueryStoreSourceAsync(data, pattern, database, limit, ready, ct);
+            AssertSameAnswer(before[i], after, $"'{pattern}' in {database ?? "every database"}, limit {limit}");
+        }
+
+        Assert.Equal(new[] { ("db_1", 1009L), ("db_4", 12L), ("db_6", 2006L) }, Keys(before[1]));
+        foreach (var pattern in new[] { "Col_12 FROM", "zz_no_such_table_zz" })
+        {
+            var plan = await ExplainAsync(admin, pattern, 20, ct);
+            Assert.Contains(QueryStoreTextTrigramIndex.IndexBareName, IndexNames(plan));
+            Assert.Contains("server_id", IndexCondition(plan, QueryStoreTextTrigramIndex.IndexBareName), StringComparison.Ordinal);
+            Assert.Equal(0.0, RowsRemovedByFilter(plan));
+        }
     }
 }

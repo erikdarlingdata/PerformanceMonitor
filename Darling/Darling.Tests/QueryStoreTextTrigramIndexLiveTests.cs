@@ -19,10 +19,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8570: the opt-in trigram index on the Query Store text on a real store: with the option off nothing is built, with it on exactly one
-/// build happens and the next pass changes nothing, turning the option off drops the index, an INVALID leftover is dropped and rebuilt, a
-/// failed build is reported and waits before its retry, a login that cannot create <c>pg_trgm</c> is reported with the statement an
-/// operator runs and is not asked again, the plan-cache index's option neither builds nor drops this index, and the health read names each
-/// state.
+/// build happens, keyed by server, and the next pass changes nothing, turning the option off drops the index and the one on the text alone
+/// it replaces, the replaced one is dropped once this one is valid and kept while a login cannot create <c>btree_gin</c>, an INVALID
+/// leftover is dropped and rebuilt, a failed build is reported and waits before its retry, a login that cannot create the extensions is
+/// reported with the statement an operator runs and is not asked again, the plan-cache index's option neither builds nor drops this index,
+/// and the health read names each state.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its own
    database through ScratchPostgres and works entirely inside it, so it cannot race live collection. Every test uses its own tracker, never
@@ -55,6 +56,16 @@ public sealed class QueryStoreTextTrigramIndexLiveTests
               SELECT 1 + i % 2, 'db_' || (i % 4), i, 'SELECT * FROM dbo.Orders_' || i || ' WHERE OrderId = @p', '0x' || i, timezone('UTC', now())
               FROM generate_series(1, 3000) AS i", ct);
         Assert.Equal(3000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_text", ct));
+    }
+
+    /// <summary>The index earlier builds made for this option, on the text alone, as they made it. Superuser only.</summary>
+    internal static async Task CreateReplacedIndexAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_trgm", ct);
+        var schema = (string)(await ScalarAsync(
+            connection, "SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'", ct))!;
+        await ExecAsync(connection, $"CREATE INDEX ix_query_store_text_trgm ON collect.query_store_text USING gin (query_sql_text \"{schema}\".gin_trgm_ops)", ct);
+        Assert.True(await ExistsAsync(connection, QueryStoreTextTrigramIndex.ReplacedIndexName, ct));
     }
 
     private static async Task<bool> ExistsAsync(NpgsqlConnection connection, string index, CancellationToken ct) =>
@@ -129,9 +140,15 @@ public sealed class QueryStoreTextTrigramIndexLiveTests
         Assert.True(await ExistsAsync(admin, ct));
         Assert.True(await ValidAsync(admin, ct));
         Assert.Equal(1, tracker.BuildsStarted);
+        /* The server is the first key (btree_gin's int4_ops), the text the second. */
         Assert.Equal(
-            "gin_trgm_ops",
-            await ScalarAsync(admin, $"SELECT opc.opcname FROM pg_index i JOIN pg_opclass opc ON opc.oid = i.indclass[0] WHERE i.indexrelid = '{QueryStoreTextTrigramIndex.IndexName}'::regclass", ct));
+            "server_id int4_ops, query_sql_text gin_trgm_ops",
+            await ScalarAsync(admin, $@"SELECT string_agg(a.attname || ' ' || opc.opcname, ', ' ORDER BY k.n)
+                FROM pg_index AS i
+                CROSS JOIN LATERAL unnest(i.indkey::int2[], i.indclass::oid[]) WITH ORDINALITY AS k (attnum, opclass, n)
+                JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                JOIN pg_opclass AS opc ON opc.oid = k.opclass
+                WHERE i.indexrelid = '{QueryStoreTextTrigramIndex.IndexName}'::regclass", ct));
         var oid = await OidAsync(admin, ct);
         var built = await HealthAsync(data, tracker, ct);
         Assert.Equal(TrigramIndexStatus.Ready, built.Status);
@@ -174,6 +191,95 @@ public sealed class QueryStoreTextTrigramIndexLiveTests
         Assert.False(await ExistsAsync(admin, ct));
         Assert.Equal(TrigramIndexStatus.Off, (await HealthAsync(data, off, ct)).Status);
         Assert.True(await PassAsync(data, false, off, Now.AddHours(3), ct));
+    }
+
+    /// <summary>Point by point: the option off drops this index and the one on the text alone it replaces, each on its own, and a store
+    /// holding only the replaced one (an earlier build's) is DropPending until the pass drops it.</summary>
+    [Fact]
+    public async Task TurningTheOptionOff_DropsTheReplacedIndexToo()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+        await admin.OpenAsync(ct);
+        await SeedAsync(admin, ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tracker = new QueryTextTrigramIndexTracker();
+        tracker.Configure(true);
+        await PassAsync(data, true, tracker, Now, ct);
+        Assert.True(await ValidAsync(admin, ct));
+
+        /* Both names at once: an earlier build ran with the option on after this one built its index. */
+        await CreateReplacedIndexAsync(admin, ct);
+        var off = new QueryTextTrigramIndexTracker();
+        off.Configure(false);
+        var both = await HealthAsync(data, off, ct);
+        Assert.Equal(TrigramIndexStatus.DropPending, both.Status);
+        Assert.True(both.ReplacedIndexExists);
+
+        Assert.False(await PassAsync(data, false, off, Now.AddHours(1), ct));
+
+        Assert.False(await ExistsAsync(admin, ct));
+        Assert.False(await ExistsAsync(admin, QueryStoreTextTrigramIndex.ReplacedIndexName, ct));
+        Assert.Equal(TrigramIndexStatus.Off, (await HealthAsync(data, off, ct)).Status);
+
+        /* Only the replaced one: a store an earlier build indexed, with the option now off. */
+        await CreateReplacedIndexAsync(admin, ct);
+        var only = await HealthAsync(data, off, ct);
+        Assert.Equal(TrigramIndexStatus.DropPending, only.Status);
+        Assert.Null(only.Valid);
+        Assert.True(only.ReplacedIndexExists);
+
+        Assert.False(await PassAsync(data, false, off, Now.AddHours(2), ct));
+
+        Assert.False(await ExistsAsync(admin, QueryStoreTextTrigramIndex.ReplacedIndexName, ct));
+        Assert.Equal(TrigramIndexStatus.Off, (await HealthAsync(data, off, ct)).Status);
+        Assert.True(await PassAsync(data, false, off, Now.AddHours(3), ct));
+        Assert.Equal(0, off.BuildsStarted);
+    }
+
+    /// <summary>A store an earlier build indexed on the text alone: the replaced index serves until this one is valid, and the pass that
+    /// builds this one drops it. One build, and the next pass changes nothing.</summary>
+    [Fact]
+    public async Task TheIndexOnTheTextAlone_IsDroppedOnceThisOneIsValid()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+        await admin.OpenAsync(ct);
+        await SeedAsync(admin, ct);
+        await CreateReplacedIndexAsync(admin, ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tracker = new QueryTextTrigramIndexTracker();
+        tracker.Configure(true);
+
+        var before = await HealthAsync(data, tracker, ct);
+        Assert.Equal(TrigramIndexStatus.Pending, before.Status);
+        Assert.Null(before.Valid);
+        Assert.True(before.ReplacedIndexExists);
+        Assert.Contains(QueryStoreTextTrigramIndex.ReplacedIndexName, QueryStoreTextTrigramIndex.Note(before), StringComparison.Ordinal);
+
+        await PassAsync(data, true, tracker, Now, ct);
+
+        Assert.True(await ValidAsync(admin, ct));
+        Assert.False(await ExistsAsync(admin, QueryStoreTextTrigramIndex.ReplacedIndexName, ct));
+        Assert.Equal(1, tracker.BuildsStarted);
+        var ready = await HealthAsync(data, tracker, ct);
+        Assert.Equal(TrigramIndexStatus.Ready, ready.Status);
+        Assert.False(ready.ReplacedIndexExists);
+        Assert.DoesNotContain(QueryStoreTextTrigramIndex.ReplacedIndexName, QueryStoreTextTrigramIndex.Note(ready), StringComparison.Ordinal);
+        var oid = await OidAsync(admin, ct);
+
+        await PassAsync(data, true, tracker, Now.AddHours(1), ct);
+
+        Assert.Equal(1, tracker.BuildsStarted);
+        Assert.Equal(oid, await OidAsync(admin, ct));
     }
 
     [Fact]
@@ -286,7 +392,8 @@ public sealed class QueryStoreTextTrigramIndexLiveTests
         await admin.OpenAsync(ct);
         await SeedAsync(admin, ct);
         await ExecAsync(admin, "DROP EXTENSION IF EXISTS pg_trgm", ct);
-        Assert.Equal(0L, await ScalarAsync(admin, "SELECT count(*) FROM pg_extension WHERE extname = 'pg_trgm'", ct));
+        await ExecAsync(admin, "DROP EXTENSION IF EXISTS btree_gin", ct);
+        Assert.Equal(0L, await ScalarAsync(admin, "SELECT count(*) FROM pg_extension WHERE extname IN ('pg_trgm', 'btree_gin')", ct));
         await ExecAsync(admin, $"CREATE ROLE {role} LOGIN PASSWORD '{password}'", ct);
         await ExecAsync(admin, $"GRANT USAGE ON SCHEMA collect TO {role}", ct);
 
@@ -303,14 +410,14 @@ public sealed class QueryStoreTextTrigramIndexLiveTests
         Assert.False(await ExistsAsync(admin, ct));
         var waiting = await HealthAsync(limitedData, tracker, ct);
         Assert.Equal(TrigramIndexStatus.WaitingOnExtension, waiting.Status);
-        Assert.Equal(QueryTextTrigramIndex.OperatorStatement, waiting.OperatorStatement);
+        Assert.Equal(QueryStoreTextTrigramIndex.OperatorStatement, waiting.OperatorStatement);
         Assert.True(waiting.ExtensionAvailable);
         Assert.False(waiting.ExtensionInstalled);
         Assert.False(string.IsNullOrEmpty(waiting.LastError));
         Assert.Contains("operator_statement", QueryStoreTextTrigramIndex.Note(waiting), StringComparison.Ordinal);
 
-        /* An operator creates the extension: the next pass builds, and the wait is over. */
-        await ExecAsync(admin, QueryTextTrigramIndex.OperatorStatement, ct);
+        /* An operator creates the extensions: the next pass builds, and the wait is over. */
+        await ExecAsync(admin, QueryStoreTextTrigramIndex.OperatorStatement, ct);
         await PassAsync(data, true, tracker, Now.AddHours(2), ct);
 
         Assert.Equal(1, tracker.BuildsStarted);
@@ -318,6 +425,75 @@ public sealed class QueryStoreTextTrigramIndexLiveTests
         var ready = await HealthAsync(data, tracker, ct);
         Assert.Equal(TrigramIndexStatus.Ready, ready.Status);
         Assert.Null(ready.OperatorStatement);
+    }
+
+    /// <summary>pg_trgm is there (an earlier build used it) and the login cannot create btree_gin: the store reports it is waiting on the
+    /// extension with the statement to run, keeps the index on the text alone serving, and is not asked again; once an operator creates
+    /// btree_gin the next pass builds this index and drops the replaced one.</summary>
+    [Fact]
+    public async Task ALoginThatCannotCreateBtreeGin_KeepsTheIndexOnTheTextAlone()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+
+        var role = "qstrgm_nokey_" + Guid.NewGuid().ToString("N")[..8];
+        const string password = "Nokey-8570-pw";
+        var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        try
+        {
+            await RunWithoutBtreeGinAsync(scratch, role, password, ct);
+        }
+        finally
+        {
+            await scratch.DisposeAsync();
+            await using var cluster = new NpgsqlConnection(baseCs);
+            await cluster.OpenAsync(CancellationToken.None);
+            await ExecAsync(cluster, $"DROP ROLE IF EXISTS {role}", CancellationToken.None);
+        }
+    }
+
+    private static async Task RunWithoutBtreeGinAsync(ScratchPostgres scratch, string role, string password, CancellationToken ct)
+    {
+        await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+        await admin.OpenAsync(ct);
+        await SeedAsync(admin, ct);
+        await CreateReplacedIndexAsync(admin, ct);
+        await ExecAsync(admin, "DROP EXTENSION IF EXISTS btree_gin", ct);
+        Assert.Equal(0L, await ScalarAsync(admin, "SELECT count(*) FROM pg_extension WHERE extname = 'btree_gin'", ct));
+        await ExecAsync(admin, $"CREATE ROLE {role} LOGIN PASSWORD '{password}'", ct);
+        await ExecAsync(admin, $"GRANT USAGE ON SCHEMA collect TO {role}", ct);
+
+        var limited = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = password };
+        await using var limitedData = NpgsqlDataSource.Create(limited.ConnectionString);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tracker = new QueryTextTrigramIndexTracker();
+        tracker.Configure(true);
+
+        await PassAsync(limitedData, true, tracker, Now, ct);
+        await PassAsync(limitedData, true, tracker, Now.AddHours(1), ct);
+
+        Assert.Equal(0, tracker.BuildsStarted);
+        Assert.False(await ExistsAsync(admin, ct));
+        Assert.True(await ExistsAsync(admin, QueryStoreTextTrigramIndex.ReplacedIndexName, ct));
+        var waiting = await HealthAsync(limitedData, tracker, ct);
+        Assert.Equal(TrigramIndexStatus.WaitingOnExtension, waiting.Status);
+        Assert.Equal(QueryStoreTextTrigramIndex.OperatorStatement, waiting.OperatorStatement);
+        Assert.False(waiting.ExtensionInstalled);
+        Assert.True(waiting.ExtensionAvailable);
+        Assert.True(waiting.ReplacedIndexExists);
+        Assert.False(string.IsNullOrEmpty(waiting.LastError));
+        var note = QueryStoreTextTrigramIndex.Note(waiting);
+        Assert.Contains("btree_gin", note, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreTextTrigramIndex.ReplacedIndexName, note, StringComparison.Ordinal);
+
+        await ExecAsync(admin, "CREATE EXTENSION btree_gin", ct);
+        await PassAsync(data, true, tracker, Now.AddHours(2), ct);
+
+        Assert.Equal(1, tracker.BuildsStarted);
+        Assert.True(await ValidAsync(admin, ct));
+        Assert.False(await ExistsAsync(admin, QueryStoreTextTrigramIndex.ReplacedIndexName, ct));
+        Assert.Equal(TrigramIndexStatus.Ready, (await HealthAsync(data, tracker, ct)).Status);
     }
 
     /// <summary>The two trigram options are independent: each pass builds and drops only its own index, and each tracker counts only its

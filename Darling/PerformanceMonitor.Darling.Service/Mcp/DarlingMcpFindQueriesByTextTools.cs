@@ -41,11 +41,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// 0.69 s. Each source's statement runs in its own transaction under <c>SET LOCAL statement_timeout</c> (<see cref="BudgetMilliseconds"/>),
 /// so the read stays under about ten seconds; a source that runs out is reported <c>stopped</c> and the other source is unaffected.</para>
 ///
-/// <para><b>#8570: the Query Store source on an index.</b> The opt-in trigram index on <c>query_store_text.query_sql_text</c>
+/// <para><b>#8570: the Query Store source on an index.</b> The opt-in trigram index on <c>query_store_text (server_id, query_sql_text)</c>
 /// (<see cref="QueryStoreTextTrigramIndex"/>, option <c>queryStoreTextTrigramIndexEnabled</c>) serves <see cref="QueryStoreSql"/> as it is
-/// written: the planner reads a rare pattern's matches through the index and filters them to the server (a no-match search of one server of
-/// a seeded 1,000,000 row store read 47 buffers in 0.3 ms, against 11,325 buffers in 52 ms through the primary key), and keeps the
-/// primary-key walk for a common pattern, which stops at the row cap. The statement, its order, its cap and its excerpt are the same with or
+/// written: the planner reads the server's matches through the index, with the server applied inside it beside the pattern's trigrams, so
+/// only that server's candidates are rechecked (a no-match search of one server of a seeded 1,000,000 row store read 340 buffers in 0.7 ms,
+/// against 1,301 buffers in 34 ms through the primary key), and keeps the primary-key walk for a pattern most of the server's texts
+/// contain, which stops at the row cap. The statement, its order, its cap and its excerpt are the same with or
 /// without the index, so the rows are too; an index that is building or INVALID is never planned. The budget stays, for a store whose
 /// index is off or not yet built.</para>
 ///
