@@ -267,7 +267,7 @@ public sealed class PlanDigestCacheTests
     public void TheRunnerTimesTheFetchLoop_AndStampsOnlyThroughTheOneSeam()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
-        var body = source[source.IndexOf("private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsPlansAsync", StringComparison.Ordinal)..];
+        var body = source[source.IndexOf("> FetchDeferredQueryStatsPlansAsync(", StringComparison.Ordinal)..];
         body = body[..body.IndexOf("internal static void StampPlanFetch", StringComparison.Ordinal)];
         Assert.Contains("Stopwatch.StartNew()", body, StringComparison.Ordinal);
         Assert.Equal(2, Count(body, "StampPlanFetch("));

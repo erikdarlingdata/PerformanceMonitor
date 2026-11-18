@@ -412,6 +412,12 @@ public sealed partial class DarlingCollectorRunner
        the store, because a probe costs more than the render it would save (#2831). */
     private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanKey>> _queryStatsPlanCaches = new();
 
+    /* #8994: the plan digest this host committed for each statement shape (QueryStatsPlanShapeKey), one cache per server
+       and per service lifetime, settled, evicted and aged out with _queryStatsPlanCaches. A row whose identity misses but
+       whose shape hits links to the stored plan, so literal-only variants of an ad hoc statement store one plan, not one
+       each. */
+    private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanShapeKey>> _queryStatsShapeCaches = new();
+
     /* #7419: the text digests of statements whose text the store already holds, by the same plan identity, one cache per
        server for the service's lifetime (a restart starts empty and each server reads its kept rows' texts once more).
        Aged out at QueryStatsPlanCacheMaxAge like the plan cache. */
