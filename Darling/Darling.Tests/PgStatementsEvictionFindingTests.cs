@@ -87,6 +87,33 @@ public sealed class PgStatementsEvictionFindingTests
         Assert.Null(block.RemediationTsql);
     }
 
+    [Theory]
+    [InlineData(5000L, "for example to 10,000")]
+    [InlineData(10000L, "for example to 20,000")]
+    public void Remediation_ExampleIsAboveTheRecordedMax(long max, string example)
+    {
+        var fact = new Fact { Key = PgTargetFactKeys.ConfigStatStatementsEviction, Value = 3, Source = PgTargetSources.ConfigSource };
+        fact.Metadata[EvictionFinding.MaxEntriesKey] = max;
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigStatStatementsEviction,
+            new Dictionary<string, Fact> { [fact.Key] = fact });
+
+        Assert.NotNull(block);
+        Assert.Contains(example, block!.Remediation);
+        Assert.DoesNotContain($"to {max.ToString("#,0", System.Globalization.CultureInfo.InvariantCulture)})", block.Remediation);
+    }
+
+    [Fact]
+    public void Remediation_OmitsTheExample_WhenTheMaxIsNotRecorded()
+    {
+        var fact = new Fact { Key = PgTargetFactKeys.ConfigStatStatementsEviction, Value = 3, Source = PgTargetSources.ConfigSource };
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigStatStatementsEviction,
+            new Dictionary<string, Fact> { [fact.Key] = fact });
+
+        Assert.NotNull(block);
+        Assert.Contains("pg_stat_statements.max is not recorded", block!.Headline);
+        Assert.DoesNotContain("for example", block.Remediation);
+    }
+
     [Fact]
     public void Band_IsTheAdvisoryBase_AndTheKeyIsAdvisoryRootedAndNamed()
     {
