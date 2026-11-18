@@ -540,7 +540,11 @@ OPTION(RECOMPILE);";
             {
                 pending[pair.Key] = string.Empty;
             }
+
+            StageText(context, DatabaseProtectionErrorLogState.UnparsedKey, string.Empty);
         }
+
+        var unparsed = DatabaseProtectionErrorLogState.RememberedUnparsed(state, loaded.Reset);
 
         if (StagesMarkers(plan))
         {
@@ -560,6 +564,7 @@ OPTION(RECOMPILE);";
                 ErrorLogMessage = ErrorLogDidNotComplete,
                 ErrorLogBackfillComplete = backfillComplete,
                 ErrorLogSkippedArchives = skippedText,
+                ErrorLogUnparsedLines = unparsed,
                 ErrorLogCheckDbTime = check?.TimeUtc,
                 ErrorLogCheckDbOptions = check?.Options,
                 ErrorLogCheckDbErrors = check?.Errors,
@@ -583,13 +588,17 @@ OPTION(RECOMPILE);";
 
     /* One log is read per loop pass, each inside its own TRY/CATCH, so an archive that errors (or a refused current log) leaves the others
        readable and is reported in the first result set. The archive list is parsed with CHARINDEX rather than STRING_SPLIT, which needs
-       database compatibility level 130 and master may be lower. sp_readerrorlog filters on its two search strings in the server, so only
-       the CHECKDB lines come back.
+       database compatibility level 130 and master may be lower. sp_readerrorlog filters on its search string in the server, so only the
+       CHECKDB lines come back. #8865: the one search string is the command, which the instance never translates. A second string on the
+       English " executed by " would drop every completion line of an instance whose error log is in another language, and those lines
+       must come back to be counted as unparsed.
        #8865: the lines are not matched to databases here. Matching every database against every line cost databases x lines (45 s for
-       2,000 databases and 56,000 lines, most of the 60 s budget). The server instead keeps the newest line per head (the text before
-       " executed by ": the database and the options, binary collation), which is at most a few lines per database however many days the
-       logs hold, and the collector matches those to its rows by name. A line of message 5235 ("... terminated abnormally due to error
-       state N") has the same head as the good line it would shadow, so it is dropped before the reduction. */
+       2,000 databases and 56,000 lines, most of the 60 s budget). The server instead keeps the newest line per head, which is at most a
+       few lines per database however many days the logs hold, and the collector matches those to its rows by name. The head (binary
+       collation) is the text before " executed by " on an English line: the database and the options. A line without it (another
+       language) has no marker to cut at, so its head is the text up to the first ")": the database, or a shorter part of a name that holds
+       ")", which only merges such lines further. A line of message 5235 ("... terminated abnormally due to error state N") has the same
+       head as the good line it would shadow, so it is dropped before the reduction. */
     private const string SupplementalQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 5000;
@@ -646,7 +655,7 @@ BEGIN
             process_info,
             text
         )
-        EXECUTE sys.sp_readerrorlog @archive, 1, N'DBCC CHECKDB', N'executed by';
+        EXECUTE sys.sp_readerrorlog @archive, 1, N'DBCC CHECKDB';
 
         INSERT
             @lines
@@ -714,7 +723,15 @@ FROM
                     CONVERT
                     (
                         nvarchar(1000),
-                        LEFT(l.text, ISNULL(NULLIF(CHARINDEX(N' executed by ', l.text), 0), 1000))
+                        LEFT
+                        (
+                            l.text,
+                            ISNULL
+                            (
+                                NULLIF(CHARINDEX(N' executed by ', l.text), 0),
+                                ISNULL(NULLIF(CHARINDEX(N')', l.text), 0), 1000)
+                            )
+                        )
                     ) COLLATE Latin1_General_100_BIN2
                 ORDER BY
                     l.log_date DESC
@@ -782,6 +799,7 @@ OPTION(RECOMPILE);";
            about one database, the longest name it can be read as. */
         var names = new HashSet<string>(rows.Select(r => r.DatabaseName), StringComparer.Ordinal);
         var newest = new Dictionary<string, (DateTime Time, string Text)>(StringComparer.Ordinal);
+        var unreadable = 0;
         if (await reader.NextResultAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -794,7 +812,15 @@ OPTION(RECOMPILE);";
                 var time = reader.GetDateTime(0);
                 var text = reader.GetString(1);
                 var name = CheckDbErrorLogLine.DatabaseName(text, names);
-                if (name is not null && (!newest.TryGetValue(name, out var held) || time > held.Time))
+                if (name is null)
+                {
+                    /* #8865: a completion line in another language names no database this build can find, and is counted, not dropped. */
+                    if (CheckDbErrorLogLine.IsUnreadableCompletion(text))
+                    {
+                        unreadable++;
+                    }
+                }
+                else if (!newest.TryGetValue(name, out var held) || time > held.Time)
                 {
                     newest[name] = (time, text);
                 }
@@ -802,7 +828,7 @@ OPTION(RECOMPILE);";
         }
 
         var seen = new Dictionary<string, DatabaseProtectionErrorLogState.StoredCheck>(StringComparer.Ordinal);
-        var unparsed = 0;
+        var unparsed = unreadable;
         foreach (var (name, line) in newest)
         {
             if (CheckDbErrorLogLine.TryParse(line.Text, name, out var options, out var errors))
@@ -817,6 +843,15 @@ OPTION(RECOMPILE);";
 
         var state = context.State;
         var reset = plan.Before.Reset;
+
+        /* #8865: this cycle's count when it found unreadable lines; otherwise the remembered one, until a parsed line with none unreadable
+           shows the log is readable after all. */
+        if (unparsed == 0 && seen.Count == 0)
+        {
+            unparsed = DatabaseProtectionErrorLogState.RememberedUnparsed(state, reset);
+        }
+
+        Overwrite(context, DatabaseProtectionErrorLogState.UnparsedKey, unparsed > 0 ? unparsed.ToString(CultureInfo.InvariantCulture) : string.Empty);
 
         /* #8865: archives are identified by a minute-precision date, so a date counts as read only when every archive carrying it read fine. */
         var readOk = DatabaseProtectionErrorLogState.DatesReadWhole(plan, archive => status.TryGetValue(archive, out var s) && s.Ok);

@@ -750,7 +750,50 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.All(rows, r => Assert.Equal(1, r.ErrorLogUnparsedLines));
         Assert.Null(rows[0].ErrorLogCheckDbTime);
         Assert.Equal(Checked.AddDays(-1), rows[1].ErrorLogCheckDbTime);
-        Assert.Equal(new[] { DatabaseProtectionErrorLogState.CheckKeyPrefix + "B" }, context.PendingState.Keys.ToArray());
+        Assert.Equal(new[] { DatabaseProtectionErrorLogState.CheckKeyPrefix + "B", DatabaseProtectionErrorLogState.UnparsedKey }, context.PendingState.Keys.Order(StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task ALineInAnotherLanguage_IsCountedUnparsed_AndTheCountHoldsUntilALineParses()
+    {
+        /* #8865: on an instance whose error log is not English the 8957 line has no "executed by", so before the fix the server never
+           returned it and the count stayed 0. The line still starts with the command. An English line about a database this collector
+           does not list is not ours and is not counted. */
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log, role: "PRIMARY");
+        var state = SettledState();
+        var context = ContextWith(state);
+        var rows = await ReadWithAsync(context, table, Logs(1));
+        var lines = LineShape();
+        lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB (A) WITH physical_only wurde von sa ausgeführt und hat 0 Fehler gefunden und 0 Fehler repariert.");
+        lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB (Ventes) a été exécuté par sa et a trouvé 0 erreurs et réparé 0 erreurs.");
+        lines.Rows.Add(Checked.AddDays(-1), CheckLine("NotListed"));
+
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+
+        Assert.Equal(2, rows[0].ErrorLogUnparsedLines);
+        Assert.Null(rows[0].ErrorLogCheckDbTime);
+
+        /* The log rolls over and the next cycles read no CHECKDB line: the instance still writes lines this build cannot read, so the
+           count is remembered rather than dropping to 0 (which would read every AG database as never checked). */
+        state = Carry(context, state);
+        context = ContextWith(state);
+        rows = await ReadWithAsync(context, table, Logs(1));
+        Assert.Equal(2, rows[0].ErrorLogUnparsedLines);
+        await ApplyAsync(context, rows, Status((0, true)), LineShape());
+        Assert.Equal(2, rows[0].ErrorLogUnparsedLines);
+        Assert.Empty(context.PendingState);
+
+        /* A cycle that parses a line and finds none unreadable clears it. */
+        state = Carry(context, state);
+        context = ContextWith(state);
+        rows = await ReadWithAsync(context, table, Logs(1));
+        lines = LineShape();
+        lines.Rows.Add(Checked, CheckLine("A"));
+        await ApplyAsync(context, rows, Status((0, true)), lines);
+        Assert.Equal(0, rows[0].ErrorLogUnparsedLines);
+        Assert.Equal(Checked, rows[0].ErrorLogCheckDbTime);
+        Assert.Equal(string.Empty, Carry(context, state).GetValueOrDefault(DatabaseProtectionErrorLogState.UnparsedKey, string.Empty));
     }
 
     [Fact]
@@ -1427,13 +1470,17 @@ INSERT #backupset VALUES
             await ExecuteAsync(cs!, $"CREATE DATABASE [{NoIndexDatabase}]; CREATE DATABASE [{AbnormalDatabase}];", ct);
             await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{NoIndexDatabase}', NOINDEX) WITH NO_INFOMSGS;", ct);
             await ExecuteAsync(cs!, $"DBCC CHECKDB (N'{AbnormalDatabase}') WITH NO_INFOMSGS;", ct);
+
+            /* The unparsed count is server-wide and the instance's logs may hold lines other tests planted, so the abnormal end is
+               measured against the count of the same read before it is planted. */
+            await using var connection = new SqlConnection(cs);
+            await connection.OpenAsync(ct);
+            var (before, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
             await ExecuteAsync(
                 cs!,
                 $"EXECUTE master.dbo.xp_logevent 60000, N'DBCC CHECKDB ({AbnormalDatabase}) WITH no_infomsgs executed by sa terminated abnormally due to error state 5. Elapsed time: 0 hours 0 minutes 0 seconds.', informational;",
                 ct);
 
-            await using var connection = new SqlConnection(cs);
-            await connection.OpenAsync(ct);
             var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
 
             var noIndex = rows.Single(r => r.DatabaseName == NoIndexDatabase);
@@ -1443,12 +1490,51 @@ INSERT #backupset VALUES
             var abnormal = rows.Single(r => r.DatabaseName == AbnormalDatabase);
             Assert.NotNull(abnormal.ErrorLogCheckDbTime);
             Assert.Equal(0, abnormal.ErrorLogCheckDbErrors);
-            Assert.Equal(0, abnormal.ErrorLogUnparsedLines);
+            Assert.Equal(before.Single(r => r.DatabaseName == AbnormalDatabase).ErrorLogUnparsedLines, abnormal.ErrorLogUnparsedLines);
         }
         finally
         {
             await DropDatabaseAsync(cs!, NoIndexDatabase, ct);
             await DropDatabaseAsync(cs!, AbnormalDatabase, ct);
+        }
+    }
+
+    /// <summary>
+    /// #8865: on an instance whose error log is not in English the 8957 line has no " executed by ", and a read that also searched for those
+    /// words never returned it, so nothing was counted. The line (planted with xp_logevent in the shape German writes) must come back and be
+    /// counted as unparsed. The log is cycled afterwards so the line leaves the current log; the count is server-wide, so a test that
+    /// counts unparsed lines compares with a cycle of its own taken before it plants anything.
+    /// </summary>
+    [Fact]
+    public async Task ACheckDbLineInAnotherLanguage_ComesBack_AndIsCountedUnparsed()
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
+        var ct = TestContext.Current.CancellationToken;
+        var major = await MajorVersionAsync(cs!, ct);
+        const string Database = "pm_8865_localized";
+
+        try
+        {
+            await ExecuteAsync(cs!, $"CREATE DATABASE [{Database}];", ct);
+            await ExecuteAsync(
+                cs!,
+                $"EXECUTE master.dbo.xp_logevent 60000, N'DBCC CHECKDB ({Database}) wurde von sa ausgeführt und hat 0 Fehler gefunden und 0 Fehler repariert. Verstrichene Zeit: 0 Stunden 0 Minuten 0 Sekunden.', informational;",
+                ct);
+
+            await using var connection = new SqlConnection(cs);
+            await connection.OpenAsync(ct);
+            var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+
+            var row = rows.Single(r => r.DatabaseName == Database);
+            Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, row.ErrorLogState);
+            Assert.True(row.ErrorLogUnparsedLines >= 1);
+            Assert.Null(row.ErrorLogCheckDbTime);
+        }
+        finally
+        {
+            await ExecuteAsync(cs!, "EXECUTE sys.sp_cycle_errorlog;", ct);
+            await DropDatabaseAsync(cs!, Database, ct);
         }
     }
 

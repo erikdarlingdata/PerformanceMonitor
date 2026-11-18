@@ -77,7 +77,8 @@ public sealed record DatabaseProtectionOverdue(string Kind, string Database, str
 /// a platform-managed target shows the age under the platform's word and is never overdue, and a native-only target does the same for its two backup facts while its CHECKDB is judged as on SQL Server (#6902); a CHECKDB or backup that never
 /// happened is overdue unless the database is newer than the threshold (<c>new_database</c>); a recorded time is overdue when its age at
 /// the capture is above the threshold. #8865: CHECKDB comes from the replica's own error log when it was read (an AG database on the log only, <c>pending</c> while the
-/// backfill still runs, <c>errors_found</c> when the check reported errors), else from the boot page as before.
+/// backfill still runs, <c>unknown</c> when no check was found but the log held CHECKDB lines that could not be read, <c>errors_found</c> when the check reported
+/// errors), else from the boot page as before.
 /// </summary>
 public static class DatabaseProtectionBands
 {
@@ -101,6 +102,9 @@ public static class DatabaseProtectionBands
     private const string DetailSecondary = "secondary";
     /// <summary>#8865: the sentence a replica that refuses connections gets, said by every surface (the band's detail, the web cell's tooltip, the Viewer's).</summary>
     public const string DetailNotReadable = "replica is not readable, so CHECKDB cannot run on it";
+    /// <summary>#8865: the sentence an Availability Group database with no check found gets when the error log holds CHECKDB lines that could
+    /// not be read, which is what an instance whose error log is not written in English shows.</summary>
+    public const string DetailUnreadableLog = "the error log's CHECKDB lines could not be read (the log is not in English), so this replica's last check is unknown";
 
     /// <summary>The database is judged on nothing: offline, restoring, recovering, not yet recovered, suspect or in emergency, or a secondary replica.</summary>
     public static string? ExclusionReason(string? stateDesc, string? replicaRole)
@@ -175,6 +179,12 @@ public static class DatabaseProtectionBands
             {
                 return new(Pending, false, null, threshold, SourceErrorLog,
                     Detail: "the older error logs are still being read", ReferenceTime: reference);
+            }
+
+            /* #8865: lines the parser could not read mean the checks may be there in another language, so "none found" is not "never". */
+            if (fact.ErrorLogUnparsedLines is > 0)
+            {
+                return new(Unknown, false, null, threshold, SourceErrorLog, Detail: DetailUnreadableLog, ReferenceTime: reference);
             }
 
             if (fact.CreateDate is { } created && capturedAt - created < threshold)

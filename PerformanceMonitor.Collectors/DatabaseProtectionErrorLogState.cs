@@ -56,6 +56,13 @@ public static class DatabaseProtectionErrorLogState
     public const string SkippedKey = "errorlog_skipped";
 
     /// <summary>
+    /// Server-scoped: how many CHECKDB lines the newest read that found any could not parse, kept until a read parses a line and finds
+    /// none it cannot read. #8865: on an instance whose error log is not English no line ever parses, and a cycle that happens to read
+    /// no CHECKDB line (the current log just rolled over) must not make every Availability Group database read as never checked.
+    /// </summary>
+    public const string UnparsedKey = "errorlog_unparsed";
+
+    /// <summary>
     /// Archives (besides the current log) read per cycle, so a long backlog never makes one cycle slow. Measured (#8865, SQL Server 2022 on
     /// Linux): <c>sp_readerrorlog</c> with both search strings reads a 228 MB log in under 1 s, so three archives plus the current log are
     /// a few seconds, far under half of the 60 s supplemental timeout; the number stays at three.
@@ -169,6 +176,11 @@ public static class DatabaseProtectionErrorLogState
 
         return check;
     }
+
+    /// <summary>#8865: the remembered count of CHECKDB lines that could not be parsed (<see cref="UnparsedKey"/>); 0 when none, unreadable, or reset.</summary>
+    public static int RememberedUnparsed(IReadOnlyDictionary<string, string> state, bool reset) =>
+        !reset && state.TryGetValue(UnparsedKey, out var value)
+        && int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var count) ? count : 0;
 
     /// <summary>
     /// The newer of the remembered check and the one seen this cycle. A check before

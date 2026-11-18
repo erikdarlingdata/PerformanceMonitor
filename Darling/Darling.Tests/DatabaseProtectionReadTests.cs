@@ -244,6 +244,30 @@ public sealed class DatabaseProtectionBandsTests
     }
 
     [Fact]
+    public void AnAgDatabaseWithNoCheck_WhoseLogShowsUnreadableLines_ReadsUnknown_NotNever()
+    {
+        /* #8865: on an instance whose error log is not English no CHECKDB line parses, so "no check found" is not "never checked". */
+        foreach (var role in new[] { "PRIMARY", "SECONDARY" })
+        {
+            var band = DatabaseProtectionBands.Evaluate(Logged(role) with { ErrorLogUnparsedLines = 3, LastGoodCheckDbTime = Now.AddDays(-1) }, Now, Limits);
+
+            Assert.Equal("unknown", band.CheckDb.State);
+            Assert.False(band.CheckDb.Overdue);
+            Assert.Null(band.CheckDb.Age);
+            Assert.Equal(DatabaseProtectionBands.SourceErrorLog, band.CheckDb.Source);
+            Assert.Equal(DatabaseProtectionBands.DetailUnreadableLog, band.CheckDb.Detail);
+            Assert.Equal(Now.AddDays(-1), band.CheckDb.ReferenceTime);
+        }
+
+        /* The backfill still running keeps pending first; no unreadable line keeps never. */
+        Assert.Equal("pending", DatabaseProtectionBands.Evaluate(Logged() with { ErrorLogUnparsedLines = 3, ErrorLogBackfillComplete = false }, Now, Limits).CheckDb.State);
+        Assert.Equal("never", DatabaseProtectionBands.Evaluate(Logged() with { ErrorLogUnparsedLines = 0 }, Now, Limits).CheckDb.State);
+        /* A check that did parse is judged as usual, and outside an AG the boot page still decides. */
+        Assert.Equal("ok", DatabaseProtectionBands.Evaluate(Logged() with { ErrorLogUnparsedLines = 3, ErrorLogCheckDbTime = Now.AddDays(-2) }, Now, Limits).CheckDb.State);
+        Assert.Equal("ok", DatabaseProtectionBands.Evaluate(Logged(null) with { ErrorLogUnparsedLines = 3 }, Now, Limits).CheckDb.State);
+    }
+
+    [Fact]
     public void AnAgDatabaseWithAnOldCheckFoundDuringTheBackfill_IsOverdueAtOnce()
     {
         var band = DatabaseProtectionBands.Evaluate(
