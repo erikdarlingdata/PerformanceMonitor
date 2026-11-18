@@ -3439,6 +3439,23 @@ LIMIT 1";
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (PgPlanCapturePreconditionException ex)
+        {
+            /* #8982: readiness says auto_explain is not loaded, so pg_plan_capture did not download the log. Recorded
+               under EXTENSION_MISSING, the named skip the extension collectors write for a module that is not set up
+               (#3240, #8913): every health surface already bands it as a setup step with the stored sentence as the
+               remedy, and none counts it as a failure or a stale collector. Not SUCCESS, which reads as "no new
+               plans" on a target that can never have one. Only the store's readiness row was read, so the time is
+               storage time. */
+            _logger.LogInformation("  [{Server}] {Collector} => {Status}: auto_explain is not loaded, so the log was not read",
+                server.Config.DisplayName, collectorName, CollectorRuntimePrecondition.ExtensionMissingStatus);
+
+            await LogRunAsync(
+                server, runtime, collectorName, CollectorRuntimePrecondition.ExtensionMissingStatus, 0, 0, runClock.ElapsedMilliseconds,
+                ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
         {
             /* #2633: the AWS call was DENIED, so nothing was read. Degraded to PERMISSIONS rather than

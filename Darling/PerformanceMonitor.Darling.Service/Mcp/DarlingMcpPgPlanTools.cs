@@ -319,7 +319,17 @@ public sealed class DarlingMcpPgPlanTools
 
         var precondition = await DarlingRuntimePrecondition.StatusAsync(
             postgres, serverId, displayName, "pg_plan_capture", cancellationToken);
-        if (precondition != null)
+
+        /* #8982: pg_plan_capture declares no extension, so its EXTENSION_MISSING run is the stand-down it records when readiness says
+           auto_explain is not loaded. The readiness answer below names every unmet facet, which says more than that one run, so it
+           goes first; the run's own answer is kept for when readiness has no unmet facet left to name. */
+        var stoodDownOnReadiness = precondition != null
+            && string.Equals(
+                await DarlingRuntimePrecondition.LatestStatusAsync(postgres, serverId, "pg_plan_capture", cancellationToken),
+                PerformanceMonitor.Collectors.CollectorRuntimePrecondition.ExtensionMissingStatus,
+                StringComparison.OrdinalIgnoreCase);
+
+        if (precondition != null && !stoodDownOnReadiness)
         {
             return precondition;
         }
@@ -331,6 +341,11 @@ public sealed class DarlingMcpPgPlanTools
         if (unmet.Count > 0)
         {
             return PlanCaptureNotReadyStatus(unmet, engineLimited);
+        }
+
+        if (stoodDownOnReadiness)
+        {
+            return precondition!;
         }
 
         /* #8912: nothing left to set, but the engine will not store a plan that carries a query id, so the empty answer below
