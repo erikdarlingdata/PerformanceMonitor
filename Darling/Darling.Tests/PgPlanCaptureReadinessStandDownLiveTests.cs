@@ -27,8 +27,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #8982: <c>pg_plan_capture</c> on Aurora and RDS reads the newest <c>library_loaded</c> readiness row before it downloads the
 /// RDS log. FALSE stands the run down under the extension collectors' named skip, with the readiness remedy, and never reaches
-/// the plan ingestor. No row, a TRUE row, a NULL row (unknown, not false) and a FALSE row older than the lookback all run as
-/// before. The target connection string points at a closed local port, so no run here reaches a server or the AWS API: the
+/// the plan ingestor. No row, a TRUE row, a NULL row (unknown, not false), a FALSE row older than the lookback and a failed
+/// readiness read all run as before. The target connection string points at a closed local port, so no run here reaches a server or the AWS API: the
 /// ingestor is entered (its resume load counts it) and then finds a host it does not treat as RDS.
 /// </summary>
 [Collection("live-postgres")]
@@ -116,19 +116,7 @@ public sealed class PgPlanCaptureReadinessStandDownLiveTests
             var runtime = Runtime();
             var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
 
-            var worker = new DarlingWorker(
-                NullLogger<DarlingWorker>.Instance,
-                NullLoggerFactory.Instance,
-                new McpRuntimeState(),
-                new WebRuntimeState(),
-                new MonitoredServerRegistryState(),
-                new CollectorRuntimeState(),
-                new WebTlsCertificateState(),
-                new BaselineCache(),
-                new ReadLatencyAccumulator())
-            {
-                StoreForTests = postgres,
-            };
+            var worker = NewWorker(postgres);
 
             /* The worker's own dispatch picks the RDS route by target facts; the override sends this run down it directly. */
             worker.DispatchOverrideForTests = (_, overrideRuntime, overrideToken) => runner.IngestRdsPlansAsync(overrideRuntime, overrideToken);
@@ -149,6 +137,84 @@ public sealed class PgPlanCaptureReadinessStandDownLiveTests
         });
     }
 
+    /// <summary>
+    /// A stand-down that readiness has since moved past: auto_explain was loaded after the run stood down, the newest readiness row
+    /// says so, and the next capture run has not happened yet. <c>get_pg_plans</c> answers as it does for a target whose capture
+    /// is set up, not with the generic missing-extension text that the stale stand-down run would give.
+    /// </summary>
+    [Fact]
+    public async Task AStandDownThatReadinessHasMovedPast_GetPgPlansAnswersAsASetUpTarget()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-capture stand-down test.");
+
+        await WithStoreAsync(cs!, [new(30, false)], async (postgres, connection, ct) =>
+        {
+            var (runner, _) = BuildRunner(postgres);
+            var runtime = Runtime();
+            var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
+            var worker = NewWorker(postgres);
+            worker.DispatchOverrideForTests = (_, overrideRuntime, overrideToken) => runner.IngestRdsPlansAsync(overrideRuntime, overrideToken);
+
+            var effective = StoreConfigProvider.ResolveSchedule(Collector, ServerId, worker.ScheduleOverridesForTest);
+            await worker.RunOnLoadAsync(server, runner, Collector, ServerId, effective, ct);
+            var (status, _) = await ReadRunAsync(connection, ct);
+            Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
+
+            /* Readiness runs again after the stand-down and now sees auto_explain loaded. Another collector's SUCCESS run keeps the
+               server online, so the empty answer is not turned into the offline one. */
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedReadinessAsync(connection, now, true, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
+VALUES ($1, $2, $3, 'pg_stat_statements', $4, 'SUCCESS')",
+                CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(now));
+
+            var plans = JsonDocument.Parse(await DarlingMcpPgPlanTools.GetPgPlans(postgres, ServerName, 24, 10, cancellationToken: ct)).RootElement;
+            Assert.Equal("empty", plans.GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>
+    /// The readiness read fails (here the store has no readiness relation at all), so the run fails open: it downloads as it did
+    /// before this check existed and reaches the plan ingestor.
+    /// </summary>
+    [Fact]
+    public async Task AFailedReadinessRead_RunsTheIngestAsBefore()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-capture stand-down test.");
+
+        await WithStoreAsync(cs!, [new(30, false)], async (postgres, connection, ct) =>
+        {
+            /* #1776 own-store: an unmigrated scratch database of this test's own, so the runner's readiness read fails on a missing
+               relation without changing the shared store. The newest FALSE row seeded in the shared store would stand the run down
+               if the runner could read it. */
+            await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, plainPostgres: true, emptyStore: true);
+            await using var unreadable = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var (runner, entered) = BuildRunner(postgres, runnerStore: unreadable);
+
+            var result = await runner.IngestRdsPlansAsync(Runtime(), ct);
+
+            Assert.NotNull(result);
+            Assert.Equal(1, entered.Count);
+        });
+    }
+
+    private static DarlingWorker NewWorker(NpgsqlDataSource postgres) => new(
+        NullLogger<DarlingWorker>.Instance,
+        NullLoggerFactory.Instance,
+        new McpRuntimeState(),
+        new WebRuntimeState(),
+        new MonitoredServerRegistryState(),
+        new CollectorRuntimeState(),
+        new WebTlsCertificateState(),
+        new BaselineCache(),
+        new ReadLatencyAccumulator())
+    {
+        StoreForTests = postgres,
+    };
+
     private static ServerRuntime Runtime()
     {
         var config = new MonitoredServer { Name = ServerName, Host = "127.0.0.1" };
@@ -168,10 +234,10 @@ public sealed class PgPlanCaptureReadinessStandDownLiveTests
         public int Count;
     }
 
-    private static (DarlingCollectorRunner Runner, Counter Entered) BuildRunner(NpgsqlDataSource postgres)
+    private static (DarlingCollectorRunner Runner, Counter Entered) BuildRunner(NpgsqlDataSource postgres, NpgsqlDataSource? runnerStore = null)
     {
         var runner = new DarlingCollectorRunner(
-            postgres,
+            runnerStore ?? postgres,
             new CollectorDeltaCalculator(),
             databaseScope: (_, _) => new List<string>(),
             separatelyMonitoredDatabases: _ => new List<string>(),
@@ -209,11 +275,7 @@ public sealed class PgPlanCaptureReadinessStandDownLiveTests
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
             foreach (var seed in seeds)
             {
-                await DarlingMcpTestData.ExecAsync(connection, ct, @"
-INSERT INTO pg_plan_capture_readiness (collection_id, collection_time, server_id, server_name, facet, is_satisfied, observed, detail)
-VALUES ($1, $2, $3, $4, 'library_loaded', $5::boolean, $6, $7)",
-                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-seed.MinutesAgo)), ServerId, ServerName,
-                    seed.Satisfied, SeededObserved, SeededDetail);
+                await SeedReadinessAsync(connection, now.AddMinutes(-seed.MinutesAgo), seed.Satisfied, ct);
             }
 
             await body(postgres, connection, ct);
@@ -224,6 +286,13 @@ VALUES ($1, $2, $3, $4, 'library_loaded', $5::boolean, $6, $7)",
             await LiveStoreCleanup.RunAsync(cs, bodySucceeded, DeleteRowsAsync);
         }
     }
+
+    private static Task SeedReadinessAsync(NpgsqlConnection connection, DateTime collectionTimeUtc, bool? satisfied, CancellationToken ct)
+        => DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_plan_capture_readiness (collection_id, collection_time, server_id, server_name, facet, is_satisfied, observed, detail)
+VALUES ($1, $2, $3, $4, 'library_loaded', $5::boolean, $6, $7)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
+            satisfied, SeededObserved, SeededDetail);
 
     private static async Task<(string Status, string Message)> ReadRunAsync(NpgsqlConnection connection, CancellationToken ct)
     {
