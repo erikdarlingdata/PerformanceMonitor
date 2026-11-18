@@ -28,7 +28,8 @@ namespace Darling.Tests;
 /// 'ad hoc'), and (2) the handle groups the module lookup keeps are the ranked handles' only, read from the plan's own row counts (#8549: the lookup is a hash
 /// aggregate now, not a sort, so the count is the aggregate's groups).</para>
 /// </summary>
-[Collection("live-postgres")]
+/* #1776 own-store: the test pins the migration stamp the module lookup reads (#8549), which a shared store's other tests must not see, so it
+   boots its own database through ScratchPostgres and is left out of [Collection("live-postgres")] deliberately. */
 public sealed class ViewerTopQueriesModuleLiveTests
 {
     private const int ServerId = -970840;
@@ -44,16 +45,20 @@ public sealed class ViewerTopQueriesModuleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Top Queries module test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(cs);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection, ct);
-        await CleanupAsync(connection, ct);
 
         /* #5608: the window ends at the anchored point and spans four hours, so it sits inside one raw chunk at any hour the test runs. */
         var end = LiveClock.AnchoredEnd();
         var start = end.AddHours(-4);
-        var succeeded = false;
-        try
+
+        /* #8549: the module lookup reads procedure_stats only for a window that starts before the store applied the rung that added host_object_name
+           (V51): from then on every statement that has a host carries it, so a NULL host is ad hoc. The rows below have no host and are named by the
+           lookup, so the store is stamped as upgraded after them. The post-rung window is TopQueriesModuleLookupLiveTests'. */
+        await ExecAsync(connection, ct, "UPDATE darling_schema_version SET applied_at = $1 WHERE version = 51",
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = end.AddDays(1) });
         {
             /* Two ranked queries. 0xOLD's module row was collected three days BEFORE the window; 0xNEW's two rows are inside it
                (the newer name must win); 0xLOOSE matches no module at all. */
@@ -77,7 +82,7 @@ public sealed class ViewerTopQueriesModuleLiveTests
                 new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start.AddHours(-48) }, new NpgsqlParameter { Value = ServerId }, new NpgsqlParameter { Value = ServerName });
 
             /* The answer, through the Viewer's own read. */
-            await using var viewer = new ViewerDataService(cs!);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
             var rows = await viewer.GetTopQueriesByCpuAsync(ServerId, start, end);
             Assert.Equal("db.dbo.usp_Old", rows.Single(r => r.QueryHash == "0xQOLD").ModuleName);     /* older than the window, still named */
             Assert.Equal("db.dbo.usp_NewAfter", rows.Single(r => r.QueryHash == "0xQNEW").ModuleName); /* the newest row wins, no fan-out */
@@ -96,12 +101,6 @@ public sealed class ViewerTopQueriesModuleLiveTests
             using var document = JsonDocument.Parse(json);
             var groups = GroupsKeptFromProcedureStats(document.RootElement[0].GetProperty("Plan"));
             Assert.True(groups is > 0 and <= 3, $"the module lookup kept {groups} handle groups; it should keep only the ranked handles' (at most 3), not the server's {UnrelatedHandles + 2}: {json}");
-
-            succeeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(cs!, succeeded, (cleanup, cleanupCt) => CleanupAsync(cleanup, cleanupCt));
         }
     }
 
@@ -140,9 +139,6 @@ public sealed class ViewerTopQueriesModuleLiveTests
 
         return found.Max();
     }
-
-    private static Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct) =>
-        ExecAsync(connection, ct, $"DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM procedure_stats WHERE server_id = {ServerId}");
 
     private static async Task ExecAsync(NpgsqlConnection connection, CancellationToken ct, string sql, params NpgsqlParameter[] parameters)
     {

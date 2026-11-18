@@ -160,12 +160,22 @@ public sealed partial class ViewerDataService
                over the table. The tie-break is the row collected last (the higher collection_id), the rule Lite's module lookup
                uses; the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before. Both
                columns of the time key are NOT NULL, so no NULL ordering applies.
-               idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it. */
+               idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it.
+               #8549: the answer is read only for a group with no host_object_name (ViewerQueryStatsRow.ModuleName shows the host when the
+               group has one, so nothing reads this answer for it). And since the rung that added host_object_name (V51, query-stats-host-object)
+               the collector names the host of every statement that has one: the column is NULL only when dm_exec_sql_text.objectid is
+               NULL, an ad hoc or prepared statement, which has no procedure_stats row. A window that starts at or after the time this
+               store applied V51 holds only such rows, so a NULL host in it is ad hoc and this lookup can only answer 'no module': it
+               reads nothing then. A window that starts earlier, or a store with no V51 stamp, reads as before. Both times are naive UTC.
+               On a field store the two reads over procedure_stats were 10.15 s of an 11.35 s cold statement, to keep nothing for 25 ad hoc
+               handles. */
             WITH handles AS MATERIALIZED (
                 SELECT DISTINCT sql_handle
                 FROM ranked
                 WHERE sql_handle IS NOT NULL
                 AND   sql_handle <> ''
+                AND   host_object_name IS NULL
+                AND   NOT EXISTS (SELECT 1 FROM darling_schema_version WHERE version = 51 AND applied_at <= $2)
             ),
             recent AS MATERIALIZED (
                 SELECT
@@ -174,6 +184,7 @@ public sealed partial class ViewerDataService
                 FROM procedure_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
+                AND   EXISTS (SELECT 1 FROM handles)
                 AND   sql_handle IN (SELECT sql_handle FROM handles)
                 GROUP BY sql_handle
             ),
