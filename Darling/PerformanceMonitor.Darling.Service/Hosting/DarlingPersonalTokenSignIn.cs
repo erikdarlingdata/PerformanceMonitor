@@ -55,9 +55,13 @@ internal static class DarlingPersonalTokenSignIn
                 reason = PersonalTokenStore.OperatorsDisabledReason;
                 break;
             default:
+                /* The seat is not lowered: nothing to revoke now, and a queued revoke from an earlier sign-in of this person (demoted during an
+                   outage, restored since) is moot, so it must not revoke tokens made after the restore. */
+                pending.Remove(ownerKey);
                 return;
         }
 
+        var revokedRows = 0;
         try
         {
             var source = owner.Read();
@@ -67,12 +71,7 @@ internal static class DarlingPersonalTokenSignIn
                 return;
             }
 
-            var revoked = await PersonalTokenStore.RevokeForOwnerAsync(source, ownerKey, operatorOnly, SignInActor, reason, DateTimeOffset.UtcNow, ct);
-            if (revoked > 0)
-            {
-                logger.LogInformation("Revoked {Count} MCP personal token(s) at sign-in ({Reason}).", revoked, reason);
-                await snapshot.RefreshAsync(owner, logger, ct);
-            }
+            revokedRows = await PersonalTokenStore.RevokeForOwnerAsync(source, ownerKey, operatorOnly, SignInActor, reason, DateTimeOffset.UtcNow, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -84,6 +83,28 @@ internal static class DarlingPersonalTokenSignIn
             {
                 Queue(pending, ownerKey, operatorOnly, reason, "the store write failed", ex, logger);
             }
+
+            return;
+        }
+
+        if (revokedRows > 0)
+        {
+            logger.LogInformation("Revoked {Count} MCP personal token(s) at sign-in ({Reason}).", revokedRows, reason);
+            await RefreshAfterRevokeAsync(owner, snapshot, logger, ct);
+        }
+    }
+
+    /// <summary>The revoke has committed, so a failed refresh is not a reason to revoke again: it is logged, and the snapshot's own tick reloads
+    /// within 5 seconds.</summary>
+    private static async Task RefreshAfterRevokeAsync(StoreOwnerSource owner, DarlingPersonalTokenSnapshot snapshot, ILogger logger, CancellationToken ct)
+    {
+        try
+        {
+            await snapshot.RefreshAsync(owner, logger, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "MCP personal tokens were revoked, but the snapshot refresh failed; the next snapshot tick picks the revoke up.");
         }
     }
 
@@ -107,7 +128,7 @@ internal static class DarlingPersonalTokenSignIn
 
     /// <summary>
     /// Makes the revokes a sign-in could not make: one store write per queued owner. An entry leaves the queue only after its revoke commits;
-    /// a store failure leaves it for the next tick (a debug line, the pending case was already warned about). A store with no personal token table
+    /// a store failure stops the pass and leaves the rest for the next tick (a debug line, the pending case was already warned about). A store with no personal token table
     /// has no tokens to revoke, so its entries are dropped. The snapshot is refreshed once after a pass that revoked rows, as the sign-in does.
     /// With the feature off (<paramref name="settings"/> null) nothing is drained and the queue is kept.
     /// </summary>
@@ -147,14 +168,16 @@ internal static class DarlingPersonalTokenSignIn
                 }
                 else
                 {
-                    logger.LogDebug(ex, "A queued MCP personal token revoke ({Reason}) is still pending; the next supervisor tick retries.", entry.Reason);
+                    /* Stop the pass: each further entry would pay the same connect timeout inside the supervisor loop. */
+                    logger.LogDebug(ex, "A queued MCP personal token revoke ({Reason}) is still pending; the pass stops and the next supervisor tick retries.", entry.Reason);
+                    break;
                 }
             }
         }
 
         if (revokedAny)
         {
-            await snapshot.RefreshAsync(owner, logger, ct);
+            await RefreshAfterRevokeAsync(owner, snapshot, logger, ct);
         }
     }
 

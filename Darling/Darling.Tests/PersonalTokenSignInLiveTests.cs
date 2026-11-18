@@ -411,6 +411,58 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
     }
 
     [Fact]
+    public async Task Drain_WhileTheStoreFails_StopsAtTheFirstFailure_AndKeepsEveryEntry()
+    {
+        await using var dead = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=nobody;Database=none;Timeout=2;Command Timeout=2;Pooling=false");
+        await using var rig = await StartAsync(Settings());
+        rig.OwnerSource.Publish(null);
+        foreach (var label in new[] { "stop-a", "stop-b", "stop-c", "stop-d" })
+        {
+            await rig.SignInAsync(IdTokenFor(label, "everyone"));
+        }
+
+        Assert.Equal(4, rig.Host.PendingPersonalRevokes.Count);
+        rig.OwnerSource.Publish(dead);
+
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+
+        /* One store attempt (one "still pending" line, which is logged per failed attempt), and nothing left the queue. */
+        Assert.Equal(1, rig.Logger.Lines.Count(line => line.Message.Contains("still pending", StringComparison.Ordinal)));
+        Assert.Equal(4, rig.Host.PendingPersonalRevokes.Count);
+    }
+
+    [Fact]
+    public async Task LaterSignIn_ThatLeavesNothingToRevoke_ClearsTheOwnersPendingEntry()
+    {
+        await using var rig = await StartAsync(Settings());
+        var op = await rig.MakeTokenAsync(OwnerKeyFor("moot-entry"), "ops", "operator");
+        rig.OwnerSource.Publish(null);
+        await rig.SignInAsync(IdTokenFor("moot-entry", "everyone"));
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+
+        /* Back at the admin seat (adminRole operator): the seat is not lowered, so the stale entry is dropped. */
+        await rig.SignInAsync(IdTokenFor("moot-entry", "admins"));
+        Assert.Equal(0, rig.Host.PendingPersonalRevokes.Count);
+
+        rig.OwnerSource.Publish(rig.Owner);
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(op.Value));
+    }
+
+    [Fact]
+    public async Task LaterNarrowerSignIn_KeepsTheBroaderPendingEntry()
+    {
+        await using var rig = await StartAsync(Settings());
+        rig.OwnerSource.Publish(null);
+        await rig.SignInAsync(IdTokenFor("keep-broad", "nobody"));
+        await rig.SignInAsync(IdTokenFor("keep-broad", "everyone"));
+
+        var entry = Assert.Single(rig.Host.PendingPersonalRevokes.Snapshot());
+        Assert.False(entry.OperatorOnly);
+        Assert.Equal(PersonalTokenStore.SignInRefusedReason, entry.Reason);
+    }
+
+    [Fact]
     public async Task Drain_WithTheFeatureOff_KeepsTheQueue()
     {
         await using var rig = await StartAsync(Settings());

@@ -73,6 +73,14 @@ public sealed class PersonalTokenRungTests
     }
 
     [Fact]
+    public void RevokeBlock_EscapesTheRoleNamesInItsLiterals()
+    {
+        var sql = PersonalTokenSchema.ReassertPermissionsSql("config", "ad'min", "viewer", "web", "mcp");
+
+        Assert.Contains("rolname IN ('ad''min', 'viewer', 'web', 'mcp')", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rung_IsIdempotent()
     {
         var ct = TestContext.Current.CancellationToken;

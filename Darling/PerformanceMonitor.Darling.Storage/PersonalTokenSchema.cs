@@ -107,6 +107,8 @@ ALTER TABLE config.mcp_personal_token ENABLE ALWAYS TRIGGER trg_mcp_personal_tok
     /// <c>aclexplode</c> finds on the table or its columns. Used by the rung and by the managed-roles batch (and mirrored in
     /// <c>Darling/tools/provision-roles.sql</c>). Guarded on the table existing.
     /// </summary>
+    private static string Lit(string value) => value.Replace("'", "''", System.StringComparison.Ordinal);
+
     internal static string RevokeFromEveryRoleSql(string config, string admin, string viewer, string web, string mcp) => $"""
 DO $personal_token$
 DECLARE
@@ -126,7 +128,7 @@ BEGIN
             UNION
             SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
             WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('{config}.mcp_personal_token'))
-              AND (rolname IN ('{admin}', '{viewer}', '{web}', '{mcp}') OR oid IN (SELECT grantee FROM grantees))
+              AND (rolname IN ('{Lit(admin)}', '{Lit(viewer)}', '{Lit(web)}', '{Lit(mcp)}') OR oid IN (SELECT grantee FROM grantees))
         LOOP
             EXECUTE pg_catalog.format('REVOKE ALL ON {config}.mcp_personal_token FROM %s CASCADE', r);
             FOR c IN SELECT attname FROM pg_catalog.pg_attribute

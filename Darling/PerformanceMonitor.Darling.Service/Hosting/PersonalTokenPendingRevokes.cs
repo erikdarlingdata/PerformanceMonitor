@@ -86,6 +86,18 @@ internal sealed class PersonalTokenPendingRevokes
         }
     }
 
+    /// <summary>Drops the owner's entry: a later sign-in left nothing to revoke, so the queued revoke is moot.</summary>
+    internal void Remove(string ownerKey)
+    {
+        lock (_gate)
+        {
+            if (_entries.Remove(ownerKey) && _entries.Count < _max)
+            {
+                _overflowReported = false;
+            }
+        }
+    }
+
     /// <summary>The queued entries now, for one drain pass.</summary>
     internal IReadOnlyList<Entry> Snapshot()
     {
