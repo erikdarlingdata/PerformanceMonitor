@@ -117,6 +117,19 @@ def load_collections(dirs):
 _SERIAL_DEF = re.compile(r"\[\s*CollectionDefinition\(\s*([^,)]+?)\s*,\s*DisableParallelization\s*=\s*true\b")
 
 
+def linked_texts():
+    """The Darling.Tests sources: Lite.Tests compiles some of them in (ApplicationThemeGuard.cs), so a collection name a
+    Lite.Tests declaration takes from a constant there is declared in this tree, not under Lite.Tests."""
+    out = []
+    for p in sorted(glob.glob(os.path.join(REPO_ROOT, "Darling", "Darling.Tests", "*.cs"))):
+        try:
+            with open(p, encoding="utf-8-sig") as f:
+                out.append(f.read())
+        except OSError:
+            continue
+    return out
+
+
 def serial_collection_names(tests_dir):
     """Names of the collections declared `[CollectionDefinition(name, DisableParallelization = true)]` under
     tests_dir, plus the declarations it could not resolve to a name. `name` is a string literal or a
@@ -132,6 +145,8 @@ def serial_collection_names(tests_dir):
     for text in texts:
         for m in _SERIAL_DEF.finditer(text):
             expr = m.group(1).strip()
+            if "\\" in expr or "{" in expr:
+                continue  # the text of an interpolated message string that quotes the attribute, not a declaration
             if len(expr) >= 2 and expr[0] == expr[-1] == '"':
                 names.add(expr[1:-1])
                 continue
@@ -140,7 +155,7 @@ def serial_collection_names(tests_dir):
             if holder:
                 pat = re.compile(r"\bclass\s+" + re.escape(holder.rpartition(".")[2]) + r"\b[\s\S]{0,400}?const\s+string\s+"
                                  + re.escape(member) + r'\s*=\s*"([^"]*)"')
-                for t in texts:
+                for t in texts + linked_texts():
                     mm = pat.search(t)
                     if mm:
                         found = mm.group(1)
