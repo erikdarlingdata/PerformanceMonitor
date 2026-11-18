@@ -3527,7 +3527,7 @@ $rung$;";
         new Migration(274, "trigram-index-store-options", V274Sql),
         /* V275 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
            Catalog-only ALTERs on a plain table, nothing is backfilled, so the upgrade stays fast. */
-        new Migration(275, "database-protection-error-log", V274Sql),
+        new Migration(275, "database-protection-error-log", V275Sql),
     };
 
     /// <summary>
@@ -3698,7 +3698,7 @@ CREATE TABLE IF NOT EXISTS collect.column_stats_state (
 );";
 
     /// <summary>
-    /// V274 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
+    /// V275 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
     /// that replica's own SQL Server error log. <b>Raw facts only</b>: how the log read went (<c>errorlog_state</c>, message, the grant that
     /// would fix a refusal), whether the backfill reached the start of the retained logs, the archives skipped, the lines that did not parse,
     /// the newest completed CHECKDB the log shows (time, options, error count) and whether the database was readable on that replica. What
@@ -3708,7 +3708,7 @@ CREATE TABLE IF NOT EXISTS collect.column_stats_state (
     /// carries the columns from the collector's payload and these ALTERs no-op there) and an upgraded one share one physical column
     /// order. Every statement is idempotent.
     /// </summary>
-    private const string V274Sql = @"
+    private const string V275Sql = @"
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_state text;
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_message text;
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_grant text;
