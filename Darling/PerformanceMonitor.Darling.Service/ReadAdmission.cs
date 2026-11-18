@@ -137,11 +137,22 @@ public sealed class ReadAdmission
     /// every time (<see cref="WindowlessFleetRoutes"/>), and the same 5 minutes apply for the same reasons: the grid
     /// changes once per collection, a 24-hour figure moves by under 1/288th in 5 minutes, and a write (a registry edit,
     /// a rule) moves the generation and drops the entry at once.</para>
+    ///
+    /// <para><b><c>get_query_fleet_summary</c> (#8570)</b> is one statement's cost on every server: it has no server name, so a call
+    /// is the fleet form whenever its window is 24 hours or more, and its default window is 7 days. A statement that runs on most
+    /// servers took 14 to 21 s on a large store, most of it the Query Store part, which decompresses every server's hourly rows for
+    /// the compressed days of the week. The 7-day band kept a heavy answer for 60 s in a 60 s wall-clock bucket, so a read that
+    /// started late in the bucket stored an entry that lived a few seconds, and a second call for the same hash a minute later paid
+    /// the whole read again. The 5 minutes cost little here: the answer is a 7-day total per server and database,
+    /// which moves by under 1/2016th in 5 minutes, and the newest hours come from 1-minute and 5-minute collectors that a live
+    /// trend read still shows at once. The key carries the hash, the window and the limit, so another statement is its own entry,
+    /// and a write moves the generation and drops the entry at once.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
     {
         ["get_resource_use_by_tag"] = TimeSpan.FromMinutes(5),
         ["get_finops_inventory"] = TimeSpan.FromMinutes(5),
+        ["get_query_fleet_summary"] = TimeSpan.FromMinutes(5),
     };
 
     /// <summary>#8323: the routes in <see cref="FleetCachedRoutes"/> whose window is fixed inside the read and so take no
