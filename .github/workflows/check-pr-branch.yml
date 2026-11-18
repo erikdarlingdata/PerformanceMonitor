@@ -1,11 +1,16 @@
 name: Check pull request target branch
 on:
-  pull_request_target:
+  pull_request:
     types:
       - opened
       - reopened
       - synchronize
       - edited
+# This job only compares branch names. It checks out nothing and calls no API,
+# so it gets no token permissions at all. It runs on pull_request, not
+# pull_request_target: GitHub blocks pull_request_target by default in public
+# repositories from 2026-12-02, and this job never needed its token.
+permissions: {}
 jobs:
   check-branches:
     runs-on: ubuntu-latest
