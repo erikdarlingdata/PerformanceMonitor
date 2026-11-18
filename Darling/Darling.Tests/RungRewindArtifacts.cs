@@ -845,6 +845,10 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V273 or the ensure sweep makes it
         // again. Safe on a store that never had it.
         new(273, "hasWaitStatsHourly", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsHourlyView)),
+        // V274 (#8978): the store's trigram text index options on the service row. Plain nullable columns with no default, so the rewind drops both
+        // (the probe's sentinel is the Query Store one) and the re-run of V274 adds them back as NULL. Safe on a store that never had them.
+        new(274, "hasTrigramIndexStoreOptions",
+            @"ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_text_trigram_index_enabled, DROP COLUMN IF EXISTS query_store_text_trigram_index_enabled;"),
     ];
 
     /// <summary>

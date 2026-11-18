@@ -246,7 +246,7 @@ public sealed class CollectionStateToolsLiveTests
         var ok = false;
         try
         {
-            /* #6393 gave mcp UPDATE on five flags (capture_plans among them) for update_service_flags; mcp_enabled stays Viewer-only. */
+            /* #6393 gave mcp UPDATE on service flags (capture_plans among them) for update_service_flags; mcp_enabled stays Viewer-only. */
             var denied = await Assert.ThrowsAsync<PostgresException>(() =>
                 ExecAsync(rig.Mcp, "UPDATE config.config_service SET mcp_enabled = NOT mcp_enabled WHERE id = 1", ct));
             Assert.Equal("42501", denied.SqlState);
