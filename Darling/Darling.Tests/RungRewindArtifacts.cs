@@ -871,6 +871,9 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // and re-states the order. The order itself is not undone: an older build reads the aggregate the same way in either order. Safe on a
         // store that never had it.
         new(279, "hasAggregateCompressionOrderHistory", @"DROP TABLE IF EXISTS collect.aggregate_compression_order_history;"),
+        // V280 (#8570): the plan_correction recommendation index. The index is the probe's newest sentinel. The rewind drops it, so a re-run of V280
+        // builds it again. Safe on a store that never had it.
+        new(280, "hasPlanCorrectionServerDbQueryIndex", "DROP INDEX IF EXISTS collect.idx_plan_correction_server_db_query_time;"),
     ];
 
     /// <summary>

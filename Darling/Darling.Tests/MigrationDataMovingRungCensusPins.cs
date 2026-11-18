@@ -476,6 +476,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "ix_plan_regression_daily_server_day (server_id, day), the two narrow columns the day-driven reads of the per-day plan totals "
             + "filter on. The build reads the heap once. Measured on a 3,072,000-row table (462 MB heap, 529 MB unique key): 0.4 s, 20 MB of "
             + "index. Not CONCURRENTLY, inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            280,
+            SetsTheFloor: false,
+            "#8570: CREATE INDEX over the populated collect.plan_correction hypertable (created V1), a partial index on the rows that carry a "
+            + "recommendation (idx_plan_correction_server_db_query_time). V150's and V220's case: compression leaves only the newest day or two "
+            + "uncompressed at migration time, and a compressed chunk's index is an empty shell, so the build reads only the uncompressed chunks. "
+            + "Measured on a rig of 10 servers, 31 daily chunks (28 compressed), about 3.3M rows: the build took 3.3 s and the index is 56 MB. "
+            + "A store many times that size still builds in seconds, far inside a MigrationCommandTimeoutSeconds window, so it does not move the multiple."),
     ];
 
     /// <summary>
