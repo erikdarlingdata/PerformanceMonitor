@@ -3700,8 +3700,9 @@ CREATE TABLE IF NOT EXISTS collect.column_stats_state (
     /// <summary>
     /// V275 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
     /// that replica's own SQL Server error log. <b>Raw facts only</b>: how the log read went (<c>errorlog_state</c>, message, the grant that
-    /// would fix a refusal), whether the backfill reached the start of the retained logs, the archives skipped, the lines that did not parse,
-    /// the newest completed CHECKDB the log shows (time, options, error count) and whether the database was readable on that replica. What
+    /// would fix a refusal), whether the backfill reached the start of the retained logs, the archives skipped, the CHECKDB lines that
+    /// did not parse (this cycle's count, or the newest count above zero carried over until a line parses), the newest completed CHECKDB
+    /// the log shows (time, options, error count) and whether the database was readable on that replica. What
     /// they mean for the band is decided at read time. One nullable column each, no DEFAULT, no backfill: a row stored before this rung
     /// carries NULL in all ten and bands exactly as it did. Catalog-only on a plain table. <b>Appended in the order of the collector's
     /// payload</b> after <c>log_backup_state</c>, because the writer is a positional binary COPY: a fresh store (the generated V1 table

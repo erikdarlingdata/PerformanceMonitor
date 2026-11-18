@@ -104,7 +104,7 @@ public static class DatabaseProtectionBands
     public const string DetailNotReadable = "replica is not readable, so CHECKDB cannot run on it";
     /// <summary>#8865: the sentence an Availability Group database with no check found gets when the error log holds CHECKDB lines that could
     /// not be read, which is what an instance whose error log is not written in English shows.</summary>
-    public const string DetailUnreadableLog = "the error log's CHECKDB lines could not be read (the log is not in English), so this replica's last check is unknown";
+    public const string DetailUnreadableLog = "the error log's CHECKDB lines could not be read (the log is likely not in English), so this replica's last check is unknown";
 
     /// <summary>The database is judged on nothing: offline, restoring, recovering, not yet recovered, suspect or in emergency, or a secondary replica.</summary>
     public static string? ExclusionReason(string? stateDesc, string? replicaRole)
