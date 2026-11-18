@@ -330,6 +330,9 @@ public sealed partial class DarlingWorker
                deadline. Also two true reads in a row, failure-isolated and gated on the master switch inside. */
             await _selfAlerts.EvaluateVacuumStalledAsync(
                 _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
+
+            /* #9000: the store and each object against their own growth baseline, on the same hourly stamp the sizes are written on. */
+            await _selfAlerts.EvaluateStoreGrowthAsync(_postgres, TryReadStoreFreeBytes(config), stoppingToken);
         }
 
         /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a

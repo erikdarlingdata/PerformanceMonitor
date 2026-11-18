@@ -1353,9 +1353,12 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<int>? identityCapacityWarningPercent = null,
         Func<int>? identityCapacityCriticalPercent = null,
         Func<string, string, string?, int, int>? resolveThreshold = null,
-        Func<AlertMuteContext, string?>? digestWindowReason = null)
+        Func<AlertMuteContext, string?>? digestWindowReason = null,
+        Func<StoreGrowthSettings>? storeGrowthSettings = null)
     {
         _digestWindowReason = digestWindowReason;
+        /* #9000: unsupplied falls back to the V275 column defaults (on, 5 GB for the store, 2 GB for one object). */
+        _storeGrowthSettings = storeGrowthSettings ?? (() => new StoreGrowthSettings(true, 5, 2));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
@@ -6382,6 +6385,183 @@ internal sealed class DarlingSelfAlertEvaluator
                 StoreKey(DiskKey), _storeLabel, DiskPressureMetric,
                 DiskPressureResolvedMetric, "Monitor store volume free space recovered"), cancellationToken);
         }
+    }
+
+    /* ---------------- store growth (fleet-level, polled hourly, #9000) ---------------- */
+
+    /// <summary>The fixed key for the fleet-level Store Growth edge (not a real server); non-numeric so the deliverer's #1236 int.TryParse
+    /// override no-ops on it, like <see cref="DiskKey"/>.</summary>
+    private const string GrowthKey = "store-growth";
+
+    /// <summary>The alert metric name the Store Growth edge fires under (#9000). A WEBHOOK AUTOMATION KEY like its siblings and keyed on by the
+    /// triage map, so it is a const and must stay stable across releases. Its value is the last 24 hours of growth in GB.</summary>
+    internal const string StoreGrowthMetric = "Store Growth";
+
+    /// <summary>The resolution title the recovery edge records into <c>config_alert_log.metric_name</c>; the triage map aliases it back to
+    /// <see cref="StoreGrowthMetric"/>.</summary>
+    internal const string StoreGrowthResolvedMetric = "Store Growth Resolved";
+
+    /// <summary>A standing breach alerts again only when its growth reaches this multiple of the growth the last alert reported (and the shared
+    /// cooldown has run out). The condition reads a 24 hour window, so one spike stays true for a day.</summary>
+    internal const double StoreGrowthWorseningFactor = 1.25;
+
+    private readonly Func<StoreGrowthSettings> _storeGrowthSettings;
+    private readonly ConcurrentDictionary<string, bool> _activeStoreGrowth = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastStoreGrowthAlert = new();
+    private readonly ConcurrentDictionary<string, double> _lastAlertedStoreGrowth = new();
+
+    /// <summary>
+    /// The entry point the worker's hourly check calls. Skips the read when the master alerts switch or the Store Growth switch is off, reads
+    /// the store once (<see cref="StoreGrowthReader"/>), and hands the reading to <see cref="ApplyStoreGrowthAsync"/> in the same failure
+    /// isolation the disk-pressure sweep has. A FAILED read changes no state. <paramref name="freeBytes"/> is the store volume's free space
+    /// when the service can see it (null for a remote store), and only adds the days until the volume is full to the text.
+    /// </summary>
+    public async Task EvaluateStoreGrowthAsync(NpgsqlDataSource postgres, long? freeBytes, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || !_storeGrowthSettings().Enabled)
+        {
+            return;
+        }
+
+        StoreGrowthReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            reading = await StoreGrowthReader.ReadAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store growth self-alert read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store growth self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        try
+        {
+            await ApplyStoreGrowthAsync(reading, freeBytes, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
+            _logger?.LogError(ex, "Store growth self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level Store Growth condition (#9000) from one reading. Fires on entry and re-fires while it stands only when the
+    /// growth is <see cref="StoreGrowthWorseningFactor"/> times what the last alert reported and the shared cooldown has run out. The first
+    /// reading with no line crossed clears the state and, when the alert had fired, writes ONE "Store Growth Resolved" row. A null reading
+    /// is a read that failed: nothing changes. Internal so it pins directly with a recording deliverer and a controllable clock.
+    /// </summary>
+    internal async Task ApplyStoreGrowthAsync(StoreGrowthReading? reading, long? freeBytes, CancellationToken cancellationToken)
+    {
+        var growthSettings = _storeGrowthSettings();
+        if (!_settings.AlertsEnabled || !growthSettings.Enabled || reading is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var verdict = StoreGrowthJudge.Judge(reading, growthSettings);
+        if (!verdict.Crossed)
+        {
+            _lastAlertedStoreGrowth.TryRemove(GrowthKey, out _);
+            if (_activeStoreGrowth.TryRemove(GrowthKey, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(GrowthKey), _storeLabel, StoreGrowthMetric,
+                    StoreGrowthResolvedMetric, "The store and its objects are growing at their usual rate again"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeStoreGrowth[GrowthKey] = true;
+        var headline = verdict.Store is { Crossed: true } storeLine ? storeLine : verdict.Objects[0];
+        double? lastReported = _lastAlertedStoreGrowth.TryGetValue(GrowthKey, out var last) ? last : null;
+        if (lastReported is double prior && headline.GrowthBytes < prior * StoreGrowthWorseningFactor)
+        {
+            return;
+        }
+
+        if (!CooldownElapsed(_lastStoreGrowthAlert, GrowthKey, now))
+        {
+            return;
+        }
+
+        _lastStoreGrowthAlert[GrowthKey] = now;
+        _lastAlertedStoreGrowth[GrowthKey] = headline.GrowthBytes;
+        var floorGb = headline.IsStore ? growthSettings.StoreFloorGb : growthSettings.ObjectFloorGb;
+        var shortMessage = BuildStoreGrowthShortMessage(verdict);
+        var multiple = StoreGrowthJudge.BaselineMultiple.ToString("0.#", CultureInfo.InvariantCulture);
+        var delivery = await FireAsync(
+            StoreKey(GrowthKey), _storeLabel, StoreGrowthMetric,
+            currentValue: StoreGrowthReader.FormatGb(headline.GrowthBytes),
+            thresholdValue: floorGb > 0
+                ? $"{multiple} times its own baseline and at least {floorGb.ToString(CultureInfo.InvariantCulture)} GB a day"
+                : $"{multiple} times its own baseline",
+            detail: BuildStoreGrowthDetail(verdict, freeBytes),
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            numericCurrentValue: headline.GrowthBytes / (1024.0 * 1024.0 * 1024.0),
+            numericThresholdValue: floorGb,
+            cancellationToken);
+        if (AfterSelfFire(StoreGrowthMetric, _lastStoreGrowthAlert, GrowthKey, now, SharedCooldown, delivery))
+        {
+            /* #4795, as on disk pressure: the marker moved before the send. Put it back so the retry still counts as worse. */
+            RestoreMarker(_lastAlertedStoreGrowth, GrowthKey, lastReported);
+        }
+    }
+
+    private static string DescribeStoreGrowthLine(StoreGrowthLine line) =>
+        $"{line.Name} grew {StoreGrowthReader.FormatGb(line.GrowthBytes)} against a typical {StoreGrowthReader.FormatGb(line.BaselineBytes ?? 0)}";
+
+    /// <summary>The headline of the alert: the store's growth when it crossed, then the largest object. No em dashes and no semicolons.</summary>
+    internal static string BuildStoreGrowthShortMessage(StoreGrowthVerdict verdict)
+    {
+        var parts = new List<string>();
+        if (verdict.Store is { Crossed: true } store)
+        {
+            parts.Add($"The store grew {StoreGrowthReader.FormatGb(store.GrowthBytes)} in the last 24 hours against a typical {StoreGrowthReader.FormatGb(store.BaselineBytes ?? 0)}");
+        }
+
+        if (verdict.Objects.Count > 0)
+        {
+            parts.Add(DescribeStoreGrowthLine(verdict.Objects[0]));
+        }
+
+        return string.Join(". Largest object: ", parts) + ".";
+    }
+
+    /// <summary>The alert text. No em dashes and no semicolons: it is public text.</summary>
+    internal static string BuildStoreGrowthDetail(StoreGrowthVerdict verdict, long? freeBytes)
+    {
+        var text = new StringBuilder();
+        if (verdict.Store is { } store)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"The store grew {StoreGrowthReader.FormatGb(store.GrowthBytes)} in the last 24 hours. Its typical day over the 14 days before is {StoreGrowthReader.FormatGb(store.BaselineBytes ?? 0)}. ");
+            if (freeBytes is long free && store.GrowthBytes > 0)
+            {
+                var days = free / (double)store.GrowthBytes;
+                text.Append(CultureInfo.InvariantCulture,
+                    $"The store volume has {StoreGrowthReader.FormatGb(free)} free. At that rate it is full in about {days.ToString("0.#", CultureInfo.InvariantCulture)} days. ");
+            }
+        }
+
+        if (verdict.Objects.Count > 0)
+        {
+            text.Append("Objects growing at least 3 times faster than their own typical day: ");
+            text.Append(string.Join(", ", verdict.Objects.Take(5).Select(DescribeStoreGrowthLine)));
+            text.Append(". ");
+        }
+
+        text.Append("Find what is writing more than before. Shorten retention (config_collector_schedules), enable TimescaleDB compression, or move the store to a larger disk.");
+        return text.ToString();
     }
 
     /* ---------------- store autovacuum behind (fleet-level, polled hourly — #7368) ---------------- */

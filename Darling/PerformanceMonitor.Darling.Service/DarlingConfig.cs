@@ -1158,6 +1158,20 @@ public sealed class AlertsConfig
     [JsonPropertyName("selfDiskFreeWarnGb")]
     public int SelfDiskFreeWarnGb { get; set; } = 50;
 
+    /// <summary>#9000: the Store Growth alert's switch. On by default. Stored as <c>config_alert_settings.self_store_growth_enabled</c> (V275).</summary>
+    [JsonPropertyName("selfStoreGrowthEnabled")]
+    public bool SelfStoreGrowthEnabled { get; set; } = true;
+
+    /// <summary>#9000: the whole store must grow at least this many GB in the last 24 hours before Store Growth fires, on top of growing 3 times
+    /// faster than its own baseline. 0 removes the floor. Stored as <c>config_alert_settings.self_store_growth_floor_gb</c> (V275).</summary>
+    [JsonPropertyName("selfStoreGrowthFloorGb")]
+    public int SelfStoreGrowthFloorGb { get; set; } = 5;
+
+    /// <summary>#9000: the same floor for one object (a hypertable, a dimension table or a continuous aggregate). 0 removes the floor. Stored as
+    /// <c>config_alert_settings.self_store_growth_object_floor_gb</c> (V275).</summary>
+    [JsonPropertyName("selfStoreGrowthObjectFloorGb")]
+    public int SelfStoreGrowthObjectFloorGb { get; set; } = 2;
+
     /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
     /// Running fire (was a compile-time 30 minutes). Defaults to the shared constant behind the
     /// display's Offline band, so the two definitions of "collection stopped" agree out of the

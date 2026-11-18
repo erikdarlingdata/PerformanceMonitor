@@ -3525,6 +3525,8 @@ $rung$;";
         new Migration(273, "wait-stats-hourly-rollup", V273Sql),
         /* V274 (#8978): the store's trigram text index options on the service row. Two catalog-only nullable boolean columns, no default. */
         new Migration(274, "trigram-index-store-options", V274Sql),
+        /* V275 (#9000): the Store Growth alert's switch and its two size floors on the alert settings. Three catalog-only columns with defaults, no backfill. */
+        new Migration(275, "store-growth-alert-settings", V275Sql),
     };
 
     /// <summary>
@@ -3582,6 +3584,19 @@ CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_st
 ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
 CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
 ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V275 (#9000): the Store Growth alert's settings on <c>config.config_alert_settings</c>: <c>self_store_growth_enabled</c> (<c>boolean NOT NULL DEFAULT TRUE</c>),
+    /// <c>self_store_growth_floor_gb</c> (<c>integer NOT NULL DEFAULT 5</c>, the whole store's daily growth floor in GB) and <c>self_store_growth_object_floor_gb</c>
+    /// (<c>integer NOT NULL DEFAULT 2</c>, one object's). Catalog-only adds, idempotent, no backfill (the DEFAULTs fill the singleton row). A floor of 0 removes that floor.
+    /// <c>self_store_growth_object_floor_gb</c> is the probe's sentinel and is added LAST. An older build never reads the columns and has no Store Growth alert,
+    /// so rolling back past this rung loses the alert and nothing else.
+    /// </summary>
+    private const string V275Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS self_store_growth_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS self_store_growth_floor_gb integer NOT NULL DEFAULT 5,
+    ADD COLUMN IF NOT EXISTS self_store_growth_object_floor_gb integer NOT NULL DEFAULT 2;";
 
     /// <summary>
     /// V274 (#8978): <c>config.config_service.query_text_trigram_index_enabled</c> and <c>query_store_text_trigram_index_enabled</c>, the

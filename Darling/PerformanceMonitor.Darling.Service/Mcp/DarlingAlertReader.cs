@@ -710,7 +710,11 @@ LIMIT 1";
         bool TempDbGrowthFitEnabled,
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches (boolean NOT NULL, default on). APPENDED, same reason. */
         bool InstanceRestartedEnabled,
-        bool MemoryDumpsEnabled);
+        bool MemoryDumpsEnabled,
+        /* #9000 (V275): the Store Growth switch and its two floors in GB. APPENDED, same reason. */
+        bool SelfStoreGrowthEnabled,
+        int SelfStoreGrowthFloorGb,
+        int SelfStoreGrowthObjectFloorGb);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -757,7 +761,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
        tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
        tempdb_growth_fit_enabled,
-       instance_restarted_enabled, memory_dumps_enabled
+       instance_restarted_enabled, memory_dumps_enabled,
+       self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -845,7 +850,9 @@ WHERE id = 1";
             /* #8882 (V270): the TempDB Growth Fit switch at 101. */
             reader.GetBoolean(101),
             /* #8884 (V271): the Instance Restarted and Memory Dumps switches at 102-103. */
-            reader.GetBoolean(102), reader.GetBoolean(103));
+            reader.GetBoolean(102), reader.GetBoolean(103),
+            /* #9000 (V275): the Store Growth switch and its two floors at 104-106. */
+            reader.GetBoolean(104), reader.GetInt32(105), reader.GetInt32(106));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */
