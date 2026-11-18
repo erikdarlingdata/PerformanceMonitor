@@ -110,11 +110,11 @@ public sealed class BaselineDiscontinuityDuckDbTests : IClassFixture<SharedDuckD
                 noise.CommandText = $@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
 SELECT {id}::BIGINT * 1000000 + c.idx * 100000 + r.m, {id}, 'noise', c.name, TIMESTAMP '2026-01-10' + r.m * INTERVAL 1 MINUTE, 50, 'SUCCESS',
-       CASE WHEN c.name = '{WaitStatsCollector.CollectorName}' AND r.m % 13 = 0 THEN 'the {ServerEpoch.IdentityChangesMeasurement} marker is prose here'
-            WHEN c.name = '{PgStatementStatsCollector.CollectorName}' AND r.m % 11 = 0 THEN '{ServerEpoch.StatementsDeallocMeasurement}=3'
+       CASE WHEN c.name = '{WaitStatsCollector.Instance.Name}' AND r.m % 13 = 0 THEN 'the {ServerEpoch.IdentityChangesMeasurement} marker is prose here'
+            WHEN c.name = '{PgStatementStatsCollector.Instance.Name}' AND r.m % 11 = 0 THEN '{ServerEpoch.StatementsDeallocMeasurement}=3'
             WHEN r.m % 37 = 0 THEN 'short note ' || r.m END, 10
-FROM (VALUES (1, '{CpuUtilizationCollector.CollectorName}'), (2, '{WaitStatsCollector.CollectorName}'),
-             (3, '{PgStatementStatsCollector.CollectorName}'), (4, '{PgWaitStatsCollector.CollectorName}'),
+FROM (VALUES (1, '{CpuUtilizationCollector.Instance.Name}'), (2, '{WaitStatsCollector.Instance.Name}'),
+             (3, '{PgStatementStatsCollector.Instance.Name}'), (4, '{PgWaitStatsCollector.Instance.Name}'),
              (5, 'query_stats'), (6, 'latch_stats')) AS c(idx, name),
      range(0, 180) AS r(m)";
                 await noise.ExecuteNonQueryAsync();
@@ -124,10 +124,10 @@ FROM (VALUES (1, '{CpuUtilizationCollector.CollectorName}'), (2, '{WaitStatsColl
         /* Markers from each of the four writers, on both servers, with a host note in front of some. */
         foreach (var id in new[] { _serverId, otherServerId })
         {
-            await SeedLogAsync(CpuUtilizationCollector.CollectorName, day.AddMinutes(30).AddSeconds(40), ServerEpoch.IdentityChangesMeasurement + "=1", id);
-            await SeedLogAsync(WaitStatsCollector.CollectorName, day.AddMinutes(30), ServerEpoch.IdentityChangesMeasurement + "=1", id);
-            await SeedLogAsync(PgStatementStatsCollector.CollectorName, day.AddMinutes(90), "wall-clock budget (120s) reached; " + ServerEpoch.StatementsChangesMeasurement + "=1", id);
-            await SeedLogAsync(PgWaitStatsCollector.CollectorName, day.AddMinutes(150), "cycle abandoned; " + ServerEpoch.PostmasterChangesMeasurement + "=1", id);
+            await SeedLogAsync(CpuUtilizationCollector.Instance.Name, day.AddMinutes(30).AddSeconds(40), ServerEpoch.IdentityChangesMeasurement + "=1", id);
+            await SeedLogAsync(WaitStatsCollector.Instance.Name, day.AddMinutes(30), ServerEpoch.IdentityChangesMeasurement + "=1", id);
+            await SeedLogAsync(PgStatementStatsCollector.Instance.Name, day.AddMinutes(90), "wall-clock budget (120s) reached; " + ServerEpoch.StatementsChangesMeasurement + "=1", id);
+            await SeedLogAsync(PgWaitStatsCollector.Instance.Name, day.AddMinutes(150), "cycle abandoned; " + ServerEpoch.PostmasterChangesMeasurement + "=1", id);
         }
 
         var end = day.AddHours(3);

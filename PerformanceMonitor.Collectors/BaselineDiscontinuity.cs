@@ -158,14 +158,14 @@ public static class BaselineDiscontinuities
     /// at compile time rather than leaving it matching a token nothing writes — the
     /// <c>EnumeratedCollectorDriver.AbandonedByNotePredicateSql</c> idiom.
     /// </summary>
-    public const string MarkerRowsSql =
+    public static readonly string MarkerRowsSql =
         "SELECT collection_time, collector_name, error_message\n"
         + "FROM collection_log\n"
         + "WHERE server_id = $1\n"
         + "AND   collection_time >= $2\n"
         + "AND   collection_time <= $3\n"
-        + "AND   collector_name IN ('" + CpuUtilizationCollector.CollectorName + "', '" + WaitStatsCollector.CollectorName
-        + "', '" + PgStatementStatsCollector.CollectorName + "', '" + PgWaitStatsCollector.CollectorName + "')\n"
+        + "AND   collector_name IN ('" + CpuUtilizationCollector.Instance.Name + "', '" + WaitStatsCollector.Instance.Name
+        + "', '" + PgStatementStatsCollector.Instance.Name + "', '" + PgWaitStatsCollector.Instance.Name + "')\n"
         + "AND   error_message IS NOT NULL\n"
         + "AND   (error_message LIKE '%" + ServerEpoch.IdentityChangesMeasurement + "=%'\n"
         + "   OR  error_message LIKE '%" + ServerEpoch.StatementsChangesMeasurement + "=%'\n"

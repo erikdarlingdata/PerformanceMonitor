@@ -179,10 +179,7 @@ LEFT JOIN aurora_stat_wait_event() AS e(type_id, event_id, event_name)
        AND e.type_id  = w.type_id
 WHERE w.wait_time > 0";
 
-    /// <summary>The name this collector logs its <c>collection_log</c> rows under. A constant so the baseline marker read (#8570) names it without a second spelling.</summary>
-    public const string CollectorName = "pg_wait_stats";
-
-    public override string Name => CollectorName;
+    public override string Name => "pg_wait_stats";
 
     public override string TargetTable => "pg_wait_stats";
 

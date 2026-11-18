@@ -68,10 +68,7 @@ SELECT /* PerformanceMonitorLite */
     server_name = @@SERVERNAME
 FROM sys.dm_os_sys_info AS dosi;";
 
-    /// <summary>The name this collector logs its <c>collection_log</c> rows under. A constant so the baseline marker read (#8570) names it without a second spelling.</summary>
-    public const string CollectorName = "wait_stats";
-
-    public override string Name => CollectorName;
+    public override string Name => "wait_stats";
 
     public override string TargetTable => "wait_stats";
 

@@ -283,10 +283,7 @@ SELECT /* PerformanceMonitorLite */
     dump_newest_utc = @dump_newest_utc,
     dump_recent_count = @dump_recent_count;";
 
-    /// <summary>The name this collector logs its <c>collection_log</c> rows under. A constant so the baseline marker read (#8570) names it without a second spelling.</summary>
-    public const string CollectorName = "cpu_utilization";
-
-    public override string Name => CollectorName;
+    public override string Name => "cpu_utilization";
 
     public override string TargetTable => "cpu_utilization_stats";
 

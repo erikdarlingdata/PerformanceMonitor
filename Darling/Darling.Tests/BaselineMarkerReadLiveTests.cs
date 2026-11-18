@@ -69,10 +69,10 @@ public sealed class BaselineMarkerReadLiveTests
     {
         var rows = new List<string>
         {
-            $"(1, '{CpuUtilizationCollector.CollectorName}', 1)",
-            $"(2, '{WaitStatsCollector.CollectorName}', 1)",
-            $"(3, '{PgStatementStatsCollector.CollectorName}', 1)",
-            $"(4, '{PgWaitStatsCollector.CollectorName}', 1)",
+            $"(1, '{CpuUtilizationCollector.Instance.Name}', 1)",
+            $"(2, '{WaitStatsCollector.Instance.Name}', 1)",
+            $"(3, '{PgStatementStatsCollector.Instance.Name}', 1)",
+            $"(4, '{PgWaitStatsCollector.Instance.Name}', 1)",
         };
         for (var i = 0; i < fillers; i++)
         {
@@ -95,8 +95,8 @@ INSERT INTO collect.collection_log
     (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
 SELECT (s * 100000000000::bigint) + (c.idx * 100000000::bigint) + m, s, 'srv' || s, c.name,
        @start + (m * c.period) * interval '1 minute', 50, 'SUCCESS',
-       CASE WHEN c.name = '{PgStatementStatsCollector.CollectorName}' AND m % 11 = 0 THEN '{ServerEpoch.StatementsDeallocMeasurement}=3'
-            WHEN c.name = '{WaitStatsCollector.CollectorName}' AND m % 13 = 0 THEN 'the {ServerEpoch.IdentityChangesMeasurement} marker is prose here'
+       CASE WHEN c.name = '{PgStatementStatsCollector.Instance.Name}' AND m % 11 = 0 THEN '{ServerEpoch.StatementsDeallocMeasurement}=3'
+            WHEN c.name = '{WaitStatsCollector.Instance.Name}' AND m % 13 = 0 THEN 'the {ServerEpoch.IdentityChangesMeasurement} marker is prose here'
             WHEN m % 37 = 0 THEN 'short note ' || m
        END,
        10
@@ -116,10 +116,10 @@ INSERT INTO collect.collection_log
 SELECT 90000000000000::bigint + (s * 1000) + (w.idx * 10) + k, s, 'srv' || s, w.name,
        @start + (k * interval '1 day') + interval '30 seconds', 50, 'SUCCESS', w.note, 10
 FROM generate_series(1, @servers) AS s,
-     (VALUES (1, '{CpuUtilizationCollector.CollectorName}', '{ServerEpoch.IdentityChangesMeasurement}=1'),
-             (2, '{WaitStatsCollector.CollectorName}', '{ServerEpoch.IdentityChangesMeasurement}=1'),
-             (3, '{PgStatementStatsCollector.CollectorName}', 'wall-clock budget (120s) reached; {ServerEpoch.StatementsChangesMeasurement}=1'),
-             (4, '{PgWaitStatsCollector.CollectorName}', 'cycle abandoned; {ServerEpoch.PostmasterChangesMeasurement}=1')) AS w(idx, name, note),
+     (VALUES (1, '{CpuUtilizationCollector.Instance.Name}', '{ServerEpoch.IdentityChangesMeasurement}=1'),
+             (2, '{WaitStatsCollector.Instance.Name}', '{ServerEpoch.IdentityChangesMeasurement}=1'),
+             (3, '{PgStatementStatsCollector.Instance.Name}', 'wall-clock budget (120s) reached; {ServerEpoch.StatementsChangesMeasurement}=1'),
+             (4, '{PgWaitStatsCollector.Instance.Name}', 'cycle abandoned; {ServerEpoch.PostmasterChangesMeasurement}=1')) AS w(idx, name, note),
      generate_series(1, {MarkersPerWriter}) AS k", connection) { CommandTimeout = 600 };
         markers.Parameters.Add(new NpgsqlParameter("start", NpgsqlDbType.Timestamp) { Value = Start });
         markers.Parameters.Add(new NpgsqlParameter("servers", NpgsqlDbType.Integer) { Value = servers });
