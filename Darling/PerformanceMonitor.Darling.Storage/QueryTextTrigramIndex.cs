@@ -88,7 +88,8 @@ public sealed record TrigramIndexHealth(
 /// What this process remembers about the trigram index between passes: whether the option is on, whether a build or a drop is
 /// running, the last failure and its backoff, and whether <c>pg_trgm</c> could not be created. The catalog says what exists;
 /// only this says why it does not. Thread-safe: the worker's background pass writes it and the MCP and web hosts, which run in
-/// the same process, read it. Tests make their own instance; production uses <see cref="Shared"/>.
+/// the same process, read it. Tests make their own instance; production uses <see cref="Shared"/> for the plan-cache index and
+/// <see cref="QueryStoreTextTrigramIndex.SharedTracker"/> for the Query Store text index.
 /// </summary>
 public sealed class QueryTextTrigramIndexTracker
 {
@@ -227,9 +228,8 @@ public sealed class QueryTextTrigramIndexTracker
 /// largest field store: 3.1 GB (52% of the table), a 16.6 minute build, about 0.5 ms added to each written row. So it is off by default,
 /// it is never built by a migration rung (an upgrade must not wait that long), and turning the option off drops it.
 ///
-/// <para><b>Why the Query Store text is not indexed.</b> Only the plan-cache text was measured. <c>collect.query_store_text</c> is read in
-/// primary-key order with a row cap for one server, which stops early on a common pattern, and nothing measured shows it needs the index
-/// for a whole-table search. Part B of #7674 decides that with a measurement, not a guess.</para>
+/// <para><b>The Query Store text has its own index and option.</b> <c>collect.query_store_text</c> is indexed by
+/// <see cref="QueryStoreTextTrigramIndex"/> under its own option, with its own tracker, so either index can be on without the other.</para>
 ///
 /// <para><b>One pass.</b> <see cref="RunPassAsync"/> reads the catalog and does the one thing the option calls for: option off and index
 /// present, drop it (<c>DROP INDEX CONCURRENTLY</c>); option on and index valid, nothing; option on and a build running in another

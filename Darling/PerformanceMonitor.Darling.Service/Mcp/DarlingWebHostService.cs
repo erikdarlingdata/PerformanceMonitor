@@ -284,6 +284,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
                     /* #7674: file-only, and get_store_metrics (served here) reads it from process start. */
                     QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+                    QueryStoreTextTrigramIndex.SharedTracker.Configure(config.QueryStoreTextTrigramIndexEnabled);
                 }
                 catch (Exception ex)
                 {

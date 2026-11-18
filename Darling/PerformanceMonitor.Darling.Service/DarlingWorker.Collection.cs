@@ -286,6 +286,14 @@ public sealed partial class DarlingWorker
             config.QueryTextTrigramIndexEnabled ? QueryTextTrigramIndex.StartDelay : TimeSpan.Zero,
             QueryTextTrigramIndex.PassInterval, stoppingToken);
 
+        /* #8570: the opt-in trigram index on the Query Store text, under its own option and tracker, with the same pass rules as the
+           plan-cache index above: built CONCURRENTLY in the background StartDelay after start, dropped at once when the option is off,
+           never awaited on the startup path, and drained with the other background work. */
+        var queryStoreTextTrigramIndex = QueryStoreTextTrigramIndex.RunAsync(
+            postgres, config.QueryStoreTextTrigramIndexEnabled, QueryStoreTextTrigramIndex.SharedTracker, _logger,
+            config.QueryStoreTextTrigramIndexEnabled ? QueryStoreTextTrigramIndex.StartDelay : TimeSpan.Zero,
+            QueryStoreTextTrigramIndex.PassInterval, stoppingToken);
+
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
            large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
@@ -2065,6 +2073,9 @@ public sealed partial class DarlingWorker
 
         /* And the trigram index pass (#7674): shutdown cancels a build in progress, and the next start drops its leftover. */
         await queryTextTrigramIndex;
+
+        /* And the Query Store text trigram index pass (#8570), on the same terms. */
+        await queryStoreTextTrigramIndex;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;

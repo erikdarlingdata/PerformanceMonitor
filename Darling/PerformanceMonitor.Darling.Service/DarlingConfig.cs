@@ -242,6 +242,20 @@ public sealed class DarlingConfig
     public bool QueryTextTrigramIndexEnabled { get; set; }
 
     /// <summary>
+    /// Whether the service builds a <c>pg_trgm</c> GIN index on the Query Store text (<c>collect.query_store_text.query_sql_text</c>, #8570),
+    /// which <c>find_queries_by_text</c> searches a server's Query Store text through. Default FALSE: on a seeded store of 1,000,000 texts of
+    /// about 300 characters the index is 398 MB (92% of the table), a build takes about 33 seconds and it adds about 0.07 ms to each inserted
+    /// row; the cost grows with the store's text. The liveness touch of <c>last_seen</c> stays a HOT update when the page has room, so it
+    /// writes nothing to the index. When true the service creates the <c>pg_trgm</c> extension if the store login can, then builds the index
+    /// with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never ahead of collection. When false the
+    /// service drops the index if it exists. A failed build is dropped, reported by <c>get_store_metrics</c> (<c>query_store_text_index</c>)
+    /// and retried with a growing wait. Independent of <see cref="QueryTextTrigramIndexEnabled"/>. A file-only knob (not seeded into the
+    /// control-plane store), so an edit takes effect on the next restart.
+    /// </summary>
+    [JsonPropertyName("queryStoreTextTrigramIndexEnabled")]
+    public bool QueryStoreTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
     /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
     /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.

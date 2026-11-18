@@ -112,6 +112,9 @@ public sealed partial class DarlingWorker
                    start, long before the migrations finish (and for good when they fail). Set it the moment the file loads, not when the
                    background pass starts, or a valid index reads as "option off, being dropped" while the option is on. */
                 QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+                /* #8570: the Query Store text index's option, for the same reason: get_store_metrics and find_queries_by_text read it from
+                   process start. */
+                QueryStoreTextTrigramIndex.SharedTracker.Configure(config.QueryStoreTextTrigramIndexEnabled);
                 _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
                 break;
             }

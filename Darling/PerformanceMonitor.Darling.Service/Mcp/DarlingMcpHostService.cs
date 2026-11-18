@@ -867,6 +867,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                worker has migrated the store (or when it never does), so it sets the shared tracker from its own load too: the same value from
                whichever host loads first. */
             QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+            /* #8570: the Query Store text index's option, on the same terms. */
+            QueryStoreTextTrigramIndex.SharedTracker.Configure(config.QueryStoreTextTrigramIndexEnabled);
 
             if (peerPublish.Refused)
             {
