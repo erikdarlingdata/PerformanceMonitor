@@ -27,8 +27,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #5072: <see cref="DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql"/> returns each database's newest
 /// snapshot. An index only an older cycle carries was dropped and is not shown; a database that left collection
-/// scope still shows its last snapshot; another server's rows never leak in; a same-instant re-run resolves to the
-/// newest collection_id. Fixed past anchors, never the wall clock. With TimescaleDB every chunk but the newest is
+/// scope still shows its last snapshot; another server's rows never leak in; a server with no rows reads none; a same-instant
+/// re-run resolves to the newest collection_id. Fixed past anchors, never the wall clock. With TimescaleDB every chunk but the newest is
 /// compressed, so the anchor runs over compressed chunks too; without it the same facts run on a plain table.
 /// </summary>
 /* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
@@ -36,6 +36,7 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
 {
     private const int ServerA = 5072001;
     private const int ServerB = 5072002;
+    private const int ServerEmpty = 5072003;
     private const int DbX = 5;
     private const int DbY = 6;
 
@@ -101,6 +102,9 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         Assert.Equal(2, b.Count);
         Assert.Equal(99, b[(DbX, "b1")]);
         Assert.Equal(98, b[(DbY, "b2")]);
+
+        /* A server with no rows has no anchor: the instant array is empty and the read returns nothing. */
+        Assert.Empty(await ReadAsync(connection, ServerEmpty, ct));
     }
 
     /// <summary>The reader's naive-UTC snapshot time per database, and the same time through get_finops index_analysis:
@@ -202,8 +206,8 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
 
     /// <summary>#8570: the read touches only the chunks that hold a database's newest cycle. Database X is collected every day for twelve
     /// days and database Y left scope ten days back, so two of the twelve daily chunks hold an anchor and the other ten are excluded at run
-    /// time, every chunk between Y's last cycle and today included. The answer is still each database's newest snapshot. TimescaleDB only:
-    /// chunk exclusion is what is measured.</summary>
+    /// time, every chunk between Y's last cycle and today included. The answer is still each database's newest snapshot. A server with no
+    /// rows has no anchor, so the row scan never runs and no chunk is read. TimescaleDB only: chunk exclusion is what is measured.</summary>
     [Fact]
     public async Task TheRead_ExcludesEveryChunkThatHoldsNoAnchor_AScopedOutDatabaseCostingOnlyItsOwnLastChunk()
     {
@@ -239,16 +243,34 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         Assert.All(Enumerable.Range(1, 20), i => Assert.Equal((long)i, rows[(DbX, "i" + i)]));
         Assert.All(Enumerable.Range(1, 20), i => Assert.Equal(10_000L + i, rows[(DbY, "i" + i)]));
 
+        var a = await RowChunksAsync(connection, ServerA, ct);
+        Assert.Equal(10, a.Excluded);
+        Assert.Equal(2, a.Scanned);
+
+        Assert.Empty(await ReadAsync(connection, ServerEmpty, ct));
+        var empty = await RowChunksAsync(connection, ServerEmpty, ct);
+        Assert.Equal(0, empty.Loops);
+        Assert.Equal(0, empty.Scanned);
+    }
+
+    /// <summary>From EXPLAIN ANALYZE of the read, the row-reading ChunkAppend's loops, its chunks excluded at run time (absent when it never
+    /// ran) and how many of its children ran.</summary>
+    private static async Task<(long Loops, int? Excluded, int Scanned)> RowChunksAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
         await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql, connection);
-        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerA });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         var json = (string)(await explain.ExecuteScalarAsync(ct))!;
         using var plan = JsonDocument.Parse(json);
         var appends = new List<JsonElement>();
         FindRowChunkAppends(plan.RootElement[0].GetProperty("Plan"), appends);
         var rowScan = Assert.Single(appends);
-        Assert.True(rowScan.TryGetProperty("Chunks excluded during runtime", out var excluded), json);
-        Assert.Equal(10, excluded.GetInt32());
-        Assert.Equal(2, rowScan.GetProperty("Plans").EnumerateArray().Count(c => c.GetProperty("Actual Loops").GetInt64() > 0));
+        var loops = rowScan.GetProperty("Actual Loops").GetInt64();
+        int? excluded = rowScan.TryGetProperty("Chunks excluded during runtime", out var e) ? e.GetInt32() : null;
+        Assert.True(loops == 0 || excluded is not null, json);
+        var scanned = rowScan.TryGetProperty("Plans", out var children)
+            ? children.EnumerateArray().Count(c => c.GetProperty("Actual Loops").GetInt64() > 0)
+            : 0;
+        return (loops, excluded, scanned);
     }
 
     /// <summary>The ChunkAppend nodes that read index_object_stats rows, outside the anchor CTE (which reads every chunk's per-database
