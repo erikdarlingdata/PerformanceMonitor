@@ -46,6 +46,11 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
 
     private const int ExpectedCommonMatches = 3000;
 
+    /// <summary>A budget, and a match-read timeout, no read here comes near: these tests are about which read serves the search and what it lists,
+    /// so a slow or busy runner cannot stop a source part way or send the probe to the span read. The run-out test sets its own short match
+    /// timeout on top of it.</summary>
+    private static readonly DarlingMcpFindQueriesByTextTools.SourceBudget Roomy = new(60_000) { MatchMilliseconds = 60_000 };
+
     private static async Task<JsonElement> PlanCacheAsync(
         NpgsqlDataSource data, string pattern, string server, string? database, int limit, QueryTextTrigramIndexTracker tracker, CancellationToken ct,
         DarlingMcpFindQueriesByTextTools.SourceBudget? budget = null) =>
@@ -57,7 +62,7 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
     {
         var reply = JsonDocument.Parse(await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
             data, pattern, server, database, limit, McpDataDetail.Full,
-            DarlingMcpFindQueriesByTextTools.SourceBudget.Default, budget ?? DarlingMcpFindQueriesByTextTools.SourceBudget.Default, ct, tracker)).RootElement;
+            Roomy, budget ?? Roomy, ct, tracker)).RootElement;
         Assert.Equal("one_server", reply.GetProperty("scope").GetString());
         return reply;
     }
@@ -71,7 +76,7 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
     /// <summary>A budget that records, for every sample statement the search runs, the type of its third parameter: the matched digests
     /// (<c>bytea[]</c>) on the probe, the pattern (<c>text</c>) on the span read.</summary>
     private static DarlingMcpFindQueriesByTextTools.SourceBudget Recording(List<NpgsqlDbType> bound, DarlingMcpFindQueriesByTextTools.SourceBudget? from = null) =>
-        (from ?? DarlingMcpFindQueriesByTextTools.SourceBudget.Default) with { StatementBound = (_, p) => bound.Add(p[2].NpgsqlDbType) };
+        (from ?? Roomy) with { StatementBound = (_, p) => bound.Add(p[2].NpgsqlDbType) };
 
     private const NpgsqlDbType Digests = NpgsqlDbType.Array | NpgsqlDbType.Bytea;
 
@@ -197,16 +202,12 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
         var tracker = await FindQueriesByTextIndexScopeLiveTests.BuildIndexAsync(data, ct);
         var bound = new List<NpgsqlDbType>();
-        var slowMatch = new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds)
-        {
-            MatchMilliseconds = 100,
-            MatchTestDelaySeconds = 5,
-        };
+        var slowMatch = Roomy with { MatchMilliseconds = 100, MatchTestDelaySeconds = 5 };
 
         var planCache = await PlanCacheAsync(data, RarePattern, "ix-a", null, 20, tracker, ct, Recording(bound, slowMatch));
         var plain = await PlanCacheAsync(data, RarePattern, "ix-a", null, 20, new QueryTextTrigramIndexTracker(), ct);
 
-        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.True(planCache.GetProperty("status").GetString() == "ok", planCache.GetProperty("message").ToString());
         Assert.Equal(DarlingMcpFindQueriesByTextTools.SampleReadPlain, planCache.GetProperty("sample_read").GetString());
         Assert.Equal(JsonValueKind.Null, planCache.GetProperty("matched_texts").ValueKind);
         Assert.Equal(["0xA001@Sales"], Keys(planCache));
