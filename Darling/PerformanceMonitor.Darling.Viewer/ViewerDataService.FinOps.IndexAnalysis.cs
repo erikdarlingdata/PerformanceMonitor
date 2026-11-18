@@ -311,6 +311,10 @@ public sealed class IndexCleanupRollupRow
     public int IndexesToMerge => _rollup.IndexesToMerge;
     public int CompressableIndexes => _rollup.CompressableIndexes;
     public int UnusedIndexes => _rollup.UnusedIndexes;
+
+    /// <summary>#8880: heaps listed as Heap REVIEW findings (in none of the other figures).</summary>
+    public int Heaps => _rollup.Heaps;
+
     public decimal UnusedSizeGb => _rollup.UnusedSizeGb;
     public decimal CompressionMinSavingsGb => _rollup.CompressionMinSavingsGb;
     public decimal CompressionMaxSavingsGb => _rollup.CompressionMaxSavingsGb;

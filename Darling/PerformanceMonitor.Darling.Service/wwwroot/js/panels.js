@@ -62,6 +62,7 @@ import {
   clampText,
   plainEmptyStrip,
   noteStrip,
+  chartNote,
   disclosure,
   markPartialSubtitle,
   applyDataSubtitle,
@@ -1764,6 +1765,9 @@ function vizLine(data, desc) {
   /* #8881: `captionKey` names a text field of the reply drawn as a plain line under the chart when it has text, and nothing when it is null or empty. */
   const lineCaption = desc.captionKey ? getPath(data, desc.captionKey) : null;
   if (typeof lineCaption === "string" && lineCaption) under.push(captionStrip(lineCaption));
+  /* #8927: `noteKind` ("summed" or "level", as chartNote takes it) draws what a point covers under the chart and, when the read's `source` is "hourly", the sentence that the newest hours are not in it yet. Opt-in per chart: the Queries tab's three hourly-rollup trends name it. */
+  const widthNote = desc.noteKind ? chartNote(data, desc.noteKind) : null;
+  if (widthNote) under.push(widthNote);
   return under.length ? el("div", {}, [chart, ...under]) : chart;
 }
 

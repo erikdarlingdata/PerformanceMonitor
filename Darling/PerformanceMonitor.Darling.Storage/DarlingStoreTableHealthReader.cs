@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 
@@ -229,6 +230,22 @@ public static class DarlingStoreTableHealthReader
     /// when every eligible relation was checked and VACUUM can give each one back. NULL when the object is not past the floors (not
     /// read), or when no relation was found occupied and some could not be judged (a window over the cap, a read that failed, or
     /// more eligible relations than are checked): the tail is then unknown, never "VACUUM can shrink it".</param>
+    /// <param name="AutovacuumCancels">Autovacuums of the object's relations cancelled in the <see cref="CancelWindow"/> before the
+    /// read, from the store log (<c>collect.store_log_events</c>, class <c>autovacuum_cancel</c>). A cancel on a TOAST table counts
+    /// for the table that owns it, and a cancel on a chunk or partition for its hypertable or partitioned table. A cancel whose
+    /// relation no longer exists (a dropped chunk) counts for no table.</param>
+    /// <param name="LastAutovacuumCancel">When the latest of those cancels was captured (UTC). NULL when there were none.</param>
+    /// <param name="RelationsPastTrigger">Heap relations past their vacuum trigger, or past their insert trigger on a plain table, with
+    /// autovacuum on. A relation with autovacuum turned off is left out: nothing runs on it by design.</param>
+    /// <param name="Behind">True when a relation counted in <see cref="RelationsPastTrigger"/> has had no vacuum, automatic or manual,
+    /// complete within <see cref="BehindWindow"/> before the read. Autovacuum is not keeping up with it.</param>
+    /// <param name="BehindSince">The oldest last completed vacuum among the relations past a trigger (UTC), or when the statistics
+    /// began (<see cref="StatsSince"/>) when one of them has had no vacuum since. NULL when no relation is past a trigger.</param>
+    /// <param name="BehindSinceSource"><see cref="BehindSourceLastVacuum"/> or <see cref="BehindSourceStatsSince"/>, saying which of
+    /// the two <see cref="BehindSince"/> is. NULL with it.</param>
+    /// <param name="BehindHours">Hours from <see cref="BehindSince"/> to the read: how long the relation past its trigger has gone
+    /// without a completed vacuum. The statistics do not say when it crossed the trigger, so it has been past it for at most that
+    /// long.</param>
     public sealed record StoreTableHealthRow(
         string SchemaName,
         string TableName,
@@ -278,8 +295,19 @@ public static class DarlingStoreTableHealthReader
         int TailRelationsEligible,
         int TailRelationsChecked,
         int TailRelationsOccupied,
-        bool? TailOccupied)
+        bool? TailOccupied,
+        long AutovacuumCancels = 0,
+        DateTime? LastAutovacuumCancel = null,
+        int RelationsPastTrigger = 0,
+        bool Behind = false,
+        DateTime? BehindSince = null,
+        string? BehindSinceSource = null,
+        double? BehindHours = null)
     {
+        /// <summary>True when autovacuum on the object was cancelled more than once in the <see cref="CancelWindow"/>
+        /// (<see cref="RepeatedCancelMinimum"/> or more). A table cancelled again and again never finishes a vacuum.</summary>
+        public bool RepeatedlyCancelled => AutovacuumCancels >= RepeatedCancelMinimum;
+
         /// <summary>Share of updates that were HOT (heap-only, no index entry written), 0 to 1. NULL when there were no updates.</summary>
         public double? HotUpdateShare => TuplesUpdated > 0 ? (double)TuplesHotUpdated / TuplesUpdated : null;
 
@@ -305,6 +333,25 @@ public static class DarlingStoreTableHealthReader
 
         private double? PerDay(long count, double hours) => RatesKnown && hours > 0 ? count / (hours / 24.0) : null;
     }
+
+    /// <summary>How far back the cancel count looks from the read.</summary>
+    public static readonly TimeSpan CancelWindow = TimeSpan.FromHours(24);
+
+    /// <summary>Cancels in <see cref="CancelWindow"/> at which an object is <see cref="StoreTableHealthRow.RepeatedlyCancelled"/>: more
+    /// than one a day.</summary>
+    public const int RepeatedCancelMinimum = 2;
+
+    /// <summary>How long a relation past its trigger may go without a completed vacuum before the object is
+    /// <see cref="StoreTableHealthRow.Behind"/>. Autovacuum checks each database every <c>autovacuum_naptime</c> (a minute by
+    /// default), so a relation past its trigger for a day is not waiting for its turn.</summary>
+    public static readonly TimeSpan BehindWindow = TimeSpan.FromHours(24);
+
+    /// <summary><see cref="StoreTableHealthRow.BehindSince"/> is the oldest last completed vacuum among the relations past a trigger.</summary>
+    public const string BehindSourceLastVacuum = "last_vacuum";
+
+    /// <summary><see cref="StoreTableHealthRow.BehindSince"/> is when the statistics began: a relation past a trigger has had no
+    /// vacuum since.</summary>
+    public const string BehindSourceStatsSince = "stats_since";
 
     /// <summary>The counters began at <c>pg_stat_database.stats_reset</c>.</summary>
     public const string StatsSourceReset = "stats_reset";
@@ -431,12 +478,16 @@ public static class DarlingStoreTableHealthReader
     /// <param name="WithoutEstimate">Rows with no usable estimate.</param>
     /// <param name="WithoutEstimateByReason">Those rows, counted by <see cref="StoreTableHealthRow.EstimateUnavailableReason"/>,
     /// most common first.</param>
+    /// <param name="Behind">Rows flagged <see cref="StoreTableHealthRow.Behind"/>.</param>
+    /// <param name="RepeatedlyCancelled">Rows flagged <see cref="StoreTableHealthRow.RepeatedlyCancelled"/>.</param>
     public sealed record StoreTableHealthSummary(
         int TableCount,
         long TotalBytes,
         int RewriteCandidates,
         int WithoutEstimate,
-        IReadOnlyList<KeyValuePair<string, int>> WithoutEstimateByReason);
+        IReadOnlyList<KeyValuePair<string, int>> WithoutEstimateByReason,
+        int Behind = 0,
+        int RepeatedlyCancelled = 0);
 
     /// <summary>Counts the rows for a header line.</summary>
     public static StoreTableHealthSummary Summarize(IReadOnlyList<StoreTableHealthRow> rows)
@@ -454,7 +505,9 @@ public static class DarlingStoreTableHealthReader
             rows.Sum(r => r.TotalBytes),
             rows.Count(r => r.RewriteCandidate),
             byReason.Sum(p => p.Value),
-            byReason);
+            byReason,
+            rows.Count(r => r.Behind),
+            rows.Count(r => r.RepeatedlyCancelled));
     }
 
     /// <summary>A plain-language phrase for each <c>Reason*</c> value, for headers and tooltips.</summary>
@@ -571,6 +624,45 @@ members AS (
     LEFT JOIN pg_catalog.pg_stat_database AS d ON d.datname = pg_catalog.current_database()
 )";
 
+    /// <summary>True when the relation's own storage options turn autovacuum off (<c>c</c> is its <c>pg_class</c> row).</summary>
+    private const string AutovacuumDisabledSql = @"EXISTS (
+            SELECT 1 FROM pg_catalog.unnest(c.reloptions) AS o(opt)
+            WHERE o.opt ~* '^autovacuum_enabled=(f|fa|fal|fals|false|of|off|n|no|0)$')";
+
+    /// <summary>
+    /// The body of the LATERAL that works out a relation's two autovacuum triggers (<c>vac_trigger</c>, <c>ins_trigger</c>) from
+    /// its <c>pg_class</c> row <c>c</c>. <paramref name="unfrozen"/> is the share of pages not all-frozen (PostgreSQL 18) or 1.
+    /// </summary>
+    private static string TriggerSql(string unfrozen) => $@"
+        /* The relation's own autovacuum storage options win over the server settings, as in PostgreSQL's
+           relation_needs_vacanalyze: threshold + scale_factor * reltuples (a never-analyzed table counts as 0 rows), the
+           vacuum trigger capped by autovacuum_vacuum_max_threshold where the server has it (PostgreSQL 18; -1 is no cap),
+           and the insert trigger off when its threshold is negative. */
+        SELECT
+            LEAST(
+                COALESCE(ro.vt, cur.vt) + COALESCE(ro.vs, cur.vs) * GREATEST(c.reltuples, 0),
+                CASE WHEN COALESCE(ro.vm, cur.vm) >= 0 THEN COALESCE(ro.vm, cur.vm) END) AS vac_trigger,
+            CASE WHEN COALESCE(ro.it, cur.it) >= 0
+                 THEN COALESCE(ro.it, cur.it) + COALESCE(ro.isf, cur.isf) * GREATEST(c.reltuples, 0) * {unfrozen}
+            END AS ins_trigger
+        FROM (
+            SELECT
+                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_threshold')::float8 AS vt,
+                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_scale_factor')::float8 AS vs,
+                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_max_threshold')::float8 AS vm,
+                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_insert_threshold')::float8 AS it,
+                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_insert_scale_factor')::float8 AS isf
+            FROM pg_catalog.pg_options_to_table(c.reloptions) AS o
+        ) AS ro
+        CROSS JOIN (
+            SELECT
+                pg_catalog.current_setting('autovacuum_vacuum_threshold')::float8 AS vt,
+                pg_catalog.current_setting('autovacuum_vacuum_scale_factor')::float8 AS vs,
+                pg_catalog.current_setting('autovacuum_vacuum_max_threshold', true)::float8 AS vm,
+                pg_catalog.current_setting('autovacuum_vacuum_insert_threshold')::float8 AS it,
+                pg_catalog.current_setting('autovacuum_vacuum_insert_scale_factor')::float8 AS isf
+        ) AS cur";
+
     /// <summary>
     /// The statement for the per-table read. <paramref name="serverVersion"/> is <c>server_version_num</c>: PostgreSQL 18 adds
     /// <c>relallfrozen</c> (and the unfrozen share of the insert trigger), 16 adds <c>n_tup_newpage_upd</c>; older majors read NULL.
@@ -622,9 +714,7 @@ sized AS (
         c.relpages::bigint AS relpages,
         c.relallvisible::bigint AS relallvisible,
         {relAllFrozen} AS relallfrozen,
-        EXISTS (
-            SELECT 1 FROM pg_catalog.unnest(c.reloptions) AS o(opt)
-            WHERE o.opt ~* '^autovacuum_enabled=(f|fa|fal|fals|false|of|off|n|no|0)$') AS autovacuum_disabled,
+        {AutovacuumDisabledSql} AS autovacuum_disabled,
         ({DarlingVacuumTruncateRule.TruncateOffSql}) AS truncate_off,
         m.heap_bytes / pg_catalog.current_setting('block_size')::bigint AS rel_heap_pages,
         st.n_dead_tup,
@@ -657,35 +747,7 @@ sized AS (
     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
     LEFT JOIN pg_catalog.pg_stat_all_tables AS st ON st.relid = c.oid
     LEFT JOIN est AS l ON m.member_role = 'heap' AND l.schema_name = n.nspname AND l.table_name = c.relname
-    LEFT JOIN LATERAL (
-        /* The relation's own autovacuum storage options win over the server settings, as in PostgreSQL's
-           relation_needs_vacanalyze: threshold + scale_factor * reltuples (a never-analyzed table counts as 0 rows), the
-           vacuum trigger capped by autovacuum_vacuum_max_threshold where the server has it (PostgreSQL 18; -1 is no cap),
-           and the insert trigger off when its threshold is negative. */
-        SELECT
-            LEAST(
-                COALESCE(ro.vt, cur.vt) + COALESCE(ro.vs, cur.vs) * GREATEST(c.reltuples, 0),
-                CASE WHEN COALESCE(ro.vm, cur.vm) >= 0 THEN COALESCE(ro.vm, cur.vm) END) AS vac_trigger,
-            CASE WHEN COALESCE(ro.it, cur.it) >= 0
-                 THEN COALESCE(ro.it, cur.it) + COALESCE(ro.isf, cur.isf) * GREATEST(c.reltuples, 0) * {unfrozen}
-            END AS ins_trigger
-        FROM (
-            SELECT
-                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_threshold')::float8 AS vt,
-                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_scale_factor')::float8 AS vs,
-                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_max_threshold')::float8 AS vm,
-                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_insert_threshold')::float8 AS it,
-                max(o.option_value) FILTER (WHERE o.option_name = 'autovacuum_vacuum_insert_scale_factor')::float8 AS isf
-            FROM pg_catalog.pg_options_to_table(c.reloptions) AS o
-        ) AS ro
-        CROSS JOIN (
-            SELECT
-                pg_catalog.current_setting('autovacuum_vacuum_threshold')::float8 AS vt,
-                pg_catalog.current_setting('autovacuum_vacuum_scale_factor')::float8 AS vs,
-                pg_catalog.current_setting('autovacuum_vacuum_max_threshold', true)::float8 AS vm,
-                pg_catalog.current_setting('autovacuum_vacuum_insert_threshold')::float8 AS it,
-                pg_catalog.current_setting('autovacuum_vacuum_insert_scale_factor')::float8 AS isf
-        ) AS cur
+    LEFT JOIN LATERAL ({TriggerSql(unfrozen)}
     ) AS trig ON m.member_role = 'heap'
 ),
 eligible AS (
@@ -1006,6 +1068,350 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
          (SELECT count(*) FROM have AS h WHERE h.root_index_oid = p.indexrelid AND NOT h.ok) DESC,
          p.nspname, p.relname, p.index_name";
 
+    /// <summary>
+    /// One object's autovacuum progress, from <see cref="BuildVacuumSql"/>: its cancels in the window and its relations past a
+    /// trigger. <see cref="OldestVacuumWhilePast"/> is the oldest last completed vacuum (automatic or manual) among the relations
+    /// past a trigger, <see cref="RelationsPastNeverVacuumed"/> counts those with none since the statistics began, and
+    /// <see cref="StatsSince"/> is when the statistics began (as <see cref="StoreTableHealthRow.StatsSince"/>).
+    /// </summary>
+    public sealed record StoreVacuumObjectRow(
+        string SchemaName,
+        string TableName,
+        string Kind,
+        long Cancels,
+        DateTime? LastCancel,
+        int RelationsPast,
+        int RelationsPastNeverVacuumed,
+        DateTime? OldestVacuumWhilePast,
+        DateTime? StatsSince)
+    {
+        /// <summary>True when the object's autovacuums were cancelled at least <see cref="RepeatedCancelMinimum"/> times in the window.</summary>
+        public bool RepeatedlyCancelled => Cancels >= RepeatedCancelMinimum;
+    }
+
+    /// <summary>
+    /// Whether an object is behind on autovacuum as of a read (<see cref="BehindAsOf"/>). <see cref="Since"/> is the oldest last
+    /// completed vacuum among its relations past a trigger, or when the statistics began when one of them has had none
+    /// (<see cref="Source"/> says which). <see cref="Hours"/> is the time from <see cref="Since"/> to the read.
+    /// </summary>
+    public readonly record struct StoreVacuumBehind(bool Behind, DateTime? Since, string? Source, double? Hours);
+
+    /// <summary>
+    /// Whether <paramref name="vacuum"/> is behind as of <paramref name="asOfUtc"/>: a relation past a trigger has had no
+    /// completed vacuum, automatic or manual, within <see cref="BehindWindow"/>.
+    /// </summary>
+    public static StoreVacuumBehind BehindAsOf(StoreVacuumObjectRow vacuum, DateTime asOfUtc)
+    {
+        ArgumentNullException.ThrowIfNull(vacuum);
+        DateTime? since = null;
+        string? source = null;
+        if (vacuum.RelationsPast > 0)
+        {
+            if (vacuum.OldestVacuumWhilePast is DateTime done)
+            {
+                since = done;
+                source = BehindSourceLastVacuum;
+            }
+
+            if (vacuum.RelationsPastNeverVacuumed > 0 && vacuum.StatsSince is DateTime began && (since is null || began < since))
+            {
+                since = began;
+                source = BehindSourceStatsSince;
+            }
+        }
+
+        if (since is not DateTime from)
+        {
+            return default;
+        }
+
+        var asOf = asOfUtc.ToUniversalTime();
+        return new StoreVacuumBehind(from <= asOf - BehindWindow, from, source, Math.Max(0, (asOf - from).TotalHours));
+    }
+
+    /// <summary>
+    /// The statement for the autovacuum progress read: per object, the autovacuum cancels the store log holds between
+    /// <c>@cancel_since</c> and <c>@cancel_until</c> (naive UTC, like <c>capture_time</c>) and the relations past a trigger. It reads
+    /// the catalog, <c>pg_stat_all_tables</c> and one day of one class of the store log through its (event_class, capture_time)
+    /// index, and calls no size function. Only objects with a cancel or a relation past a trigger come back.
+    /// </summary>
+    public static string BuildVacuumSql(bool timescale, int serverVersion = int.MaxValue)
+    {
+        var unfrozen = serverVersion >= RelAllFrozenMinVersion
+            ? "(CASE WHEN c.relpages > 0 THEN 1 - LEAST(c.relallfrozen, c.relpages)::float8 / c.relpages ELSE 1 END)"
+            : "1";
+        return $@"
+WITH {BuildMembersCtes(timescale)},
+{StatsInfoCte},
+cancel_log AS (
+    /* The grouping key of a cancel names its relation, database first: canceling autovacuum task: db.schema.rel. A row whose
+       key names no relation is left out here; the settings read counts every cancel. */
+    SELECT
+        pg_catalog.regexp_match(e.message_text, '^{AutovacuumCancelKeyPattern}(.+)\.([^.]+)\.([^.]+)$') AS p,
+        e.occurrences,
+        e.capture_time
+    FROM collect.store_log_events AS e
+    WHERE e.event_class = '{StoreLogClassifier.AutovacuumCancelClass}'
+    AND   e.capture_time >= @cancel_since
+    AND   e.capture_time < @cancel_until
+),
+cancel_rel AS (
+    /* A TOAST table counts for the table that owns it. */
+    SELECT
+        COALESCE(owner.oid, c.oid) AS rel_oid,
+        sum(l.occurrences)::bigint AS cancels,
+        max(l.capture_time) AS last_cancel
+    FROM cancel_log AS l
+    JOIN pg_catalog.pg_namespace AS n ON n.nspname = l.p[2]
+    JOIN pg_catalog.pg_class AS c ON c.relnamespace = n.oid AND c.relname = l.p[3]
+    LEFT JOIN pg_catalog.pg_class AS owner ON n.nspname = 'pg_toast' AND owner.reltoastrelid = c.oid
+    WHERE l.p[1] = pg_catalog.current_database()
+    GROUP BY 1
+),
+rel AS (
+    SELECT
+        m.obj_schema,
+        m.obj_name,
+        m.kind,
+        cr.cancels,
+        cr.last_cancel,
+        GREATEST(st.last_vacuum, st.last_autovacuum) AS last_done,
+        COALESCE(m.member_role = 'heap' AND NOT {AutovacuumDisabledSql}
+                 AND (st.n_dead_tup > trig.vac_trigger
+                      OR (m.kind = 'table' AND st.n_ins_since_vacuum > trig.ins_trigger)), false) AS is_past
+    FROM members AS m
+    JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
+    LEFT JOIN pg_catalog.pg_stat_all_tables AS st ON st.relid = c.oid
+    LEFT JOIN cancel_rel AS cr ON cr.rel_oid = m.rel_oid
+    LEFT JOIN LATERAL ({TriggerSql(unfrozen)}
+    ) AS trig ON m.member_role = 'heap'
+)
+SELECT
+    r.obj_schema,
+    r.obj_name,
+    r.kind,
+    COALESCE(sum(r.cancels), 0)::bigint AS cancels,
+    max(r.last_cancel) AS last_cancel,
+    (count(*) FILTER (WHERE r.is_past))::int AS rel_past,
+    (count(*) FILTER (WHERE r.is_past AND r.last_done IS NULL))::int AS rel_past_never,
+    (min(r.last_done) FILTER (WHERE r.is_past) AT TIME ZONE 'UTC') AS oldest_done,
+    (SELECT si.since AT TIME ZONE 'UTC' FROM statsinfo AS si) AS stats_since
+FROM rel AS r
+GROUP BY r.obj_schema, r.obj_name, r.kind
+HAVING sum(r.cancels) > 0 OR bool_or(r.is_past)";
+    }
+
+    /// <summary>The cancel key's prefix as a regular expression (<c>canceling autovacuum task: </c>).</summary>
+    private const string AutovacuumCancelKeyPattern = "canceling autovacuum task: ";
+
+    /// <summary>
+    /// Reads every store object's autovacuum progress as of <paramref name="asOfUtc"/>: cancels in the <see cref="CancelWindow"/>
+    /// ending there, and relations past a trigger. The probe and one statement, each bounded by
+    /// <see cref="StorageCommandDeadlines.McpReadSeconds"/>. A statement past it throws <see cref="StoreTableHealthTimeoutException"/>.
+    /// </summary>
+    public static async Task<List<StoreVacuumObjectRow>> GetVacuumAsync(
+        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        try
+        {
+            var (timescale, serverVersion) = await ProbeAsync(postgres, cancellationToken);
+            return await ReadVacuumAsync(postgres, timescale, serverVersion, asOfUtc, cancellationToken);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreVacuumObjectRow>> ReadVacuumAsync(
+        NpgsqlDataSource postgres, bool timescale, int serverVersion, DateTime asOfUtc, CancellationToken cancellationToken)
+    {
+        var until = DateTime.SpecifyKind(asOfUtc.ToUniversalTime(), DateTimeKind.Unspecified);
+        var rows = new List<StoreVacuumObjectRow>();
+        await using var command = postgres.CreateCommand(BuildVacuumSql(timescale, serverVersion));
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime>("cancel_since", NpgsqlDbType.Timestamp) { TypedValue = until - CancelWindow });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>("cancel_until", NpgsqlDbType.Timestamp) { TypedValue = until });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new StoreVacuumObjectRow(
+                SchemaName: reader.GetString(0),
+                TableName: reader.GetString(1),
+                Kind: reader.GetString(2),
+                Cancels: reader.GetInt64(3),
+                LastCancel: Utc(reader, 4),
+                RelationsPast: reader.GetInt32(5),
+                RelationsPastNeverVacuumed: reader.GetInt32(6),
+                OldestVacuumWhilePast: Utc(reader, 7),
+                StatsSince: Utc(reader, 8)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// <paramref name="row"/> with its autovacuum progress from <paramref name="vacuum"/> (none when null) as of
+    /// <paramref name="asOfUtc"/> (<see cref="BehindAsOf"/>).
+    /// </summary>
+    public static StoreTableHealthRow WithVacuum(StoreTableHealthRow row, StoreVacuumObjectRow? vacuum, DateTime asOfUtc)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        if (vacuum is null)
+        {
+            return row;
+        }
+
+        var behind = BehindAsOf(vacuum, asOfUtc);
+        return row with
+        {
+            AutovacuumCancels = vacuum.Cancels,
+            LastAutovacuumCancel = vacuum.LastCancel,
+            RelationsPastTrigger = vacuum.RelationsPast,
+            Behind = behind.Behind,
+            BehindSince = behind.Since,
+            BehindSinceSource = behind.Source,
+            BehindHours = behind.Hours,
+        };
+    }
+
+    /// <summary>
+    /// The store's autovacuum settings as they apply (the <c>autovacuum_*</c> value, or the plain <c>vacuum_*</c> or
+    /// <c>maintenance_work_mem</c> value it falls back to at -1), the autovacuum workers running at the read (any role can count
+    /// them in <c>pg_stat_activity</c>), and every autovacuum cancel the store log holds in the <see cref="CancelWindow"/>.
+    /// </summary>
+    /// <param name="CostLimit">The cost budget all running autovacuum workers share between sleeps.</param>
+    /// <param name="CostDelayMs">How long a worker sleeps when the budget is spent. 0 means no sleep: vacuum is not throttled.</param>
+    /// <param name="WriteBudgetMBps">The most autovacuum can dirty per second across all its workers: <c>CostLimit /
+    /// vacuum_cost_page_dirty</c> pages per <c>CostDelayMs</c>, in MB (2^20 bytes). NULL when <c>CostDelayMs</c> is 0
+    /// (unthrottled) or the page cost is 0.</param>
+    /// <param name="CancelsInWindow">Every autovacuum cancel the store log holds in the window, whatever relation it names.</param>
+    /// <param name="CancelsUnresolved">Those of <paramref name="CancelsInWindow"/> whose relation the catalog does not have: a
+    /// relation since dropped (a chunk a retention policy removed), one in another database, or an entry that names none. They
+    /// count for no table. A cancel on a system catalog resolves but is not a store table, so it is in neither figure.</param>
+    public sealed record StoreAutovacuumSettings(
+        bool AutovacuumOn,
+        int MaxWorkers,
+        int WorkersRunning,
+        int NaptimeSeconds,
+        int CostLimit,
+        string CostLimitSetting,
+        double CostDelayMs,
+        string CostDelaySetting,
+        long WorkMemKb,
+        string WorkMemSetting,
+        int CostPageDirty,
+        int BlockSize,
+        double? WriteBudgetMBps,
+        long CancelsInWindow,
+        long CancelsUnresolved);
+
+    /// <summary>The statement for <see cref="GetAutovacuumSettingsAsync"/>. Reads <c>pg_settings</c>, counts autovacuum workers in
+    /// <c>pg_stat_activity</c>, and sums one day of one class of the store log through its (event_class, capture_time) index,
+    /// resolving each cancel's relation in the catalog.</summary>
+    public static readonly string AutovacuumSettingsSql = $@"
+WITH cancels AS (
+    SELECT
+        COALESCE(sum(e.occurrences), 0)::bigint AS total,
+        COALESCE(sum(e.occurrences) FILTER (WHERE rel.oid IS NULL), 0)::bigint AS unresolved
+    FROM collect.store_log_events AS e
+    LEFT JOIN LATERAL (
+        SELECT c.oid
+        FROM pg_catalog.regexp_match(e.message_text, '^{AutovacuumCancelKeyPattern}(.+)\.([^.]+)\.([^.]+)$') AS p(m)
+        JOIN pg_catalog.pg_namespace AS n ON n.nspname = p.m[2]
+        JOIN pg_catalog.pg_class AS c ON c.relnamespace = n.oid AND c.relname = p.m[3]
+        WHERE p.m[1] = pg_catalog.current_database()
+    ) AS rel ON true
+    WHERE e.event_class = '{StoreLogClassifier.AutovacuumCancelClass}'
+    AND   e.capture_time >= @cancel_since
+    AND   e.capture_time < @cancel_until
+)
+SELECT
+    max(s.setting) FILTER (WHERE s.name = 'autovacuum') = 'on',
+    max(s.setting) FILTER (WHERE s.name = 'autovacuum_max_workers')::int,
+    (SELECT count(*)::int FROM pg_catalog.pg_stat_activity AS a WHERE a.backend_type = 'autovacuum worker'),
+    max(s.setting) FILTER (WHERE s.name = 'autovacuum_naptime')::int,
+    max(s.setting) FILTER (WHERE s.name = 'autovacuum_vacuum_cost_limit')::int,
+    max(s.setting) FILTER (WHERE s.name = 'vacuum_cost_limit')::int,
+    max(s.setting) FILTER (WHERE s.name = 'autovacuum_vacuum_cost_delay')::float8,
+    max(s.setting) FILTER (WHERE s.name = 'vacuum_cost_delay')::float8,
+    max(s.setting) FILTER (WHERE s.name = 'autovacuum_work_mem')::bigint,
+    max(s.setting) FILTER (WHERE s.name = 'maintenance_work_mem')::bigint,
+    max(s.setting) FILTER (WHERE s.name = 'vacuum_cost_page_dirty')::int,
+    max(s.setting) FILTER (WHERE s.name = 'block_size')::int,
+    (SELECT k.total FROM cancels AS k),
+    (SELECT k.unresolved FROM cancels AS k)
+FROM pg_catalog.pg_settings AS s
+WHERE s.name IN ('autovacuum', 'autovacuum_max_workers', 'autovacuum_naptime', 'autovacuum_vacuum_cost_limit', 'vacuum_cost_limit',
+                 'autovacuum_vacuum_cost_delay', 'vacuum_cost_delay', 'autovacuum_work_mem', 'maintenance_work_mem',
+                 'vacuum_cost_page_dirty', 'block_size')";
+
+    /// <summary>
+    /// Reads <see cref="StoreAutovacuumSettings"/> as of <paramref name="asOfUtc"/>. One statement, bounded by
+    /// <see cref="StorageCommandDeadlines.McpReadSeconds"/>. A statement past it throws <see cref="StoreTableHealthTimeoutException"/>.
+    /// </summary>
+    public static async Task<StoreAutovacuumSettings> GetAutovacuumSettingsAsync(
+        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        try
+        {
+            var until = DateTime.SpecifyKind(asOfUtc.ToUniversalTime(), DateTimeKind.Unspecified);
+            await using var command = postgres.CreateCommand(AutovacuumSettingsSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<DateTime>("cancel_since", NpgsqlDbType.Timestamp) { TypedValue = until - CancelWindow });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>("cancel_until", NpgsqlDbType.Timestamp) { TypedValue = until });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            return Settings(
+                autovacuumOn: !reader.IsDBNull(0) && reader.GetBoolean(0),
+                maxWorkers: reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                workersRunning: reader.GetInt32(2),
+                naptimeSeconds: reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                autovacuumCostLimit: reader.IsDBNull(4) ? -1 : reader.GetInt32(4),
+                vacuumCostLimit: reader.IsDBNull(5) ? 200 : reader.GetInt32(5),
+                autovacuumCostDelayMs: reader.IsDBNull(6) ? -1 : reader.GetDouble(6),
+                vacuumCostDelayMs: reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                autovacuumWorkMemKb: reader.IsDBNull(8) ? -1 : reader.GetInt64(8),
+                maintenanceWorkMemKb: reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                costPageDirty: reader.IsDBNull(10) ? 20 : reader.GetInt32(10),
+                blockSize: reader.IsDBNull(11) ? 8192 : reader.GetInt32(11),
+                cancelsInWindow: reader.GetInt64(12),
+                cancelsUnresolved: reader.GetInt64(13));
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    /// <summary>
+    /// The settings as they apply, from the raw values: an <c>autovacuum_*</c> value of -1 falls back to its plain twin, and the
+    /// write budget is worked out from what applies.
+    /// </summary>
+    public static StoreAutovacuumSettings Settings(
+        bool autovacuumOn, int maxWorkers, int workersRunning, int naptimeSeconds, int autovacuumCostLimit, int vacuumCostLimit,
+        double autovacuumCostDelayMs, double vacuumCostDelayMs, long autovacuumWorkMemKb, long maintenanceWorkMemKb,
+        int costPageDirty, int blockSize, long cancelsInWindow, long cancelsUnresolved = 0)
+    {
+        var (limit, limitSetting) = autovacuumCostLimit >= 0
+            ? (autovacuumCostLimit, "autovacuum_vacuum_cost_limit")
+            : (vacuumCostLimit, "vacuum_cost_limit");
+        var (delay, delaySetting) = autovacuumCostDelayMs >= 0
+            ? (autovacuumCostDelayMs, "autovacuum_vacuum_cost_delay")
+            : (vacuumCostDelayMs, "vacuum_cost_delay");
+        var (workMem, workMemSetting) = autovacuumWorkMemKb >= 0
+            ? (autovacuumWorkMemKb, "autovacuum_work_mem")
+            : (maintenanceWorkMemKb, "maintenance_work_mem");
+        double? budget = delay > 0 && costPageDirty > 0
+            ? (double)limit / costPageDirty * (1000.0 / delay) * blockSize / (1024.0 * 1024.0)
+            : null;
+        return new StoreAutovacuumSettings(
+            autovacuumOn, maxWorkers, workersRunning, naptimeSeconds, limit, limitSetting, delay, delaySetting,
+            workMem, workMemSetting, costPageDirty, blockSize, budget, cancelsInWindow, cancelsUnresolved);
+    }
+
     private static async Task<(bool Timescale, int ServerVersion)> ProbeAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         await using var probe = postgres.CreateCommand(TimescaleProbeSql + ", pg_catalog.current_setting('server_version_num')::int");
@@ -1016,17 +1422,26 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
     }
 
     /// <summary>
-    /// Reads every store table's health, in the order the surfaces show it: rewrite candidates first, then objects past the
-    /// floors whose tail could not be judged, then estimated empty bytes descending (rows with no estimate last), then total
-    /// bytes descending. The probe, the read, and one small read per object past the floors (a window at
-    /// the end of the file for each of the emptiest <see cref="TailProbeMaxRelations"/> relations). Each statement is
-    /// bounded by <see cref="StorageCommandDeadlines.McpReadSeconds"/>. A statement past it throws <see cref="StoreTableHealthTimeoutException"/>.
+    /// Reads every store table's health as of now. See <see cref="GetAsync(NpgsqlDataSource, DateTime, CancellationToken)"/>.
     /// </summary>
-    public static async Task<List<StoreTableHealthRow>> GetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    public static Task<List<StoreTableHealthRow>> GetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+        => GetAsync(postgres, DateTime.UtcNow, cancellationToken);
+
+    /// <summary>
+    /// Reads every store table's health as of <paramref name="asOfUtc"/>, in the order the surfaces show it: objects behind on
+    /// autovacuum first (<see cref="StoreTableHealthRow.Behind"/>), then objects whose autovacuum was cancelled repeatedly in the
+    /// <see cref="CancelWindow"/>, then rewrite candidates, then objects past the floors whose tail could not be judged, then
+    /// estimated empty bytes descending (rows with no estimate last), then total bytes descending. The probe, the read, the
+    /// autovacuum progress read (<see cref="BuildVacuumSql"/>), and one small read per object past the floors (a window at the end
+    /// of the file for each of the emptiest <see cref="TailProbeMaxRelations"/> relations). Each statement is bounded by
+    /// <see cref="StorageCommandDeadlines.McpReadSeconds"/>. A statement past it throws <see cref="StoreTableHealthTimeoutException"/>.
+    /// </summary>
+    public static async Task<List<StoreTableHealthRow>> GetAsync(
+        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken = default)
     {
         try
         {
-            return await ReadTablesAsync(postgres, cancellationToken);
+            return await ReadTablesAsync(postgres, asOfUtc, cancellationToken);
         }
         catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
         {
@@ -1034,7 +1449,8 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
         }
     }
 
-    private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(
+        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -1105,16 +1521,21 @@ ORDER BY (SELECT count(*) FROM pleaves AS l WHERE l.root_oid = p.root_oid)
             }
         }
 
+        var vacuum = (await ReadVacuumAsync(postgres, timescale, serverVersion, asOfUtc, cancellationToken))
+            .ToDictionary(v => (v.SchemaName, v.TableName));
         var rows = new List<StoreTableHealthRow>(read.Count);
         foreach (var (row, tailRelations) in read)
         {
-            rows.Add(row.PastRewriteFloors && tailRelations.Length > 0
-                ? await WithTailAsync(postgres, row, tailRelations, cancellationToken)
-                : row);
+            var withVacuum = WithVacuum(row, vacuum.GetValueOrDefault((row.SchemaName, row.TableName)), asOfUtc);
+            rows.Add(withVacuum.PastRewriteFloors && tailRelations.Length > 0
+                ? await WithTailAsync(postgres, withVacuum, tailRelations, cancellationToken)
+                : withVacuum);
         }
 
         return rows
-            .OrderByDescending(r => r.RewriteCandidate)
+            .OrderByDescending(r => r.Behind)
+            .ThenByDescending(r => r.RepeatedlyCancelled)
+            .ThenByDescending(r => r.RewriteCandidate)
             .ThenByDescending(r => r.PastRewriteFloors)
             .ThenByDescending(r => r.EstimatedEmptyBytes ?? long.MinValue)
             .ThenByDescending(r => r.TotalBytes)

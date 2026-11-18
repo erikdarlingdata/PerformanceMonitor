@@ -100,6 +100,14 @@ public sealed class BaselineTierJoinShapeTests
             return;
         }
 
+        /* #8570: the two raw-grain I/O arms end in the wide-window scaffold, which joins each tier to the rows once per tier
+           instead of expanding the rows first. Its joins are checked by their results in IoLatencyBaselineLiveTests (the
+           identity test against the shared scaffold), not here. */
+        if (query.EndsWith(PgBaselineProvider.RobustTierScaffoldWide, StringComparison.Ordinal))
+        {
+            return;
+        }
+
         Assert.Contains("keyed_tiers", query, StringComparison.Ordinal);
         Assert.Contains("t.hour_of_day = k.hour_of_day", query, StringComparison.Ordinal);
         Assert.Contains("t.day_of_week = k.day_of_week", query, StringComparison.Ordinal);

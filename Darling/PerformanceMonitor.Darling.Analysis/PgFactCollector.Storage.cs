@@ -56,6 +56,9 @@ WHERE rn = 1";
        collector writes (both columns are always set). The one difference is a file with a NULL name: NOT EXISTS
        never matched it, so it forced DatabaseSizeSql, while EXCEPT matches it with the newest snapshot's row of the
        same NULL name and leaves the sum to this read. */
+    /* #8980: the dropped_out arm repeats the lookback bound. TimescaleDB excludes no chunk on an IN over the edge CTE,
+       so without it the arm read, and decompressed, every file_io_stats chunk the server had, and its cost grew with
+       the table's retention, not the lookback. Both edge times lie inside the lookback, so the bound changes no answer. */
     public const string DatabaseSizeNewestSql = @"
 WITH newest AS (
     SELECT collection_time
@@ -104,6 +107,8 @@ SELECT
         SELECT f.database_name, f.file_name
         FROM file_io_stats AS f
         WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
         AND   f.collection_time IN (SELECT collection_time FROM edge)
         AND   f.size_mb > 0
         EXCEPT

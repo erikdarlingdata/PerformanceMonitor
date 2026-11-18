@@ -1630,10 +1630,10 @@ public sealed class DarlingMcpDataTools
     internal static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
         string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
-        int? responseByteBudget = McpResponseBudget.DefaultBytes) =>
+        int? responseByteBudget = McpResponseBudget.DefaultBytes, bool roundAverages = true) =>
     #pragma warning restore CA1068
         GetQueryStoreTop(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag, responseByteBudget);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag, responseByteBudget, roundAverages);
 
     /// <summary>
     /// #5245: <see cref="GetQueryStoreTop(NpgsqlDataSource,string,int,int,string,string,string,string,bool,int,CancellationToken)"/>
@@ -1646,7 +1646,7 @@ public sealed class DarlingMcpDataTools
     internal static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of,
         string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
-        int? responseByteBudget = McpResponseBudget.DefaultBytes)
+        int? responseByteBudget = McpResponseBudget.DefaultBytes, bool roundAverages = true)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1728,7 +1728,9 @@ public sealed class DarlingMcpDataTools
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
-                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path.
+                   the filter has rows. One existence probe of the unfiltered window tells the two apart
+                   (QueryStoreWindowHasRowsAsync: the top read's tier, bounds and exclusions, no ranking); it runs
+                   only on this path.
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
                 /* #5245: one name keeps today's "in database 'X'" text; two or more have no one name to say, so the
@@ -1736,7 +1738,7 @@ public sealed class DarlingMcpDataTools
                 var scopeName = databases.Names.Count == 1 ? databases.Names[0] : null;
                 var scopeText = databases.Names.Count > 1 ? " for " + DatabaseFilter.ManyDatabasesDescription : null;
                 if ((execution_type != null || module_name != null)
-                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, databases, cancellationToken)).Count > 0)
+                    && await DarlingDataReader.QueryStoreWindowHasRowsAsync(postgres, resolved.ServerId, requestedStart, now, databases, cancellationToken))
                     return module_name is null
                         /* #5094: whole days from the daily summary make a zero here "close, not exact" (a late write the
                            summary missed), so the empty answer carries the same flag as a populated one. */
@@ -1797,6 +1799,7 @@ public sealed class DarlingMcpDataTools
                     WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken, requestedStart);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
+            double Average(double value) => roundAverages ? Math.Round(value, 2) : value;
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -1807,12 +1810,12 @@ public sealed class DarlingMcpDataTools
                 execution_type = r.ExecutionTypeDesc,
                 module_name = r.ModuleName,
                 execution_count = r.TotalExecutions,
-                avg_duration_ms = r.AvgDurationMs,
-                avg_cpu_ms = r.AvgCpuTimeMs,
-                avg_logical_reads = r.AvgLogicalReads,
-                avg_logical_writes = r.AvgLogicalWrites,
-                avg_physical_reads = r.AvgPhysicalReads,
-                avg_rowcount = r.AvgRowcount,
+                avg_duration_ms = Average(r.AvgDurationMs), // #8902: two places for the MCP reply; the web route keeps full precision (roundAverages false)
+                avg_cpu_ms = Average(r.AvgCpuTimeMs),
+                avg_logical_reads = Average(r.AvgLogicalReads),
+                avg_logical_writes = Average(r.AvgLogicalWrites),
+                avg_physical_reads = Average(r.AvgPhysicalReads),
+                avg_rowcount = Average(r.AvgRowcount),
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
                 query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, previewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > previewLength,

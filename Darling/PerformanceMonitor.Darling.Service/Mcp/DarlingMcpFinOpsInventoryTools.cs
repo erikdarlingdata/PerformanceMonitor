@@ -79,6 +79,13 @@ public sealed class DarlingMcpFinOpsInventoryTools
 
             if (inventory.Count == 0)
             {
+                /* #8942: on a store with no SQL Server target no server_properties snapshot is coming, so "yet" would promise one. The answer is the
+                   engine status the other gated reads use. */
+                if (await DarlingEngineCapability.FleetNotCollectedMessageAsync(postgres, "server_properties", cancellationToken) is { } engineGap)
+                {
+                    return McpHelpers.Status("not_collected", $"{engineGap} Server inventory covers SQL Server servers only.");
+                }
+
                 return McpHelpers.Status("empty",
                     include_removed
                         ? "No registered server has a collected server_properties snapshot yet, so there is no inventory to show."

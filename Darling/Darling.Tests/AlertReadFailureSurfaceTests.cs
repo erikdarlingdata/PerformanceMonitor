@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// down), and the counts are asserted in both directions so a walk that silently stopped reaching cannot
 /// report clean.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertReadFailureSurfaceTests
 {
     /* ---------------- the counter's own behaviour ---------------- */
@@ -938,7 +939,8 @@ public sealed class AlertReadFailureSurfaceTests
         /* 24th counted in DarlingSelfAlertEvaluator since #8302: the history read that closes a stale-rollup episode that ended while the service was down ("stale rollup ended-episode close self-alert"). */
         /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
         /* 22nd exempt since #7041: the daily health report's delivery-stamp WRITE, a write whose loss costs one re-send at the next restart and never a missed delivery, like the other daily documents' stamp write. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 25, 23),
+        /* 26th counted in DarlingSelfAlertEvaluator since #8950: the Store Vacuum Stalled read of the store's autovacuum progress ("store vacuum stalled self-alert"). 24th exempt there since #8950: that alert's apply and deliver half, whose read is the counted one just before it. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 26, 24),
     };
 
     /// <summary>
@@ -1073,8 +1075,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTY-NINTH since #8881: the TempDB Log Space alert's snapshot read ("TempDB log space"), in <c>AlertEngine.cs</c>, counted on its own name and its own clock like the data-file check beside it.
     /// And a SIXTIETH since #8882: the TempDB Growth Won't Fit alert's file read ("TempDB growth fit"), in <c>AlertEngine.cs</c>, counted on its own name and its own clock beside the log-space check.
     /// And a SIXTY-FIRST and SIXTY-SECOND since #8884: the Instance Restarted and Memory Dumps alerts' record read ("instance events") and the read of what they last fired ("instance events seed"), both in <c>AlertEngine.cs</c>, each counted on its own name and its own clock.
+    /// And a SIXTY-FIFTH since #8950: the Store Vacuum Stalled read ("store vacuum stalled self-alert"), in <c>DarlingSelfAlertEvaluator.cs</c>, counted because a swallowed read neither fires nor resolves the alert.
     /// </summary>
-    private const int CountedSites = 64;
+    private const int CountedSites = 65;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1095,6 +1098,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store autovacuum self-alert failed"] = "the read just before this catch is counted (store autovacuum self-alert), this one covers the apply and deliver half",
+        ["Store vacuum stalled self-alert failed"] = "the read just before this catch is counted (store vacuum stalled self-alert), this one covers the apply and deliver half",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["External-alert delivery self-alert failed"] = "handed its evidence (the report) as a parameter; the count read is counted in DarlingWorker (#5654)",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
@@ -1335,8 +1339,8 @@ public sealed class AlertReadFailureSurfaceTests
            at the next restart and never a delivery. 46th since #7085: the High CPU incident's opened-at save, a write whose
            loss costs the restart bound and never the opening page. 47th since #7082: the Poison Wait detail read, the text of a page whose
            condition was already read and counted. 48th since #7368: the Store Autovacuum Behind apply and deliver half, whose
-           read is counted just above it. 49th since #8549: the job history category summary pass's catch, a maintenance write. 50th since #8882: the TempDB Space context's tempdb file read, a footnote read after the alert's condition was counted. 51st since #8884: the Instance Restarted and Memory Dumps alerts' fired-mark save, a write after the record read they count. */
-        Assert.Equal(51, totalExempt);
+           read is counted just above it. 49th since #8549: the job history category summary pass's catch, a maintenance write. 50th since #8882: the TempDB Space context's tempdb file read, a footnote read after the alert's condition was counted. 51st since #8884: the Instance Restarted and Memory Dumps alerts' fired-mark save, a write after the record read they count. 52nd since #8950: the Store Vacuum Stalled apply and deliver half, whose read is counted just above it. */
+        Assert.Equal(52, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

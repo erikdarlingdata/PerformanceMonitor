@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -707,7 +708,7 @@ public static class CollectorEngineCapability
     /// pass the surface's real Amazon RDS fact, or an explicit <see cref="AwsRdsKind.None"/> where it has none or cannot apply (a PostgreSQL
     /// panel, a collector with no RDS gate). <see cref="AwsRdsKind.None"/> makes no RDS claim.</para>
     /// </summary>
-    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
+    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind, IReadOnlyCollection<string>? extensionsNotOffered = null)
     {
         var definition = CollectorCatalog.Find(collectorName);
 
@@ -760,7 +761,8 @@ public static class CollectorEngineCapability
                SERVERPROPERTY('EngineEdition') is 2 for both Web and Standard, so the registry's edition cannot say it and the stored fact does. */
             if (awsRdsKind == AwsRdsKind.None || IsCollectedOnAwsRds(definition, engineKind, awsRdsKind))
             {
-                return null;
+                /* #8913: the last axis, and the only one that needs a stored fact rather than the engine facts alone. */
+                return AuroraExtensionNotOfferedMessage(serverName, engineKind, definition, extensionsNotOffered);
             }
 
             if (awsRdsKind == AwsRdsKind.RdsWebOrExpress && IsCollectedOnAwsRds(definition, engineKind, AwsRdsKind.Rds))
@@ -793,6 +795,60 @@ public static class CollectorEngineCapability
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}), " +
                $"which does not have {CapturePathOf(collectorName)} that this server can read, so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
                PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
+    }
+
+    /// <summary>
+    /// #8913: the collectors whose whole job is one optional extension that Amazon Aurora PostgreSQL does not offer. The extension is
+    /// absent from <c>pg_available_extensions</c> there, so no setup step exists, and a precondition that sends the operator to a
+    /// parameter-group change and a reboot cannot work. The gate is on the server's stored extension census, not on the engine kind
+    /// alone, so an Aurora server that does offer the extension (available but not created) keeps the precondition wording.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AuroraOptionalExtensionCollectors = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "pg_kernel_stats",
+        "pg_predicate_stats",
+    };
+
+    /// <summary>
+    /// The extensions a server's newest census shows as absent, narrowed to the ones <paramref name="collectorName"/> cannot run without,
+    /// or <c>null</c> when <paramref name="engineKind"/> is not Aurora, the collector is not one of
+    /// <see cref="AuroraOptionalExtensionCollectors"/>, or the census does not say the extension is absent. Unknown is not absent: a
+    /// census that has not run, or a server that offers the extension, makes no claim.
+    /// </summary>
+    public static string? AuroraAbsentExtensionOf(string? engineKind, string collectorName, IReadOnlyCollection<string>? extensionsNotOffered)
+    {
+        if (extensionsNotOffered is null
+            || extensionsNotOffered.Count == 0
+            || !MonitoredEngineKind.IsAurora(engineKind)
+            || !AuroraOptionalExtensionCollectors.Contains(collectorName)
+            || CollectorCatalog.Find(collectorName) is not { } definition
+            || definition.RequiredPgExtensions.Count == 0)
+        {
+            return null;
+        }
+
+        foreach (var required in definition.RequiredPgExtensions)
+        {
+            if (!extensionsNotOffered.Contains(required.ExtensionName, StringComparer.Ordinal))
+            {
+                return null;
+            }
+        }
+
+        return definition.RequiredPgExtensions[0].ExtensionName;
+    }
+
+    private static string? AuroraExtensionNotOfferedMessage(
+        string serverName, string? engineKind, ICollectorSchemaInfo definition, IReadOnlyCollection<string>? extensionsNotOffered)
+    {
+        if (AuroraAbsentExtensionOf(engineKind, definition.Name, extensionsNotOffered) is not { } extension)
+        {
+            return null;
+        }
+
+        return $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. It does not offer the {extension} extension " +
+               $"(the extension is not in pg_available_extensions), so this server does not collect {CapturePathOf(definition.Name)}, and never will. " +
+               $"There is no setup step that adds it. {PermanentGapEpilogue}" + CoveredInsteadSuffix(definition.Name);
     }
 
     /// <summary>

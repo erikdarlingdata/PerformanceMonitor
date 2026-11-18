@@ -251,7 +251,7 @@ The command follows these rules:
 - If the account already has Read, it says `Already granted` and changes nothing.
 - If an explicit Deny entry on the account covers Read, it stops and tells you to remove the Deny first.
 - When it succeeds, it names the account and the certificate's subject and thumbprint. It tells you to restart the service.
-- It works on CNG keys and on legacy CAPI RSA keys. It does not handle a key on a smart card or a hardware module.
+- It works on CNG keys and on legacy CAPI RSA keys. It does not handle a key on a smart card or a hardware module. For one, it opens no card or PIN prompt. It stops and prints the provider's message. It also shows how to find the key file with `certutil` and grant the account with `icacls` by hand.
 - `--store-location CurrentUser` grants on the key of a certificate in the store of the account that runs the command, which is the elevated operator. A service that runs under its own account reads that account's `CurrentUser` store, never the operator's, so the grant does nothing for it. Use `CurrentUser` only when the service runs as the same account that runs the command, for example a service you moved to your own account. Every other install wants the default, `LocalMachine`.
 
 #### When the newest certificate's key cannot be opened

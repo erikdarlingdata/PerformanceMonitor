@@ -6,8 +6,8 @@
              mc:Ignorable="d"
              d:DesignHeight="800" d:DesignWidth="1100">
     <!-- Store Health (#8787): the health of the monitoring store's own tables and indexes, read only. The Viewer twin of the web's
-         Store health page: both call the same Storage readers, so the figures match. Top: the header (counts and the maintenance
-         verdict). Then the tables, rewrite candidates first, with Measure for one plain table. Then the indexes (flagged ones first)
+         Store health page: both call the same Storage readers, so the figures match. Top: the header (counts, the autovacuum settings
+         and the maintenance verdict). Then the tables, those behind on autovacuum first, with Measure for one plain table. Then the indexes (flagged ones first)
          and the partition index coverage. The tables and the indexes load as two separate reads, so the tables show as soon as theirs
          returns and the index sections say they are loading until theirs does. -->
     <Grid>
@@ -29,10 +29,13 @@
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </WrapPanel>
 
-        <!-- Header: the counts line and the maintenance verdict. -->
+        <!-- Header: the counts line, the autovacuum settings with the write budget, and the maintenance verdict. -->
         <StackPanel Grid.Row="1" Margin="10,2,10,6">
             <TextBlock x:Name="HeaderText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}"
                        Text="Loading store tables…"/>
+            <TextBlock x:Name="AutovacuumSettingsTextBlock" AutomationProperties.AutomationId="StoreHealthAutovacuumSettings"
+                       TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       Visibility="Collapsed" Text=""/>
             <TextBlock x:Name="ReadinessTextBlock" TextWrapping="Wrap" Margin="0,4,0,0"
                        Foreground="{DynamicResource ForegroundBrush}" Text="Checking whether now is a safe time for maintenance…"/>
         </StackPanel>
@@ -60,6 +63,7 @@
                     <DataGridTextColumn Header="Flag" Binding="{Binding Flag}" SortMemberPath="IsFlagged" Width="Auto" MinWidth="110"/>
                     <DataGridTextColumn Header="Table" Binding="{Binding Table}" Width="Auto" MinWidth="170"/>
                     <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="Auto" MinWidth="70"/>
+                    <DataGridTextColumn Header="Autovacuum behind" Binding="{Binding Behind}" SortMemberPath="BehindSort" Width="Auto" MinWidth="120"/>
                     <DataGridTextColumn Header="Total size" Binding="{Binding TotalSize}" SortMemberPath="TotalSizeSort" Width="Auto" MinWidth="80"/>
                     <DataGridTextColumn Header="Table data" Binding="{Binding HeapSize}" SortMemberPath="HeapSizeSort" Width="Auto" MinWidth="80"/>
                     <DataGridTextColumn Header="Indexes" Binding="{Binding IndexSize}" SortMemberPath="IndexSizeSort" Width="Auto" MinWidth="70"/>
@@ -76,6 +80,9 @@
                     <DataGridTextColumn Header="VACUUM can return it" Binding="{Binding VacuumCanReturn}" Width="Auto" MinWidth="130"/>
                     <DataGridTextColumn Header="Dead rows" Binding="{Binding DeadRows}" SortMemberPath="DeadRowsSort" Width="Auto" MinWidth="80"/>
                     <DataGridTextColumn Header="Autovacuum" Binding="{Binding Autovacuum}" Width="Auto" MinWidth="110"/>
+                    <DataGridTextColumn Header="Autovacuum cancels, 24 hours" Binding="{Binding AutovacuumCancels}" SortMemberPath="AutovacuumCancelsSort" Width="Auto" MinWidth="90"/>
+                    <DataGridTextColumn Header="Last cancel" Binding="{Binding LastCancel}" SortMemberPath="LastCancelUtc" Width="Auto" MinWidth="120"/>
+                    <DataGridTextColumn Header="Parts past the start point" Binding="{Binding PastTrigger}" SortMemberPath="PastTriggerSort" Width="Auto" MinWidth="90"/>
                     <DataGridTextColumn Header="Pages all visible" Binding="{Binding AllVisible}" SortMemberPath="AllVisibleSort" Width="Auto" MinWidth="90"/>
                     <DataGridTextColumn Header="Deleted per day, % of rows" Binding="{Binding Turnover}" SortMemberPath="TurnoverSort" Width="Auto" MinWidth="110"/>
                     <DataGridTextColumn Header="Counted since" Binding="{Binding CountedSince}" SortMemberPath="CountedSinceUtc" Width="Auto" MinWidth="140"/>

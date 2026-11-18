@@ -190,6 +190,7 @@ public sealed class WebPartialWindowBehaviourTests
             "  Incident Since: " + H("inc"),
             "  Blocked Query: SELECT 1 WHERE d = '2026-01-01 00:00:00Z'",
             "  Failed At: " + H("fail"),
+            "  Run Started: " + H("runStart"),
             "  Started: 2026-09-27 21:32:43 (server clock, UTC offset not collected)",
             "  Window: " + H("fail") + " → " + H("end"),
             "",

@@ -84,6 +84,8 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #8970: a database name, spliced into the Long-Running Query read as a string literal. Not a statement, and the read it is spliced into is in the parse-checked population. */
+        "DarlingPgSessionStatesReader.ManagedMaintenanceDatabase",
         /* #7616: the pg_blocking capture predicate and the FROM ... WHERE clause built on it, spliced into PgBlockingCaptureCountsSql and
            PgBlockingCaptureCountsByServerSql (both in the parse-checked population). Not statements, and verified where they are spliced. */
         "DarlingPgBlockingReader.PgBlockingCaptureFilter",

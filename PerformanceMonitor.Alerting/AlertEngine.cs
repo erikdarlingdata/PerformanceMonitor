@@ -3021,9 +3021,13 @@ public sealed class AlertEngine
     ///
     /// <para><b>Mute.</b> The mute check runs per sampled (database, client application) group, inside the evaluation
     /// (<see cref="AttentionEvaluator.Evaluate"/>), because the judged count depends on which groups are muted. A fire whose
-    /// exact count crossed a bar but whose unmuted share did not is recorded Muted, like any muted fire. A Muted finding is not
+    /// rate after the built-in filters crossed a bar but whose unmuted share did not is recorded Muted, like any muted fire. A Muted finding is not
     /// a delivery: it neither starts the delivery cooldown nor records an escalation tier, and it is throttled by a cooldown of
     /// its own (round 2 of #5714).</para>
+    ///
+    /// <para><b>Filtered.</b> A crossing that the built-in filters alone (SSMS IntelliSense, VS Code mssql metadata, events under 1 ms,
+    /// Azure Data Studio and dbatools metadata) take under the Warning bar is a Filtered finding (#8971). It is handled as a reading under the bar:
+    /// nothing is recorded, no alert stands, and a standing alert resolves. A storm of filtered noise therefore writes no alert-log rows.</para>
     /// </summary>
     private async Task CheckAttentionAsync(
         string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -3111,6 +3115,13 @@ public sealed class AlertEngine
                     return groupJudgment.Silenced;
                 },
                 new AttentionRelativeBars(baseline?.P999ThreeMinuteAverage, multiples.Warning, multiples.Critical));
+
+            /* #8971: a crossing the built-in filters alone take under the bar is not a fire and not a mute. It is handled as a reading
+               under the bar: no row and no standing alert, and a standing alert it follows resolves the usual way. */
+            if (finding is { Filtered: true })
+            {
+                finding = null;
+            }
 
             if (finding is not null)
             {

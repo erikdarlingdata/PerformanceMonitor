@@ -149,6 +149,9 @@ public static class AlertFamily
         ["Store Disk Pressure"] = SelfMonitor,
         /* #7368: big tables past 3 times their autoanalyze threshold on two hourly reads in a row. */
         ["Store Autovacuum Behind"] = SelfMonitor,
+        /* #8950: store tables past their autovacuum start point with no vacuum in 24 hours, or with autovacuum cancelled
+           repeatedly, on two hourly reads in a row. */
+        ["Store Vacuum Stalled"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,

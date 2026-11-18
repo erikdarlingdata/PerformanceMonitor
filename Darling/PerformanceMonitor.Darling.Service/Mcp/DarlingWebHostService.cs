@@ -325,8 +325,10 @@ public sealed class DarlingWebHostService : BackgroundService
                     /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
                     _readAdmission?.Configure(config.Reads.MaxHeavyReads);
 
-                    /* #7674: file-only, and get_store_metrics (served here) reads it from process start. */
-                    QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+                    /* #7674: get_store_metrics (served here) reads it from process start. #8978: the file value, ignored once the worker has set the
+                       value, which the store may override. */
+                    QueryTextTrigramIndexTracker.Shared.ConfigureFromFile(config.QueryTextTrigramIndexEnabled);
+                    QueryStoreTextTrigramIndex.SharedTracker.ConfigureFromFile(config.QueryStoreTextTrigramIndexEnabled);
                 }
                 catch (Exception ex)
                 {
@@ -1358,7 +1360,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             _managedGroups = frontDoorProxy is null && _ownerSource is not null && postgres is not null
                 ? new DarlingWebGroupTokens(() => _ownerSource.Read(), postgres, () => DarlingPasswordKey.Current,
-                    accessToken, webTokens, mcpTokens, _logger)
+                    accessToken, webTokens, mcpTokens, _logger,
+                    () => _collectorState.Read()?.Phase == CollectorRuntimeState.CollectorPhase.Collecting)
                 : null;
             ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups, tokenSignIn: tokenSignIn, personalTokens: DarlingMcpHostService.PersonalTokensFor(config));
 

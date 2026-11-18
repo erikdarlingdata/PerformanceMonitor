@@ -73,20 +73,36 @@ const table = (o) => ({
   estimate_unavailable_reason: null, estimate_unavailable_text: null, past_rewrite_floors: false, tail_occupied: null, rewrite_candidate: false,
   dead_rows: 0, vacuum_trigger_rows: 100, relations_past_vacuum_trigger: 0, autovacuum_disabled: false, pct_all_visible: 100, last_vacuum: null, last_autovacuum: null,
   last_analyze: null, last_autoanalyze: null, growth_bytes_7d: null, inserts_per_day: 10, updates_per_day: 0, deletes_per_day: 0, hot_update_share: null, turnover_per_day: 0,
-  stats_since: "2026-11-01T00:00:00Z", ...o,
+  stats_since: "2026-11-01T00:00:00Z", autovacuum_cancels_24h: 0, last_autovacuum_cancel: null, repeatedly_cancelled: false, relations_past_trigger: 0,
+  behind: false, behind_since: null, behind_since_source: null, behind_hours: null, ...o,
 });
 const NEVER = "never analyzed";
+/* #8950: the read puts the table behind on autovacuum first and the one cancelled repeatedly next. */
 const TABLES = [
+  table({ table_name: "query_snapshots", kind: "hypertable", chunk_count: 12, estimate_relations: 12, estimate_relations_usable: 12, estimated_empty_bytes: 1 * MB, estimated_empty_share: 0.1,
+    relations_past_trigger: 3, behind: true, behind_since: "2026-11-14T03:11:02Z", behind_since_source: "last_vacuum", behind_hours: 84.2, autovacuum_cancels_24h: 1, last_autovacuum_cancel: "2026-11-17T14:00:00Z" }),
+  table({ table_name: "wait_stats", kind: "partitioned", leaf_count: 4, estimate_relations: 4, estimate_relations_usable: 4, estimated_empty_bytes: 1 * MB, estimated_empty_share: 0.1, autovacuum_cancels_24h: 5, last_autovacuum_cancel: "2026-11-17T15:00:00Z", repeatedly_cancelled: true }),
   table({ table_name: "store_metrics", total_bytes: 900 * MB, heap_bytes: 800 * MB, estimated_empty_bytes: 600 * MB, estimated_empty_share: 0.75, estimate_relations_usable: 1, past_rewrite_floors: true, tail_occupied: true, rewrite_candidate: true }),
   table({ table_name: "fresh_table", estimate_unavailable_reason: "never_analyzed", estimate_unavailable_text: NEVER }),
   table({ table_name: "query_stats", kind: "hypertable", chunk_count: 441, estimate_relations: 441, estimate_relations_usable: 400, estimated_empty_bytes: 5 * MB, estimated_empty_share: 0.05 }),
   table({ table_name: "emptied", estimated_empty_bytes: 300 * MB, estimated_empty_share: 0.8, estimate_relations_usable: 1, past_rewrite_floors: true, tail_occupied: false }),
 ];
 let neverReset = false;
+const SETTINGS = {
+  as_of: "2026-11-17T15:11:02Z", age_seconds: 240, autovacuum_on: true, max_workers: 3, workers_running: 1, naptime_seconds: 60,
+  cost_limit: 200, cost_limit_setting: "vacuum_cost_limit", cost_delay_ms: 2, cost_delay_setting: "autovacuum_vacuum_cost_delay",
+  work_mem_kb: 65536, work_mem_setting: "maintenance_work_mem", vacuum_cost_page_dirty: 20, block_size: 8192, write_budget_mb_per_s: 39.1,
+  cancels_24h: 8, cancels_unresolved: 2,
+};
+/* null: the settings read ran past its limit and was left out. */
+let settings = SETTINGS;
 const tablesAnswer = () => ({
+  tables_behind: 1, tables_repeatedly_cancelled: 1,
+  ...(settings === null ? { autovacuum_settings_left_out_note: "The store table health read ran past its 30-second limit and was stopped." } : { autovacuum_settings: settings }),
   ...(neverReset ? { rates_known: false, rates_note: "x" } : { rates_known: true, rates_note: null }),
-  section: "tables", header: "x", estimate_note: "x", store_tables: 4, store_total_bytes: 1000 * MB, rewrite_candidates: 1, tables_without_estimate: 1,
-  without_estimate_by_reason: { never_analyzed: 1 }, without_estimate_reason_text: { never_analyzed: NEVER }, truncated: false, tables_returned: 4, tables: TABLES,
+  tables_as_of: "2026-11-17T15:11:02Z", tables_age_seconds: 240, held_for_seconds: 300,
+  section: "tables", header: "x", estimate_note: "x", store_tables: TABLES.length, store_total_bytes: 1000 * MB, rewrite_candidates: 1, tables_without_estimate: 1,
+  without_estimate_by_reason: { never_analyzed: 1 }, without_estimate_reason_text: { never_analyzed: NEVER }, truncated: false, tables_returned: TABLES.length, tables: TABLES,
 });
 const index = (o) => ({
   schema_name: "collect", table_name: "store_metrics", kind: "table", index_name: "ix_ok", on_compressed_data: false, index_count: 1, leaf_count: 0, bytes: 5 * MB, heap_bytes: 800 * MB,
@@ -109,6 +125,7 @@ const indexesAnswer = (cov) => cov === null
   ? { section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
       coverage_left_out_note: "The store table health read ran past its 30-second limit and was stopped." }
   : {
+      indexes_as_of: "2026-11-17T15:11:04Z", indexes_age_seconds: 0,
       section: "indexes", index_header: "x", indexes_total: INDEXES.length, indexes_returned: INDEXES.length, indexes_truncated: false, indexes: INDEXES,
       partition_index_coverage_total: cov.length, partition_index_coverage_returned: cov.length, partition_index_coverage_truncated: false, partition_index_coverage: cov,
     };
@@ -183,6 +200,8 @@ await flush();
     coverageWhileHeld: sections[8].textContent,
     readiness: sections[2].textContent,
     measureButtons: buttons(main).length,
+    readLine: byClass(sections[0], "meta").map((n) => n.textContent),
+    readLineTitle: byClass(sections[0], "meta").map((n) => n.getAttribute("title")),
   };
 }
 holdIndexes.go();
@@ -276,6 +295,36 @@ function gridRowsOfPlain(root) {
     noteAfterReset: byClass(main4, "store-health-note").map((n) => n.textContent),
     postmasterCell: page.countedSinceText({ stats_since: "2026-11-01T00:00:00Z", stats_since_source: "postmaster_start" }),
     resetCell: page.countedSinceText({ stats_since: "2026-11-01T00:00:00Z", stats_since_source: "stats_reset" }),
+  };
+}
+/* 6. #8950: the autovacuum part of the header, the cells of a table behind and one cancelled repeatedly, and the settings left out. */
+{
+  const main5 = new FakeNode("main");
+  main5.isRoot = true;
+  page.renderStoreHealth(main5);
+  await flush();
+  const withMaintenance = gridRows(main5);
+  settings = { ...SETTINGS, cost_delay_ms: 0, write_budget_mb_per_s: null, cost_limit_setting: "autovacuum_vacuum_cost_limit", work_mem_setting: "autovacuum_work_mem", cancels_24h: 0, cancels_unresolved: 0 };
+  const main6 = new FakeNode("main");
+  main6.isRoot = true;
+  page.renderStoreHealth(main6);
+  await flush();
+  settings = null;
+  const main7 = new FakeNode("main");
+  main7.isRoot = true;
+  page.renderStoreHealth(main7);
+  await flush();
+  settings = SETTINGS;
+  out.autovacuum = {
+    headers: gridHeads(main5),
+    rows: withMaintenance,
+    tiles: byClass(main5, "tile").map((t) => t.textContent),
+    settingsLine: byClass(main5, "store-health-autovacuum").map((n) => n.textContent),
+    unthrottledTiles: byClass(main6, "tile").map((t) => t.textContent),
+    unthrottledLine: byClass(main6, "store-health-autovacuum").map((n) => n.textContent),
+    leftOutHeader: main7.children[0].children[1].textContent,
+    leftOutLines: byClass(main7, "store-health-autovacuum").length,
+    hours: [page.hoursText(30.9), page.hoursText(84.2)],
   };
 }
 out.neverAll = asks.filter((a) => a.q.section === "all").length;

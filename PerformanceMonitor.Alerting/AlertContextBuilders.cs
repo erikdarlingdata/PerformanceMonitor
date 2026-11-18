@@ -1701,7 +1701,17 @@ public static class AlertContextBuilders
         {
             var item = new AlertDetailItem { Heading = j.JobName, Fields = new() };
             item.Fields.Add(("Job", j.JobName));
-            item.Fields.Add(("Failed At", j.RunDateTimeFormatted));
+            /* #8972: RunDateTime is when the run STARTED. "Failed At" is the start plus the run's duration, so it
+               is stated only when the duration is known; without one the start is labelled as what it is. */
+            if (j.FailedAtFormatted is string failedAt)
+            {
+                item.Fields.Add(("Started", j.RunDateTimeFormatted));
+                item.Fields.Add(("Failed At", failedAt));
+            }
+            else
+            {
+                item.Fields.Add(("Run Started", j.RunDateTimeFormatted));
+            }
             if (j.StepId > 0 && !string.IsNullOrEmpty(j.StepName))
                 item.Fields.Add(("Step", $"{j.StepId}: {j.StepName}"));
             if (!string.IsNullOrEmpty(j.Message))

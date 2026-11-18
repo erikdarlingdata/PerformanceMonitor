@@ -14,7 +14,17 @@
  * The page reads get_store_table_health twice, started together: section "tables" and section "indexes". The tables half
  * takes about a second and a half on a busy laptop and the indexes half about one, so each draws as its own read returns,
  * and the Indexes and coverage sections say "Loading" until theirs does. The page never asks for section "all".
- * get_store_maintenance_readiness is a third read and fills the verdict line. Refresh runs all three again.
+ * get_store_maintenance_readiness is a third read and fills the verdict line. Refresh asks for all three again.
+ *
+ * The service reads the store's catalogs for the tables and the indexes at most once in a few minutes and holds each answer
+ * in between (#8924), so a refresh inside that time gets the same read back. The page never stamps such an answer with the
+ * time it arrived: the line beside Refresh and the line under the index summary show when the store answered
+ * (tables_as_of, indexes_as_of) and how long ago that was (the _age_seconds beside each).
+ *
+ * Autovacuum: the tables read also says, per table, how many of its autovacuums the store log saw cancelled in the last 24 hours
+ * and whether autovacuum is behind on it (a relation past its trigger with no vacuum completed in 24 hours). Tables behind come
+ * first in the read's order. The header shows the store's autovacuum settings as they apply and the write budget they allow,
+ * beside the store size (autovacuum_settings). The read decides what is behind and what is cancelled repeatedly. The page words it.
  *
  * Measure runs measure_store_table for ONE plain table. Only one runs at a time, and the page shows how long it has run.
  *
@@ -87,7 +97,23 @@ export function describeTable(r) {
   out.vacuum_due_text = r.vacuum_trigger_rows == null ? null : Number(r.relations_past_vacuum_trigger) > 0 ? "Due" : "Not yet";
   out.autovacuum_text = r.autovacuum_disabled === true ? "Off" : "On";
   out.autovacuum_sev = r.autovacuum_disabled === true ? "Critical" : null;
+  if (r.behind === true) {
+    out.behind_text = r.behind_hours == null ? "Behind" : "Behind, no vacuum in " + hoursText(Number(r.behind_hours));
+    out.behind_sev = "Critical";
+    out.behind_rank = 1 + (Number(r.behind_hours) || 0);
+  } else {
+    out.behind_text = "No";
+    out.behind_sev = null;
+    out.behind_rank = 0;
+  }
+  out.cancels_sev = r.repeatedly_cancelled === true ? "Warning" : null;
   return out;
+}
+
+/** A number of hours in whole hours up to three days, then in whole days: "30 h", "4 days". */
+export function hoursText(hours) {
+  if (!Number.isFinite(hours)) return "—";
+  return hours < 72 ? fmtInt(Math.floor(hours)) + " h" : fmtInt(Math.floor(hours / 24)) + " days";
 }
 
 /** The kind column: "Hypertable, 441 chunks", "Partitioned table, 12 partitions", or the kind alone. */
@@ -116,6 +142,8 @@ export function countedSinceText(r) {
 export const TABLE_COLUMNS = [
   { key: "table_name", label: "Table", name: true, display: named, sortValue: named },
   { key: "kind", label: "Kind", display: kindText, sortValue: kindText },
+  { key: "behind_text", label: "Autovacuum behind", sevKey: "behind_sev", sortValue: (r) => r.behind_rank,
+    hint: "Behind: a part of the table is past the point where autovacuum starts (its dead rows, or for a plain table its new rows) and no vacuum, automatic or manual, has finished on it in 24 hours. The time is since its last vacuum, or since the statistics began when it has had none. It crossed the point some time after that. A table with autovacuum off is never behind." },
   { key: "rewrite_text", label: "Rewrite", sevKey: "rewrite_sev", sortValue: (r) => r.rewrite_rank,
     hint: "Rewrite candidate: about half of the table or more is estimated empty, and that is a large amount of space. VACUUM gives space back only by cutting empty pages off the end of the file. A live row near the end, or a table set not to truncate, means only a rewrite can." },
   { key: "total_bytes", label: "Total", format: "bytes" },
@@ -145,6 +173,11 @@ export const TABLE_COLUMNS = [
   { key: "last_vacuum_at", label: "Last vacuum", format: "time", group: "Maintenance" },
   { key: "last_analyze_at", label: "Last analyze", format: "time", group: "Maintenance" },
   { key: "autovacuum_text", label: "Autovacuum", sevKey: "autovacuum_sev", group: "Maintenance" },
+  { key: "autovacuum_cancels_24h", label: "Autovacuum cancels (24 h)", format: "int", sevKey: "cancels_sev", group: "Maintenance",
+    hint: "How many times the store log saw an autovacuum of this table cancelled in the last 24 hours, its TOAST table's and its chunks' or partitions' included. Two or more is flagged. A lock request that waits on autovacuum cancels it, so the work starts over." },
+  { key: "last_autovacuum_cancel", label: "Last cancel", format: "time", group: "Maintenance" },
+  { key: "relations_past_trigger", label: "Parts past the start point", format: "int", group: "Maintenance",
+    hint: "How many parts of the table (the table itself, or its chunks or partitions) are past the point where autovacuum starts, by dead rows or, for a plain table, by new rows." },
   { key: "growth_bytes_7d", label: "7-day growth", format: "bytes", group: "Maintenance", hint: "Blank for a table the store does not record sizes for." },
 
   { key: "inserts_per_day", label: "Inserts per day", format: "int", group: "Churn" },
@@ -352,7 +385,11 @@ export function renderStoreHealth(main) {
     const tables = readTool("get_store_table_health", { section: "tables", top: READ_TOP }, signal)
       .then(guard(tablesBox, (res) => {
         const d = drawTables(res, headerBox, tablesBox);
-        if (d) updated.textContent = "Read at " + new Date().toLocaleTimeString();
+        if (d) {
+          updated.textContent = readAtLine("Tables", d.tables_as_of, d.tables_age_seconds);
+          const held = heldLine(d.held_for_seconds);
+          if (held) updated.setAttribute("title", held);
+        }
       }));
     const indexes = readTool("get_store_table_health", { section: "indexes", top: READ_TOP }, signal)
       .then(guard(indexesBox, (res) => drawIndexes(res, indexesBox, coverageBox)));
@@ -368,6 +405,31 @@ export function renderStoreHealth(main) {
 
   refresh.addEventListener("click", load);
   load();
+}
+
+/** A length of time in the largest whole unit that fits: "40 s", "4 min", "2 h". */
+function spanText(seconds) {
+  if (seconds < 60) return fmtInt(Math.floor(seconds)) + " s";
+  if (seconds < 3600) return fmtInt(Math.floor(seconds / 60)) + " min";
+  return fmtInt(Math.floor(seconds / 3600)) + " h";
+}
+
+/**
+ * When the store answered one part of the read: "Tables read 11/17/2026, 3:11:02 PM (4 min ago)". The time is the answer's own
+ * as-of time, never the time the answer reached the page, and the age is the answer's own figure. Empty when the answer carries no time.
+ */
+export function readAtLine(part, asOf, ageSeconds) {
+  if (typeof asOf !== "string" || !asOf) return "";
+  const age = Number(ageSeconds);
+  return part + " read " + localTime(asOf) + (Number.isFinite(age) && age >= 1 ? " (" + spanText(age) + " ago)" : "");
+}
+
+/** Why a refresh can show the same read: how long the service holds one. Empty when the answer does not say. */
+export function heldLine(heldForSeconds) {
+  const held = Number(heldForSeconds);
+  return Number.isFinite(held) && held > 0
+    ? "The store's tables and indexes are read at most once every " + spanText(held) + ". A refresh inside that time shows the same read."
+    : "";
 }
 
 /** Nothing to draw for a read the page left behind or a session that ended; true when the answer is data to draw. */
@@ -410,14 +472,25 @@ function drawTables(res, headerBox, tablesBox) {
   const noEstimate = Number(d.tables_without_estimate) || 0;
   const unread = rows.filter((r) => r.past_rewrite_floors === true && r.tail_occupied == null).length;
 
+  const behind = Number(d.tables_behind) || 0;
+  const cancelled = Number(d.tables_repeatedly_cancelled) || 0;
+  const av = d.autovacuum_settings && typeof d.autovacuum_settings === "object" ? d.autovacuum_settings : null;
+
   const usedIds = new Set();
   const head = [
     el("div", { class: "rollup" }, [el("div", { class: "rollup-group" }, [
       tile(fmtBytes(d.store_total_bytes), "Store tables and indexes", countWord(Number(d.store_tables) || 0, "table"), undefined, usedIds),
+      av ? tile(writeBudgetText(av), "Autovacuum write budget", writeBudgetSub(av), undefined, usedIds) : null,
+      tile(fmtInt(behind), behind === 1 ? "Table behind on autovacuum" : "Tables behind on autovacuum", behind > 0 ? "past the start point, no vacuum in 24 hours" : "none", behind > 0 ? "critical" : "healthy", usedIds),
+      tile(fmtInt(cancelled), cancelled === 1 ? "Table with autovacuum cancelled repeatedly" : "Tables with autovacuum cancelled repeatedly", cancelled > 0 ? "2 or more cancels in 24 hours" : "none", cancelled > 0 ? "warning" : "healthy", usedIds),
       tile(fmtInt(candidates), candidates === 1 ? "Rewrite candidate" : "Rewrite candidates", candidates > 0 ? "VACUUM cannot return the space" : "none", candidates > 0 ? "critical" : "healthy", usedIds),
       tile(fmtInt(noEstimate), noEstimate === 1 ? "Table with no usable estimate" : "Tables with no usable estimate", noEstimate > 0 ? "empty space not known" : "every table has one", noEstimate > 0 ? "warning" : "healthy", usedIds),
     ])]),
   ];
+  if (av) head.push(el("div", { class: "meta store-health-autovacuum" }, [autovacuumSettingsLine(av)]));
+  else if (typeof d.autovacuum_settings_left_out_note === "string" && d.autovacuum_settings_left_out_note) {
+    head.push(noticeStrip("The autovacuum settings were left out. " + d.autovacuum_settings_left_out_note));
+  }
   const reasons = d.without_estimate_by_reason && typeof d.without_estimate_by_reason === "object" ? Object.entries(d.without_estimate_by_reason) : [];
   if (reasons.length) {
     const text = d.without_estimate_reason_text || {};
@@ -446,6 +519,45 @@ function drawTables(res, headerBox, tablesBox) {
   return d;
 }
 
+/** The write budget tile's figure: the most all autovacuum workers together may dirty per second, or "Unthrottled". */
+export function writeBudgetText(s) {
+  if (s.write_budget_mb_per_s == null) return "Unthrottled";
+  return Number(s.write_budget_mb_per_s).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " MB/s";
+}
+
+function writeBudgetSub(s) {
+  if (s.write_budget_mb_per_s == null) return "cost delay 0, so vacuum does not sleep";
+  return "the most autovacuum may write per second";
+}
+
+/** A memory setting in kB as words: "64 MB", "1 GB". */
+function memText(kb) {
+  const n = Number(kb);
+  return Number.isFinite(n) && n >= 0 ? fmtBytes(n * 1024) : "—";
+}
+
+/**
+ * The store's autovacuum settings as one line, from the read's own figures. A setting that falls back to another (an
+ * autovacuum_ setting of -1) names the one in force.
+ */
+export function autovacuumSettingsLine(s) {
+  const from = (setting, own) => (setting && setting !== own ? " (from " + setting + ")" : "");
+  const parts = [
+    (s.autovacuum_on === false ? "Autovacuum is off" : "Autovacuum is on") + ": " + fmtInt(s.workers_running) + " of " + fmtInt(s.max_workers) + " workers running",
+    "it looks for work every " + spanText(Number(s.naptime_seconds) || 0),
+    "cost limit " + fmtInt(s.cost_limit) + from(s.cost_limit_setting, "autovacuum_vacuum_cost_limit"),
+    "cost delay " + Number(s.cost_delay_ms).toLocaleString(undefined, { maximumFractionDigits: 2 }) + " ms" + from(s.cost_delay_setting, "autovacuum_vacuum_cost_delay"),
+    memText(s.work_mem_kb) + " of memory per worker" + from(s.work_mem_setting, "autovacuum_work_mem"),
+  ];
+  const cancels = Number(s.cancels_24h) || 0;
+  const unresolved = Number(s.cancels_unresolved) || 0;
+  const cancelText = cancels === 0
+    ? "The store log has no cancelled autovacuum in the last 24 hours."
+    : "The store log has " + countWord(cancels, "cancelled autovacuum") + " in the last 24 hours"
+      + (unresolved > 0 ? ", " + fmtInt(unresolved) + " for a relation the store no longer has or one in another database." : ".");
+  return parts.join(", ") + ". " + cancelText;
+}
+
 /* ─────────────────────────── the indexes and the coverage ─────────────────────────── */
 
 function drawIndexes(res, indexesBox, coverageBox) {
@@ -466,6 +578,8 @@ function drawIndexes(res, indexesBox, coverageBox) {
   const parts = [
     el("div", { class: "meta", text: total + (total === 1 ? " index" : " indexes") + ": " + fmtInt(invalid) + " invalid, " + fmtInt(larger) + " larger than their table, " + fmtInt(rarely) + " rarely used. Flagged indexes come first." }),
   ];
+  const readAt = readAtLine("Indexes", d.indexes_as_of, d.indexes_age_seconds);
+  if (readAt) parts.push(el("div", { class: "meta", text: readAt + "." }));
   if (d.indexes_truncated === true) parts.push(noticeStrip("The grid lists " + fmtInt(d.indexes_returned) + " of the " + fmtInt(total) + " indexes."));
   parts.push(gridTable(rows, {
     id: "store-health|indexes",

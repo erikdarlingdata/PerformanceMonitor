@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -49,6 +50,26 @@ public partial class ViewerServerTab
     /// DataGrid asked to realise all of them is a hung UI thread rather than a slow one.
     /// </summary>
     private const int PgGridRowLimit = 200;
+
+    /// <summary>#8919: reads this PostgreSQL server's recorded time zone and applies it. The shared clock refresh calls it only for a PostgreSQL tab.</summary>
+    private async Task RefreshPgServerClockAsync()
+    {
+        var (pgClock, zoneName) = await _dataService.GetPgServerClockAsync(_server.ServerId);
+        ApplyPgServerClock(pgClock, zoneName);
+    }
+
+    /// <summary>
+    /// #8919: a PostgreSQL target's clock is the time zone its <c>pg_server_config</c> snapshot records (<paramref name="zoneName"/>). Where the
+    /// store records none, Server Time reads UTC, as the fleet-wide views do, and the time display box says so: this machine's offset was
+    /// shown as the server's. Local Time and UTC are the same either way.
+    /// </summary>
+    internal void ApplyPgServerClock(ServerClock? clock, string? zoneName)
+    {
+        _serverClock = clock ?? ServerClock.Utc;
+        TimeDisplayModeBox.ToolTip = clock is null
+            ? "How timestamps are displayed. This server's time zone is not recorded, so Server Time shows UTC."
+            : $"How timestamps are displayed. Server Time is this server's own time zone ({zoneName}).";
+    }
 
     /// <summary>
     /// Picks the engine's tab set, once, in the constructor. Only a POSITIVE PostgreSQL claim switches:
@@ -132,8 +153,7 @@ public partial class ViewerServerTab
     /// </summary>
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
-        var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+        var gap = PgCollectorGap(collectorName);
 
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
@@ -144,8 +164,7 @@ public partial class ViewerServerTab
     /// </summary>
     private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
     {
-        var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
+        var gap = PgCollectorGap(collectorName);
 
         return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText, cleared);
     }
@@ -241,8 +260,21 @@ public partial class ViewerServerTab
     /// calls this server Offline; read before each PostgreSQL tab loads, and false when the read fails.</summary>
     private bool _pgOffline;
 
+    /// <summary>
+    /// #8913: the optional extensions this server's newest census shows as absent (an Aurora server does not offer them), so a panel for
+    /// the collector that reads one says the engine limit instead of a setup step. Null until read, and when the read fails, which makes
+    /// no claim. Read with <see cref="_pgOffline"/> before each PostgreSQL tab loads.
+    /// </summary>
+    private System.Collections.Generic.IReadOnlyCollection<string>? _extensionsNotOffered;
+
     private async Task RefreshPgOfflineAsync()
     {
+        if (MonitoredEngineKind.IsAurora(_server.EngineKind))
+        {
+            var notOffered = await _dataService.GetExtensionsNotOfferedAsync(_server.ServerId);
+            _extensionsNotOffered = notOffered;
+        }
+
         try
         {
             var freshness = await _dataService.GetServerCollectionStateAsync();
@@ -259,9 +291,13 @@ public partial class ViewerServerTab
 
     /// <summary>True when a panel's collector cannot run here — used to skip the read entirely rather than
     /// spend a round trip proving a permanent gap is still permanent.</summary>
-    private bool PgCollectorIsGatedOff(string collectorName) =>
+    private bool PgCollectorIsGatedOff(string collectorName) => PgCollectorGap(collectorName) is not null;
+
+    /// <summary>The sentence for a collector this target can never run: the engine's gap, else (#8918) the PostgreSQL version's, else null.</summary>
+    private string? PgCollectorGap(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None, _extensionsNotOffered)
+        ?? ViewerDataService.PostgresVersionGap(_server, collectorName);
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders
@@ -282,7 +318,7 @@ public partial class ViewerServerTab
             _server.ServerId, startUtc, endUtc, collectors.Select(c => c.Name).ToList());
 
         PgCollectorHealthGrid.ItemsSource =
-            ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
+            ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts, _extensionsNotOffered);
 
         /* #3691 part a2: the persisted analysis collection caveats, as on the SQL Server Collection Health tab. */
         var caveats = await _dataService.GetCollectionCaveatsAsync(_server.ServerId);
@@ -1157,7 +1193,9 @@ public partial class ViewerServerTab
            no plans. */
         ShowNote(PgPlanCaptureNote, PgCollectorIsGatedOff("pg_plan_capture_readiness")
             ? PanelNoteParts("pg_plan_capture_readiness", 0, string.Empty, string.Empty)
-            : PlanCaptureReadinessNote(planCaptureTask.Result.Select(r => (r.Facet, r.IsSatisfied)).ToList()));
+            : PlanCaptureReadinessNote(
+                planCaptureTask.Result.Select(r => (r.Facet, r.IsSatisfied)).ToList(),
+                planCaptureTask.Result.Where(r => r.IsEngineLimit).Select(r => r.Facet).ToHashSet(StringComparer.Ordinal)));
     }
 
     /// <summary>The plain name of a plan-capture readiness facet, for the one-line note. A facet this build does not know keeps its own name.</summary>
@@ -1182,7 +1220,10 @@ public partial class ViewerServerTab
     /// #7410: the note over Plan Capture Readiness. One plain line says whether capture is ready and, when it is not, which preconditions are
     /// unmet, built from the facet rows. The long explanation that used to be the whole note is kept as the hover text.
     /// </summary>
-    internal static PanelNoteText PlanCaptureReadinessNote(IReadOnlyList<(string Facet, bool IsSatisfied)> facets)
+    /// <param name="facets">Every facet row, with whether it is met.</param>
+    /// <param name="engineLimited">#8912: the facets that are an Aurora engine limit (unmet, and no setting meets them). They are counted out of
+    /// the unmet list and named on their own, because the operator has nothing left to change for them.</param>
+    internal static PanelNoteText PlanCaptureReadinessNote(IReadOnlyList<(string Facet, bool IsSatisfied)> facets, IReadOnlySet<string>? engineLimited = null)
     {
         if (facets.Count == 0)
         {
@@ -1192,7 +1233,18 @@ public partial class ViewerServerTab
                 + "server added in the last hour has nothing here. It does NOT mean plan capture is unavailable.");
         }
 
-        var unmet = facets.Where(f => !f.IsSatisfied).Select(f => PlanCaptureFacetLabel(f.Facet)).ToList();
+        var unmet = facets.Where(f => !f.IsSatisfied && engineLimited?.Contains(f.Facet) != true).Select(f => PlanCaptureFacetLabel(f.Facet)).ToList();
+        var limitText = engineLimited is { Count: > 0 }
+            ? "Query ids in the log are an Aurora engine limit, not a setting you can change. Its parameter group does not let log_line_prefix carry %Q, "
+              + "so the stderr plan reader stores no plan and no other join to a statement exists."
+            : null;
+        if (unmet.Count == 0 && limitText is not null)
+        {
+            return new PanelNoteText(
+                "Plans cannot be captured on this server. " + limitText,
+                "Every step you can change is in place. " + limitText + " The row for it says engine limit, and its detail has the full explanation.");
+        }
+
         if (unmet.Count == 0)
         {
             return new PanelNoteText(
@@ -1204,7 +1256,7 @@ public partial class ViewerServerTab
         }
 
         return new PanelNoteText(
-            "Plan capture is not ready on this server. Not met: " + string.Join(", ", unmet) + ".",
+            "Plan capture is not ready on this server. Not met: " + string.Join(", ", unmet) + "." + (limitText is null ? string.Empty : " " + limitText),
             "At least one precondition is unmet, so either no execution plans are being captured by auto_explain "
                 + "here or the ones that are cannot be attributed. Read the rows in order: extension_available, "
                 + "library_loaded, capture_threshold, plan_text_setting, plan_attribution, message_locale. Each names "
@@ -1261,9 +1313,13 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        /* #8918: PostgreSQL 15 has no pg_stat_io, so there is nothing to read and the note says so instead of calling the window idle. */
+        var ioGatedOff = PgCollectorIsGatedOff("pg_io_stats");
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var dataStartTask = StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
-        var rowsTask = _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        var dataStartTask = ioGatedOff ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
+        var rowsTask = ioGatedOff
+            ? Task.FromResult(new List<DarlingPgIoReader.PgIoRow>())
+            : _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL I/O Stats");
         var rows = rowsTask.Result;
         readFanOut.Release();
@@ -1425,10 +1481,7 @@ public partial class ViewerServerTab
         var flapping = rows.Count(r => r.TotalSamples > 0 && r.Samples < r.TotalSamples);
 
         PgReplicationStatsNote.Text = rows.Count == 0
-            ? "No standby was streaming from this server in this window. On a REPLICA that is the expected "
-              + "answer: pg_stat_replication is the primary-side view and reports nothing unless this "
-              + "server is cascading to a downstream of its own. On a primary it means nothing is "
-              + "replicating from it, which is either correct or the finding."
+            ? PgDisplay.ReplicationStatsEmptyNote(_server.EngineKind)
             : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
               + $"{PgDisplay.Bytes(worst)} of unapplied WAL - that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
@@ -1483,6 +1536,11 @@ public partial class ViewerServerTab
         var bloatRows = bloat.Select(PgDisplay.TableBloat).ToList();
         PgTableBloatGrid.ItemsSource = bloatRows;
 
+        /* #8943: both collectors are gated off on a read replica, so an empty panel there is not the healthy answer. The collection_log runs
+           say which empty panels come from a collector that ran (a primary with nothing over the floor) and which from one that never did. */
+        var storageEmpty = StorageEmptyTexts(
+            bloatRows.Count == 0 || indexes.Count == 0 ? await ReadStorageCollectorRunsAsync(startUtc, endUtc) : null, _pgOffline);
+
         /* The suppression count is stated ON THE PANEL rather than left to the per-row Confidence column,
            because the usual cause is a single instance-wide permissions gap: every row is suppressed for
            the same reason, and saying it once above the grid is what gets it fixed. Counted from the
@@ -1492,9 +1550,7 @@ public partial class ViewerServerTab
         PgTableBloatNote.Text = PgCollectorIsGatedOff("pg_table_bloat_stats")
             ? PanelNote("pg_table_bloat_stats", 0, string.Empty)
             : bloatRows.Count == 0
-                ? "No table of at least 1 MB was measured on this server in this window. Below that floor "
-                  + "bloat is not an actionable amount of space, so zero rows here is the healthy answer "
-                  + "rather than a missing read."
+                ? storageEmpty.TableBloat
                 : suppressed == 0
                     ? "Bloat figures are ESTIMATES computed from column-width statistics - the table itself "
                       + "is never read. Confirm one with pgstattuple before rewriting anything."
@@ -1509,9 +1565,7 @@ public partial class ViewerServerTab
         PgIndexUsageNote.Text = PgCollectorIsGatedOff("pg_index_usage_stats")
             ? PanelNote("pg_index_usage_stats", 0, string.Empty)
             : indexes.Count == 0
-                ? "No index of at least 64 KB was recorded on this server in this window. Below that floor "
-                  + "an index costs effectively nothing to keep, so zero rows here is the healthy answer "
-                  + "rather than a missing read."
+                ? storageEmpty.IndexUsage
                 : "Scans are cumulative since each database's statistics were last reset. An index with no "
                   + "scans is a CANDIDATE, never a conclusion: check the Can It Go? column, and widen the "
                   + "window past the slowest scheduled job you have before acting - a monthly report looks "
@@ -1522,6 +1576,63 @@ public partial class ViewerServerTab
         await LoadPgColumnStatsAsync(startUtc, endUtc);
         await LoadPgIndexBloatAsync(startUtc, endUtc);
         await LoadPgPredicateStatsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>The empty-panel sentence for the 1 MB table bloat panel when its collector ran for this server in the window.</summary>
+    internal const string TableBloatHealthyEmptyText =
+        "No table of at least 1 MB was measured on this server in this window. Below that floor "
+        + "bloat is not an actionable amount of space, so zero rows here is the healthy answer "
+        + "rather than a missing read.";
+
+    /// <summary>The empty-panel sentence for the 64 KB index usage panel when its collector ran for this server in the window.</summary>
+    internal const string IndexUsageHealthyEmptyText =
+        "No index of at least 64 KB was recorded on this server in this window. Below that floor "
+        + "an index costs effectively nothing to keep, so zero rows here is the healthy answer "
+        + "rather than a missing read.";
+
+    /// <summary>
+    /// #8943: the sentence for a Storage panel whose collector has no run for this server in the window. The collector is gated off on a
+    /// read replica and is collected on the writer only, the same fact the MCP reads state. The store does not record which monitored server is the
+    /// writer, so the sentence says "the writer" without a name. It also covers a primary whose collection is off, so it says what to check.
+    /// </summary>
+    internal static string WriterOnlyEmptyText(string collectorName, string panel) =>
+        $"No {collectorName} run is recorded for this server in this window, so this panel was not measured. "
+        + $"The {panel} collector is gated off on a read replica, so it is collected on the writer only: "
+        + "if this server is a replica, read these figures from the writer. "
+        + "If it is not a replica, check Collection Health on the Overview tab.";
+
+    /// <summary>
+    /// #8943: the two Storage empty-panel sentences. <paramref name="runs"/> is the collection_log facts for the two collectors over the
+    /// window, or null when no read was made or it failed (no claim is made then: the healthy sentences stay). A collector with no run
+    /// gets <see cref="WriterOnlyEmptyText"/>, except on an offline server, where nothing has arrived from any collector and the
+    /// existing empty text keeps the field.
+    /// </summary>
+    internal static (string TableBloat, string IndexUsage) StorageEmptyTexts(IReadOnlyList<ViewerDataService.PostgresCollectorLogFacts>? runs, bool offline)
+    {
+        if (runs is null || offline)
+        {
+            return (TableBloatHealthyEmptyText, IndexUsageHealthyEmptyText);
+        }
+
+        bool Ran(string name) => runs.Any(r => string.Equals(r.CollectorName, name, StringComparison.Ordinal) && r.Runs > 0);
+
+        return (
+            Ran("pg_table_bloat_stats") ? TableBloatHealthyEmptyText : WriterOnlyEmptyText("pg_table_bloat_stats", "table bloat"),
+            Ran("pg_index_usage_stats") ? IndexUsageHealthyEmptyText : WriterOnlyEmptyText("pg_index_usage_stats", "index usage"));
+    }
+
+    /// <summary>#8943: the collection_log facts for the two Storage collectors, or null when the read fails.</summary>
+    private async Task<IReadOnlyList<ViewerDataService.PostgresCollectorLogFacts>?> ReadStorageCollectorRunsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        try
+        {
+            return await _dataService.GetPostgresCollectorLogFactsAsync(
+                _server.ServerId, startUtc, endUtc, new[] { "pg_table_bloat_stats", "pg_index_usage_stats" });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -1717,4 +1828,7 @@ public partial class ViewerServerTab
 
     /// <summary>#8663: the Storage page scrolls as one, like Vacuum: a wheel over a grid at its end moves the page.</summary>
     private void PgStorageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+
+    /// <summary>#8917: the Query Shapes page scrolls as one, like Vacuum and Storage: a wheel over a grid at its end moves the page.</summary>
+    private void PgQueryShapesScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
 }

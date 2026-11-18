@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -53,22 +55,27 @@ public sealed class ViewerStoreHealthRefreshTests
         public TaskCompletionSource? Gate;
         public bool FailTables;
 
+        /// <summary>The time every scripted tables and indexes answer says the store gave it: a fixed one, so the strip's text does not
+        /// depend on when a test runs.</summary>
+        public DateTime ReadAt = new(2026, 11, 15, 15, 0, 0, DateTimeKind.Utc);
+
         public void Wire(StoreHealthTab tab)
         {
-            tab.TablesRead = async () =>
+            tab.TablesRead = async _ =>
             {
                 Tables++;
                 if (Gate is { } g) await g.Task;
                 if (FailTables) throw new InvalidOperationException("scripted failure");
-                return [TableRow("store_things")];
+                return new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>([TableRow("store_things")], ReadAt);
             };
-            tab.IndexesRead = async () =>
+            tab.IndexesRead = async _ =>
             {
                 Indexes++;
                 if (Gate is { } g) await g.Task;
                 return new StoreIndexHealth(
                     [IndexRow("ix_things")],
-                    [new StoreIndexCoverageRow("collect", "parts", "ix_parts", true, 2, 2, 0, [], 0, [])]);
+                    [new StoreIndexCoverageRow("collect", "parts", "ix_parts", true, 2, 2, 0, [], 0, [])],
+                    ReadAtUtc: ReadAt);
             };
             tab.ReadinessRead = async () =>
             {
@@ -110,6 +117,64 @@ public sealed class ViewerStoreHealthRefreshTests
             }
         }
     });
+
+    /// <summary>#8924: the tab over a store health cache whose three store reads count their calls, on a clock the test steps. The refresh
+    /// the shell's timer runs every 30 seconds shows the held rows and sends the store only the maintenance check, the strip says when the
+    /// store answered the rows on screen (not when the tab last refreshed), the Refresh button reads the store again, and so does a timer
+    /// refresh once the lifetime has passed. The data source is never opened: the reads are scripted.</summary>
+    [Fact]
+    public void ATimerRefresh_ShowsTheHeldRows_SendsTheStoreNoTableOrIndexRead_AndTheStripSaysWhenTheyWereRead()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var now = new DateTime(2026, 11, 15, 15, 0, 0, DateTimeKind.Utc);
+            int tables = 0, indexes = 0, coverage = 0;
+            var held = new DarlingStoreTableHealthCache(
+                () => now,
+                (_, _) => { Interlocked.Increment(ref tables); return Task.FromResult(new List<StoreTableHealthRow> { TableRow("store_things") }); },
+                (_, _) => { Interlocked.Increment(ref indexes); return Task.FromResult(new List<StoreIndexHealthRow> { IndexRow("ix_things") }); },
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref coverage);
+                    return Task.FromResult(new List<StoreIndexCoverageRow> { new("collect", "parts", "ix_parts", true, 2, 2, 0, [], 0, []) });
+                });
+            await using var store = NpgsqlDataSource.Create("Host=127.0.0.1;Database=never_opened");
+            tab.TablesRead = fresh => held.GetTablesAsync(store, fresh);
+            tab.IndexesRead = fresh => ViewerDataService.ReadStoreIndexHealthAsync(held, store, fresh, CancellationToken.None);
+            tab.FreshFor = TimeSpan.Zero;
+            string ReadAt() => ", tables and indexes read " + ViewerTimeHelper.RefreshedStamp(now, ViewerTimeHelper.CurrentDisplayMode);
+
+            await tab.RefreshAsync();
+            Assert.Equal((1, 1, 1), (tables, indexes, coverage));
+            Assert.Equal(1, reads.Readiness);
+            var firstRead = ReadAt();
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+            Assert.EndsWith(firstRead, tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            /* Two timer refreshes, two minutes on: the rows on screen are the held ones and the strip still gives the time the store answered them. */
+            now = now.AddMinutes(2);
+            await tab.RefreshAsync();
+            await tab.RefreshAsync();
+            Assert.Equal((1, 1, 1), (tables, indexes, coverage));
+            Assert.Equal(3, reads.Readiness);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.Single(tab.IndexesDataGrid.Items);
+            Assert.Single(tab.CoverageDataGrid.Items);
+            Assert.NotEqual(firstRead, ReadAt());
+            Assert.EndsWith(firstRead, tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            /* The Refresh button asks for a new read of all three parts, and the strip moves to its time. */
+            await tab.RefreshAsync(force: true);
+            Assert.Equal((2, 2, 2), (tables, indexes, coverage));
+            Assert.EndsWith(ReadAt(), tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            /* Past the lifetime a timer refresh reads the store again. */
+            now = now + DarlingStoreTableHealthCache.Lifetime + TimeSpan.FromSeconds(1);
+            await tab.RefreshAsync();
+            Assert.Equal((3, 3, 3), (tables, indexes, coverage));
+            Assert.EndsWith(ReadAt(), tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
 
     [Fact]
     public void ARefreshOverFilledGrids_KeepsTheRowsAndTheSummaryLine_AndSaysRefreshing()
@@ -174,11 +239,13 @@ public sealed class ViewerStoreHealthRefreshTests
         {
             await tab.RefreshAsync(force: true);
             var stamp = tab.LastRefreshedIndicator.Text;
+            Assert.Contains(", tables and indexes read ", stamp, StringComparison.Ordinal);
             reads.FailTables = true;
 
             await tab.RefreshAsync(force: true);
 
-            Assert.Equal(stamp, tab.LastRefreshedIndicator.Text);
+            /* The strip is back on the last refresh that worked. The table rows are gone, so the read time it gives is the index rows' alone. */
+            Assert.Equal(stamp.Replace(", tables and indexes read ", ", indexes read ", StringComparison.Ordinal), tab.LastRefreshedIndicator.Text);
         });
     }
 
@@ -252,6 +319,87 @@ public sealed class ViewerStoreHealthRefreshTests
             Assert.StartsWith("Refreshing… (last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
             Assert.Single(tab.TablesDataGrid.Items);
             Assert.Equal(1, reads.Tables);
+        });
+    }
+
+    /// <summary>#8950: the autovacuum settings line under the header. The scripted settings read answers five minutes before the tables read,
+    /// so the strip gives the older of the two answers. A read past its limit leaves the line saying so and the tables still show, any other
+    /// failure says it failed, and with no settings read at all the line stays hidden.</summary>
+    [Fact]
+    public void TheAutovacuumSettingsLine_ShowsTheSettings_SaysWhenTheyWereLeftOut_AndStaysHiddenWithNoRead()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            await tab.RefreshAsync(force: true);
+            Assert.Equal(Visibility.Collapsed, tab.AutovacuumSettingsTextBlock.Visibility);
+            Assert.Equal("", tab.AutovacuumSettingsTextBlock.Text);
+
+            var settings = Settings(true, 3, 1, 60, -1, 200, 2, 0, -1, 65536, 20, 8192, 4, 1);
+            var settingsAt = reads.ReadAt.AddMinutes(-5);
+            var calls = new List<bool>();
+            Exception? failure = null;
+            tab.AutovacuumSettingsRead = fresh =>
+            {
+                calls.Add(fresh);
+                return failure is { } ex
+                    ? Task.FromException<StoreHealthRead<StoreAutovacuumSettings>>(ex)
+                    : Task.FromResult(new StoreHealthRead<StoreAutovacuumSettings>(settings, settingsAt));
+            };
+
+            await tab.RefreshAsync(force: true);
+            Assert.Equal([true], calls);
+            Assert.Equal(Visibility.Visible, tab.AutovacuumSettingsTextBlock.Visibility);
+            Assert.Equal(StoreHealthRows.AutovacuumSettingsText(settings), tab.AutovacuumSettingsTextBlock.Text);
+            Assert.EndsWith(
+                ", tables and indexes read " + ViewerTimeHelper.RefreshedStamp(settingsAt, ViewerTimeHelper.CurrentDisplayMode),
+                tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            failure = new StoreTableHealthTimeoutException(new TimeoutException());
+            await tab.RefreshAsync(force: true);
+            Assert.Equal(Visibility.Visible, tab.AutovacuumSettingsTextBlock.Visibility);
+            Assert.Equal("The autovacuum settings were left out. " + failure.Message, tab.AutovacuumSettingsTextBlock.Text);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.EndsWith(
+                ", tables and indexes read " + ViewerTimeHelper.RefreshedStamp(reads.ReadAt, ViewerTimeHelper.CurrentDisplayMode),
+                tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            failure = new InvalidOperationException("scripted settings failure");
+            await tab.RefreshAsync(force: true);
+            Assert.Equal("The autovacuum settings failed to load: scripted settings failure", tab.AutovacuumSettingsTextBlock.Text);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.Equal(3, calls.Count);
+        });
+    }
+
+    /// <summary>#8950: the grid keeps the reader's order, which puts the tables behind on autovacuum first, and flags them.</summary>
+    [Fact]
+    public void TheTablesBehindOnAutovacuum_ComeFirstInTheGrid_AndAreFlagged()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            tab.TablesRead = _ => Task.FromResult(new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>(
+                [
+                    TableRow("behind") with { Behind = true, BehindHours = 30, RelationsPastTrigger = 1 },
+                    TableRow("cancelled") with { AutovacuumCancels = 3 },
+                    TableRow("quiet"),
+                ],
+                reads.ReadAt));
+
+            await tab.RefreshAsync(force: true);
+
+            var rows = new List<StoreTableRow>();
+            foreach (var item in tab.TablesDataGrid.Items)
+            {
+                rows.Add((StoreTableRow)item);
+            }
+
+            Assert.Equal(["collect.behind", "collect.cancelled", "collect.quiet"], rows.ConvertAll(r => r.Table));
+            Assert.Equal("Behind on autovacuum", rows[0].Flag);
+            Assert.Equal("Behind, no vacuum in 30 h", rows[0].Behind);
+            Assert.Equal("Autovacuum cancelled repeatedly", rows[1].Flag);
+            Assert.Equal("No", rows[2].Behind);
+            Assert.Contains("1 table behind on autovacuum", tab.HeaderText.Text, StringComparison.Ordinal);
+            Assert.Contains("1 table with autovacuum cancelled 2 or more times in 24 hours", tab.HeaderText.Text, StringComparison.Ordinal);
         });
     }
 

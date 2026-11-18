@@ -250,5 +250,5 @@ ORDER BY datname",
     /// providers' equivalents (<c>cloudsqladmin</c>, <c>azure_maintenance</c>) have never been measured
     /// on a monitored target, so adding them would be excluding databases nobody has seen.</para>
     /// </summary>
-    internal const string ManagedMaintenanceDatabase = "rdsadmin";
+    internal const string ManagedMaintenanceDatabase = PerformanceMonitor.Darling.Storage.DarlingPgSessionStatesReader.ManagedMaintenanceDatabase;
 }

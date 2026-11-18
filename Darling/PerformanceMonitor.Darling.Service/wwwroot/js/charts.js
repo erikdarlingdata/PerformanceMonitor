@@ -1330,6 +1330,8 @@ function seriesDashes(series) {
     const n = seen.get(c) || 0;
     seen.set(c, n + 1);
     if (n > 0) out.set(s.key, SERIES_DASHES[(n - 1) % SERIES_DASHES.length]);
+    /* A series that asks for it (`dashed: true`) is drawn dashed whatever its color, so a line drawn over its neighbours stays readable (#8937). */
+    else if (s.dashed) out.set(s.key, SERIES_DASHES[0]);
   }
   return out;
 }

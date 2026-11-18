@@ -130,6 +130,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     message = "No store self-metrics recorded yet. The service records a snapshot hourly (the first lands " +
                         "within an hour of starting on a store at schema V53 or later).",
                     query_text_index = BuildQueryTextIndexBlock(await ReadTrigramHealthAsync(postgres, cancellationToken)),
+                    query_store_text_index = BuildQueryStoreTextIndexBlock(await ReadQueryStoreTextTrigramHealthAsync(postgres, cancellationToken)),
                 }, McpHelpers.JsonOptions);
             }
 
@@ -211,6 +212,9 @@ public sealed class DarlingMcpStoreMetricsTools
             /* #7674: the opt-in trigram index on the plan-cache text. Its own checkout, failure-isolated to null ("Unreadable"), so a catalog
                read that fails never reads as "the index is off". */
             var trigramHealth = await ReadTrigramHealthAsync(postgres, cancellationToken);
+
+            /* #8570: the opt-in trigram index on the Query Store text, read the same way. */
+            var queryStoreTextTrigramHealth = await ReadQueryStoreTextTrigramHealthAsync(postgres, cancellationToken);
 
             var heldPolicies = holds
                 .Where(h => !h.Armed)
@@ -458,6 +462,8 @@ public sealed class DarlingMcpStoreMetricsTools
                    its filters and carries no block at all. status is one of Off, DropPending, Dropping, Pending, Building, Ready, Failed or
                    WaitingOnExtension; Unreadable when the catalog read failed. */
                 query_text_index = BuildQueryTextIndexBlock(trigramHealth),
+                /* #8570. The Query Store text's index, beside the plan-cache one, on the same replies and with the same status words. */
+                query_store_text_index = BuildQueryStoreTextIndexBlock(queryStoreTextTrigramHealth),
                 /* #3175. Present on EVERY response, for the #2813 reason one line up and one step further:
                    here the absence being guarded is the absence of ROWS in the instrument this description
                    sends a maximum question to, so an absent block would leave the redirect unqualified
@@ -860,6 +866,8 @@ public sealed class DarlingMcpStoreMetricsTools
             {
                 status = trigramHealth.Status.ToString(),
                 enabled = trigramHealth.Status == TrigramIndexStatus.Unconfigured ? (bool?)null : trigramHealth.Enabled,
+                /* #8978: where enabled came from: "store" (config.config_service holds a value, set by update_service_flags) or "file" (darling.json). */
+                option_source = trigramHealth.Status == TrigramIndexStatus.Unconfigured ? null : trigramHealth.OptionSource,
                 table = QueryTextTrigramIndex.TableName,
                 index_name = QueryTextTrigramIndex.IndexName,
                 exists = trigramHealth.Exists,
@@ -882,6 +890,49 @@ public sealed class DarlingMcpStoreMetricsTools
                 sample_index_valid = trigramHealth.SampleIndexValid,
                 sample_index_size_bytes = trigramHealth.SampleIndexSizeBytes,
                 note = QueryTextTrigramIndex.Note(trigramHealth),
+            };
+
+    /// <summary>#8570: the Query Store text index's health on its own checkout, failure-isolated to null ("Unreadable") the same way.</summary>
+    private static async Task<TrigramIndexHealth?> ReadQueryStoreTextTrigramHealthAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var trigramConnection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await QueryStoreTextTrigramIndex.ReadHealthAsync(trigramConnection, QueryStoreTextTrigramIndex.SharedTracker, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>#8570: the <c>query_store_text_index</c> block of the reply, from one health read (null is the failed read). The fields of
+    /// <see cref="BuildQueryTextIndexBlock"/> without the sample index, which only the plan-cache option builds.</summary>
+    private static object BuildQueryStoreTextIndexBlock(TrigramIndexHealth? health) =>
+        health is null
+            ? (object)new { status = "Unreadable", note = "The trigram index state on the Query Store text could not be read." }
+            : new
+            {
+                status = health.Status.ToString(),
+                enabled = health.Status == TrigramIndexStatus.Unconfigured ? (bool?)null : health.Enabled,
+                /* #8978: where enabled came from, as in query_text_index. */
+                option_source = health.Status == TrigramIndexStatus.Unconfigured ? null : health.OptionSource,
+                table = QueryStoreTextTrigramIndex.TableName,
+                index_name = QueryStoreTextTrigramIndex.IndexName,
+                exists = health.Exists,
+                valid = health.Valid,
+                size_bytes = health.SizeBytes,
+                build_running = health.BuildRunning,
+                build_started_at = health.BuildStartedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                extension_installed = health.ExtensionInstalled,
+                extension_available = health.ExtensionAvailable,
+                failed_attempts = health.FailedAttempts,
+                last_error = health.LastError,
+                last_sqlstate = health.LastSqlState,
+                last_failed_at = health.LastFailedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                next_attempt_at = health.NextAttemptUtc?.ToString("o", CultureInfo.InvariantCulture),
+                operator_statement = health.OperatorStatement,
+                note = QueryStoreTextTrigramIndex.Note(health),
             };
 
     /// <summary>Whether a name that matched no self-metrics row was also looked up among the un-enumerated relations (#8817), and what that found.</summary>

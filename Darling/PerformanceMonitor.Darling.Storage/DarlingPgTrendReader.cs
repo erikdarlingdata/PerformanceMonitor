@@ -193,8 +193,11 @@ public static class DarlingPgTrendReader
     /// <summary>
     /// #8074: the engine_cumulative arm's automatic choice: the event that accrued the most wait time in the window on the
     /// engine's counters. Ranked on the collector's deltas, so a restart inside the window costs nothing (the collector
-    /// re-baselines and writes no interval for that collection). Background-worker and client-idle waits never reach the table,
-    /// so nothing is excluded here; an event the engine reports but does not name cannot be followed by name and is skipped.
+    /// re-baselines and writes no interval for that collection). <c>Activity</c>, <c>Client</c> and <c>Timeout</c> waits never reach
+    /// the table: the collector drops them. The generic <c>Extension</c> / <c>Extension</c> event does reach it (#8916): it is the
+    /// wait background workers (the pg_cron launcher, the TimescaleDB scheduler) sleep in, and the counters are engine-wide with no
+    /// backend type, so it is skipped here. A caller who names it still gets it. An event the engine reports but does not name
+    /// cannot be followed by name and is skipped.
     /// $1 server_id, $2/$3 window.
     /// </summary>
     public const string DominantWaitEventEngineSql = """
@@ -202,6 +205,7 @@ public static class DarlingPgTrendReader
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   wait_event IS NOT NULL
+        AND   NOT (wait_type IS NOT DISTINCT FROM 'Extension' AND wait_event IS NOT DISTINCT FROM 'Extension')
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   sample_interval_seconds > 0
@@ -539,6 +543,11 @@ public static class DarlingPgTrendReader
     /// Picking it as the default for a WAIT trend answers the opposite of the question asked. It stays
     /// askable by name, because how much time backends spend on CPU is a real signal; it is just never the
     /// automatic answer to "what is this server waiting on".</para>
+    ///
+    /// <para><b>The generic <c>Extension</c> / <c>Extension</c> event is skipped too (#8916).</b> Background workers (the pg_cron
+    /// launcher, the TimescaleDB scheduler) sleep in it around the clock, so left in it outranks every client wait. The sampler arm
+    /// drops a background worker's row at collection, but rows stored before that rule keep the old shape and the extension arm
+    /// has no backend type, so the choice skips the event as well. Still askable by name.</para>
     /// </summary>
     public const string DominantWaitEventSql = """
         WITH per_snapshot AS (
@@ -547,6 +556,7 @@ public static class DarlingPgTrendReader
             WHERE server_id = $1
             AND   event IS NOT NULL
             AND   coalesce(event_type, '') <> 'CPU'
+            AND   NOT (event_type IS NOT DISTINCT FROM 'Extension' AND event IS NOT DISTINCT FROM 'Extension')
             AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY event, collection_time

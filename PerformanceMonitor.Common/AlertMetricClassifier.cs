@@ -232,7 +232,8 @@ namespace PerformanceMonitor.Common
                with no expiry, past every expiry the product offers. "Store Settings Need Attention" (#4215)
                is the same shape again: the count of conditions in force (a last-good fallback, a kept hand
                edit, a rejected value) on a managed store's darling-managed.conf. "Store Autovacuum Behind" (#7368) counts the big tables past 3 times their
-               autoanalyze threshold. "Collector Cost Digest" (#3443) counts
+               autoanalyze threshold. "Store Vacuum Stalled" (#8950) counts the store tables behind on autovacuum or with it
+               cancelled repeatedly. "Collector Cost Digest" (#3443) counts
                the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
                NOT NULL column demands, because a report has no threshold, and the alert's own threshold
                STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
@@ -242,7 +243,7 @@ namespace PerformanceMonitor.Common
                Failing" (#4750) counts a webhook channel's failures in a row. "External Alerts Undelivered" (#5654)
                counts the external alerts the drain gave up on in the last hour. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
-                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention" or "Store Autovacuum Behind"
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention" or "Store Autovacuum Behind" or "Store Vacuum Stalled"
                 or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest" or "Daily Health Report"
                 or "Notification Channel Failing" or "External Alerts Undelivered" => $"{value:F0}",
 

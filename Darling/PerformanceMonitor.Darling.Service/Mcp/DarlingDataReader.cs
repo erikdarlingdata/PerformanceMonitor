@@ -2823,16 +2823,41 @@ internal static class DarlingDataReader
                clock-skew slack) and the ceiling is a day of engine-maximum interval plus collector-outage allowance. They keep
                idx_query_store_stats_time (server_id, collection_time) and the hypertable's chunk pruning; the start predicate is a
                residual filter on the rows they bring back. */
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
-            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
-            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopRawWindowSql}}
             /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
                so dropping the other outcomes first cannot change which row wins any partition, and the window
                sort then sees only the outcome asked for. */
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
+        """;
+
+    /// <summary>
+    /// The raw read's window, collection-time and database predicates, shared by <see cref="QueryStoreTopRawPrefix"/> and
+    /// <see cref="QueryStoreWindowProbeRawRowsSql"/>, so the existence probe reads the rows the top read ranks. Each line
+    /// carries the indentation it renders with inside the top read, which interpolates it at its literal's left margin.
+    /// $2/$3 window (naive UTC), $5 databases (NULL = all).
+    /// </summary>
+    private const string QueryStoreTopRawWindowSql = $$"""
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
+    /// The interval-table read's window, <c>first_execution_time</c> range and database predicates, shared by
+    /// <see cref="QueryStoreTopTablePrefix"/> and <see cref="QueryStoreWindowProbeTableRowsSql"/>. The floor carries
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>, which <see cref="QueryStoreIntervalWide.WithEdgeMargin"/>
+    /// narrows in both. Indented as <see cref="QueryStoreTopRawWindowSql"/> is. $2 the gate's <c>ReadStart</c>, $3 window
+    /// end, $5 databases. A static readonly declared above its users: static initializers run in textual order.
+    /// </summary>
+    private static readonly string QueryStoreTopTableWindowSql = $$"""
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
         """;
 
     /// <summary>
@@ -2876,11 +2901,7 @@ internal static class DarlingDataReader
             /* #7814: placed by the interval's start, as the raw read is (QueryStoreTopRawPrefix). The first_execution_time range
                below is what ix_query_store_interval_wide_server_first_exec serves; this is a residual filter, and no collection_time
                bound is added because none could drop a row here (an interval is collected after it starts). */
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
-            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopTableWindowSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         """;
@@ -2990,6 +3011,34 @@ internal static class DarlingDataReader
                newest inline query_text, which is where text lived before the cutover and is what keeps
                existing history readable. */
             LEFT JOIN LATERAL (
+        {{QueryStoreTopTextLookupSql}}
+            ) AS t ON TRUE
+            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
+               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
+               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+        {{QueryStoreTopShowableTextSql}}
+            ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
+            LIMIT $4
+        ) AS p
+        ORDER BY page_ord
+        )
+        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
+           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
+        """;
+
+    /// <summary>
+    /// The text lookup inside <see cref="QueryStoreTopTail"/>'s lateral, keyed on <c>r</c> (database, query id): the
+    /// <c>query_store_text</c> row by key, else the newest inline text collected inside <c>$2</c> through <c>$3</c>. Shared
+    /// with <see cref="QueryStoreWindowProbeTextTestSql"/>, so the existence probe resolves each statement's text as the top
+    /// read does. Each line carries the indentation it renders with inside the tail, which interpolates it at its literal's
+    /// left margin.
+    /// </summary>
+    private const string QueryStoreTopTextLookupSql = $$"""
                 SELECT COALESCE(
                            (
                                SELECT x.query_sql_text
@@ -3016,29 +3065,64 @@ internal static class DarlingDataReader
                                LIMIT 1
                            )
                        ) AS query_text
-            ) AS t ON TRUE
-            /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
-               (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
-               that the separate text fetch leaves empty, and the marker is only in the text resolved above. */
+        """;
+
+    /// <summary>
+    /// The two text tests over the lateral's <c>t.query_text</c>, shared by <see cref="QueryStoreTopTail"/> and
+    /// <see cref="QueryStoreWindowProbeTextTestSql"/>: a statement with no known text passes, one whose text starts with
+    /// WAITFOR or carries the monitor's marker (<see cref="QueryStoreSelfStatement.NotSelfOfLateralText"/>) does not.
+    /// Indented as <see cref="QueryStoreTopTextLookupSql"/> is.
+    /// </summary>
+    private const string QueryStoreTopShowableTextSql = $$"""
             WHERE (t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%')
             AND   {{QueryStoreSelfStatement.NotSelfOfLateralText}}
-            ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
-            LIMIT $4
-        ) AS p
-        ORDER BY page_ord
-        )
-        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
-           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
-           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
-        SELECT p.*, c.candidate_count
-        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
-        LEFT JOIN page AS p ON TRUE
-        ORDER BY p.page_ord
         """;
 
     /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
     /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/>.</summary>
     private const string QueryStoreTopSuffix = QueryStoreTopRankedHead + QueryStoreTopTail;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s leading edge, <c>[$2, S)</c> of the wide table by <c>collection_time</c>
+    /// with the <c>first_execution_time</c> range, through the database predicate. Shared with
+    /// <see cref="QueryStoreWindowProbeDailyRowsSql"/>. Indented as <see cref="QueryStoreTopRawWindowSql"/> is.
+    /// $1 server_id, $2 the gate's <c>ReadStart</c>, $5 databases, $8 <c>S</c>. A static readonly declared above its users.
+    /// </summary>
+    private static readonly string QueryStoreTopDailyLeadingEdgeSql = $$"""
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time < $8::date
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time < $8::date + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s trailing edge, <c>[E, $3]</c> of the wide table, as
+    /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading one. $3 window end, $9 <c>E</c>.
+    /// </summary>
+    private static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $9::date
+            AND   collection_time <= $3
+            AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s days, <c>[S, E)</c> of <c>query_store_top_daily</c>, as
+    /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading edge. $8 <c>S</c>, $9 <c>E</c>.
+    /// </summary>
+    private const string QueryStoreTopDailyDaysSql = """
+            FROM query_store_top_daily
+            WHERE server_id = $1
+            AND   day >= $8::date
+            AND   day < $9::date
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        """;
 
     /// <summary>
     /// The long-window read (#5094): <see cref="QueryStoreTopTableSql"/>'s answer, with a run of whole UTC days taken
@@ -3084,13 +3168,7 @@ internal static class DarlingDataReader
                 CAST(avg_physical_io_reads AS numeric) * execution_count AS physical_wsum,
                 CAST(avg_rowcount AS numeric) * execution_count AS rowcount_wsum,
                 last_execution_time, query_plan_hash
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time < $8::date
-            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time < $8::date + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopDailyLeadingEdgeSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
             UNION ALL
             SELECT
@@ -3103,13 +3181,7 @@ internal static class DarlingDataReader
                 CAST(avg_physical_io_reads AS numeric) * execution_count,
                 CAST(avg_rowcount AS numeric) * execution_count,
                 last_execution_time, query_plan_hash
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   collection_time >= $9::date
-            AND   collection_time <= $3
-            AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopDailyTrailingEdgeSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
             UNION ALL
             SELECT
@@ -3122,11 +3194,7 @@ internal static class DarlingDataReader
                 avg_physical_io_reads_wsum,
                 avg_rowcount_wsum,
                 last_execution_time_max, query_plan_hash_max
-            FROM query_store_top_daily
-            WHERE server_id = $1
-            AND   day >= $8::date
-            AND   day < $9::date
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        {{QueryStoreTopDailyDaysSql}}
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         ranked AS (
@@ -3254,8 +3322,9 @@ internal static class DarlingDataReader
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, DatabaseFilter.One(databaseName), executionType: null, moduleName: null, cancellationToken);
 
-    /// <summary>#5245: the unfiltered-by-outcome top rows over a SET of databases (the one read the tool uses to tell a
-    /// measured zero from missing data).</summary>
+    /// <summary>#5245: the unfiltered-by-outcome top rows over a SET of databases. The tools tell a measured zero from
+    /// missing data with <see cref="QueryStoreWindowHasRowsAsync"/>, which answers whether this read returns a row at an
+    /// unlimited candidate limit.</summary>
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         CancellationToken cancellationToken = default) =>
@@ -3429,27 +3498,9 @@ internal static class DarlingDataReader
                 throw injectFault();
             }
 
-            /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. No built day
-               keeps the interval-table read exactly as it was (same text, same parameters). */
-            var (firstDay, endDay) = WholeDays(plan.ReadStart, endUtc);
-            (DateOnly Start, DateOnly EndExclusive)? dailySpan = null;
-            if (firstDay < endDay)
-            {
-                var builtDays = new List<DateOnly>();
-                await using (var built = new NpgsqlCommand(QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
-                {
-                    AddInt(built, serverId);
-                    built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
-                    built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
-                    await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
-                    while (await builtReader.ReadAsync(cancellationToken))
-                    {
-                        builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
-                    }
-                }
-
-                dailySpan = LongestBuiltRun(builtDays);
-            }
+            /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. With no built day
+               the interval-table statement reads the whole window. */
+            var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
 
             var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
 
@@ -3501,6 +3552,247 @@ internal static class DarlingDataReader
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ReadScope.NoteFallback(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed, "#3953 MCP top-queries table read", ex);
+            return null;
+        }
+    }
+
+    /// <summary>The longest run of built whole days inside <c>[readStart, endUtc)</c> (<see cref="QueryStoreTopBuiltDaysSql"/>,
+    /// <see cref="LongestBuiltRun"/>), read in the caller's snapshot. Null when the window holds no whole day or none of its
+    /// days is built. The top read and <see cref="QueryStoreWindowHasRowsAsync"/> both take their daily span from here, so
+    /// they choose the same tier.</summary>
+    private static async Task<(DateOnly Start, DateOnly EndExclusive)?> ReadQueryStoreTopDailySpanAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var (firstDay, endDay) = WholeDays(readStart, endUtc);
+        if (firstDay >= endDay)
+        {
+            return null;
+        }
+
+        var builtDays = new List<DateOnly>();
+        await using (var built = new NpgsqlCommand(QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            AddInt(built, serverId);
+            built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
+            built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
+            await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
+            while (await builtReader.ReadAsync(cancellationToken))
+            {
+                builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+            }
+        }
+
+        return LongestBuiltRun(builtDays);
+    }
+
+    /// <summary>How many of the window's rows <see cref="QueryStoreWindowProbeSql"/> tests one by one before it tests the
+    /// window's distinct statements. A window with ordinary activity answers from these rows without reading the rest, and a
+    /// window that holds fewer rows than this is answered by them alone.</summary>
+    internal const int QueryStoreWindowProbeSampleRows = 64;
+
+    /// <summary>
+    /// The raw tier's rows for <see cref="QueryStoreWindowHasRowsAsync"/>: <see cref="QueryStoreTopRawWindowSql"/>, the
+    /// predicates of <see cref="QueryStoreTopRawPrefix"/>, as the statement key (database, query id) of each row. No interval
+    /// dedupe: a re-collected interval has a newest row exactly when it has any row. The parameters are the top read's:
+    /// $1 server_id, $2/$3 window (naive UTC), $4 the sample size, $5 databases (NULL = all).
+    /// </summary>
+    internal const string QueryStoreWindowProbeRawRowsSql = $$"""
+        SELECT database_name, query_id
+        FROM query_store_stats
+        WHERE server_id = $1
+        {{QueryStoreTopRawWindowSql}}
+        """;
+
+    /// <summary>
+    /// The interval-table tier's rows for <see cref="QueryStoreWindowHasRowsAsync"/>: <see cref="QueryStoreTopTableWindowSql"/>,
+    /// the predicates of <see cref="QueryStoreTopTablePrefix"/>. $1 server_id, $2 the gate's <c>ReadStart</c>, $3 window end,
+    /// $4 the sample size, $5 databases. The <c>first_execution_time</c> floor carries
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>, which <see cref="QueryStoreIntervalWide.WithEdgeMargin"/>
+    /// narrows as it does for the top read.
+    /// </summary>
+    internal static readonly string QueryStoreWindowProbeTableRowsSql = $$"""
+        SELECT database_name, query_id
+        FROM query_store_interval_wide
+        WHERE server_id = $1
+        {{QueryStoreTopTableWindowSql}}
+        """;
+
+    /// <summary>
+    /// The daily tier's rows for <see cref="QueryStoreWindowHasRowsAsync"/>: the three arms of
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s <c>parts</c> (<see cref="QueryStoreTopDailyLeadingEdgeSql"/>,
+    /// <see cref="QueryStoreTopDailyTrailingEdgeSql"/> and <see cref="QueryStoreTopDailyDaysSql"/>). $1 server_id, $2 the
+    /// gate's <c>ReadStart</c>, $3 window end, $4 the sample size, $5 databases, $6 and $7 unused (the top read's outcome and
+    /// module, bound as NULL text), $8 <c>S</c> and $9 <c>E</c> (dates).
+    /// </summary>
+    internal static readonly string QueryStoreWindowProbeDailyRowsSql = $$"""
+        SELECT database_name, query_id
+        {{QueryStoreTopDailyLeadingEdgeSql}}
+        UNION ALL
+        SELECT database_name, query_id
+        {{QueryStoreTopDailyTrailingEdgeSql}}
+        UNION ALL
+        SELECT database_name, query_id
+        {{QueryStoreTopDailyDaysSql}}
+        """;
+
+    /// <summary>
+    /// The showable test of one statement key <c>r</c> (database, query id): <see cref="QueryStoreTopTextLookupSql"/> and
+    /// <see cref="QueryStoreTopShowableTextSql"/>, the text lookup and the two text tests of <see cref="QueryStoreTopTail"/>.
+    /// <para><c>OFFSET 0</c> keeps the lookup a subquery of its own, run once for each key. Without it the planner copies the
+    /// lookup into every test that reads the text and runs it once for each.</para>
+    /// </summary>
+    private const string QueryStoreWindowProbeTextTestSql = $$"""
+        LEFT JOIN LATERAL (
+        {{QueryStoreTopTextLookupSql}}
+            OFFSET 0
+        ) AS t ON TRUE
+        {{QueryStoreTopShowableTextSql}}
+        """;
+
+    /// <summary>
+    /// The statement <see cref="QueryStoreWindowHasRowsAsync"/> runs over one tier's rows (<paramref name="rowsSql"/>, a
+    /// SELECT of <c>database_name, query_id</c>): TRUE when any statement of the window is showable. A statement is
+    /// showable when it passes <see cref="QueryStoreWindowProbeTextTestSql"/> and, when <paramref name="selfKeysReady"/>,
+    /// the key-table test of <see cref="QueryStoreSelfStatement.NotSelfOfKey"/>. The key-table test filters the window's
+    /// rows ahead of either text test, so a statement of the monitor's own costs no text lookup.
+    /// <para>One CASE, which stops at its first true WHEN, over three steps:</para>
+    /// <para>1. <c>sample</c> holds the first <c>$4</c> (<see cref="QueryStoreWindowProbeSampleRows"/>) rows of the window as the scan
+    /// produces them (rows of the monitor's own by key left out), and each is tested. A window with ordinary activity
+    /// answers TRUE after a few rows.</para>
+    /// <para>2. A sample of fewer rows than that holds every such row of the window, so the answer is FALSE with no second
+    /// read. An empty window is read once.</para>
+    /// <para>3. Otherwise every sampled row is a WAITFOR or a statement of the monitor's own that only its text shows, and
+    /// each DISTINCT statement key of the window is tested once: one pass over the window's rows and one text lookup for
+    /// each statement, not one for each interval row.</para>
+    /// </summary>
+    internal static string QueryStoreWindowProbeSql(string rowsSql, bool selfKeysReady)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rowsSql);
+        var rows = "FROM (\n" + rowsSql + "\n) AS r"
+            + (selfKeysReady ? "\nWHERE " + QueryStoreSelfStatement.NotSelfOfKey("$1", "r.database_name", "r.query_id") : "");
+        string AnyShowable(string keysSql) =>
+            "EXISTS (\nSELECT 1\nFROM " + keysSql + " AS r\n" + QueryStoreWindowProbeTextTestSql + "\n)";
+        return "WITH sample AS MATERIALIZED (\nSELECT r.database_name, r.query_id\n" + rows + "\nLIMIT $4\n)\n"
+            + "SELECT CASE\nWHEN " + AnyShowable("sample") + " THEN TRUE\n"
+            + "WHEN (SELECT count(*) FROM sample) < $4 THEN FALSE\n"
+            + "ELSE " + AnyShowable("(\nSELECT DISTINCT r.database_name, r.query_id\n" + rows + "\n)") + "\nEND";
+    }
+
+    /// <summary>
+    /// Whether the window holds any row <c>get_query_store_top</c> can show, with no ranking cut. It answers for the tier the
+    /// top read serves the window from: the same tier choice (<see cref="QueryStoreTopMayReadTable"/>, then
+    /// <see cref="QueryStoreIntervalWide.ResolveReadAsync"/> and the built-days span in one read-only REPEATABLE READ
+    /// transaction, raw when the gate says raw or the table path faults), the same window bounds, edge margin and database
+    /// list, and the same exclusions (the monitor's own statements by the key table once
+    /// <see cref="QueryStoreSelfKeys.ReadyAsync"/> says it is filled and by the marker in the text in every case, and
+    /// statements whose text starts with WAITFOR).
+    /// <para>It is true exactly when the top read returns a row at an unlimited candidate limit. The top read ranks before it
+    /// trims, and keeps <see cref="TopFill.FinalCandidates"/> candidates, so a window whose highest-duration groups are all
+    /// WAITFOR or the monitor's own, more of them than candidates, gives the top read an empty page while this answers true:
+    /// the window holds other runs. It is never false where the top read returns a row.</para>
+    /// <para>It builds no aggregate and no ranking (<see cref="QueryStoreWindowProbeSql"/>), which is why a caller that only
+    /// needs "does the window hold anything" asks here and not for a top-1 page. No execution-outcome, module or tag filter.</para>
+    /// </summary>
+    public static async Task<bool> QueryStoreWindowHasRowsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
+    {
+        if (QueryStoreTopMayReadTable(startUtc, endUtc)
+            && await TryQueryStoreWindowHasRowsFromTableAsync(postgres, serverId, startUtc, endUtc, databases, cancellationToken) is { } fromTable)
+        {
+            ReadScope.NoteSource(ReadScope.SourceIntervalTable);
+            return fromTable;
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            await readOnly.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var selfKeysReady = await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var probeSql = QueryStoreWindowProbeSql(QueryStoreWindowProbeRawRowsSql, selfKeysReady);
+        await using var command = new NpgsqlCommand(probeSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        AddWindow(command, serverId, startUtc, endUtc);
+        AddInt(command, QueryStoreWindowProbeSampleRows);
+        AddDatabases(command, databases);
+        var any = await command.ExecuteScalarAsync(cancellationToken) is true;
+        ReadScope.NoteSource(ReadScope.SourceRaw);
+        return any;
+    }
+
+    /// <summary>
+    /// <see cref="QueryStoreWindowHasRowsAsync"/>'s gate and table tiers, the steps of
+    /// <see cref="TryGetQueryStoreTopFromTableAsync"/> in its order on one connection in one read-only REPEATABLE READ
+    /// transaction: the gate, the built-days span, the edge margin, the self-key readiness, then the probe over the interval
+    /// table alone or over the daily summary with the interval table's edges. Null when the gate says raw or anything but a
+    /// cancellation faults, so the caller reads raw, as the top read does.
+    /// </summary>
+    private static async Task<bool?> TryQueryStoreWindowHasRowsFromTableAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, CancellationToken cancellationToken)
+    {
+        var gateDecided = false;
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
+                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
+            if (!plan.UseTable)
+            {
+                if (plan.DecisionFailed)
+                {
+                    ReadScope.Note(ReadFallback.GateFailed);
+                }
+
+                return null;
+            }
+
+            gateDecided = true;
+            if (TestOnlyTableReadFault.Value is { } injectFault)
+            {
+                throw injectFault();
+            }
+
+            var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
+            var rowsSql = dailySpan is null ? QueryStoreWindowProbeTableRowsSql : QueryStoreWindowProbeDailyRowsSql;
+
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, plan.ReadStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                rowsSql = QueryStoreIntervalWide.WithEdgeMargin(rowsSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+            }
+
+            var selfKeysReady = await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var probeSql = QueryStoreWindowProbeSql(rowsSql, selfKeysReady);
+            await using var command = new NpgsqlCommand(probeSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            AddInt(command, serverId);
+            AddTimestamp(command, plan.ReadStart);
+            AddTimestamp(command, endUtc);
+            AddInt(command, QueryStoreWindowProbeSampleRows);
+            AddDatabases(command, databases);
+            if (dailySpan is var (spanStart, spanEnd))
+            {
+                AddNullableText(command, null);
+                AddNullableText(command, null);
+                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanStart, NpgsqlDbType = NpgsqlDbType.Date });
+                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanEnd, NpgsqlDbType = NpgsqlDbType.Date });
+            }
+
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.NoteFallback(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed, "#8570 MCP Query Store window probe table read", ex);
             return null;
         }
     }

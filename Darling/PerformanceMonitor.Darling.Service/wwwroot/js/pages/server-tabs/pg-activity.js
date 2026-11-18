@@ -278,8 +278,9 @@ export const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
   {
     key: "is_satisfied",
     label: "Ready",
-    display: (row) => (row.is_satisfied === true ? "yes" : row.is_satisfied === false ? (planFacetUnconfirmed(row) ? "can't tell" : "no") : "—"),
-    sortValue: (row) => (row.is_satisfied === true ? 2 : planFacetUnconfirmed(row) ? 1 : 0),
+    /* #8912: an engine limit (plan_attribution on Aurora) is not a "no" to act on, so it says what it is. */
+    display: (row) => (row.is_satisfied === true ? "yes" : row.engine_limit === true ? "engine limit" : row.is_satisfied === false ? (planFacetUnconfirmed(row) ? "can't tell" : "no") : "—"),
+    sortValue: (row) => (row.is_satisfied === true ? 2 : planFacetUnconfirmed(row) || row.engine_limit === true ? 1 : 0),
   },
   { key: "observed", label: "Observed", mono: true, display: (row) => (planFacetUnconfirmed(row) ? "not listed" : row.observed ?? "—"), sortValue: (row) => row.observed },
   detailColumn("detail", "What it means and the fix", (text) => firstSentence(text, 110) || null,

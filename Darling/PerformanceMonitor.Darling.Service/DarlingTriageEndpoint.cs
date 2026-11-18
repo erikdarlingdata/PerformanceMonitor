@@ -120,6 +120,8 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
         /* #7368: the autovacuum-behind check's recovery. */
         (DarlingSelfAlertEvaluator.AutovacuumBehindResolvedMetric, DarlingSelfAlertEvaluator.AutovacuumBehindMetric),
+        /* #8950: the vacuum-stalled check's recovery. */
+        (DarlingSelfAlertEvaluator.VacuumStalledResolvedMetric, DarlingSelfAlertEvaluator.VacuumStalledMetric),
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
         /* #3816: the other two policy families' recovery edges. The total_failures arm has none — it reports

@@ -150,7 +150,7 @@ public sealed class ViewerOverviewCardDetailColumnTests
         WarningCollectorCount = 3,
         NotCollectedCollectorCount = 2,
         NoPermissionCollectorCount = 1,
-        IdentityCapacity = new IdentityCapacityCard("Warning", 2, 0),
+        IdentityCapacity = new IdentityCapacityCard("Warning", 2, 0, 0),
         DatabaseProtectionChipValue = "4 items on 4 databases",
         DatabaseProtectionOverdueCount = 4,
         DatabaseProtectionChipDetail = "CHECKDB overdue on 4 databases, the oldest 31 days ago",
