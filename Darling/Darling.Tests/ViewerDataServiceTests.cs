@@ -728,27 +728,36 @@ public sealed class ViewerSchemaVersionGateTests
         var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        /* #8865: the V278 sentinel (the error-log facts on the database protection rows) is the last parameter, so a store that has every
-           sentinel but that one is a V277 store and maps to 277, not 278. #8967: the V277 sentinel (the progress table of the attention_events
-           copy) is the one before it, so a store without it (and without V278's) is a V276 store. #9000: the V276 sentinel (the Store Growth
+        /* #8570: the V279 sentinel (the aggregate compression order history) is the last parameter, so a store that has every sentinel but
+           that one is a V278 store and maps to 278, not 279. #8865: the V278 sentinel (the error-log facts on the database protection rows) is
+           the one before it, so a store without it (and without V279's) is a V277 store. #8967: the V277 sentinel (the progress table of the attention_events
+           copy) is the one before that, so a store without it (and without the two above) is a V276 store. #9000: the V276 sentinel (the Store Growth
            settings on the alert settings) is the one before that, #8737: the V275 sentinel (the personal token table) the one before that,
            and #8978: the V274 sentinel the one before that. */
+        var allButV279 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV279[^1] = false;
+        Assert.Equal("hasAggregateCompressionOrderHistory", map.GetParameters()[^1].Name);
+        Assert.Equal(278, (int)map.Invoke(null, allButV279)!);
+
         var allButV278 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV278[^1] = false;
-        Assert.Equal("hasDatabaseProtectionErrorLog", map.GetParameters()[^1].Name);
+        allButV278[^2] = false;
+        Assert.Equal("hasDatabaseProtectionErrorLog", map.GetParameters()[^2].Name);
         Assert.Equal(277, (int)map.Invoke(null, allButV278)!);
 
         var allButV277 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV277[^1] = false;
         allButV277[^2] = false;
-        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^2].Name);
+        allButV277[^3] = false;
+        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^3].Name);
         Assert.Equal(276, (int)map.Invoke(null, allButV277)!);
 
         var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV276[^1] = false;
         allButV276[^2] = false;
         allButV276[^3] = false;
-        Assert.Equal("hasStoreGrowthAlertSettings", map.GetParameters()[^3].Name);
+        allButV276[^4] = false;
+        Assert.Equal("hasStoreGrowthAlertSettings", map.GetParameters()[^4].Name);
         Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
 
         var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -756,7 +765,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV275[^2] = false;
         allButV275[^3] = false;
         allButV275[^4] = false;
-        Assert.Equal("hasPersonalTokens", map.GetParameters()[^4].Name);
+        allButV275[^5] = false;
+        Assert.Equal("hasPersonalTokens", map.GetParameters()[^5].Name);
         Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
 
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -765,7 +775,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV274[^3] = false;
         allButV274[^4] = false;
         allButV274[^5] = false;
-        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^5].Name);
+        allButV274[^6] = false;
+        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^6].Name);
         Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
 
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes

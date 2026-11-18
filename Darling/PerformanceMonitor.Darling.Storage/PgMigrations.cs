@@ -3266,6 +3266,58 @@ BEGIN
 END
 $swap$;";
 
+    /// <summary>
+    /// V279 (#8570): <c>collect.query_store_stats_corrected_hourly</c> compresses ordered by <c>query_hash, bucket DESC</c> instead of
+    /// <c>bucket DESC</c>, the order <see cref="TimescaleSupport.EnableAggregateCompressionSql(string)"/> gives a fresh store. The Query Store
+    /// reads behind the fleet summary and the top list aggregate one query across days, and a bucket-ordered batch spreads that query over
+    /// every batch of the segment; ordered by hash, its hours share a batch and the min/max metadata on <c>query_hash</c> skips the rest.
+    /// Measured on a seven-day rig store: 19,751 buffers to 4,956 for the Query Store statement, against 47 to 139 buffers on a one-hour
+    /// server-wide trend read of one compressed day.
+    ///
+    /// <para><c>collect.aggregate_compression_order_history</c> records each change with its outcome and is the rung's sentinel. A plain
+    /// table, never purged, naive UTC, a row per rung run that reached the ALTER. The ALTER runs only when TimescaleDB is installed and the
+    /// aggregate already compresses (a store whose ensure has not enabled compression yet gets the new order from the ensure itself). It is
+    /// catalog-only: chunks already compressed keep <c>bucket DESC</c> and every chunk compressed afterwards takes the new order, so the
+    /// store converges as the compression policy works through its window. When TimescaleDB refuses the ALTER (a release before 2.14
+    /// refuses a compression settings change while compressed chunks exist) the rung records <c>skipped</c> with the server's message and the
+    /// aggregate keeps <c>bucket DESC</c>; its reads stay correct either way. <c>lock_not_available</c> is re-raised, so the runner's lock
+    /// retry handles a busy materialization. Every statement is idempotent.</para>
+    ///
+    /// <para>Declared above <see cref="Scripts"/> and self-contained: static fields initialize in textual order, and the ladder reads this
+    /// one when it is built.</para>
+    /// </summary>
+    private static readonly string V279Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+
+CREATE TABLE IF NOT EXISTS collect.aggregate_compression_order_history
+(
+    changed_at timestamp NOT NULL,
+    view_name text NOT NULL,
+    compress_orderby text NOT NULL,
+    outcome text NOT NULL
+);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        IF EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates
+                   WHERE view_schema = 'collect' AND view_name = 'query_store_stats_corrected_hourly' AND compression_enabled) THEN
+            BEGIN
+                ALTER MATERIALIZED VIEW collect.query_store_stats_corrected_hourly SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id', timescaledb.compress_orderby = 'query_hash, bucket DESC');
+                INSERT INTO collect.aggregate_compression_order_history (changed_at, view_name, compress_orderby, outcome)
+                VALUES (now() AT TIME ZONE 'UTC', 'query_store_stats_corrected_hourly', 'query_hash, bucket DESC', 'applied');
+            EXCEPTION
+                WHEN lock_not_available THEN
+                    RAISE;
+                WHEN OTHERS THEN
+                    INSERT INTO collect.aggregate_compression_order_history (changed_at, view_name, compress_orderby, outcome)
+                    VALUES (now() AT TIME ZONE 'UTC', 'query_store_stats_corrected_hourly', 'query_hash, bucket DESC', 'skipped: ' || SQLERRM);
+            END;
+        END IF;
+    END IF;
+END
+$$;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3606,6 +3658,9 @@ $swap$;";
         /* V278 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
            Catalog-only ALTERs on a plain table, nothing is backfilled, so the upgrade stays fast. */
         new Migration(278, "database-protection-error-log", V278Sql),
+        /* V279 (#8570): the corrected Query Store hourly aggregate's compression order becomes query_hash then bucket, so one query's
+           hours sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
+        new Migration(279, "qs-corrected-hourly-compress-orderby", V279Sql),
     };
 
     /// <summary>

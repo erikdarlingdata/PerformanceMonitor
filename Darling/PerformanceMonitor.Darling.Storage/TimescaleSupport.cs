@@ -10182,8 +10182,8 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// One aggregate's compression enablement: the same <c>server_id</c> segmentation the raw tier uses, ordered
-    /// by the aggregate's own bucket column descending — the read order of every trend query.
+    /// One aggregate's compression enablement: the same <c>server_id</c> segmentation the raw tier uses, ordered as
+    /// <see cref="AggregateCompressionOrderByFor(string)"/> gives.
     ///
     /// <para><c>ALTER MATERIALIZED VIEW</c> rather than <c>ALTER TABLE</c> on the materialization: TimescaleDB
     /// resolves the settings onto the materialization hypertable itself, and the statement is idempotent — on a
@@ -10192,10 +10192,23 @@ AND   j.hypertable_name = '{relation}'";
     /// (<c>continuous_aggregates.compression_enabled</c>) so a settled store runs no ALTER at all. Same pre-2.18
     /// vocabulary as <see cref="EnableCompressionSql(string)"/>, for the same cross-2.x reason.</para>
     /// </summary>
-    public static string EnableAggregateCompressionSql(string view)
+    public static string EnableAggregateCompressionSql(string view) =>
+        $"ALTER MATERIALIZED VIEW collect.{view} SET (timescaledb.compress, timescaledb.compress_segmentby = '{AggregateCompressionSegmentBy}', timescaledb.compress_orderby = '{AggregateCompressionOrderByFor(view)}')";
+
+    /// <summary>
+    /// One aggregate's compression order: its own bucket column descending, the read order of every trend query, except
+    /// <see cref="QueryStoreStatsCorrectedHourlyView"/>, which orders by <c>query_hash</c> first (#8570). The Query Store reads behind the
+    /// fleet summary and the top list aggregate one query across days; ordered by hash, that query's hours share a compressed batch and the
+    /// batch metadata on <c>query_hash</c> skips the rest. Measured on a seven-day rig store: 19,751 buffers to 4,956 for the Query Store
+    /// statement, against 47 to 139 buffers for a one-hour server-wide trend read of one compressed day. A store compressed before this
+    /// order existed is moved to it by V279.
+    /// </summary>
+    public static string AggregateCompressionOrderByFor(string view)
     {
-        var target = AggregateCompressionTargetFor(view);
-        return $"ALTER MATERIALIZED VIEW collect.{view} SET (timescaledb.compress, timescaledb.compress_segmentby = '{AggregateCompressionSegmentBy}', timescaledb.compress_orderby = '{AggregateBucketColumnFor(target.CreateSql)} DESC')";
+        var bucket = AggregateBucketColumnFor(AggregateCompressionTargetFor(view).CreateSql);
+        return string.Equals(view, QueryStoreStatsCorrectedHourlyView, StringComparison.Ordinal)
+            ? $"query_hash, {bucket} DESC"
+            : $"{bucket} DESC";
     }
 
     /// <summary>
