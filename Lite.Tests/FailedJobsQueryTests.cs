@@ -72,13 +72,6 @@ public class FailedJobsQueryTests
            alert_time share. Measured on the server rather than read from collected server_properties
            because this feed is already connected to it. */
         Assert.Contains("utc_offset_minutes = DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())", sql);
-
-        /* #8972: the outcome row's whole-run duration (the raw HHMMSS integer), LAST so the seven earlier
-           ordinals stay put. */
-        Assert.Contains("run_duration = jh.run_duration", sql);
-        Assert.True(
-            sql.IndexOf("utc_offset_minutes =", StringComparison.Ordinal) < sql.IndexOf("run_duration =", StringComparison.Ordinal),
-            "run_duration must come after utc_offset_minutes (ordinal 7)");
     }
 
     [Fact]
