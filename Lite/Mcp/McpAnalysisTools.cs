@@ -88,7 +88,8 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
-                    " Check get_collection_health to see when each collector last succeeded." +
+                    /* #8910: a window retention removed has nothing for collection health to say. */
+                    WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
                     unobservedCollection.Attach(new
                     {
@@ -379,13 +380,24 @@ public sealed class McpAnalysisTools
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
 
+            /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
+               must not blame collection. Read only for the two unavailable answers below; null when the window sits inside the span. */
+            async Task<RetentionBoundary?> RetentionRemovedAsync()
+            {
+                var boundary = await analysisService.ReadRetentionBoundaryAsync(resolved.ServerId, cancellationToken);
+                return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
+            }
+
             if (facts.Count == 0)
             {
                 /* No scored facts means the underlying collectors produced nothing for the window —
                    not retrievable now rather than an all-clear (mirrors get_perfmon_trend's empty case).
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
-                const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
+                var removedWindow = await RetentionRemovedAsync();
+                var noFacts = removedWindow is null
+                    ? "No facts collected. The collector may not have run yet, or no data exists in the requested time range."
+                    : $"No facts were collected in the requested window. {removedWindow.Describe()} This is NOT an all-clear.";
                 var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
                 return McpHelpers.Status(
                     "unavailable",
@@ -401,11 +413,14 @@ public sealed class McpAnalysisTools
                    "wait stats as fraction-of-period, blocking rates"; none of those can be shown, so
                    this is the unavailable envelope, with the count of what COULD be read so a caller
                    after configuration alone knows audit_config still has it. */
+                var removedWindow = await RetentionRemovedAsync();
                 return McpHelpers.Status(
                     "unavailable",
-                    $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
-                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those. " +
-                    "Check get_collection_health to see when each collector last succeeded." +
+                    (removedWindow is null
+                        ? $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. "
+                        : $"{removedWindow.Describe()} The requested window for {resolved.DisplayName} is gone from the store, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. ") +
+                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those." +
+                    WindowEmptyText.HealthPointer(removedWindow is not null) +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }

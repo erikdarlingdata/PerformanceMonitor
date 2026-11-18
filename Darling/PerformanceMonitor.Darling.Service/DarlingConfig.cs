@@ -235,11 +235,61 @@ public sealed class DarlingConfig
     /// minutes and it adds about 0.5 ms to each written row. When true the service creates the <c>pg_trgm</c> extension if the store
     /// login can, then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never
     /// ahead of collection. When false the service drops the index if it exists. A failed build is dropped, reported by
-    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. A file-only knob (not seeded into the
-    /// control-plane store), so an edit takes effect on the next restart.
+    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. #8978: this file value is the fallback. While
+    /// <c>config.config_service.query_text_trigram_index_enabled</c> is NULL (the default; it is never seeded from the file) the file
+    /// governs and an edit takes effect on the next restart; a store value (written by <c>update_service_flags</c>) overrides it and
+    /// takes effect at the next pass without a restart. The pass reads <see cref="QueryTextTrigramIndexResolved"/>.
     /// </summary>
     [JsonPropertyName("queryTextTrigramIndexEnabled")]
     public bool QueryTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
+    /// #8978: the store's value of the plan-cache trigram index option, <c>config.config_service.query_text_trigram_index_enabled</c>, as the
+    /// last config load or reload read it. NULL means darling.json governs. Never serialized: the file never holds it.
+    /// </summary>
+    [JsonIgnore]
+    public bool? QueryTextTrigramIndexStoreValue { get; set; }
+
+    /// <summary>#8978: the plan-cache trigram index option the pass acts on: the store's value when it holds one, else the file's.</summary>
+    [JsonIgnore]
+    public bool QueryTextTrigramIndexResolved => ResolveTrigramIndexOption(QueryTextTrigramIndexStoreValue, QueryTextTrigramIndexEnabled);
+
+    /// <summary>
+    /// Whether the service builds a <c>pg_trgm</c> GIN index on the Query Store text (<c>collect.query_store_text.query_sql_text</c>, #8570),
+    /// which <c>find_queries_by_text</c> searches a server's Query Store text through. Default FALSE: on a seeded store of 1,000,000 texts of
+    /// about 300 characters the index is 398 MB (92% of the table), a build takes about 33 seconds and it adds about 0.07 ms to each inserted
+    /// row; the cost grows with the store's text. The liveness touch of <c>last_seen</c> stays a HOT update when the page has room, so it
+    /// writes nothing to the index. When true the service creates the <c>pg_trgm</c> extension if the store login can, then builds the index
+    /// with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never ahead of collection. When false the
+    /// service drops the index if it exists. A failed build is dropped, reported by <c>get_store_metrics</c> (<c>query_store_text_index</c>)
+    /// and retried with a growing wait. Independent of <see cref="QueryTextTrigramIndexEnabled"/>. #8978: this file value is the fallback.
+    /// While <c>config.config_service.query_store_text_trigram_index_enabled</c> is NULL (the default; it is never seeded from the file) the
+    /// file governs and an edit takes effect on the next restart; a store value (written by <c>update_service_flags</c>) overrides it and
+    /// takes effect at the next pass without a restart. The pass reads <see cref="QueryStoreTextTrigramIndexResolved"/>.
+    /// </summary>
+    [JsonPropertyName("queryStoreTextTrigramIndexEnabled")]
+    public bool QueryStoreTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
+    /// #8978: the store's value of the Query Store trigram index option, <c>config.config_service.query_store_text_trigram_index_enabled</c>,
+    /// as the last config load or reload read it. NULL means darling.json governs. Never serialized: the file never holds it.
+    /// </summary>
+    [JsonIgnore]
+    public bool? QueryStoreTextTrigramIndexStoreValue { get; set; }
+
+    /// <summary>#8978: the Query Store trigram index option the pass acts on: the store's value when it holds one, else the file's.</summary>
+    [JsonIgnore]
+    public bool QueryStoreTextTrigramIndexResolved => ResolveTrigramIndexOption(QueryStoreTextTrigramIndexStoreValue, QueryStoreTextTrigramIndexEnabled);
+
+    /// <summary>
+    /// #8978: a trigram index option's resolved value. A store value wins; NULL defers to the file, the way a NULL
+    /// <c>analysis_uncorroborated_route</c> defers to darling.json (V137). Pure.
+    /// </summary>
+    public static bool ResolveTrigramIndexOption(bool? storeValue, bool fileValue) => storeValue ?? fileValue;
+
+    /// <summary>#8978: where a trigram index option's resolved value comes from: <c>"store"</c> when the store holds a value, else <c>"file"</c>.</summary>
+    public static string TrigramIndexOptionSource(bool? storeValue) =>
+        storeValue.HasValue ? QueryTextTrigramIndexTracker.SourceStore : QueryTextTrigramIndexTracker.SourceFile;
 
     /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is

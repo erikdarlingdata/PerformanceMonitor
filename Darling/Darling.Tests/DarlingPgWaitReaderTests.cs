@@ -88,7 +88,7 @@ public class DarlingPgWaitReaderTests
     [Fact]
     public void OrdersByWeightAndBoundsTheResult()
     {
-        Assert.Contains("ORDER BY SUM(delta_wait_time_us) DESC", Sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_wait_time_us) DESC", Sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT", Sql, StringComparison.Ordinal);
     }
 

@@ -36,16 +36,24 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>query_hash</c> but one row per in-flight session per sample, and its retention is whatever the operator set for that collector,
 /// so no single horizon can be stated for an empty answer.</para>
 ///
-/// <para><b>No index, so a time budget.</b> The text has no index and a rare pattern reads every row in scope. On the largest server of
-/// a 6.1 million row store (238,395 rows) that took 24.9 s cold and 1.9 s warm, and one server plus one database took 0.69 s. Each
-/// source's statement runs in its own transaction under <c>SET LOCAL statement_timeout</c> (<see cref="BudgetMilliseconds"/>), so the
-/// read stays under about ten seconds; a source that runs out is reported <c>stopped</c> and the other source is unaffected.</para>
+/// <para><b>A time budget, because the text is not indexed by default.</b> Without an index a rare pattern reads every row in scope. On the
+/// largest server of a 6.1 million row store (238,395 rows) that took 24.9 s cold and 1.9 s warm, and one server plus one database took
+/// 0.69 s. Each source's statement runs in its own transaction under <c>SET LOCAL statement_timeout</c> (<see cref="BudgetMilliseconds"/>),
+/// so the read stays under about ten seconds; a source that runs out is reported <c>stopped</c> and the other source is unaffected.</para>
+///
+/// <para><b>#8570: the Query Store source on an index.</b> The opt-in trigram index on <c>query_store_text.query_sql_text</c>
+/// (<see cref="QueryStoreTextTrigramIndex"/>, option <c>queryStoreTextTrigramIndexEnabled</c>) serves <see cref="QueryStoreSql"/> as it is
+/// written: the planner reads a rare pattern's matches through the index and filters them to the server (a no-match search of one server of
+/// a seeded 1,000,000 row store read 47 buffers in 0.3 ms, against 11,325 buffers in 52 ms through the primary key), and keeps the
+/// primary-key walk for a common pattern, which stops at the row cap. The statement, its order, its cap and its excerpt are the same with or
+/// without the index, so the rows are too; an index that is building or INVALID is never planned. The budget stays, for a store whose
+/// index is off or not yet built.</para>
 ///
 /// <para><b>#7674: the all-servers scope, only on an index.</b> A search that names no server reads the plan-cache text of every enabled server, through
 /// the opt-in trigram index on <c>query_text_dim.query_text</c> (<see cref="QueryTextTrigramIndex"/>, option <c>queryTextTrigramIndexEnabled</c>).
 /// It is offered only when the index is <c>Ready</c> (it exists and is valid): in every other state the search is refused with a sentence that names the option
 /// and the state, because without the index the text match would read the whole text table and run out its budget. The index serves the text match.
-/// Query Store text has no index and is still searched one server at a time. With no <c>server_name</c> the front door
+/// The all-servers scope does not read Query Store text, which is searched one server at a time. With no <c>server_name</c> the front door
 /// routes this tool as a fan-out (the default for a tool it does not list), so each store answers with its own index state. The one-server scope keeps the plain path whether or not the index exists: <see cref="PlanCacheSql"/> writes its match so the index
 /// cannot serve it, which the issue measured to be faster than the index for that scope.</para>
 ///
@@ -380,7 +388,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         + " days, one row per server, query_hash and database. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped with the rows it had found by then (the plan-cache text of one server is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. The text is not indexed unless the operator turns an index on, so each source has a 4 second budget. One server's Query Store text is read through its opt-in trigram index when that index is ready (darling.json queryStoreTextTrigramIndexEnabled; get_store_metrics query_store_text_index says its state), which makes a rare pattern fast. A source that runs out is reported stopped with the rows it had found by then (the plan-cache text of one server is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -401,7 +409,8 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         SourceBudget queryStoreBudget,
         SourceBudget planCacheBudget,
         CancellationToken cancellationToken,
-        QueryTextTrigramIndexTracker? tracker = null)
+        QueryTextTrigramIndexTracker? tracker = null,
+        QueryTextTrigramIndexTracker? queryStoreTextTracker = null)
     {
         if (detail != McpDataDetail.Full)
         {
@@ -459,7 +468,8 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
             var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
 
             var queryStore = await RunSourceAsync(
-                postgres, QueryStoreSql, queryStoreBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon, StoppedAdvice(database),
+                postgres, QueryStoreSql, queryStoreBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon,
+                QueryStoreStoppedAdvice(database, (queryStoreTextTracker ?? QueryStoreTextTrigramIndex.SharedTracker).Read()),
                 r => (Database: r.GetString(0), QueryId: r.GetInt64(1), Hash: r.IsDBNull(2) ? null : r.GetString(2), LastSeen: r.GetDateTime(3),
                     Stored: r.IsDBNull(4) ? null : r.GetString(4)),
                 raw =>
@@ -689,7 +699,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                     query_store = new
                     {
                         status = "not_searched",
-                        message = "Query Store text has no index, so an all-servers search does not read it. Name a server with server_name (and database_name to make it faster) to search its Query Store text.",
+                        message = "An all-servers search does not read Query Store text. Name a server with server_name (and database_name to make it faster) to search its Query Store text.",
                         horizon = QueryStoreHorizon,
                         returned = 0,
                         truncated = false,
@@ -720,7 +730,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// state. Null <paramref name="health"/> is a catalog read that failed. Pure, so each state is tested without a store.</summary>
     internal static string AllServersRefusal(TrigramIndexHealth? health)
     {
-        var lead = "Searching every server at once needs the opt-in trigram index on the plan-cache text (queryTextTrigramIndexEnabled in darling.json), and ";
+        var lead = "Searching every server at once needs the opt-in trigram index on the plan-cache text (update_service_flags query_text_trigram_index_enabled, or queryTextTrigramIndexEnabled in darling.json), and ";
         var tail = " Until then, name one server with server_name (database_name makes it faster).";
         if (health is null)
         {
@@ -728,15 +738,18 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         }
 
         var minutes = ((int)QueryTextTrigramIndex.StartDelay.TotalMinutes).ToString(CultureInfo.InvariantCulture);
+        var passMinutes = ((int)QueryTextTrigramIndex.PassInterval.TotalMinutes).ToString(CultureInfo.InvariantCulture);
         var state = health.Status switch
         {
             TrigramIndexStatus.Unconfigured =>
                 "the service has not read darling.json yet, so the option is not known (state: not configured yet). Try again in a moment.",
             TrigramIndexStatus.Off =>
-                "the option is off (state: off). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service: the index is built in the background about "
-                + minutes + " minutes after start and can take many minutes on a large store.",
+                "the option is off (state: off). Set update_service_flags query_text_trigram_index_enabled true (no restart; the next index pass, at most "
+                + passMinutes + " minutes away, builds it), or, while the store holds no value for it, queryTextTrigramIndexEnabled true in darling.json and restart "
+                + "the service. The build runs in the background and can take many minutes on a large store.",
             TrigramIndexStatus.DropPending or TrigramIndexStatus.Dropping =>
-                "the option is off and the service is dropping the index (state: being dropped). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service to keep it.",
+                "the option is off and the service is dropping the index (state: being dropped). Set update_service_flags query_text_trigram_index_enabled true, or queryTextTrigramIndexEnabled "
+                + "true in darling.json and restart the service while the store holds no value for it, to build it again.",
             TrigramIndexStatus.Pending =>
                 "the option is on but the index is not built yet (state: pending). The service builds it in the background about " + minutes + " minutes after start.",
             TrigramIndexStatus.Building =>
@@ -755,6 +768,20 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         database is null
             ? "Name a database with database_name to narrow the search; one server and one database is much faster."
             : "The database named is large; use a longer, more specific pattern.";
+
+    /// <summary>#8570: the Query Store source's stopped advice, which also names the Query Store text index: how to turn it on when the option is
+    /// off, and where its state is when the option is on (a stopped search with the option on is one the index was not ready for, or a pattern
+    /// common enough that the planner walks the key). Reads only this process's tracker, never the store. Pure.</summary>
+    internal static string QueryStoreStoppedAdvice(string? database, QueryTextTrigramIndexTracker.Snapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        var index = !snapshot.Configured
+            ? ""
+            : snapshot.Enabled
+                ? " The trigram index on the Query Store text is turned on; get_store_metrics query_store_text_index says whether it is ready."
+                : " The opt-in trigram index on the Query Store text makes this search an index read: update_service_flags query_store_text_trigram_index_enabled, or queryStoreTextTrigramIndexEnabled in darling.json.";
+        return StoppedAdvice(database) + index;
+    }
 
     /// <summary>One plan-cache row as the statement hands it back, before the judge sees its text.</summary>
     private sealed record PlanCacheHit(string? Hash, string? Database, DateTime LastCollected, string? Stored);

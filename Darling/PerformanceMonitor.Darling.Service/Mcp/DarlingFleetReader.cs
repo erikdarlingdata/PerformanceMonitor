@@ -1148,7 +1148,7 @@ AND   c.column_name IS NOT NULL";
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken, ILogger? logger = null)
     {
-        var counts = new Dictionary<int, (int Columns, int CriticalColumns, IdentityColumnFact? Worst, double WorstPercent, int WorstRank)>();
+        var counts = new Dictionary<int, (int Columns, int CriticalColumns, int ExhaustedColumns, IdentityColumnFact? Worst, double WorstPercent, int WorstRank)>();
         var rows = new List<(int ServerId, double Percent, string Band, IdentityColumnFact Column, DateTime ScannedAt)>();
         await using (var command = postgres.CreateCommand(FleetIdentityCapacitySql))
         {
@@ -1186,12 +1186,13 @@ AND   c.column_name IS NOT NULL";
             var rank = IdentityCapacityMath.Rank(band);
             var isWorst = seen.Worst is null || rank > seen.WorstRank || (rank == seen.WorstRank && percent > seen.WorstPercent);
             counts[serverId] = (seen.Columns + 1, seen.CriticalColumns + (band == IdentityCapacityMath.BandCritical ? 1 : 0),
+                seen.ExhaustedColumns + (band == IdentityCapacityMath.BandCritical && column.AtLimit ? 1 : 0),
                 isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent, isWorst ? rank : seen.WorstRank);
         }
 
         return counts.ToDictionary(
             c => c.Key,
-            c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst));
+            c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst, c.Value.ExhaustedColumns));
     }
 
     /// <summary>#7647: each SQL Server target's database states, through the Database State alert's own statement
@@ -1752,7 +1753,7 @@ AND   c.column_name IS NOT NULL";
         /* #7561: the identity tile's own words. A critical column bands the server; a warning one and the two setup tiles only list it. */
         if (c.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
         {
-            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns, identity.ExhaustedColumns));
         }
 
         /* #7647: the database-state tile's own words. A Critical state bands the server (and says so), any other deviation only lists it. */
@@ -3548,6 +3549,9 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar,
     /* #7561: how many of those are at the critical bar, so the reason can say "1 at its limit, 4 near it" rather than call all five critical. */
     [property: JsonPropertyName("critical_columns")] int CriticalColumns,
+    /* #8928: how many of the critical columns have no values left. Only those are "at their limit" in the reason. Required, so a site that forgets it does not
+       compile and print "near it" for a full column. */
+    [property: JsonPropertyName("exhausted_columns")] int ExhaustedColumns,
     /* #7416: the fullest column and its figures, so the tile names what to open. Table is schema.table. Remaining is digits (an identity bigint
        does not fit a JSON number) and null when the collector did not store the value. */
     [property: JsonPropertyName("worst_database")] string? WorstDatabase = null,
@@ -3559,11 +3563,11 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_band_reason")] string? WorstBandReason = null,
     [property: JsonPropertyName("worst_days_to_exhaustion")] double? WorstDaysToExhaustion = null)
 {
-    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst) =>
+    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst, int exhaustedColumns) =>
         worst is null
-            ? new FleetIdentityCapacity(band, columns, criticalColumns)
+            ? new FleetIdentityCapacity(band, columns, criticalColumns, exhaustedColumns)
             : new FleetIdentityCapacity(
-                band, columns, criticalColumns, worst.DatabaseName,
+                band, columns, criticalColumns, exhaustedColumns, worst.DatabaseName,
                 string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
                 worst.ColumnName, worst.StoredPercent,
                 worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture),

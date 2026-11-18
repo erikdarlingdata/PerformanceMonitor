@@ -2010,7 +2010,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, queryTextTrigramIndexStoreValue, queryStoreTextTrigramIndexStoreValue, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
             /* #3712: analysis.uncorroboratedRoute is the FILE half of a two-source knob whose STORE half
@@ -2123,6 +2123,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                 PlanContentRetentionDays = planContentRetentionDays,
                 ComposeStatementTimeoutSeconds = composeStatementTimeoutSeconds,
                 QueryStoreFetchTopN = queryStoreFetchTopN,
+                QueryTextTrigramIndexStoreValue = queryTextTrigramIndexStoreValue,
+                QueryStoreTextTrigramIndexStoreValue = queryStoreTextTrigramIndexStoreValue,
                 MaxConcurrentSweeps = maxSweeps,
                 PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
@@ -2231,18 +2233,18 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static string NormalizePlanXmlCompression(string? value) =>
         string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, bool? QueryTextTrigramIndexStoreValue, bool? QueryStoreTextTrigramIndexStoreValue, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
             /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
                knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
-               plan content keeps the V75 default 21-day horizon. */
-            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, 0);
+               plan content keeps the V75 default 21-day horizon. The trigram index options (V274) read NULL: darling.json governs. */
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, null, null, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
@@ -2251,7 +2253,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             reader.GetBoolean(6), reader.GetInt32(7),
             reader.GetBoolean(8), reader.GetInt32(9),
             ClampPlanContentRetentionDays(reader.GetInt32(10)),
-            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)), reader.GetInt64(13));
+            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)),
+            reader.IsDBNull(13) ? null : reader.GetBoolean(13), reader.IsDBNull(14) ? null : reader.GetBoolean(14), reader.GetInt64(15));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -3190,6 +3193,10 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         config.PlanContentRetentionDays = view.PlanContentRetentionDays;
         /* #6211: provider-read each cycle by the runner, so a store change reaches the next run without a restart. */
         config.QueryStoreFetchTopN = view.QueryStoreFetchTopN;
+        /* #8978: the store halves of the trigram index options, NULL when darling.json governs. The file values stay as loaded, so a column
+           set back to NULL resolves to the file again; the passes read the resolved values at their next pass. */
+        config.QueryTextTrigramIndexStoreValue = view.QueryTextTrigramIndexStoreValue;
+        config.QueryStoreTextTrigramIndexStoreValue = view.QueryStoreTextTrigramIndexStoreValue;
         /* #2357's effective timeout is NOT taken from here: startup role provisioning reads
            config_service.compose_statement_timeout_seconds straight out of the store and bakes it into
            ALTER ROLE viewer/mcp SET statement_timeout, so a change reaches the live roles on the next
@@ -3539,6 +3546,12 @@ public sealed class StoreConfigView
     /// 0 = every new plan, the behaviour before the setting.
     /// </summary>
     public int QueryStoreFetchTopN { get; init; } = QueryStoreFetchSelection.DefaultTopN;
+
+    /// <summary>#8978: <c>config_service.query_text_trigram_index_enabled</c> (V274). NULL means darling.json's <c>queryTextTrigramIndexEnabled</c> governs.</summary>
+    public bool? QueryTextTrigramIndexStoreValue { get; init; }
+
+    /// <summary>#8978: <c>config_service.query_store_text_trigram_index_enabled</c> (V274). NULL means darling.json's <c>queryStoreTextTrigramIndexEnabled</c> governs.</summary>
+    public bool? QueryStoreTextTrigramIndexStoreValue { get; init; }
 
     /// <summary>
     /// The per-session <c>statement_timeout</c> for the viewer and mcp roles, in seconds (#2357). Read

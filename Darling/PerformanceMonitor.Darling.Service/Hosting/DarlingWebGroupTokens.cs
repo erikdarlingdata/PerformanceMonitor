@@ -82,6 +82,14 @@ internal sealed class DarlingWebGroupTokens : IDisposable
         await _refresh.WaitAsync(ct);
         try
         {
+            // Before the store is ready its migrations may not have run, so config.web_access_advanced may not exist yet and the read
+            // would log a store ERROR for a table that is about to appear. Make no store call: the snapshot stays unavailable (nothing
+            // is honoured, the fail-closed state a failed read gives) and the next supervisor tick reads once the store is ready.
+            if (!_storeReady())
+            {
+                _snapshot = new(false, null, Array.Empty<Match>());
+                return;
+            }
             var epoch = await _metadata.ReadAdvancedSessionEpochAsync(ct);
             if (epoch is null)
             {

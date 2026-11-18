@@ -105,6 +105,16 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     }
 
     [Fact]
+    public void PlanCaptureThatAuroraCannotAttribute_SaysItIsAnEngineLimit_NotASetting()
+    {
+        var p = Run().GetProperty("planAttributionLimit");
+        var shown = p.GetProperty("text").GetString()!;
+        Assert.StartsWith("Plans are not captured on this server, and no setting changes that.", shown, StringComparison.Ordinal);
+        Assert.Contains("Aurora PostgreSQL", shown, StringComparison.Ordinal);
+        Assert.Equal(1, p.GetProperty("hasDetails").GetInt32());
+    }
+
+    [Fact]
     public void AReplyWithNoStructuredReason_StillShowsItsText_WithNothingBehindAClick()
     {
         var r = Run();

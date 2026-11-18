@@ -170,11 +170,12 @@ try {
   out.storedSpelling = { typedLower: lower, typedUnknown: seen().map((r) => r.database_name), shown: stored.value };
 
   // #7701 / #7702: a 2 MB size reads in MB (not 0.00), a left-over database carries its mark, and Collected sits right after Database.
+  // #8880: the live Alpha carries a Heaps count, which the roll-up grid draws in its Heaps column.
   body = JSON.stringify({
     ...payload(1, 1, 500),
     overall: { total_size_gb: 0.0021, total_max_savings_gb: 0.001 },
     databases: [
-      { database_name: "Alpha", total_size_gb: 0.002, unused_size_gb: 0.0004, captured_at: "2026-01-15T12:00:00.0000000Z" },
+      { database_name: "Alpha", total_size_gb: 0.002, unused_size_gb: 0.0004, heaps: 1234, captured_at: "2026-01-15T12:00:00.0000000Z" },
       { database_name: "Alpha", total_size_gb: 0.5, left_over: true, captured_at: "2026-01-05T12:00:00.0000000Z" },
     ],
     // 0.000391 GB is how the read sends an index of 0.4 MB (six places); it must print 0.4 MB, not 0.400384 MB.

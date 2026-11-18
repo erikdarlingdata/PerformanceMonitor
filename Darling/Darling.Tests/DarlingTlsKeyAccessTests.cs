@@ -753,6 +753,109 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(after.Count, Entries(ReadAcl()).Count);
     }
 
+    /* ---- a legacy CryptoAPI key (#8957): the certificate names a CryptoAPI provider, and .NET hands back an RSACng ---- */
+
+    [Fact]
+    public void RealGrant_OnALegacySChannelKey_ReadsAndGrantsThroughTheKeyFile()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "Certificate keys and their ACLs are Windows only.");
+
+        const string account = "S-1-5-19"; // LocalService: present on every Windows, one account, never a group
+        using var installed = LegacyCertificate.Create();
+        var thumbprint = installed.Certificate.Thumbprint;
+
+        byte[] ReadAcl()
+        {
+            using var key = DarlingTlsKeyAccess.OpenKeyTarget(installed.Certificate);
+            Assert.Equal("CAPI key file", key.Kind);
+            return key.ReadDescriptor();
+        }
+
+        var before = Entries(ReadAcl());
+        Assert.NotEmpty(before);
+        Assert.DoesNotContain(before, e => e.Sid.Value == account);
+
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => false,
+            DarlingTlsStore.ReadStore,
+            name => DarlingTlsKeyAccess.ResolveAccount(name, "no such service here"),
+            certificate => DarlingTlsKeyAccess.OpenKeyTarget(certificate));
+
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var code = DarlingTlsKeyAccess.Run(
+            new DarlingTlsKeyAccess.GrantArgs(thumbprint, account, StoreLocation.CurrentUser, "My"), seams, output, error);
+
+        Assert.True(code == 0, error.ToString());
+        Assert.Contains("Granted Read", output.ToString(), StringComparison.Ordinal);
+        var after = Entries(ReadAcl());
+        Assert.Equal(before.Count + 1, after.Count);
+        Assert.Single(after, e => e.Sid.Value == account && e.Qualifier == AceQualifier.AccessAllowed);
+    }
+
+    [Fact]
+    public void Run_ALegacyKeyWithNoKeyFile_NamesTheProviderAndPrintsTheExactIcaclsCommand()
+    {
+        using var certificate = Make("capi-missing.corp.test");
+        const string path = @"C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys\0123456789abcdef_fedcba98-7654";
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => true,
+            (_, _) => new[] { new X509Certificate2(certificate) },
+            _ => new DarlingTlsKeyAccess.AccountResolution(Service, @"NT SERVICE\PerformanceMonitor Darling", null),
+            _ => throw new DarlingTlsKeyAccess.CapiKeyFileMissingException("Microsoft RSA SChannel Cryptographic Provider", path));
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var code = DarlingTlsKeyAccess.Run(Args(certificate.Thumbprint), seams, output, error);
+
+        Assert.Equal(1, code);
+        var said = error.ToString();
+        Assert.Contains("Microsoft RSA SChannel Cryptographic Provider", said, StringComparison.Ordinal);
+        Assert.Contains(
+            $"icacls \"{path}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(R)\"", said, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed.", said, StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+    }
+
+    [Fact]
+    public void Run_ALegacyKeyWhoseProviderCannotBeOpened_RefusesWithTheRealReasonAndNoGuessedPath()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The key folders are Windows paths.");
+
+        using var certificate = Make("capi-unopened.corp.test");
+        const string reason = "Smart card is not available";
+        var legacy = new DarlingTlsKeyAccess.LegacyKeyProvider(
+            "Vendor Smart Card Provider", 1, "container-name-on-the-certificate", true);
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => true,
+            (_, _) => new[] { new X509Certificate2(certificate) },
+            _ => new DarlingTlsKeyAccess.AccountResolution(Service, @"NT SERVICE\PerformanceMonitor Darling", null),
+            _ =>
+            {
+                DarlingTlsKeyAccess.CapiKeyFile(legacy, key => throw new CryptographicException(reason));
+                throw new InvalidOperationException("the open was expected to fail");
+            });
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var code = DarlingTlsKeyAccess.Run(Args(certificate.Thumbprint), seams, output, error);
+
+        Assert.Equal(1, code);
+        var said = error.ToString();
+        Assert.Contains(reason, said, StringComparison.Ordinal);
+        Assert.Contains("Vendor Smart Card Provider", said, StringComparison.Ordinal);
+        Assert.Contains($"certutil -store My {certificate.Thumbprint}", said, StringComparison.Ordinal);
+        Assert.Contains("Unique container name", said, StringComparison.Ordinal);
+        var folder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Microsoft", "Crypto", "RSA", "MachineKeys");
+        Assert.Contains(
+            $"icacls \"{Path.Combine(folder, "<unique container name>")}\" /grant \"NT SERVICE\\PerformanceMonitor Darling:(R)\"",
+            said, StringComparison.Ordinal);
+        Assert.DoesNotContain("container-name-on-the-certificate", said, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed.", said, StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+    }
+
     /* ---- helpers ---- */
 
     private static DarlingTlsKeyAccess.GrantArgs Args(
@@ -952,6 +1055,107 @@ public sealed class DarlingTlsKeyAccessTests
             finally
             {
                 Certificate.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// A certificate whose key is a legacy CryptoAPI key (the "Microsoft RSA SChannel Cryptographic Provider", provider
+    /// type 12), made in the current user's personal store and removed with its key on dispose. No PowerShell: the key is a
+    /// persisted RSACryptoServiceProvider, and the setup asserts the case #8957 is about (the certificate names a CryptoAPI
+    /// provider, and .NET still hands back an RSACng for it), so the test fails loudly if the setup stops reproducing it.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private sealed class LegacyCertificate : IDisposable
+    {
+        private const string Provider = "Microsoft RSA SChannel Cryptographic Provider";
+        private readonly string _container;
+
+        private LegacyCertificate(X509Certificate2 certificate, string container)
+        {
+            Certificate = certificate;
+            _container = container;
+        }
+
+        public X509Certificate2 Certificate { get; }
+
+        public static LegacyCertificate Create()
+        {
+            var container = $"darling-8957-{Guid.NewGuid():N}";
+            var parameters = new CspParameters(12, Provider, container) { KeyNumber = (int)KeyNumber.Exchange };
+            X509Certificate2 stored;
+            using (var rsa = new RSACryptoServiceProvider(2048, parameters) { PersistKeyInCsp = true })
+            {
+                /* The SChannel provider cannot sign ("Invalid algorithm specified"), so a throwaway key signs the certificate
+                   and the CryptoAPI key is only attached to it as its private key. */
+                var subject = new X500DistinguishedName($"CN={container}");
+                var request = new CertificateRequest(subject, new PublicKey(rsa), HashAlgorithmName.SHA256);
+                using var signer = RSA.Create(2048);
+                using var unbound = request.Create(
+                    subject,
+                    X509SignatureGenerator.CreateForRSA(signer, RSASignaturePadding.Pkcs1),
+                    DateTimeOffset.UtcNow.AddDays(-1),
+                    DateTimeOffset.UtcNow.AddDays(1),
+                    Guid.NewGuid().ToByteArray());
+                using var generated = unbound.CopyWithPrivateKey(rsa);
+                using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+                store.Open(OpenFlags.ReadWrite);
+                store.Add(generated);
+                var found = store.Certificates.Find(X509FindType.FindByThumbprint, generated.Thumbprint, false);
+                Assert.Single(found);
+                stored = found[0];
+            }
+
+            var created = new LegacyCertificate(stored, container);
+            try
+            {
+                var legacy = DarlingTlsKeyAccess.ReadLegacyProvider(stored);
+                Assert.NotNull(legacy);
+                Assert.Equal(12u, legacy!.ProviderType);
+                Assert.Equal(Provider, legacy.Provider);
+                using var key = stored.GetRSAPrivateKey();
+                Assert.IsType<RSACng>(key);
+                return created;
+            }
+            catch
+            {
+                created.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+                store.Open(OpenFlags.ReadWrite);
+                store.Remove(Certificate);
+            }
+            catch (CryptographicException)
+            {
+                /* Cleanup only: a certificate that is already gone is the state we wanted. */
+            }
+            finally
+            {
+                Certificate.Dispose();
+            }
+
+            try
+            {
+                /* Deleting the key container: a provider whose key is not persisted deletes it on dispose. */
+                using var rsa = new RSACryptoServiceProvider(new CspParameters(12, Provider, _container)
+                {
+                    KeyNumber = (int)KeyNumber.Exchange,
+                    Flags = CspProviderFlags.UseExistingKey,
+                })
+                {
+                    PersistKeyInCsp = false,
+                };
+            }
+            catch (CryptographicException)
+            {
+                /* Cleanup only: a key that is already gone is the state we wanted. */
             }
         }
     }

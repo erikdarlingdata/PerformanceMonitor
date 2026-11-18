@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -98,7 +101,8 @@ public class FailedJobsQueryTests
             3,
             "Load fact table",
             "Executed as user: NT SERVICE\\SQLSERVERAGENT. The step failed.",
-            -240
+            -240,
+            3844
         });
 
         var items = await FailedJobsQuery.ReadAsync(reader, CancellationToken.None);
@@ -129,6 +133,7 @@ public class FailedJobsQueryTests
             DBNull.Value,
             DBNull.Value,
             DBNull.Value,
+            DBNull.Value,
             DBNull.Value
         });
 
@@ -145,6 +150,77 @@ public class FailedJobsQueryTests
         Assert.Null(job.UtcOffsetMinutes);
         Assert.Null(job.RunDateTimeUtc);
         Assert.EndsWith(AlertTimestamp.UnknownOffsetMarker, job.RunDateTimeFormatted, StringComparison.Ordinal);
+
+        /* #8972: no duration, no failure instant. */
+        Assert.Null(job.RunDurationSeconds);
+        Assert.Null(job.FailedAt);
+        Assert.Null(job.FailedAtFormatted);
+    }
+
+    /// <summary>
+    /// A reader shaped like <see cref="FailedJobsQuery.Sql"/>'s result, built from a DataTable so no server is
+    /// involved. The column order is the mapper's ordinal contract.
+    /// </summary>
+    private static DataTableReader ReaderOf(params object?[][] rows)
+    {
+        var table = new DataTable();
+        table.Columns.Add("job_name", typeof(string));
+        table.Columns.Add("job_id", typeof(string));
+        table.Columns.Add("run_datetime", typeof(DateTime));
+        table.Columns.Add("step_id", typeof(int));
+        table.Columns.Add("step_name", typeof(string));
+        table.Columns.Add("message", typeof(string));
+        table.Columns.Add("utc_offset_minutes", typeof(int));
+        table.Columns.Add("run_duration", typeof(int));
+        foreach (var row in rows)
+        {
+            table.Rows.Add(row.Select(v => v ?? DBNull.Value).ToArray());
+        }
+
+        return table.CreateDataReader();
+    }
+
+    [Fact]
+    public async Task ReadAsync_ReadsTheRunDurationColumn_AsSeconds_AndLeavesTheOtherColumnsAlone()
+    {
+        var start = new DateTime(2026, 11, 16, 1, 0, 0);
+        var reader = ReaderOf(
+            ["Nightly ETL", "job-1", start, 2, "Load", "boom", -300, 3844],
+            ["Quick Job", "job-2", start, 0, "(Job outcome)", "no step", -300, 0],
+            ["No Duration", "job-3", start, 1, "Step", "x", -300, null]);
+
+        var items = await FailedJobsQuery.ReadAsync(reader, CancellationToken.None);
+
+        Assert.Equal(3, items.Count);
+        Assert.Equal(2324, items[0].RunDurationSeconds);
+        Assert.Equal(start.AddSeconds(2324), items[0].FailedAt);
+        Assert.Equal("2026-11-16 06:38:44Z", items[0].FailedAtFormatted);
+        Assert.Equal("2026-11-16 06:00:00Z", items[0].RunDateTimeFormatted);
+        Assert.Equal(-300, items[0].UtcOffsetMinutes);
+        Assert.Equal(2, items[0].StepId);
+        Assert.Equal("boom", items[0].Message);
+
+        /* A real zero: the run failed within the second it started, and that is a value, not "unknown". */
+        Assert.Equal(0, items[1].RunDurationSeconds);
+        Assert.Equal("2026-11-16 06:00:00Z", items[1].FailedAtFormatted);
+
+        Assert.Null(items[2].RunDurationSeconds);
+        Assert.Null(items[2].FailedAtFormatted);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(5, 5)]
+    [InlineData(59, 59)]
+    [InlineData(100, 60)]
+    [InlineData(3844, 2324)]            /* 0h 38m 44s: the measured case */
+    [InlineData(10000, 3600)]
+    [InlineData(235959, 86399)]
+    [InlineData(1000000, 360000)]       /* 100 hours exactly */
+    [InlineData(1013045, 365445)]       /* 101h 30m 45s: more than 99 hours */
+    public void RunDurationToSeconds_ReadsMsdbHhmmss(int stored, int seconds)
+    {
+        Assert.Equal(seconds, FailedJobsQuery.RunDurationToSeconds(stored));
     }
 
     [Fact]

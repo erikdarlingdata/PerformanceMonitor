@@ -927,7 +927,7 @@ public sealed partial class DarlingWorker
     ///
     /// <para><b>Due-ness is asked of the STORE</b> (<see cref="PgStatementText.IsDueSql"/>), not remembered here.
     /// A restart therefore cannot re-fetch the fleet, and two hosts writing one store cannot disagree about when
-    /// text was last written. The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
+    /// text was last written (the store's per-server fetch marker, #8988). The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
     /// cannot drift against its own timestamps.</para>
     ///
     /// <para>Only for PostgreSQL targets: <c>aurora_stat_statements</c> does not exist elsewhere, and the
@@ -963,28 +963,23 @@ public sealed partial class DarlingWorker
                 return;
             }
 
-            var stamps = new DateTime[queryIds.Count];
-            Array.Fill(stamps, now);
-
-            await using var upsert = _postgres!.CreateCommand(PgStatementText.UpsertSql);
-            upsert.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-            upsert.Parameters.AddWithValue(Enumerable.Repeat(runtime.ServerId, queryIds.Count).ToArray());
-            upsert.Parameters.AddWithValue(queryIds.ToArray());
-            upsert.Parameters.AddWithValue(texts.ToArray());
-            upsert.Parameters.AddWithValue(stamps);
-            upsert.Parameters.AddWithValue(ownEntries.ToArray());
-            upsert.Parameters.AddWithValue(candidates.ToArray());
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            /* #8988: the upsert leaves an unchanged row's last_seen alone, so the fetch writes its own marker after it, and the due
+               check above reads that marker. */
+            var written = await PgStatementText.WriteFetchAsync(
+                _postgres!, runtime.ServerId, queryIds, texts, ownEntries, candidates, now,
+                ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
             _logger.LogInformation(
-                "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed (#2219)",
-                runtime.Config.DisplayName, queryIds.Count);
+                "  [{Server}] pg_statement_text => {Fetched} statement text(s) fetched, {Written} written (#2219)",
+                runtime.Config.DisplayName, queryIds.Count, written);
 
             /* #5320: a refresh that worked writes a SUCCESS row under the same name the failure row uses. Collection
                health bands a name from the counts of its rows and the age of its newest success, so a name that
                only ever wrote errors would read failing until the error aged out of the window, whatever the
-               refreshes after it did. The row carries the rows stored and the fetch-plus-store time; a due check
-               that finds nothing due, and a fetch that returns no statements, write none. */
+               refreshes after it did. The row carries the rows fetched (not the rows written, which is 0 on a pass that finds
+               every text unchanged: health reads three zero-row SUCCESS runs after a productive one as a collector that stopped,
+               and this refresh runs hourly) and the fetch-plus-store time; a due check that finds nothing due, and a fetch that
+               returns no statements, write none. */
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, PgStatementText.CollectorName, "SUCCESS", queryIds.Count, fetchClock.ElapsedMilliseconds, 0,
                 errorMessage: null,
@@ -1319,6 +1314,18 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #8978: sets both trigram index trackers to the options as resolved from <paramref name="config"/> (the store's value when its column
+    /// holds one, else darling.json's) and records which, for get_store_metrics. Called after each store config load is applied.
+    /// </summary>
+    internal static void ConfigureTrigramIndexTrackers(DarlingConfig config)
+    {
+        QueryTextTrigramIndexTracker.Shared.Configure(
+            config.QueryTextTrigramIndexResolved, DarlingConfig.TrigramIndexOptionSource(config.QueryTextTrigramIndexStoreValue));
+        QueryStoreTextTrigramIndex.SharedTracker.Configure(
+            config.QueryStoreTextTrigramIndexResolved, DarlingConfig.TrigramIndexOptionSource(config.QueryStoreTextTrigramIndexStoreValue));
+    }
+
+    /// <summary>
     /// Applies a control-plane reload at a SAFE point (top of a sweep, never mid-collection): re-reads the
     /// store, hot-swaps the held config's alert/SMTP/webhook/capture/analysis settings IN PLACE (the
     /// by-reference DarlingAlertSettings seam + the runner's capture provider reflect it immediately),
@@ -1356,6 +1363,8 @@ public sealed partial class DarlingWorker
         StoreConfigProvider.ApplyToConfig(config, view);
         _collectorState.SigningStatus.Publish(config.Webhooks, config.NotificationRoutes, DateTime.UtcNow); // #5998: presence and dates for the web page, no key text
         DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
+        /* #8978: a store write to a trigram index option shows in get_store_metrics now; the pass acts on it at its next pass. */
+        ConfigureTrigramIndexTrackers(config);
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);

@@ -34,6 +34,13 @@ public interface ICollectorSchemaInfo
     CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
 
     /// <summary>
+    /// Whether the collector runs once per database, reachable by name without the row type so a fault sentence can say whether an
+    /// extension has to be created in one database or in each. A default interface implementation, so a test double needs no change;
+    /// <see cref="ICollectorDefinition{TRow}"/> declares the same member and every definition overrides it.
+    /// </summary>
+    bool RunsPerDatabase(CollectorTargetInfo target) => false;
+
+    /// <summary>
     /// The query this definition builds for <paramref name="context"/>, reachable without its row type (#7681): the service
     /// registers the shape of every PostgreSQL collector's statement at startup from the catalog. Null for a definition that
     /// does not build one. A default interface implementation, so a test double needs no change; <see cref="ICollectorDefinition{TRow}"/>

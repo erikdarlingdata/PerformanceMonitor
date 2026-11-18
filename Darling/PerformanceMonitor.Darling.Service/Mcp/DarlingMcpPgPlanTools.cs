@@ -247,12 +247,16 @@ public sealed class DarlingMcpPgPlanTools
            `rows.Count >= limit` called that page truncated and withheld a summary that was whole. */
         var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
-        var unsatisfied = rows.Where(r => !r.IsSatisfied).Select(r => r.Facet).ToArray();
+        /* #8912: an engine limit is named apart from the facets still to fix. On Aurora, plan_attribution cannot be met by any setting, so it
+           is not a step the operator has left to take. It stays is_satisfied = false (no plan is stored) and says engine_limit = true. */
+        var unsatisfied = rows.Where(r => !r.IsSatisfied && !r.IsEngineLimit).Select(r => r.Facet).ToArray();
+        var engineLimited = rows.Where(r => r.IsEngineLimit).Select(r => r.Facet).ToArray();
 
         var facets = rows.Select(r => new
         {
             facet = r.Facet,
             is_satisfied = r.IsSatisfied,
+            engine_limit = r.IsEngineLimit,
             /* Verbatim, so a reader can see the value the server actually answered rather than trust this
                tool's interpretation of it. */
             observed = r.Observed,
@@ -278,11 +282,14 @@ public sealed class DarlingMcpPgPlanTools
                and would be wrong under the other, which is the exact collapse the collector splits its rows
                to avoid. The unsatisfied facets are NAMED instead. */
             unsatisfied_facets = truncated ? null : unsatisfied,
+            engine_limited_facets = truncated ? null : engineLimited,
             note = "Every facet is reported, satisfied or not, in CAUSAL order rather than alphabetically: "
                  + "fix them in the order they are listed. detail carries the remedy for the state that "
                  + "facet is actually in, including, on Aurora/RDS, whether the change needs a custom "
                  + "cluster parameter group and a writer reboot rather than a SET. This is readiness only "
-                 + "and never a claim that a plan was captured; get_pg_plans is that read."
+                 + "and never a claim that a plan was captured; get_pg_plans is that read. A facet with engine_limit true is a limit "
+                 + "of the engine (plan_attribution on Aurora, where log_line_prefix cannot carry %Q), not a setting to change: it is "
+                 + "listed in engine_limited_facets and left out of unsatisfied_facets."
                  + (truncated
                      ? " TRUNCATED at the row limit, so unsatisfied_facets is WITHHELD: naming them from a "
                        + "capped result would describe this page rather than the server. Raise the limit."
@@ -312,18 +319,37 @@ public sealed class DarlingMcpPgPlanTools
 
         var precondition = await DarlingRuntimePrecondition.StatusAsync(
             postgres, serverId, displayName, "pg_plan_capture", cancellationToken);
-        if (precondition != null)
+
+        /* #8982: pg_plan_capture declares no extension, so its EXTENSION_MISSING run is the stand-down it records when readiness says
+           auto_explain is not loaded. The readiness answer below names every unmet facet, which says more than that one run, so it
+           goes first. When readiness has no unmet facet left (auto_explain was loaded after the stand-down and the next capture run
+           has not happened yet), the stand-down is stale: the answer is the one for a target whose capture is set up, never the
+           generic missing-extension text. */
+        var stoodDownOnReadiness = precondition != null
+            && string.Equals(
+                await DarlingRuntimePrecondition.LatestStatusAsync(postgres, serverId, "pg_plan_capture", cancellationToken),
+                PerformanceMonitor.Collectors.CollectorRuntimePrecondition.ExtensionMissingStatus,
+                StringComparison.OrdinalIgnoreCase);
+
+        if (precondition != null && !stoodDownOnReadiness)
         {
             return precondition;
         }
 
         /* The readiness collector (#2564) already measured every precondition and stored the remedy beside
            it, so this names the specific missing step instead of listing everything that could be wrong. */
-        var unmet = await UnsatisfiedFacetsAsync(postgres, serverId, cancellationToken);
+        var (unmet, engineLimited) = await UnsatisfiedFacetsAsync(postgres, serverId, cancellationToken);
 
         if (unmet.Count > 0)
         {
-            return PlanCaptureNotReadyStatus(unmet);
+            return PlanCaptureNotReadyStatus(unmet, engineLimited);
+        }
+
+        /* #8912: nothing left to set, but the engine will not store a plan that carries a query id, so the empty answer below
+           ("capture is configured, nothing crossed the threshold") would be false. Same status the engine gates answer with. */
+        if (engineLimited)
+        {
+            return McpHelpers.Status("not_collected", PlanAttributionEngineLimitMessage, new { reason = "plan_attribution_engine_limit" });
         }
 
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
@@ -336,7 +362,7 @@ public sealed class DarlingMcpPgPlanTools
     /// The <c>precondition</c> answer for a server whose plan capture is not ready: the message names every unmet facet, and <c>hints</c> carries
     /// <c>reason</c> and <c>unsatisfied_count</c>, which the web page builds its one plain sentence from (#7410).
     /// </summary>
-    internal static string PlanCaptureNotReadyStatus(IReadOnlyList<string> unmet)
+    internal static string PlanCaptureNotReadyStatus(IReadOnlyList<string> unmet, bool engineLimited = false)
     {
         /* #8572: counted, and listed in the causal order get_pg_plan_capture_readiness uses (a facet cannot be fixed before the
            ones ahead of it), not the alphabetical order the store read returns them in. Each entry is "facet = observed". */
@@ -350,10 +376,24 @@ public sealed class DarlingMcpPgPlanTools
             + string.Join(" | ", ordered)
             + ", the pg_plan_capture_readiness collector stores the full detail and the remedy "
             + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
-            + "satisfied or not, in the order they have to be fixed in.",
+            + "satisfied or not, in the order they have to be fixed in."
+            /* #8912: counted out of the total above, said once beside it. */
+            + (engineLimited ? " " + PlanAttributionEngineLimitMessage : string.Empty),
             /* #7410: the page's plain sentence is built from the count, not from the message. */
-            new { reason = "plan_capture_not_ready", unsatisfied_count = unmet.Count });
+            new { reason = "plan_capture_not_ready", unsatisfied_count = unmet.Count, engine_limited = engineLimited });
     }
+
+    /// <summary>
+    /// #8912: the sentence for a target where plan capture cannot attribute a plan to a statement and no setting changes that. It names the engine
+    /// (Aurora), the setting (log_line_prefix cannot carry %Q), what happens to plans (none stored from the stderr log), and why no other join exists
+    /// (a stored plan row keeps no process id or log time). The same limit reads the same way in get_pg_plan_capture_readiness, on the Viewer's readiness
+    /// panel and in the web page.
+    /// </summary>
+    internal const string PlanAttributionEngineLimitMessage =
+        "Plan attribution is an engine limit on Aurora PostgreSQL, not a setting you can change. The parameter group does not let you put %Q in "
+        + "log_line_prefix, and without it a plan in the log has no query id. The stderr plan reader stores no plan at all from such a prefix, "
+        + "and the plan rows it does store keep no process id and no log time, so a plan cannot be joined to its statement another way. "
+        + "get_pg_plan_capture_readiness returns the plan_attribution facet with the detail.";
 
     /// <summary>
     /// The empty answer once capture is known to be configured, split by whether a queryid was asked for.
@@ -388,15 +428,16 @@ public sealed class DarlingMcpPgPlanTools
     /// The unsatisfied readiness facets, newest reading per facet. Read directly rather than through the
     /// readiness tool so this stays a fact lookup rather than one MCP tool narrating another's prose.
     /// </summary>
-    private static async Task<List<string>> UnsatisfiedFacetsAsync(NpgsqlDataSource postgres, int serverId,
+    private static async Task<(List<string> Unmet, bool EngineLimited)> UnsatisfiedFacetsAsync(NpgsqlDataSource postgres, int serverId,
         CancellationToken cancellationToken = default)
     {
         var unmet = new List<string>();
+        var engineLimited = false;
 
         const string sql = """
-            SELECT facet, observed
+            SELECT facet, observed, detail
             FROM (
-                SELECT DISTINCT ON (facet) facet, is_satisfied, observed, collection_time
+                SELECT DISTINCT ON (facet) facet, is_satisfied, observed, detail, collection_time
                 FROM pg_plan_capture_readiness
                 WHERE server_id = $1
                 ORDER BY facet, collection_time DESC
@@ -417,6 +458,14 @@ public sealed class DarlingMcpPgPlanTools
             {
                 var facet = reader.IsDBNull(0) ? "(unnamed)" : reader.GetString(0);
                 var observed = reader.IsDBNull(1) ? "(not reported)" : reader.GetString(1);
+
+                /* #8912: the Aurora engine limit is not a precondition left to fix, so it does not count in the unmet total. */
+                if (DarlingPgPlanCaptureReadinessReader.IsEngineLimitRow(facet, false, reader.IsDBNull(2) ? null : reader.GetString(2)))
+                {
+                    engineLimited = true;
+                    continue;
+                }
+
                 unmet.Add($"{facet} = {observed}");
             }
         }
@@ -426,7 +475,7 @@ public sealed class DarlingMcpPgPlanTools
                the generic answer, which is less specific but not wrong. */
         }
 
-        return unmet;
+        return (unmet, engineLimited);
     }
 
     /// <summary>

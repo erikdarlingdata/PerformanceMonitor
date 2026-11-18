@@ -1728,7 +1728,9 @@ public sealed class DarlingMcpDataTools
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
-                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path.
+                   the filter has rows. One existence probe of the unfiltered window tells the two apart
+                   (QueryStoreWindowHasRowsAsync: the top read's tier, bounds and exclusions, no ranking); it runs
+                   only on this path.
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
                 /* #5245: one name keeps today's "in database 'X'" text; two or more have no one name to say, so the
@@ -1736,7 +1738,7 @@ public sealed class DarlingMcpDataTools
                 var scopeName = databases.Names.Count == 1 ? databases.Names[0] : null;
                 var scopeText = databases.Names.Count > 1 ? " for " + DatabaseFilter.ManyDatabasesDescription : null;
                 if ((execution_type != null || module_name != null)
-                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, databases, cancellationToken)).Count > 0)
+                    && await DarlingDataReader.QueryStoreWindowHasRowsAsync(postgres, resolved.ServerId, requestedStart, now, databases, cancellationToken))
                     return module_name is null
                         /* #5094: whole days from the daily summary make a zero here "close, not exact" (a late write the
                            summary missed), so the empty answer carries the same flag as a populated one. */

@@ -531,6 +531,8 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
             /* #7368: fired through the constant, so the FireAsync literal scan below cannot see it. */
             DarlingSelfAlertEvaluator.AutovacuumBehindMetric,
+            /* #8950: fired through the constant too. */
+            DarlingSelfAlertEvaluator.VacuumStalledMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */

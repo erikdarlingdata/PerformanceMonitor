@@ -3523,9 +3523,11 @@ $rung$;";
         new Migration(272, "column-stats", V272Sql),
         /* V273 (#8824): the hourly wait totals, the open day's read under the Daily Summary. Catalog-only: no existing row moves. */
         new Migration(273, "wait-stats-hourly-rollup", V273Sql),
-        /* V274 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
+        /* V274 (#8978): the store's trigram text index options on the service row. Two catalog-only nullable boolean columns, no default. */
+        new Migration(274, "trigram-index-store-options", V274Sql),
+        /* V275 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
            Catalog-only ALTERs on a plain table, nothing is backfilled, so the upgrade stays fast. */
-        new Migration(274, "database-protection-error-log", V274Sql),
+        new Migration(275, "database-protection-error-log", V274Sql),
     };
 
     /// <summary>
@@ -3583,6 +3585,22 @@ CREATE OR REPLACE VIEW collect.v_tempdb_stats AS SELECT * FROM collect.tempdb_st
 ALTER TABLE collect.database_size_stats ADD COLUMN IF NOT EXISTS is_autogrow_all_files boolean;
 CREATE OR REPLACE VIEW v_database_size_stats AS SELECT * FROM database_size_stats;
 ALTER TABLE config.config_alert_settings ADD COLUMN IF NOT EXISTS tempdb_growth_fit_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V274 (#8978): <c>config.config_service.query_text_trigram_index_enabled</c> and <c>query_store_text_trigram_index_enabled</c>, the
+    /// store's values of the two trigram text index options (darling.json's <c>queryTextTrigramIndexEnabled</c> and
+    /// <c>queryStoreTextTrigramIndexEnabled</c>). Each is a NULLABLE boolean with no default: NULL means darling.json governs, and a value
+    /// overrides the file. The index passes read the resolved value at the start of every pass, so a store write takes effect at the next pass
+    /// with no restart. Catalog-only adds, idempotent, no backfill (every existing row reads NULL, so the file keeps governing until someone
+    /// writes a value). No GRANT here (the roles' table-level SELECT covers a new column, and the admin role's table-level UPDATE on the config
+    /// schema covers the Viewer's writes; the mcp role's column-level UPDATE for <c>update_service_flags</c> is granted by the managed-roles
+    /// sweep) and no trigger (the config_version trigger fires on any row update). <c>query_store_text_trigram_index_enabled</c> is the
+    /// probe's sentinel and is added LAST. An older build never reads the columns and goes back to darling.json.
+    /// </summary>
+    private const string V274Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS query_text_trigram_index_enabled boolean,
+    ADD COLUMN IF NOT EXISTS query_store_text_trigram_index_enabled boolean;";
 
     /// <summary>
     /// V271 (#8884): the two switches of the Instance Restarted and Memory Dumps alerts on <c>config.config_alert_settings</c>, each

@@ -276,16 +276,6 @@ public sealed partial class DarlingWorker
            (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
         var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
-        /* #7674: the opt-in trigram index on the plan-cache text. Off by default; when on it is built CONCURRENTLY in this background
-           task QueryTextTrigramIndex.StartDelay after start (a build is a whole-table read), and when off an existing one is dropped at
-           once. Never inside a migration rung, never awaited on the startup path, and RunAsync never throws. A failed build drops its
-           leftover and waits longer before each retry; a login that cannot create pg_trgm is reported by get_store_metrics and not asked
-           again. Drained with the other background work. */
-        var queryTextTrigramIndex = QueryTextTrigramIndex.RunAsync(
-            postgres, config.QueryTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.Shared, _logger,
-            config.QueryTextTrigramIndexEnabled ? QueryTextTrigramIndex.StartDelay : TimeSpan.Zero,
-            QueryTextTrigramIndex.PassInterval, stoppingToken);
-
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
            large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
@@ -656,6 +646,9 @@ public sealed partial class DarlingWorker
             {
                 initialServers = initialView.EnabledServers;
             }
+
+            /* #8978: the trigram index options as the store resolves them, so get_store_metrics follows the store before the first pass. */
+            ConfigureTrigramIndexTrackers(config);
         }
 
         /* #1560/#1562: publish the effective MCP + web enable/port (store-authoritative when the view loaded,
@@ -680,6 +673,27 @@ public sealed partial class DarlingWorker
         }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
+
+        /* #7674: the opt-in trigram index on the plan-cache text. Off by default; when on it is built CONCURRENTLY in this background
+           task QueryTextTrigramIndex.StartDelay after start (a build is a whole-table read), and when off an existing one is dropped at
+           once. Never inside a migration rung, never awaited on the startup path, and RunAsync never throws. A failed build drops its
+           leftover and waits longer before each retry; a login that cannot create pg_trgm is reported by get_store_metrics and not asked
+           again. Drained with the other background work. #8978: launched after the first store read, and the option is read live at
+           every pass: config_service.query_text_trigram_index_enabled when it holds a value, else darling.json. The start delay follows
+           the resolved value at start, so a build waits out the post-restart IO burst and an option that is off drops at once. */
+        var queryTextTrigramIndex = QueryTextTrigramIndex.RunAsync(
+            postgres, () => config.QueryTextTrigramIndexResolved, QueryTextTrigramIndexTracker.Shared, _logger,
+            config.QueryTextTrigramIndexResolved ? QueryTextTrigramIndex.StartDelay : TimeSpan.Zero,
+            QueryTextTrigramIndex.PassInterval, stoppingToken);
+
+        /* #8570: the opt-in trigram index on the Query Store text, under its own option and tracker, with the same pass rules as the
+           plan-cache index above: built CONCURRENTLY in the background StartDelay after start, dropped at once when the option is off,
+           never awaited on the startup path, and drained with the other background work. #8978: read live at every pass, as above, from
+           config_service.query_store_text_trigram_index_enabled when it holds a value, else darling.json. */
+        var queryStoreTextTrigramIndex = QueryStoreTextTrigramIndex.RunAsync(
+            postgres, () => config.QueryStoreTextTrigramIndexResolved, QueryStoreTextTrigramIndex.SharedTracker, _logger,
+            config.QueryStoreTextTrigramIndexResolved ? QueryStoreTextTrigramIndex.StartDelay : TimeSpan.Zero,
+            QueryStoreTextTrigramIndex.PassInterval, stoppingToken);
 
         /* Capture-plans is read live (() => config.CapturePlans) so a store reload of
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
@@ -2065,6 +2079,9 @@ public sealed partial class DarlingWorker
 
         /* And the trigram index pass (#7674): shutdown cancels a build in progress, and the next start drops its leftover. */
         await queryTextTrigramIndex;
+
+        /* And the Query Store text trigram index pass (#8570), on the same terms. */
+        await queryStoreTextTrigramIndex;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;

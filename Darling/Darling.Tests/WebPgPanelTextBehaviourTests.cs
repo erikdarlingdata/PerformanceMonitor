@@ -148,6 +148,16 @@ public sealed class WebPgPanelTextBehaviourTests
         Assert.Equal(1, p.GetProperty("hasDetails").GetInt32());
     }
 
+    [Fact]
+    public void IndexBloatRankingWithATrustedIndexInTheCoverageRead_NeverSaysNoIndexHasAnEstimate()
+    {
+        var p = Run().GetProperty("bloatSomeTrusted");
+        var line = p.GetProperty("line").GetString()!;
+        Assert.Equal("No index in this range has a bloat estimate, but 1 index has one over a longer range. Choose a longer range to see it.", line);
+        Assert.DoesNotContain("NOT ONE", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("The Not Measured column", line, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("bloatGrantFirst")]
     [InlineData("bloatGrantSecond")]

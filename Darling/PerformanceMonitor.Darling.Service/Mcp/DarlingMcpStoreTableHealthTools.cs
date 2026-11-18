@@ -45,16 +45,33 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "The per-day rates (inserts_per_day, updates_per_day, deletes_per_day, turnover_per_day) are null instead of a figure that "
         + "would be too high. The counters themselves are real. A statistics reset gives rates from the next read after it.";
 
+    /// <summary>The sentence every answer carries about the as-of fields: a part is read from the store at most once in
+    /// <see cref="DarlingStoreTableHealthCache.Lifetime"/>, so the answer says when each part it returns was read.</summary>
+    internal static readonly string AsOfNote = string.Create(CultureInfo.InvariantCulture,
+        $"Each part (tables, indexes, partition index coverage, autovacuum settings) is read from the store's catalogs at most once every {DarlingStoreTableHealthCache.Lifetime.TotalMinutes:0} minutes and held in memory between reads. ")
+        + "tables_as_of, indexes_as_of, partition_index_coverage_as_of and autovacuum_settings.as_of are when the store answered that read (UTC), and the matching age_seconds is how old it is as of this response. held_for_seconds is how long a read is held.";
+
+    /// <summary>The sentence a tables answer carries about the autovacuum fields.</summary>
+    internal static readonly string AutovacuumNote = string.Create(CultureInfo.InvariantCulture,
+        $"autovacuum_cancels_24h counts the autovacuums of a table's relations the store log saw cancelled in the {DarlingStoreTableHealthReader.CancelWindow.TotalHours:0} hours before the read (a TOAST table's for its owner, a chunk's or leaf's for its parent). ")
+        + string.Create(CultureInfo.InvariantCulture,
+            $"repeatedly_cancelled is at least {DarlingStoreTableHealthReader.RepeatedCancelMinimum} in that window. behind is a relation past its vacuum trigger (or its insert trigger, on a plain table) with no vacuum, automatic or manual, completed in the {DarlingStoreTableHealthReader.BehindWindow.TotalHours:0} hours before the read. ")
+        + "behind_hours is the time since that last vacuum, or since the statistics began when there was none (behind_since_source last_vacuum or stats_since): the relation crossed its trigger some time after it, so it has been past the trigger for at most that long. "
+        + "A relation with autovacuum turned off is never behind. Tables behind come first, then tables repeatedly cancelled, then rewrite candidates.";
+
     /// <summary>The sections the tool can return.</summary>
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
     [McpServerTool(Name = "get_store_table_health"), Description(
         "Gets the health of the monitoring STORE's OWN tables and indexes, not a monitored server's; no server_name. Per table: size "
         + "split, estimated empty space (an ESTIMATE, null with a reason when statistics are missing or stale, never zero), dead rows, "
-        + "autovacuum distance, change rates, whether plain VACUUM can give the space back, and rewrite_candidate (candidates first). "
+        + "autovacuum distance, autovacuum cancels in the last 24 hours, whether autovacuum is behind (sorted first), change rates, "
+        + "whether plain VACUUM can give the space back, and rewrite_candidate. Also the store's autovacuum settings and write budget. "
         + "Per index: size, scans, bloat estimate, validity; plus index coverage for partitioned parents. "
         + "<<GUIDE>> Also per table: plain, partitioned, hypertable and continuous aggregate kinds, the size split (heap, index, toast), visibility map coverage, insert, update, delete and HOT rates since the statistics were reset, last vacuum and analyze, autovacuum off, 7-day growth where store_metrics records it. Per index: scans, index-to-heap ratio, larger_than_heap and rarely_used. Reads the catalogs of the "
-        + "monitoring store live. Hypertable chunks and the relations holding compressed data roll up to the hypertable "
+        + "monitoring store at most once every 5 minutes: each part (tables, indexes, partition index coverage, autovacuum settings) is held in memory between reads, "
+        + "and tables_as_of, indexes_as_of, partition_index_coverage_as_of and autovacuum_settings.as_of say when the store answered it (UTC), with the matching age_seconds as of this response. "
+        + "top, offset, candidates_only and section cut the held rows, so they never cause a store read. Hypertable chunks and the relations holding compressed data roll up to the hypertable "
         + "(chunk_count), a continuous aggregate to its view name, and a partitioned table's leaves to the parent (leaf_count); a "
         + "leaf or chunk is never its own row, and chunk or leaf indexes that are clones of one parent index are one index row. "
         + "estimated_empty_bytes / estimated_empty_share come from the same statistics estimate the PostgreSQL target table bloat "
@@ -80,9 +97,22 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "because statistics survive a restart, so their age is unknown, the rates are null and rates_note says why; the raw counters "
         + "stay. Nothing is recorded. rarely_used is only set when the statistics window is at least 7 days old, never for a "
         + "primary key or unique index. Index bloat is the extension-free estimate the target index bloat collector uses. "
-        + "growth_bytes_7d is null for objects store_metrics does not record. The reply is also held to the 32,768-byte response budget, whole rows only, "
+        + "growth_bytes_7d is null for objects store_metrics does not record. "
+        + "autovacuum_cancels_24h counts the cancelled autovacuums the store log holds for a table's relations in the 24 hours before the read, a TOAST table's counted for "
+        + "the table that owns it and a chunk's or leaf's for its parent, with last_autovacuum_cancel the latest; repeatedly_cancelled is 2 or more. "
+        + "behind = a relation past its vacuum trigger (or its insert trigger, on a plain table) has had no vacuum, automatic or manual, complete in the 24 hours before the read; "
+        + "relations_past_trigger counts the relations past a trigger. behind_since is that relation's last vacuum, or when the statistics began when it has had none "
+        + "(behind_since_source last_vacuum or stats_since), and behind_hours runs from it to the read: the trigger was crossed some time after, so it is an upper bound. "
+        + "A relation with autovacuum off is never behind. Order: behind, then repeatedly_cancelled, then rewrite_candidate, then the empty-space order. "
+        + "tables_behind and tables_repeatedly_cancelled count them. autovacuum_settings is the store server's settings as they apply (an autovacuum_* value of -1 falls back to the vacuum_* "
+        + "or maintenance_work_mem value, and cost_limit_setting, cost_delay_setting and work_mem_setting name the one in force): autovacuum_on, max_workers, workers_running (autovacuum "
+        + "workers in pg_stat_activity at the read), naptime_seconds, cost_limit, cost_delay_ms, work_mem_kb, and write_budget_mb_per_s, the most all autovacuum workers together may "
+        + "dirty per second (cost_limit / vacuum_cost_page_dirty pages every cost_delay_ms; null when cost_delay_ms is 0, which is unthrottled). cancels_24h is every cancel in the window "
+        + "and cancels_unresolved those whose relation no longer exists or is in another database, which count for no table. Which relation a running vacuum is on and how far it "
+        + "has got (pg_stat_progress_vacuum) is not read: PostgreSQL shows it only to members of pg_read_all_stats, which the store's roles are not. "
+        + "The reply is also held to the 32,768-byte response budget, whole rows only, "
         + "the same number of rows from each section: budget_truncated = true says rows were left off the end for the budget, budget_note says how many "
-        + "fit, and has_more and next_offset read on (pass next_offset as offset). A live read of the catalogs: allow a second or two on a "
+        + "fit, and has_more and next_offset read on (pass next_offset as offset). A read that goes to the store sizes every relation and index: allow several seconds on a "
         + "store with many chunks. A part that runs past its read limit is left out and named in tables_left_out_note or indexes_left_out_note, "
         + "and the other part is still returned. When only the partition index coverage read runs past it, the index rows are still returned and coverage_left_out_note names the coverage that was left out. When every part asked for ran past the limit, status is timed_out.")]
     public static Task<string> GetStoreTableHealth(
@@ -98,11 +128,14 @@ public sealed class DarlingMcpStoreTableHealthTools
     /// The read with its response budget. The MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>. The web route passes null:
     /// the Store Health page asks for one section at a time and draws every row it asked for. <paramref name="indexSource"/> is the store
     /// the index reads use (the tool's own store when null): a test gives it a store whose statements trip the deadline. <paramref name="coverageSource"/> is
-    /// the same for the partition index coverage read alone (the index source when null).
+    /// the same for the partition index coverage read alone (the index source when null). <paramref name="cache"/> holds the reads
+    /// (#8924); null is the process's cache for the store each part reads (<see cref="DarlingStoreTableHealthCache.For"/>), and a test
+    /// hands in one over a clock it steps and reads that count their calls. top, offset, candidates_only and section cut the held rows,
+    /// so two calls that differ only in those share one store read.
     /// </summary>
     internal static async Task<string> GetStoreTableHealth(
         NpgsqlDataSource postgres, int top, bool candidates_only, string? section, int offset, int? responseByteBudget, CancellationToken cancellationToken,
-        NpgsqlDataSource? indexSource = null, NpgsqlDataSource? coverageSource = null)
+        NpgsqlDataSource? indexSource = null, NpgsqlDataSource? coverageSource = null, DarlingStoreTableHealthCache? cache = null)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
@@ -132,6 +165,8 @@ public sealed class DarlingMcpStoreTableHealthTools
                 ["section"] = chosen,
                 ["top"] = top,
                 ["offset"] = offset,
+                ["as_of_note"] = AsOfNote,
+                ["held_for_seconds"] = (int)DarlingStoreTableHealthCache.Lifetime.TotalSeconds,
             };
 
             IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow> tableRows = Array.Empty<DarlingStoreTableHealthReader.StoreTableHealthRow>();
@@ -144,16 +179,19 @@ public sealed class DarlingMcpStoreTableHealthTools
 
             if (wantTables)
             {
-                List<DarlingStoreTableHealthReader.StoreTableHealthRow> all;
+                IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow> all = Array.Empty<DarlingStoreTableHealthReader.StoreTableHealthRow>();
                 try
                 {
-                    all = await DarlingStoreTableHealthReader.GetAsync(postgres, cancellationToken);
+                    var held = cache ?? DarlingStoreTableHealthCache.For(postgres);
+                    var read = await held.GetTablesAsync(postgres, cancellationToken: cancellationToken);
+                    all = read.Rows;
+                    result["tables_as_of"] = read.ReadAtUtc;
+                    result["tables_age_seconds"] = read.AgeSeconds(held.UtcNow());
                 }
                 catch (StoreTableHealthTimeoutException ex)
                 {
                     /* The tables read ran past its limit. The index part may still answer, so the reply says the table part was left out. */
                     tablesTimeout = ex.Message;
-                    all = new List<DarlingStoreTableHealthReader.StoreTableHealthRow>();
                 }
 
                 if (tablesTimeout is not null)
@@ -172,7 +210,9 @@ public sealed class DarlingMcpStoreTableHealthTools
                             $"{p.Value} {DarlingStoreTableHealthReader.DescribeReason(p.Key)}"));
                     var pastFloorsUnread = all.Count(r => r.PastRewriteFloors && r.TailOccupied is null);
                     var header = string.Create(CultureInfo.InvariantCulture,
-                        $"{CountText.Plural(summary.TableCount, "store table")}, {CountText.Grouped(summary.TotalBytes)} bytes in total, {CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
+                        $"{CountText.Plural(summary.TableCount, "store table")}, {CountText.Grouped(summary.TotalBytes)} bytes in total, "
+                        + $"{CountText.Grouped(summary.Behind)} behind on autovacuum, {CountText.Grouped(summary.RepeatedlyCancelled)} with autovacuum cancelled repeatedly in 24 hours, "
+                        + $"{CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}, "
                         + $"{CountText.Grouped(summary.WithoutEstimate)} without a usable empty-space estimate ({noEstimate}).")
                         + (pastFloorsUnread > 0
                             ? string.Create(CultureInfo.InvariantCulture, $" {CountText.Grouped(pastFloorsUnread)} past the empty-space floors with the end of the file not checked.")
@@ -185,6 +225,20 @@ public sealed class DarlingMcpStoreTableHealthTools
                     result["rates_note"] = ratesKnown ? null : RatesNote;
                     result["store_tables"] = summary.TableCount;
                     result["store_total_bytes"] = summary.TotalBytes;
+                    result["tables_behind"] = summary.Behind;
+                    result["tables_repeatedly_cancelled"] = summary.RepeatedlyCancelled;
+                    result["autovacuum_note"] = AutovacuumNote;
+                    try
+                    {
+                        var held = cache ?? DarlingStoreTableHealthCache.For(postgres);
+                        var settings = await held.GetAutovacuumSettingsAsync(postgres, cancellationToken: cancellationToken);
+                        result["autovacuum_settings"] = Settings(settings, held.UtcNow());
+                    }
+                    catch (StoreTableHealthTimeoutException ex)
+                    {
+                        result["autovacuum_settings_left_out_note"] = ex.Message;
+                    }
+
                     result["rewrite_candidates"] = summary.RewriteCandidates;
                     result["tables_without_estimate"] = summary.WithoutEstimate;
                     result["without_estimate_by_reason"] = summary.WithoutEstimateByReason.ToDictionary(p => p.Key, p => p.Value);
@@ -197,7 +251,12 @@ public sealed class DarlingMcpStoreTableHealthTools
             {
                 try
                 {
-                    indexRows = await DarlingStoreTableHealthReader.GetIndexesAsync(indexSource ?? postgres, cancellationToken);
+                    var source = indexSource ?? postgres;
+                    var held = cache ?? DarlingStoreTableHealthCache.For(source);
+                    var read = await held.GetIndexesAsync(source, cancellationToken: cancellationToken);
+                    indexRows = read.Rows;
+                    result["indexes_as_of"] = read.ReadAtUtc;
+                    result["indexes_age_seconds"] = read.AgeSeconds(held.UtcNow());
                 }
                 catch (StoreTableHealthTimeoutException ex)
                 {
@@ -209,7 +268,12 @@ public sealed class DarlingMcpStoreTableHealthTools
                     /* The index rows are in hand. A coverage read that runs past its limit leaves out only the coverage part. */
                     try
                     {
-                        coverageRows = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(coverageSource ?? indexSource ?? postgres, cancellationToken);
+                        var source = coverageSource ?? indexSource ?? postgres;
+                        var held = cache ?? DarlingStoreTableHealthCache.For(source);
+                        var read = await held.GetIndexCoverageAsync(source, cancellationToken: cancellationToken);
+                        coverageRows = read.Rows;
+                        result["partition_index_coverage_as_of"] = read.ReadAtUtc;
+                        result["partition_index_coverage_age_seconds"] = read.AgeSeconds(held.UtcNow());
                     }
                     catch (StoreTableHealthTimeoutException ex)
                     {
@@ -361,7 +425,40 @@ public sealed class DarlingMcpStoreTableHealthTools
         deletes_per_day = Round(r.DeletesPerDay, 1),
         turnover_per_day = Round(r.TurnoverPerDay, 4),
         growth_bytes_7d = r.GrowthBytes7d,
+        autovacuum_cancels_24h = r.AutovacuumCancels,
+        last_autovacuum_cancel = Iso(r.LastAutovacuumCancel),
+        repeatedly_cancelled = r.RepeatedlyCancelled,
+        relations_past_trigger = r.RelationsPastTrigger,
+        behind = r.Behind,
+        behind_since = Iso(r.BehindSince),
+        behind_since_source = r.BehindSinceSource,
+        behind_hours = Round(r.BehindHours, 1),
     };
+
+    private static object Settings(StoreHealthRead<DarlingStoreTableHealthReader.StoreAutovacuumSettings> read, DateTime utcNow)
+    {
+        var s = read.Rows;
+        return new
+        {
+            as_of = read.ReadAtUtc,
+            age_seconds = read.AgeSeconds(utcNow),
+            autovacuum_on = s.AutovacuumOn,
+            max_workers = s.MaxWorkers,
+            workers_running = s.WorkersRunning,
+            naptime_seconds = s.NaptimeSeconds,
+            cost_limit = s.CostLimit,
+            cost_limit_setting = s.CostLimitSetting,
+            cost_delay_ms = Round(s.CostDelayMs, 2),
+            cost_delay_setting = s.CostDelaySetting,
+            work_mem_kb = s.WorkMemKb,
+            work_mem_setting = s.WorkMemSetting,
+            vacuum_cost_page_dirty = s.CostPageDirty,
+            block_size = s.BlockSize,
+            write_budget_mb_per_s = Round(s.WriteBudgetMBps, 1),
+            cancels_24h = s.CancelsInWindow,
+            cancels_unresolved = s.CancelsUnresolved,
+        };
+    }
 
     private static object Index(DarlingStoreTableHealthReader.StoreIndexHealthRow r) => new
     {

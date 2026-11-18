@@ -2090,12 +2090,25 @@ LIMIT 1";
     /// <summary>
     /// Where the missing extension has to be created, named when we know it (#2638).
     /// </summary>
-    private static string WhereToCreateIt(string? connectedDatabase)
-        => string.IsNullOrWhiteSpace(connectedDatabase)
-            ? "in the connected database (CREATE EXTENSION ...). "
-            : $"in database '{connectedDatabase}', which is the one this collector connects to: an "
-              + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
-              + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
+    private static string WhereToCreateIt(string? connectedDatabase, bool perDatabase = false)
+        => perDatabase
+            ? "in each database this collector reads (CREATE EXTENSION ...)"
+              + (string.IsNullOrWhiteSpace(connectedDatabase) ? ". " : $"; it failed in database '{connectedDatabase}'. ")
+              + "An extension installed in one database is invisible from another. "
+            : string.IsNullOrWhiteSpace(connectedDatabase)
+                ? "in the connected database (CREATE EXTENSION ...). "
+                : $"in database '{connectedDatabase}', which is the one this collector connects to: an "
+                  + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
+                  + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
+
+    /// <summary>
+    /// Whether <paramref name="collectorName"/> reads every database rather than the one the server entry connects to, so the
+    /// sentence for a fault in it says "each database" and names the one that failed instead of calling it the database the
+    /// collector connects to. A collector the catalog does not know is not per-database.
+    /// </summary>
+    private static bool RunsPerPostgresDatabase(string collectorName)
+        => CollectorCatalog.Find(collectorName)?.RunsPerDatabase(
+            new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }) == true;
 
     /// <summary>
     /// The self-hosted log readers (#3239; three since #3601). Their dispatch entries send Aurora and RDS to
@@ -2137,17 +2150,20 @@ LIMIT 1";
     /// every cycle and starts collecting on the first one after the extension exists.
     /// </summary>
     private static string ExtensionMissingExplanation(
-        PostgresException ex, IReadOnlyList<PgExtensionDependency> required, string? connectedDatabase)
+        PostgresException ex, IReadOnlyList<PgExtensionDependency> required, string? connectedDatabase, bool perDatabase = false)
     {
         var names = string.Join(", ", required.Select(r => r.ExtensionName));
         var create = string.Join("; ", required.Select(r => $"CREATE EXTENSION {r.ExtensionName}"));
         var noun = required.Count == 1 ? "extension" : "extensions";
 
-        var where = string.IsNullOrWhiteSpace(connectedDatabase)
-            ? $"run {create} in the connected database (extensions are per-database). "
-            : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
-              + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
-              + "from here. ";
+        var where = perDatabase
+            ? $"run {create} in each database this collector reads (extensions are per-database)"
+              + (string.IsNullOrWhiteSpace(connectedDatabase) ? ". " : $"; it failed in database '{connectedDatabase}'. ")
+            : string.IsNullOrWhiteSpace(connectedDatabase)
+                ? $"run {create} in the connected database (extensions are per-database). "
+                : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
+                  + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
+                  + "from here. ";
 
         var preload = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries)
             ? $"The module also has to be in shared_preload_libraries first, which takes a server restart "
@@ -2533,7 +2549,7 @@ LIMIT 1";
 
             CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
                 (CollectorRuntimePrecondition.ExtensionMissingStatus,
-                    ExtensionMissingExplanation(ex, required, connectedDatabase)),
+                    ExtensionMissingExplanation(ex, required, connectedDatabase, RunsPerPostgresDatabase(collectorName))),
 
             /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
                never created in the connected database rather than anything to do with privileges. */
@@ -2546,7 +2562,7 @@ LIMIT 1";
             CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the source object does not exist on this "
                 + "target. This is NOT a missing grant: it is normally an extension that was never created "
-                + WhereToCreateIt(connectedDatabase)
+                + WhereToCreateIt(connectedDatabase, RunsPerPostgresDatabase(collectorName))
                 + "The collector will keep degrading until it is. Recorded as a non-fatal skip rather than "
                 + "an error so it does not fill the log every cycle."),
 
@@ -3420,6 +3436,23 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgPlanCapturePreconditionException ex)
+        {
+            /* #8982: readiness says auto_explain is not loaded, so pg_plan_capture did not download the log. Recorded
+               under EXTENSION_MISSING, the named skip the extension collectors write for a module that is not set up
+               (#3240, #8913): every health surface already bands it as a setup step with the stored sentence as the
+               remedy, and none counts it as a failure or a stale collector. Not SUCCESS, which reads as "no new
+               plans" on a target that can never have one. Only the store's readiness row was read, so the time is
+               storage time. */
+            _logger.LogInformation("  [{Server}] {Collector} => {Status}: auto_explain is not loaded, so the log was not read",
+                server.Config.DisplayName, collectorName, CollectorRuntimePrecondition.ExtensionMissingStatus);
+
+            await LogRunAsync(
+                server, runtime, collectorName, CollectorRuntimePrecondition.ExtensionMissingStatus, 0, 0, runClock.ElapsedMilliseconds,
+                ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }

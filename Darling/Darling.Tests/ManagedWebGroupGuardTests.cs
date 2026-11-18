@@ -47,6 +47,7 @@ public sealed class ManagedWebGroupGuardTests
         public (WebAccessGroup Group, Guid Epoch)? Group;
         public Guid? Epoch;
         public int Reads;
+        public int EpochReads;
         public bool Throw;
         public bool ThrowOnEpoch;
 
@@ -57,16 +58,23 @@ public sealed class ManagedWebGroupGuardTests
             return Task.FromResult(Group is { } g && g.Group.GroupId == groupId ? Group : null);
         }
 
-        public Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct) =>
-            ThrowOnEpoch ? throw new InvalidOperationException("relation config.web_access_advanced does not exist") : Task.FromResult(Epoch);
+        public Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct)
+        {
+            EpochReads++;
+            return ThrowOnEpoch ? throw new InvalidOperationException("relation config.web_access_advanced does not exist") : Task.FromResult(Epoch);
+        }
     }
 
     internal sealed class FakeCredentials : IWebAccessGroupCredentials
     {
         public List<WebAccessGroupCredential> Rows = new();
+        public int CredentialReads;
 
-        public Task<IReadOnlyList<WebAccessGroupCredential>> ReadCredentialsAsync(CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<WebAccessGroupCredential>>(Rows);
+        public Task<IReadOnlyList<WebAccessGroupCredential>> ReadCredentialsAsync(CancellationToken ct)
+        {
+            CredentialReads++;
+            return Task.FromResult<IReadOnlyList<WebAccessGroupCredential>>(Rows);
+        }
 
         public Task<bool> ActivateAsync(Guid id, long revision, Guid generation, string? refusalCode, CancellationToken ct) =>
             Task.FromResult(true);
@@ -306,6 +314,24 @@ public sealed class ManagedWebGroupGuardTests
         await rig.Groups.RefreshAsync(CancellationToken.None);
         await rig.Groups.RefreshAsync(CancellationToken.None);
         Assert.Equal(1, UnavailableWarnings(log));
+    }
+
+    [Fact]
+    public async Task BeforeTheStoreIsReady_TheRefreshMakesNoStoreCall_AndAfterItTheRefreshReads()
+    {
+        var ready = false;
+        using var rig = new Rig(storeReady: () => ready);
+
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(0, rig.Metadata.EpochReads);
+        Assert.Equal(0, rig.Credentials.CredentialReads);
+        Assert.False(rig.Groups.Available);
+
+        ready = true;
+        await rig.Groups.RefreshAsync(CancellationToken.None);
+        Assert.Equal(1, rig.Metadata.EpochReads);
+        Assert.Equal(1, rig.Credentials.CredentialReads);
+        Assert.True(rig.Groups.Available);
     }
 
     [Fact]

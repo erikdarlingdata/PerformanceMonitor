@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -29,7 +30,8 @@ namespace Darling.Tests;
 /// window. The database-size probe compared every file of the probed snapshots with every file of the newest one (2.1
 /// seconds at 4,000 files), and the sp_configure trace read walked every default-trace event the server had kept. Each
 /// test runs the shipped statement and its pre-#8570 form over the same rows: the answer must be equal, and the plan
-/// must have the new shape (no pairwise join, a fraction of the blocks).
+/// must have the new shape (no pairwise join, a fraction of the blocks). #8980 added the probe's chunk test: its
+/// dropped_out arm had no time bound and read every file_io_stats chunk of the server.
 /// </summary>
 public sealed class AnalysisReadsAtScaleLiveTests
 {
@@ -90,6 +92,62 @@ SELECT
             WHERE c.database_name = f.database_name
             AND   c.file_name = f.file_name
         )
+    ) AS dropped_out";
+
+    /// <summary>The database-size probe as shipped before #8980 (the dropped_out arm matched the edge times with no time bound of its own). An oracle, never run by the product.</summary>
+    private const string UnboundedDatabaseSizeNewestSql = @"
+WITH newest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+cur AS (
+    SELECT DISTINCT ON (database_name, file_name) database_name, file_name, size_mb
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time = (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY database_name, file_name
+),
+edge AS (
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time DESC
+        LIMIT 1
+    )
+    UNION
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time ASC
+        LIMIT 1
+    )
+)
+SELECT
+    (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
+    EXISTS (
+        SELECT f.database_name, f.file_name
+        FROM file_io_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time IN (SELECT collection_time FROM edge)
+        AND   f.size_mb > 0
+        EXCEPT
+        SELECT c.database_name, c.file_name
+        FROM cur AS c
     ) AS dropped_out";
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -213,6 +271,115 @@ VALUES (857_900_000_001, $2, $1, 'scale', 'GoneDb', 'GoneFile', 'ROWS', 5)", ct,
             "the pre-#8570 probe is expected to plan a nested loop anti join at this size; if it no longer does, the plant has stopped showing the defect: " + oldPlan.RootElement);
         Assert.False(HasNestedLoop(newPlan.RootElement[0].GetProperty("Plan"), "Anti"),
             "the probe compares the probed files with the newest snapshot's pair by pair: " + newPlan.RootElement);
+    }
+
+    /// <summary>
+    /// #8980: the probe's dropped_out arm matched the edge snapshots' times with an IN over the edge CTE and had no time
+    /// bound of its own. TimescaleDB cannot exclude a chunk on that, so the arm read, and decompressed, every
+    /// file_io_stats chunk the server had, and the cost grew with the table's retention. Both edge times lie inside the
+    /// lookback, so the lookback bound changes no answer and lets the planner exclude every chunk that ends before it.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSizeProbe_ReadsNoChunkThatEndsBeforeTheLookback_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live database-size chunk test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await ExecAsync(c, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+
+        /* Migration leaves the tables plain (#7152): the service's conversion step makes file_io_stats a hypertable, and
+           the store compresses its old chunks. */
+        await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
+        await ExecAsync(c, TimescaleSupport.EnableCompressionSql(FileIoStatsCollector.Instance), ct);
+
+        const int serverId = -857_003;
+        var end = LiveClock.AnchoredEnd();
+        var lookbackStart = end.AddHours(-24);
+
+        /* Ten days of snapshots of one server, every 15 minutes, 40 files each, so most of the server's chunks end before
+           the 24-hour lookback. Those chunks are compressed, as the store's policy leaves them. */
+        await ExecAsync(c, @"
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
+SELECT 857_300_000_000 + s.k * 100 + f, $2::timestamp - interval '1 minute' - s.k * interval '15 minutes', $1, 'scale',
+       'Db' || (f / 2), 'File' || f, 'ROWS', 10 + f
+FROM generate_series(0, 959) AS s (k)
+CROSS JOIN generate_series(0, 39) AS f", ct, serverId, end);
+        await ExecAsync(c, @"
+SELECT compress_chunk(ch, if_not_compressed => true)
+FROM show_chunks('file_io_stats', older_than => $1::timestamp) AS ch", ct, lookbackStart);
+        await ExecAsync(c, "ANALYZE file_io_stats", ct);
+
+        var outside = new HashSet<string>(StringComparer.Ordinal);
+        await using (var chunks = new NpgsqlCommand(@"
+SELECT cl.relname
+FROM show_chunks('file_io_stats', older_than => $1::timestamp) AS ch
+JOIN pg_class AS cl ON cl.oid = ch", c))
+        {
+            chunks.Parameters.AddWithValue(Naive(lookbackStart));
+            await using var reader = await chunks.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                outside.Add(reader.GetString(0));
+            }
+        }
+
+        Assert.True(outside.Count >= 5, "the plant should leave several chunks wholly before the lookback, found " + outside.Count);
+
+        object[] parameters = [serverId, lookbackStart, end];
+        var shipped = await RunProbeAsync(c, PgFactCollector.DatabaseSizeNewestSql, parameters, ct);
+        var oracle = await RunProbeAsync(c, UnboundedDatabaseSizeNewestSql, parameters, ct);
+        Assert.Equal(oracle, shipped);
+        Assert.False(shipped.DroppedOut);
+
+        /* A file that only the oldest snapshot of the lookback holds: the arm must still find it. */
+        var oldestInLookback = end.AddMinutes(-1 - (95 * 15));
+        await ExecAsync(c, @"
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
+VALUES (857_390_000_001, $2, $1, 'scale', 'GoneDb', 'GoneFile', 'ROWS', 5)", ct, serverId, oldestInLookback);
+        await ExecAsync(c, "ANALYZE file_io_stats", ct);
+        var shippedGone = await RunProbeAsync(c, PgFactCollector.DatabaseSizeNewestSql, parameters, ct);
+        var oracleGone = await RunProbeAsync(c, UnboundedDatabaseSizeNewestSql, parameters, ct);
+        Assert.Equal(oracleGone, shippedGone);
+        Assert.True(shippedGone.DroppedOut);
+
+        using var newPlan = await ExplainAsync(c, PgFactCollector.DatabaseSizeNewestSql, parameters, ct);
+        using var oldPlan = await ExplainAsync(c, UnboundedDatabaseSizeNewestSql, parameters, ct);
+        var oldRead = ExecutedRelationNames(oldPlan.RootElement[0].GetProperty("Plan")).Where(outside.Contains).ToList();
+        var newRead = ExecutedRelationNames(newPlan.RootElement[0].GetProperty("Plan")).Where(outside.Contains).ToList();
+        Assert.True(oldRead.Count > 0,
+            "the pre-#8980 probe is expected to read chunks that end before the lookback; if it no longer does, the plant has stopped showing the defect: " + oldPlan.RootElement);
+        Assert.True(newRead.Count == 0,
+            "the probe reads chunks that end before the lookback: " + string.Join(", ", newRead));
+    }
+
+    /// <summary>Every relation an executed plan node reads, the chunks under a ChunkAppend or a columnar scan among them. A node
+    /// the executor never ran (a chunk excluded at run time) reports zero loops and is left out.</summary>
+    private static IEnumerable<string> ExecutedRelationNames(JsonElement node)
+    {
+        if (node.TryGetProperty("Actual Loops", out var loops) && loops.GetDouble() == 0)
+        {
+            yield break;
+        }
+
+        if (node.TryGetProperty("Relation Name", out var name) && name.GetString() is { } relation)
+        {
+            yield return relation;
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                foreach (var nested in ExecutedRelationNames(child))
+                {
+                    yield return nested;
+                }
+            }
+        }
     }
 
     [Fact]

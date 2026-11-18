@@ -866,7 +866,7 @@ public sealed class AlertReadFailureCounter
         + "store checkpointer pressure read behind the WAL levers), and the store settings self-alert's "
         + "managed-conf verdicts read, the daily collection-history audit's rollup read, and the "
         + "external-alert delivery self-alert's count of undelivered rows, and the threshold-override "
-        + "reload, daily report, store autovacuum, and the stale daily rollup self-alert's "
+        + "reload, daily report, store autovacuum, store vacuum stalled, and the stale daily rollup self-alert's "
         + "restart seed and ended-episode close reads of the alert history";
 
     /// <summary>

@@ -296,6 +296,33 @@ public class PgLongRunningQueryExclusionTests
     }
 
     /// <summary>
+    /// #8970: the card lists only what the PostgreSQL read applies. It applies the knob's program prefixes to
+    /// <c>application_name</c>, its logins to <c>username</c> and the shared database list to
+    /// <c>database_name</c>, and nothing else, so with all three set the card's fields are exactly those lists and
+    /// their counts, and the seeded defaults (which name SQL Server internals) are listed as they are applied.
+    /// </summary>
+    [Fact]
+    public void TheCard_ListsOnlyTheThreeListsTheReadApplies()
+    {
+        var details = DarlingWorker.BuildPgLongRunningQueryExclusionDetails(
+            LongRunningQueryExclusions.Defaults, 0, 0, new[] { "appdb" }, 0);
+
+        var labels = details.SelectMany(d => d.Fields.Select(f => f.Label)).ToArray();
+        Assert.Equal(
+            new[]
+            {
+                AlertContextBuilders.LongRunningQueryExcludedCountLabel,
+                AlertContextBuilders.LongRunningQueryExcludedByProgramPrefixLabel,
+                AlertContextBuilders.LongRunningQueryExcludedByLoginLabel,
+                "Excluded Program Prefixes",
+                "Excluded Logins",
+                AlertContextBuilders.LongRunningQueryExcludedByDatabaseLabel,
+                "Excluded Databases",
+            },
+            labels);
+    }
+
+    /// <summary>
     /// #3742: the database list's receipt is the SQL Server twin's second item
     /// (<see cref="AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem"/>), appended AFTER the
     /// knob's, only when the list is SET — and then even at 0, so an operator who named a database reads that
@@ -522,6 +549,62 @@ public sealed class PgLongRunningQueryExclusionLiveTests
             Assert.Equal(new long[] { 400 }, everything.Sessions.Select(s => s.BackendId).ToArray());
             Assert.Null(everything.Sessions[0].DatabaseName);
             Assert.Equal(13, everything.ExcludedByDatabase);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #8970: the managed-platform maintenance database is left out of the read, the way the collector fan-out
+    /// leaves it out. Two <c>rdsadmin</c> sessions (a seven-day one, the field case, and a shorter one) sit above
+    /// a real session and a session with NO database name. With room for ONE row the real session's page is the
+    /// longer of the two kept sessions, so the platform's rows are removed ahead of the cap and never compete
+    /// for it. The kept rows are the real one and the no-database one (a NULL name must stay in), and none of
+    /// the read's three counts includes the platform's rows: they are not the knob's, and they are not the
+    /// shared database list's even when that list is set.
+    /// </summary>
+    [Fact]
+    public async Task TheManagedMaintenanceDatabase_IsLeftOut_AheadOfTheCap_AndCountedByNoArm()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a PostgreSQL connection string to run the live maintenance-database test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var captureAt = now.AddMinutes(-1);
+            var collectionId = CollectionIdGenerator.Next();
+            const string platformDatabase = PerformanceMonitor.Darling.Service.Targets.PostgresTargetProvider.ManagedMaintenanceDatabase;
+            await PlantAsync(connection, collectionId, captureAt, backendId: 1, pid: 7001, "psql", "rdsadmin", durationMs: 10_549 * 60_000L, ct, databaseName: platformDatabase);
+            await PlantAsync(connection, collectionId, captureAt, backendId: 2, pid: 7002, "psql", "rdsadmin", durationMs: 300 * 60_000L, ct, databaseName: platformDatabase);
+            await PlantAsync(connection, collectionId, captureAt, backendId: 3, pid: 7003, "psql", "analyst", durationMs: 90 * 60_000L, ct, databaseName: "appdb");
+            await PlantAsync(connection, collectionId, captureAt, backendId: 4, pid: 7004, "psql", "analyst", durationMs: 80 * 60_000L, ct, databaseName: null);
+
+            var all = await ReadAsync(postgres, now, LongRunningQueryExclusions.None, limit: 5, ct);
+            Assert.Equal(new long[] { 3, 4 }, all.Sessions.Select(s => s.BackendId).ToArray());
+            Assert.Equal(0, all.ExcludedByProgramPrefix + all.ExcludedByLogin + all.ExcludedByDatabase);
+
+            var capped = await ReadAsync(postgres, now, LongRunningQueryExclusions.None, limit: 1, ct);
+            Assert.Equal(new long[] { 3 }, capped.Sessions.Select(s => s.BackendId).ToArray());
+
+            /* The shared list counts what the OPERATOR named and nothing else: one appdb row, not the platform's two. */
+            var listed = await ReadAsync(postgres, now, LongRunningQueryExclusions.None, limit: 5, ct, new[] { "appdb" });
+            Assert.Equal(new long[] { 4 }, listed.Sessions.Select(s => s.BackendId).ToArray());
+            Assert.Equal(1, listed.ExcludedByDatabase);
 
             bodySucceeded = true;
         }

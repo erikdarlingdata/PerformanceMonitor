@@ -366,6 +366,8 @@ public sealed class McpInvestigationTools
         "THE WINDOW IS BOUNDED AT 100 REQUESTS, newest first: requests_returned is how many you got, truncated says the " +
         "window held more (the reports and journal are those of the returned requests only; narrow hours_back or pass " +
         "server_name or request_id), and journal_truncated says their journal held more than 200 rows. " +
+        "THE REPLY IS ALSO BOUNDED BY THE RESPONSE BYTE BUDGET: it keeps the newest requests that fit, each whole with its journal rows, report and feedback, " +
+        "and sets truncated, budget_truncated and a budget_note that says how many requests were left out and the narrower call that gets them. " +
         "hours_back 1-168, default 24.")]
     public static async Task<string> GetInvestigationReports(
         ServerManager serverManager,
@@ -375,11 +377,12 @@ public sealed class McpInvestigationTools
         [Description("One request, with its brief. Omit for the window.")] string? request_id = null,
         [Description("1-168. Default 24. Ignored with request_id.")] int hours_back = 24,
         CancellationToken cancellationToken = default) =>
-        await ReportsAsync(serverManager, store, composer.Mode, server_name, request_id, hours_back, cancellationToken, await composer.KeyAsync(cancellationToken));
+        await ReportsAsync(serverManager, store, composer.Mode, server_name, request_id, hours_back, cancellationToken, await composer.KeyAsync(cancellationToken), McpResponseBudget.DefaultBytes);
 
-    /// <summary>The report read at <paramref name="mode"/>.</summary>
+    /// <summary>The report read at <paramref name="mode"/>. The MCP tool keeps the newest requests that fit <paramref name="responseByteBudget"/> (#8983).</summary>
     internal static async Task<string> ReportsAsync(ServerManager serverManager, IInvestigationRequestStore store,
-        McpDataDetail mode, string? server_name, string? request_id, int hours_back, CancellationToken cancellationToken, PseudonymKey? key = null)
+        McpDataDetail mode, string? server_name, string? request_id, int hours_back, CancellationToken cancellationToken, PseudonymKey? key = null,
+        int? responseByteBudget = null)
     {
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
@@ -418,7 +421,7 @@ public sealed class McpInvestigationTools
                     : InvestigationToolCore.Status("empty", $"No investigation request opened {McpHelpers.InTheLast($"{hours_back} hours")}.");
             }
 
-            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);
+            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key, responseByteBudget);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
