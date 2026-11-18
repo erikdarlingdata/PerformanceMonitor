@@ -32,13 +32,13 @@ namespace Darling.Tests;
 /// <summary>#8737: <c>GET /api/me</c> describes only the calling session: its sign-in method, seat, identity and expiry.</summary>
 public sealed class DarlingWebMeTests
 {
-    private static readonly string[] Keys = ["method", "seat", "subject", "display_name", "granted_by", "role_mapping", "token_name", "group_name", "expires_at"];
+    private static readonly string[] Keys = ["method", "seat", "subject", "display_name", "granted_by", "role_mapping", "token_name", "group_name", "expires_at", "personal_tokens"];
     private static readonly byte[] Key = Enumerable.Range(0, 32).Select(i => (byte)(i * 5 + 1)).ToArray();
     private const string ScopedName = "finance";
     private static readonly string OwnerKey = new('k', DarlingWebSeat.OwnerKeyLength);
 
     private static void AssertShape(JsonObject me, string method, string seat, string? subject = null, string? displayName = null,
-        string? grantedBy = null, string? tokenName = null, string? groupName = null, string? expiresAt = null, bool? roleMapping = null)
+        string? grantedBy = null, string? tokenName = null, string? groupName = null, string? expiresAt = null, bool? roleMapping = null, bool personalTokens = false)
     {
         Assert.Equal(Keys.OrderBy(k => k, StringComparer.Ordinal), me.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal));
         Assert.Equal(method, (string?)me["method"]);
@@ -50,13 +50,41 @@ public sealed class DarlingWebMeTests
         Assert.Equal(tokenName, (string?)me["token_name"]);
         Assert.Equal(groupName, (string?)me["group_name"]);
         Assert.Equal(expiresAt, (string?)me["expires_at"]);
+        Assert.Equal(personalTokens, (bool?)me["personal_tokens"]);
+    }
+
+    [Fact]
+    public void PersonalTokens_TrueForOidcWhenServed()
+    {
+        Assert.True((bool?)DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false, OwnerKey: "k"), null, true)["personal_tokens"]);
+        Assert.True((bool?)DarlingWebMe.Describe(new DarlingWebSeat("carol@example.test", true, OwnerKey: "k"), null, true)["personal_tokens"]);
+    }
+
+    [Fact]
+    public void PersonalTokens_TrueForSharedAdminWhenServed()
+    {
+        Assert.True((bool?)DarlingWebMe.Describe(DarlingWebSeat.SharedToken, null, true)["personal_tokens"]);
+    }
+
+    [Fact]
+    public void PersonalTokens_FalseForReadOnlyNonOidc()
+    {
+        Assert.False((bool?)DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly, null, true)["personal_tokens"]);
+        Assert.False((bool?)DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), null, true)["personal_tokens"]);
+    }
+
+    [Fact]
+    public void PersonalTokens_FalseWhenNotServed()
+    {
+        Assert.False((bool?)DarlingWebMe.Describe(new DarlingWebSeat("carol@example.test", true, OwnerKey: "k"), null, false)["personal_tokens"]);
+        Assert.False((bool?)DarlingWebMe.Describe(DarlingWebSeat.SharedToken, null, false)["personal_tokens"]);
     }
 
     [Fact]
     public void AnOidcAdmin_CarriesSubjectNameGrantAndExpiry()
     {
         var expiry = new DateTimeOffset(2026, 11, 14, 10, 30, 15, TimeSpan.FromHours(2));
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("alice@example.test", true, OwnerKey: "k", DisplayName: "Alice A", GrantedBy: "Admins", SessionExpiresAt: expiry), null);
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("alice@example.test", true, OwnerKey: "k", DisplayName: "Alice A", GrantedBy: "Admins", SessionExpiresAt: expiry), null, false);
 
         AssertShape(me, "oidc", "admin", "alice@example.test", "Alice A", "Admins", expiresAt: "2026-11-14T08:30:15.0000000Z");
     }
@@ -64,7 +92,7 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AnOidcViewer_IsReadOnly()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false, DisplayName: "Bob", GrantedBy: "Viewers"), null);
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false, DisplayName: "Bob", GrantedBy: "Viewers"), null, false);
 
         AssertShape(me, "oidc", "read_only", "bob@example.test", "Bob", "Viewers");
     }
@@ -72,7 +100,7 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AnOidcAdmin_WithNoGrant_HasNullNameAndGrant()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("carol@example.test", true), null);
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("carol@example.test", true), null, false);
 
         AssertShape(me, "oidc", "admin", "carol@example.test");
     }
@@ -82,7 +110,7 @@ public sealed class DarlingWebMeTests
     [InlineData(false)]
     public void AnOidcSession_ReportsWhetherTheHostHasARoleMapping(bool mapped)
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false), mapped);
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false), mapped, false);
 
         AssertShape(me, "oidc", "read_only", "bob@example.test", roleMapping: mapped);
     }
@@ -90,26 +118,26 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AnOidcSession_OnAHostWithNoOidc_HasANullRoleMapping()
     {
-        AssertShape(DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false), null), "oidc", "read_only", "bob@example.test");
+        AssertShape(DarlingWebMe.Describe(new DarlingWebSeat("bob@example.test", false), null, false), "oidc", "read_only", "bob@example.test");
     }
 
     [Fact]
     public void ANonOidcSession_HasANullRoleMapping_WhateverTheHostHas()
     {
-        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken, true), "shared_token", "admin");
-        AssertShape(DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), false), "named_token", "read_only", tokenName: ScopedName);
+        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken, true, false), "shared_token", "admin");
+        AssertShape(DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), false, false), "named_token", "read_only", tokenName: ScopedName);
     }
 
     [Fact]
     public void TheSharedToken_IsAnAdminWithNoIdentity()
     {
-        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken, null), "shared_token", "admin");
+        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.SharedToken, null, false), "shared_token", "admin");
     }
 
     [Fact]
     public void ReadsOnly_WithNoSession_IsReadOnlyWithNoIdentity()
     {
-        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly, null), "reads_only", "read_only");
+        AssertShape(DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly, null, false), "reads_only", "read_only");
     }
 
     [Fact]
@@ -117,7 +145,7 @@ public sealed class DarlingWebMeTests
     {
         var expiry = new DateTimeOffset(2026, 11, 14, 10, 30, 15, TimeSpan.Zero);
 
-        var me = DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly with { SessionExpiresAt = expiry }, null);
+        var me = DarlingWebMe.Describe(DarlingWebSeat.ReadsOnly with { SessionExpiresAt = expiry }, null, false);
 
         AssertShape(me, "shared_token", "read_only", expiresAt: "2026-11-14T10:30:15.0000000Z");
     }
@@ -125,7 +153,7 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void ANamedTokenScopedReader_NamesTheToken_AndNoSubject()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), null);
+        var me = DarlingWebMe.Describe(new DarlingWebSeat(ScopedName, false, TokenName: ScopedName, AllowedTagIds: [41]), null, false);
 
         AssertShape(me, "named_token", "read_only", tokenName: ScopedName);
     }
@@ -133,7 +161,7 @@ public sealed class DarlingWebMeTests
     [Fact]
     public void AManagedGroupSeat_NamesTheGroup_AndNoSubjectOrTokenName()
     {
-        var me = DarlingWebMe.Describe(new DarlingWebSeat("Ops", false, TokenName: "Ops", AllowedTagIds: [7], GroupId: Guid.NewGuid(), GroupGeneration: Guid.NewGuid()), null);
+        var me = DarlingWebMe.Describe(new DarlingWebSeat("Ops", false, TokenName: "Ops", AllowedTagIds: [7], GroupId: Guid.NewGuid(), GroupGeneration: Guid.NewGuid()), null, false);
 
         AssertShape(me, "managed_group", "read_only", groupName: "Ops");
     }

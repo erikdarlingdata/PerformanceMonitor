@@ -1790,10 +1790,51 @@ public sealed class McpConfig
     [JsonPropertyName("tokens")]
     public List<McpTokenEntry>? Tokens { get; set; }
 
+    /// <summary>
+    /// Personal MCP tokens (#8737): a person signed in to the web dashboard through <c>web.network.oidc</c> mints their own
+    /// short-lived MCP token. Default off, and then nothing changes for the tokens in <see cref="Tokens"/> or the legacy token.
+    /// Served only with <c>web.enabled</c> true in <c>darling.json</c>, <c>web.network.oidc</c> configured, no front door and
+    /// <see cref="AllowTokenlessLoopback"/> off; otherwise one start warning names the missing piece and the feature stays off.
+    /// File-only and restart-only. See <see cref="McpPersonalTokensConfig"/>.
+    /// </summary>
+    [JsonPropertyName("personalTokens")]
+    public McpPersonalTokensConfig? PersonalTokens { get; set; }
+
     /// <summary>True when <see cref="Tokens"/> has an entry. An entry that cannot be served (no value, a bad name or role) still counts:
     /// named tokens were asked for, so a start must not fall back to serving without credentials.</summary>
     [JsonIgnore]
     public bool HasNamedTokens => Tokens is { Count: > 0 } && Tokens.Any(t => t is not null);
+}
+
+/// <summary>
+/// The <c>mcp.personalTokens</c> block (#8737). Out-of-range numbers are clamped and an unknown <see cref="AdminRole"/> is served as
+/// <c>reader</c>, each with one start warning; an unparseable <see cref="DataDetail"/> leaves the feature off. See
+/// <c>DarlingPersonalTokenSettings</c>.
+/// </summary>
+public sealed class McpPersonalTokensConfig
+{
+    /// <summary>Default OFF.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>The longest a personal token may live, in days (1 to 365).</summary>
+    [JsonPropertyName("maxLifetimeDays")]
+    public int MaxLifetimeDays { get; set; } = 30;
+
+    /// <summary>How many live personal tokens one person may hold (1 to 50).</summary>
+    [JsonPropertyName("maxTokensPerPerson")]
+    public int MaxTokensPerPerson { get; set; } = 5;
+
+    /// <summary>The strongest role an admin's personal token may take: <c>reader</c> (the default) or <c>operator</c>. An operator personal
+    /// token gets the write tools whatever <c>mcp.allowWrites</c> and <c>web.allowAdminWrites</c> say, as a named operator file token does, so it
+    /// is opt-in. A person who is not an admin always gets <c>reader</c>.</summary>
+    [JsonPropertyName("adminRole")]
+    public string AdminRole { get; set; } = McpTokenEntry.ReaderRole;
+
+    /// <summary>Optional: <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>.
+    /// An unrecognized value leaves personal tokens off.</summary>
+    [JsonPropertyName("dataDetail")]
+    public string? DataDetail { get; set; }
 }
 
 /// <summary>

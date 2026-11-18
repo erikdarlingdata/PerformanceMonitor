@@ -802,6 +802,14 @@ public sealed partial class DarlingCollectorRunner
                         absentCache.Evict(absentDigests);
                     }
 
+                    /* #8994: a shape whose stored plan aged out renders its plan again on its next sighting. */
+                    if (absentDigests.Count > 0
+                        && definition is QueryStatsCollector
+                        && _queryStatsShapeCaches.TryGetValue(server.ServerId, out var absentShapeCache))
+                    {
+                        absentShapeCache.Evict(absentDigests);
+                    }
+
                     /* #7419: the same for a statement text the store no longer holds (its dimension row aged out). */
                     if (absentDigests.Count > 0
                         && definition is QueryStatsCollector

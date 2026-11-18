@@ -41,7 +41,7 @@
 
 import { el, mount, apiGet, apiGetFleetShell, setPollRender, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
 import { startFrontDoor as startFrontDoorIn, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
-import { initAccountMenu } from "./account-menu.js";
+import { initAccountMenu, getMe } from "./account-menu.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -69,6 +69,7 @@ import { renderManageTags } from "./pages/manage-tags.js";
 import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
+import { renderMcpTokens } from "./pages/mcp-tokens.js";
 import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initNavCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList, paintStoreServerLists } from "./sidebar.js";
@@ -153,6 +154,8 @@ export function currentRoute() {
   if (h === "#/manage-query-tags") return { name: "manageQueryTags" };
   if (h === "#/query-tag-usage") return { name: "queryTagUsage" };
   if (h === "#/job-history" || h === "#/job-history/") return { name: "jobHistory" };
+  /* #8737: the personal MCP token page, reached from the account menu; it has no sidebar link. */
+  if (h === "#/mcp-tokens" || h === "#/mcp-tokens/") return { name: "mcpTokens" };
   return { name: "fleet" };
 }
 
@@ -296,6 +299,7 @@ export const ROUTE_RENDERERS = {
   manageQueryTags: (m) => renderManageQueryTags(m),
   queryTagUsage: (m) => renderQueryTagUsage(m),
   jobHistory: (m) => renderJobHistory(m),
+  mcpTokens: (m) => getMe().then((me) => renderMcpTokens(m, me)),
   fleet: (m, r, o) => renderFleet(m, o),
 };
 
@@ -666,10 +670,11 @@ function updateStatusBar(d) {
    still routes there normally on first load / a fresh alert link.
    Query Tag Usage (#6793): its figures are 24 hour totals and the fleet read can take minutes on a large store, so a 60 s
    re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it.
-   Store Health (#8787): one read takes seconds of catalog work, and the page has its own Refresh button. */
+   Store Health (#8787): one read takes seconds of catalog work, and the page has its own Refresh button.
+   My MCP tokens (#8737): a re-draw would drop the token value shown once after a create, and the form's open input. */
 function isNoPollRoute(routeName) {
   return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
-    || routeName === "triage" || routeName === "queryTagUsage" || routeName === "storeHealth";
+    || routeName === "triage" || routeName === "queryTagUsage" || routeName === "storeHealth" || routeName === "mcpTokens";
 }
 
 /* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);

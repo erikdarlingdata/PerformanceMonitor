@@ -3195,7 +3195,7 @@ $rung$;";
     }
 
     /// <summary>
-    /// V275 (#8967): <c>collect.attention_events</c> becomes a TimescaleDB hypertable on a store that has the extension and rows, by
+    /// V276 (#8967): <c>collect.attention_events</c> becomes a TimescaleDB hypertable on a store that has the extension and rows, by
     /// SWAP, not by <c>migrate_data</c>. The table keeps about 0.7 GB a day for 30 days, and <c>create_hypertable(..., migrate_data =&gt; true)</c>
     /// holds ACCESS EXCLUSIVE for the whole rewrite (past <see cref="MigrationCommandTimeoutSeconds"/> on a big store, which would fail
     /// this startup-critical rung on every start). So the rung only renames, which is catalog-only: the populated plain table and its index
@@ -3217,7 +3217,7 @@ $rung$;";
     /// owns the table. An older build ignores the legacy table, so the Viewer, the web pages and the tools show only the rows written since the
     /// swap until the copy ends.</para>
     /// </summary>
-    private static readonly string V275Sql = AttentionSwapSql((MigrationCommandTimeoutSeconds - 20) + "s") + @"
+    private static readonly string V276Sql = AttentionSwapSql((MigrationCommandTimeoutSeconds - 20) + "s") + @"
 
 CREATE TABLE IF NOT EXISTS collect.attention_events_legacy_copy (
     next_page bigint NOT NULL,
@@ -3226,9 +3226,9 @@ CREATE TABLE IF NOT EXISTS collect.attention_events_legacy_copy (
 );";
 
     /// <summary>
-    /// The swap of <c>collect.attention_events</c> to a table a hypertable can replace (#8967), shared by V275 and
+    /// The swap of <c>collect.attention_events</c> to a table a hypertable can replace (#8967), shared by V276 and
     /// <c>TimescaleSupport.ConvertToHypertablesAsync</c>. Runs in a transaction, because the lock timeout is <c>SET LOCAL</c>. Catalog-only:
-    /// two renames, one CREATE TABLE ... LIKE and one CREATE INDEX on the new empty table. See <see cref="V275Sql"/> for when it does nothing.
+    /// two renames, one CREATE TABLE ... LIKE and one CREATE INDEX on the new empty table. See <see cref="V276Sql"/> for when it does nothing.
     /// The hypertable check goes through <c>EXECUTE</c> so <c>timescaledb_information</c> is parsed only on a store that has it.
     /// </summary>
     internal static string AttentionSwapSql(string lockTimeout) => "SET LOCAL lock_timeout = '" + lockTimeout + @"';
@@ -3597,8 +3597,10 @@ $swap$;";
         new Migration(273, "wait-stats-hourly-rollup", V273Sql),
         /* V274 (#8978): the store's trigram text index options on the service row. Two catalog-only nullable boolean columns, no default. */
         new Migration(274, "trigram-index-store-options", V274Sql),
-        /* V275 (#8967): attention_events becomes a hypertable by swap: a catalog-only rename of the populated plain table to _legacy, an empty table in its place, and the copy-progress table. */
-        new Migration(275, "attention-events-hypertable-swap", V275Sql),
+        /* V275 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
+        new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
+        /* V276 (#8967): attention_events becomes a hypertable by swap: a catalog-only rename of the populated plain table to _legacy, an empty table in its place, and the copy-progress table. */
+        new Migration(276, "attention-events-hypertable-swap", V276Sql),
     };
 
     /// <summary>

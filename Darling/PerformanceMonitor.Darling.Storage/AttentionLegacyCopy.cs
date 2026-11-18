@@ -31,7 +31,7 @@ public interface IBatchWalPacer
 
 /// <summary>
 /// #8967: the background copy that moves the older <c>collect.attention_events_legacy</c> rows into <c>collect.attention_events</c>.
-/// The rung that made the attention table a hypertable (V275) swapped a populated plain table to <c>_legacy</c> with a rename, so it
+/// The rung that made the attention table a hypertable (V276) swapped a populated plain table to <c>_legacy</c> with a rename, so it
 /// held no lock longer than a catalog change. The new table starts empty and the collector writes to it at once. This copy then
 /// fills in the older history, in short transactions that never lock the new table against a writer, and drops the legacy table at
 /// the end.

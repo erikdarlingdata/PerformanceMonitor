@@ -276,7 +276,7 @@ public sealed partial class DarlingWorker
            (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
         var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
-        /* #8967: the older attention rows. V275 swapped a populated plain collect.attention_events to collect.attention_events_legacy with a rename,
+        /* #8967: the older attention rows. V276 swapped a populated plain collect.attention_events to collect.attention_events_legacy with a rename,
            and this copies the rows still inside retention into the new table in short, paced batches, then drops the legacy table. It runs
            whenever the legacy table exists, whatever the TimescaleDB mode, resumes at its last committed batch after a restart, never throws, and a
            store with no legacy table finishes it at once. Drained with the other background work. */

@@ -80,6 +80,13 @@ internal static class DarlingUnknownKeys
                     Walk(network, Nullable.GetUnderlyingType(networkType) ?? networkType, "mcp.network", found);
                 }
 
+                // #8737: mcp.personalTokens is walked too: a mistyped limit binds to nothing and the default stands, which is wider than a
+                // stricter value the operator meant.
+                if (TryGetIgnoreCase(root.Value, "personalTokens", out var personalTokens))
+                {
+                    Walk(personalTokens, typeof(McpPersonalTokensConfig), "mcp.personalTokens", found);
+                }
+
                 // #7023: each mcp.tokens entry is walked too. A mistyped data_detail for dataDetail binds to nothing, and the entry would be
                 // served the service's level, wider than the operator meant; every other entry mistake leaves the entry unserved.
                 if (TryGetIgnoreCase(root.Value, "tokens", out var tokens) && tokens.ValueKind == JsonValueKind.Array)

@@ -19,7 +19,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8967: <c>collect.attention_events</c> becomes a hypertable by swap. A populated plain table is renamed to <c>_legacy</c> beside an
-/// empty one (V275, and the start-path step for a store that gains TimescaleDB later), the start-path conversion turns the empty table
+/// empty one (V276, and the start-path step for a store that gains TimescaleDB later), the start-path conversion turns the empty table
 /// into a hypertable, and every other store shape does nothing.
 /// </summary>
 public sealed class AttentionHypertableSwapLiveTests
@@ -65,7 +65,7 @@ public sealed class AttentionHypertableSwapLiveTests
     }
 
     [Fact]
-    public async Task V275_OnAPopulatedPlainTable_RenamesItToLegacy_AndTheStartPathConvertsTheEmptyTable()
+    public async Task V276_OnAPopulatedPlainTable_RenamesItToLegacy_AndTheStartPathConvertsTheEmptyTable()
     {
         await RunAsync(enableTimescale: true, async (store, ct) =>
         {
@@ -99,7 +99,7 @@ public sealed class AttentionHypertableSwapLiveTests
             var c = store.Connection;
             await ExecAsync(c, SeedSql, ct);
 
-            /* No rung re-run: this is the store that enabled TimescaleDB after V275 ran on an empty or plain table. */
+            /* No rung re-run: this is the store that enabled TimescaleDB after V276 ran on an empty or plain table. */
             await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
 
             Assert.Equal(5L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events_legacy", ct));

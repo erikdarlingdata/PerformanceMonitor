@@ -231,6 +231,13 @@ public static class DarlingRetention
     /// </summary>
     internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
 
+    /// <summary>How long a dead personal MCP token (revoked, or past its expiry) stays in <c>config.mcp_personal_token</c> (#8737).</summary>
+    internal const int PersonalTokenRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>A token is dead from the earlier of its revocation and its expiry; every row dead before <c>$1</c> goes.</summary>
+    internal const string PersonalTokenPurgeSql =
+        "DELETE FROM config.mcp_personal_token WHERE least(coalesce(revoked_at, expires_at), expires_at) < $1";
+
     /// <summary>
     /// config.external_alert_pending (the queue of alerts other services submit, #5654) keeps its FINISHED rows this long.
     /// Like the command queue it is not an audit surface: the alert history row is the record of an alert, and the queue
@@ -1088,6 +1095,24 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += commandsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* config.mcp_personal_token (#8737): a token stays PersonalTokenRetentionDays after it died, that is after the earlier of its
+               revocation and its expiry, so the list still shows what ended and why. Live rows are never touched. One statement: the table
+               holds a few rows per person. Schema-qualified like config.config_command. The owner-only triggers pass this, because the
+               purge runs on the owner connection. Failure-isolated like every sibling. */
+            var personalTokensDeleted = await PurgeOneAsync(
+                postgres, "config.mcp_personal_token", PersonalTokenPurgeSql,
+                utcNow.AddDays(-PersonalTokenRetentionDays), logger, cancellationToken,
+                batchSize: SingleShotStatement, pacer: walPacer);
+            if (personalTokensDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += personalTokensDeleted.Value;
             }
             else
             {

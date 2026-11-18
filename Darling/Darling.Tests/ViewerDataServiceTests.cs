@@ -728,18 +728,25 @@ public sealed class ViewerSchemaVersionGateTests
         var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        /* #8967: the V275 sentinel (the progress table of the attention_events copy) is the last parameter, so a store that has every sentinel
-           but that one is a V274 store and maps to 274, not 275. #8978: the V274 sentinel is the one before it, so a store without it
-           (and without V275's) is a V273 store. */
+        /* #8967: the V276 sentinel (the progress table of the attention_events copy) is the last parameter, so a store that has every sentinel
+           but that one is a V275 store and maps to 275, not 276. #8737: the V275 sentinel (the personal token table) is the one before it, so
+           a store without it (and without V276's) is a V274 store. #8978: the V274 sentinel is the one before that. */
+        var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV276[^1] = false;
+        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^1].Name);
+        Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
+
         var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV275[^1] = false;
-        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^1].Name);
+        allButV275[^2] = false;
+        Assert.Equal("hasPersonalTokens", map.GetParameters()[^2].Name);
         Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
 
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV274[^1] = false;
         allButV274[^2] = false;
-        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^2].Name);
+        allButV274[^3] = false;
+        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^3].Name);
         Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
 
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes

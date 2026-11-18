@@ -2287,6 +2287,9 @@ END $do$;
 
 -- Managed web credentials have their own protected-table carve, after every blanket grant.
 {WebAccessGroupSchema.ReassertPermissionsSql}
+
+-- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+{PersonalTokenSchema.ReassertPermissionsSql(config, admin, viewer, web, mcp)}
 ";
     }
 
@@ -3094,7 +3097,7 @@ DECLARE
    v_row {config}.config_notification_routes%ROWTYPE;
    -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
    -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
-   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false);
+   v_operator boolean := COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -3246,7 +3249,7 @@ DECLARE
    v_before jsonb;
    v_after jsonb;
 BEGIN
-   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{{1,64}}$' THEN
+   IF p_actor IS NULL OR p_actor !~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$' THEN
       RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
    END IF;
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
@@ -3407,7 +3410,7 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false) THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{{1,64}}|personal token [A-Za-z0-9._:-]{{1,64}} of [^[:cntrl:]]{{1,207}})$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
@@ -4370,8 +4373,9 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
     /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.
     /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
-    /// who mapped or granted a person. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
-    /// admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
+    /// who mapped or granted a person. So are the personal MCP token events (<see cref="PersonalTokenEvents.OwnerOnly"/>, #8737): only
+    /// <see cref="PersonalTokenStore"/>, on the owner connection, journals who made or revoked a token. So are an action proposal's events
+    /// (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
     /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
     /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
     /// block an approver.</summary>
@@ -4379,6 +4383,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
             .Concat(PersonEvents.OwnerOnly)
+            .Concat(PersonalTokenEvents.OwnerOnly)
             .Concat(ProposalEvents.OwnerOnly)
             .Append(InvestigationRequestStore.ProposalNoticeSent)
             .Append(InvestigationRequestStore.SlackThreadPosted)

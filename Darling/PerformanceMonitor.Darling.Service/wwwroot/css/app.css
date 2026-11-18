@@ -1830,6 +1830,13 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
 @media (min-width: 769px) {
   #topbar-account { display: none; }
 }
+/* #8737: the My MCP tokens page. The value panel shows a new token once. */
+.mcp-token-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.75rem; margin-bottom: 1rem; }
+.mcp-token-field { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.8rem; color: var(--muted); }
+.mcp-token-input { background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--fg); padding: 0.3rem 0.5rem; font-size: 0.85rem; }
+.token-value-panel { border: 1px solid var(--warn); margin-bottom: 1rem; display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+.token-value-note { color: var(--warn); font-size: 0.85rem; }
+.token-value { display: block; max-width: 100%; overflow-wrap: anywhere; user-select: all; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.4rem 0.6rem; }
 .store-current-mark { font-size: 0.72rem; font-weight: 400; color: var(--muted); }
 .sidebar-store-header { display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 1.25rem 0.2rem; font-size: 0.78rem; font-weight: 600; color: var(--muted); }
 .sidebar-store-header.current { color: var(--fg); }
