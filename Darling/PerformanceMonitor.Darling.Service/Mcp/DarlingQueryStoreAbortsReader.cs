@@ -166,14 +166,16 @@ internal static class DarlingQueryStoreAbortsReader
 
     /// <summary>
     /// Reads <paramref name="limit"/> rows. The caller asks for one more than it shows so a cut page is observed, not inferred.
-    /// The interval table is tried first under <c>get_query_store_top</c>'s own gate (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>
-    /// and <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>); a gate that says raw, or any fault before the rows are read, reads the raw tier.
+    /// The interval table is tried first under <c>get_query_store_top</c>'s own gate (<see cref="DarlingDataReader.QueryStoreTopMayReadTableFor"/>
+    /// and <see cref="QueryStoreIntervalWide.ResolveReadAsync"/> with no literal end and <see cref="DarlingDataReader.QueryStoreTopTableMinWindow"/>),
+    /// so this page and its measured-zero probe (<see cref="DarlingDataReader.QueryStoreWindowHasRowsAsync"/>) read the same tier for one window;
+    /// a gate that says raw, or any fault before the rows are read, reads the raw tier.
     /// </summary>
     internal static async Task<AbortsRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit, DatabaseFilter databases,
         CancellationToken cancellationToken)
     {
-        if (DarlingDataReader.QueryStoreTopMayReadTable(startUtc, endUtc))
+        if (DarlingDataReader.QueryStoreTopMayReadTableFor(startUtc, endUtc, databases))
         {
             var table = await TryReadTableAsync(postgres, serverId, startUtc, endUtc, limit, databases, cancellationToken);
             if (table is { } served)
@@ -215,8 +217,11 @@ internal static class DarlingQueryStoreAbortsReader
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* No literal end (UseTable's clause 4 is skipped), as the top read asks: the raw read places its window by the interval's
+               start and reads every snapshot up to the collection ceiling, so for an end before applied_through it already counts each
+               interval's newest snapshot, the row the table holds. */
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                connection, serverId, startUtc, endUtc, endUtc, DarlingDataReader.QueryStoreTopMinWindow,
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, DarlingDataReader.QueryStoreTopTableMinWindow(databases),
                 McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {

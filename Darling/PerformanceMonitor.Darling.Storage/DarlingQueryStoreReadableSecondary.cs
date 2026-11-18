@@ -29,37 +29,41 @@ public static class DarlingQueryStoreReadableSecondary
     /// in the newest <c>query_store_health</c> capture carry the readable-secondary bit (of how many, leaving out tempdb and databases whose
     /// Query Store is OFF: the on-prem capture always holds tempdb, and neither has Query Store rows to read). Beside them, the
     /// newest successful <c>query_store</c> and <c>query_store_hints</c> runs newer than that capture: the first's enumeration
-    /// count, the second's stored rows and its age on the store's clock. $1 server_id.
+    /// count, the second's stored rows and its age on the store's clock. $1 server_id. #8570: the newest capture time is read once
+    /// and every part reads that one value, where each part used to look it up again.
     /// </summary>
     public const string FactsSql = @"
+WITH newest AS (
+    SELECT MAX(h.capture_time) AS capture_time FROM v_query_store_health AS h WHERE h.server_id = $1),
+counts AS (
+    SELECT COUNT(*) AS health_databases,
+           COUNT(*) FILTER (WHERE (h.readonly_reason & 8) <> 0) AS health_secondary_databases
+    FROM v_query_store_health AS h
+    WHERE h.server_id = $1 AND h.capture_time = (SELECT n.capture_time FROM newest AS n) AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')
 SELECT
     (SELECT sp.ag_replica_role FROM server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
     (SELECT COALESCE(NULLIF(btrim(c.query_store_replica), ''), NULL) FROM config.config_monitored_servers AS c WHERE c.server_id = $1),
-    (SELECT COUNT(*) FROM v_query_store_health AS h
-      WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
-    (SELECT COUNT(*) FROM v_query_store_health AS h
-      WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
-        AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
+    counts.health_databases,
+    counts.health_secondary_databases,
     run.fanout_item_count::bigint,
     run.log_id IS NOT NULL,
     hints.rows_collected::bigint,
     hints.age_seconds,
     hints.note
-FROM (SELECT 1) AS one
+FROM newest
+CROSS JOIN counts
 LEFT JOIN LATERAL (
     SELECT cl.log_id, cl.fanout_item_count
     FROM collection_log AS cl
     WHERE cl.server_id = $1 AND cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
-      AND cl.collection_time > COALESCE((SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1), '-infinity'::timestamp)
+      AND cl.collection_time > COALESCE(newest.capture_time, '-infinity'::timestamp)
     ORDER BY cl.collection_time DESC
     LIMIT 1) AS run ON TRUE
 LEFT JOIN LATERAL (
     SELECT cl.rows_collected, EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - cl.collection_time))::double precision AS age_seconds, cl.error_message AS note
     FROM collection_log AS cl
     WHERE cl.server_id = $1 AND cl.collector_name = 'query_store_hints' AND cl.status = 'SUCCESS'
-      AND cl.collection_time > COALESCE((SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1), '-infinity'::timestamp)
+      AND cl.collection_time > COALESCE(newest.capture_time, '-infinity'::timestamp)
     ORDER BY cl.collection_time DESC
     LIMIT 1) AS hints ON TRUE";
 
@@ -245,7 +249,8 @@ LEFT JOIN LATERAL (
     /// #8361: <see cref="FactsSql"/> for a set of servers in one statement, $1 an integer array of server ids: one row per id, with
     /// the newest <c>ag_replica_role</c>, whether a <c>query_store_replica</c> is named, and the newest capture's counts (0 and 0 for
     /// a server with no capture). The fleet form of <c>get_collection_health</c> answers outside admission, so its reasons cost one
-    /// command for the whole fleet rather than one per server.
+    /// command for the whole fleet rather than one per server. #8570: each server's newest capture is one index probe per server,
+    /// not a grouping of every capture the store holds.
     /// </summary>
     public const string FleetFactsSql = @"
 WITH ids AS (SELECT unnest($1::integer[]) AS server_id),
@@ -255,18 +260,19 @@ role AS (
     JOIN ids ON ids.server_id = sp.server_id
     ORDER BY sp.server_id, sp.collection_time DESC),
 newest AS (
-    SELECT h.server_id, MAX(h.capture_time) AS capture_time
-    FROM v_query_store_health AS h
-    JOIN ids ON ids.server_id = h.server_id
-    GROUP BY h.server_id),
+    SELECT ids.server_id, nw.capture_time
+    FROM ids
+    CROSS JOIN LATERAL (
+        SELECT MAX(h.capture_time) AS capture_time FROM v_query_store_health AS h WHERE h.server_id = ids.server_id) AS nw),
 counts AS (
-    SELECT h.server_id,
-           COUNT(*) AS health_databases,
-           COUNT(*) FILTER (WHERE (h.readonly_reason & 8) <> 0) AS health_secondary_databases
-    FROM v_query_store_health AS h
-    JOIN newest AS n ON n.server_id = h.server_id AND n.capture_time = h.capture_time
-    WHERE h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'
-    GROUP BY h.server_id)
+    SELECT n.server_id, c.health_databases, c.health_secondary_databases
+    FROM newest AS n
+    CROSS JOIN LATERAL (
+        SELECT COUNT(*) AS health_databases,
+               COUNT(*) FILTER (WHERE (h.readonly_reason & 8) <> 0) AS health_secondary_databases
+        FROM v_query_store_health AS h
+        WHERE h.server_id = n.server_id AND h.capture_time = n.capture_time
+          AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF') AS c)
 SELECT ids.server_id,
        role.ag_replica_role,
        EXISTS (SELECT 1 FROM config.config_monitored_servers AS c WHERE c.server_id = ids.server_id AND NULLIF(btrim(c.query_store_replica), '') IS NOT NULL) AS replica_configured,
