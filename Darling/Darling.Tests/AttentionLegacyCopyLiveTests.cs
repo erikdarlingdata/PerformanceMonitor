@@ -257,7 +257,8 @@ public sealed class AttentionLegacyCopyLiveTests
             await RunRungAsync(c, ct);
             await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
             var during = JsonSerializer.Serialize(await adapter.GetAttentionWindowAsync("-8967", 10, ct));
-            Assert.NotEqual(before, during);
+            /* #9024: the window reads the legacy rows while they wait there, so the swap changes nothing the read sees. */
+            Assert.Equal(before, during);
 
             Assert.Equal(AttentionLegacyCopy.PassOutcome.Finished, await PassAsync(store, 3, null, ct));
             Assert.Equal(before, JsonSerializer.Serialize(await adapter.GetAttentionWindowAsync("-8967", 10, ct)));
