@@ -6609,6 +6609,233 @@ internal sealed class DarlingSelfAlertEvaluator
         return text.ToString();
     }
 
+    /* ---------------- store vacuum stalled (fleet-level, polled hourly, #8950) ---------------- */
+
+    /// <summary>The fixed key for the fleet-level Store Vacuum Stalled edge (not a real server); non-numeric so the deliverer's
+    /// #1236 int.TryParse override no-ops on it, like <see cref="AutovacuumKey"/>.</summary>
+    private const string VacuumStalledKey = "vacuum-stalled";
+
+    /// <summary>The alert metric name the Store Vacuum Stalled edge fires under (#8950). A WEBHOOK AUTOMATION KEY like its siblings
+    /// and keyed on by the triage map, so it is a const and must stay stable across releases. Its value is the count of store
+    /// tables behind on autovacuum or repeatedly cancelled (a count metric to <c>AlertMetricClassifier</c>).</summary>
+    internal const string VacuumStalledMetric = "Store Vacuum Stalled";
+
+    /// <summary>The resolution title the recovery edge records into <c>config_alert_log.metric_name</c>; the triage map aliases it back
+    /// to <see cref="VacuumStalledMetric"/>.</summary>
+    internal const string VacuumStalledResolvedMetric = "Store Vacuum Stalled Resolved";
+
+    /// <summary>How many hourly reads in a row must find a stalled table before the alert fires. A table that crossed its start point
+    /// minutes before a read counts as behind when its last vacuum is over a day old, and autovacuum usually reaches it well inside
+    /// the hour, so one read is not enough.</summary>
+    internal const int VacuumStalledReadsToFire = 2;
+
+    /// <summary>The Store Vacuum Stalled edge, in memory only like <see cref="_autovacuumBehindReads"/> and its siblings: a service
+    /// restart forgets them, so the first read after a restart counts as the first of two, and a standing alert that clears across a
+    /// restart records no resolution row.</summary>
+    private readonly ConcurrentDictionary<string, int> _vacuumStalledReads = new();
+    private readonly ConcurrentDictionary<string, bool> _activeVacuumStalled = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastVacuumStalledAlert = new();
+
+    /// <summary>What the last Store Vacuum Stalled alert reported: the tables behind and the tables repeatedly cancelled. The
+    /// worsening gate compares the next reading with it.</summary>
+    internal readonly record struct VacuumStalledMarker(int Behind, int Cancelled);
+
+    private readonly ConcurrentDictionary<string, VacuumStalledMarker> _lastAlertedVacuumStalled = new();
+
+    /// <summary>True when <paramref name="reading"/> is worse than what the last alert reported: more tables behind or more tables
+    /// repeatedly cancelled. True when nothing has been reported yet. The hours behind and the cancel counts grow on their own while
+    /// the condition stands, so they never count as worse.</summary>
+    internal static bool VacuumStalledWorsened(StoreVacuumStalledReading reading, VacuumStalledMarker? last) =>
+        last is not { } prior
+        || reading.TablesBehind > prior.Behind
+        || reading.TablesRepeatedlyCancelled > prior.Cancelled;
+
+    /// <summary>
+    /// The entry point the worker's hourly autovacuum check calls. Skips the read when the master alerts switch is off, reads the
+    /// store's autovacuum progress once (<see cref="DarlingStoreTableHealthReader.GetVacuumAsync"/>, bounded by the MCP read
+    /// deadline), and hands the reading to <see cref="ApplyVacuumStalledAsync"/>. A FAILED read changes no state: it neither counts
+    /// toward the two reads nor resolves a standing alert. Cancellation propagates.
+    /// </summary>
+    public async Task EvaluateVacuumStalledAsync(
+        NpgsqlDataSource postgres, bool managedStore, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        StoreVacuumStalledReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var asOf = _utcNow();
+            reading = StoreVacuumStalledReading.From(
+                await DarlingStoreTableHealthReader.GetVacuumAsync(postgres, asOf, cancellationToken), asOf);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogDebug(ex, "store vacuum stalled self-alert read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store vacuum stalled self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        try
+        {
+            await ApplyVacuumStalledAsync(reading, managedStore, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
+            _logger?.LogError(ex, "Store vacuum stalled self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level Store Vacuum Stalled condition (#8950) from one hourly reading. A reading with a stalled table
+    /// counts as one read toward <see cref="VacuumStalledReadsToFire"/>. The alert fires on the second such read in a row and re-fires
+    /// while the condition stands only when it is worse than what the last alert reported (<see cref="VacuumStalledWorsened"/>) and
+    /// the shared cooldown has run out. The first read that finds no stalled table clears the count and, when the alert had fired,
+    /// writes ONE "Store Vacuum Stalled Resolved" row. A null reading is a read that failed: nothing changes. Gated on the master
+    /// alerts switch. Internal so it pins directly with a recording deliverer and a controllable clock.
+    /// </summary>
+    internal async Task ApplyVacuumStalledAsync(
+        StoreVacuumStalledReading? reading, bool managedStore, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || reading is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (!reading.IsStalled)
+        {
+            _vacuumStalledReads.TryRemove(VacuumStalledKey, out _);
+            _lastAlertedVacuumStalled.TryRemove(VacuumStalledKey, out _);
+            if (_activeVacuumStalled.TryRemove(VacuumStalledKey, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(VacuumStalledKey), _storeLabel, VacuumStalledMetric,
+                    VacuumStalledResolvedMetric,
+                    string.Create(CultureInfo.InvariantCulture,
+                        $"No store table is behind on autovacuum or has had it cancelled {DarlingStoreTableHealthReader.RepeatedCancelMinimum} or more times in 24 hours any more")),
+                    cancellationToken);
+            }
+
+            return;
+        }
+
+        var reads = _vacuumStalledReads.AddOrUpdate(VacuumStalledKey, 1, static (_, n) => n < int.MaxValue ? n + 1 : n);
+        if (reads < VacuumStalledReadsToFire)
+        {
+            return;
+        }
+
+        _activeVacuumStalled[VacuumStalledKey] = true;
+        VacuumStalledMarker? lastReported =
+            _lastAlertedVacuumStalled.TryGetValue(VacuumStalledKey, out var marker) ? marker : null;
+        if (!VacuumStalledWorsened(reading, lastReported)
+            || !CooldownElapsed(_lastVacuumStalledAlert, VacuumStalledKey, now))
+        {
+            return;
+        }
+
+        _lastVacuumStalledAlert[VacuumStalledKey] = now;
+        _lastAlertedVacuumStalled[VacuumStalledKey] = new VacuumStalledMarker(reading.TablesBehind, reading.TablesRepeatedlyCancelled);
+        var delivery = await FireAsync(
+            StoreKey(VacuumStalledKey), _storeLabel, VacuumStalledMetric,
+            currentValue: reading.TablesStalled.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: BuildVacuumStalledDetail(reading, managedStore),
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: BuildVacuumStalledShortMessage(reading),
+            numericCurrentValue: reading.TablesStalled,
+            numericThresholdValue: 0,
+            cancellationToken);
+        if (AfterSelfFire(VacuumStalledMetric, _lastVacuumStalledAlert, VacuumStalledKey, now, SharedCooldown, delivery))
+        {
+            /* #4795, as on the autovacuum-behind edge: the marker moved before the send. Put it back so the retry still counts as worse. */
+            RestoreMarker(_lastAlertedVacuumStalled, VacuumStalledKey, lastReported);
+        }
+    }
+
+    private static string StalledTables(int count) =>
+        string.Create(CultureInfo.InvariantCulture, $"{count} {(count == 1 ? "table" : "tables")}");
+
+    private static string StalledTimes(long count) =>
+        string.Create(CultureInfo.InvariantCulture, $"{count} {(count == 1 ? "time" : "times")}");
+
+    /// <summary>"last vacuumed 31 h ago", or "with no vacuum on record" for a table with a part never vacuumed since the statistics began.
+    /// No hours for that one: the statistics can be older than the time they give (they survive a clean restart) and a part can be newer
+    /// (a chunk made since), so no figure is true of both.</summary>
+    private static string DescribeVacuumBehind(StoreVacuumStalledReading reading) =>
+        reading.WorstBehindNeverVacuumed
+            ? "with no vacuum on record"
+            : $"last vacuumed {StoreVacuumStalledReading.FormatHours(reading.WorstBehindHours ?? 0)} ago";
+
+    internal static string BuildVacuumStalledShortMessage(StoreVacuumStalledReading reading)
+    {
+        var text = new StringBuilder($"autovacuum is stalled on {StalledTables(reading.TablesStalled)}");
+        if (reading.TablesBehind > 0 && reading.WorstBehindTable is { } behind)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $", {reading.TablesBehind} behind (worst {behind}, {DescribeVacuumBehind(reading)})");
+        }
+
+        if (reading.TablesRepeatedlyCancelled > 0 && reading.WorstCancelledTable is { } cancelled)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $", {reading.TablesRepeatedlyCancelled} cancelled repeatedly (worst {cancelled}, {StalledTimes(reading.WorstCancels)} in 24 hours)");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>The alert text. No em dashes and no semicolons: it is public text.</summary>
+    internal static string BuildVacuumStalledDetail(StoreVacuumStalledReading reading, bool managedStore)
+    {
+        var text = new StringBuilder();
+        text.Append(CultureInfo.InvariantCulture,
+            $"Autovacuum is stalled on {StalledTables(reading.TablesStalled)} in the store on two hourly reads in a row. ");
+        if (reading.TablesBehind > 0 && reading.WorstBehindTable is { } behind)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"{StalledTables(reading.TablesBehind)} {(reading.TablesBehind == 1 ? "has" : "have")} dead or inserted rows past the point where autovacuum starts and no vacuum in 24 hours. ");
+            text.Append(CultureInfo.InvariantCulture, $"The worst is {behind}, {DescribeVacuumBehind(reading)}. ");
+        }
+
+        if (reading.TablesRepeatedlyCancelled > 0 && reading.WorstCancelledTable is { } cancelled)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"{StalledTables(reading.TablesRepeatedlyCancelled)} had autovacuum cancelled {DarlingStoreTableHealthReader.RepeatedCancelMinimum} or more times in 24 hours. ");
+            text.Append(CultureInfo.InvariantCulture, $"The worst is {cancelled}, cancelled {StalledTimes(reading.WorstCancels)}");
+            text.Append(reading.WorstLastCancel is DateTime last
+                ? string.Create(CultureInfo.InvariantCulture, $", last at {last:yyyy-MM-dd HH:mm} UTC. ")
+                : ". ");
+            text.Append("A cancelled autovacuum stops before it finishes the table, and the next one starts the table again. PostgreSQL cancels one when another session waits on a lock that conflicts with it, such as ALTER TABLE, TRUNCATE, DROP, LOCK TABLE or a TimescaleDB job that compresses or drops chunks. The store log has the lines around each cancel. ");
+        }
+
+        text.Append("Store Health in the Viewer and on the web page, and the get_store_table_health tool, list these tables first, with the store's autovacuum settings and write budget. ");
+        if (reading.TablesRepeatedlyCancelled > 0)
+        {
+            text.Append("Move the job that takes the lock away from the times autovacuum works on the table, or run VACUUM on the table after the job. ");
+        }
+
+        if (reading.TablesBehind > 0)
+        {
+            text.Append("When every autovacuum worker is busy, raise autovacuum_vacuum_cost_limit and autovacuum_max_workers, or run VACUUM on the table at a quiet hour. ");
+            text.Append("autovacuum_vacuum_cost_limit takes a reload, and autovacuum_max_workers takes a restart before PostgreSQL 18. ");
+            text.Append(managedStore
+                ? "On the managed store, set them with ALTER SYSTEM or add lines below the include line in postgresql.conf. The service does not manage these settings, so there is nothing for them in darling.json, and darling-managed.conf is rewritten on every start."
+                : "Change them on the store's PostgreSQL.");
+        }
+
+        return text.ToString().TrimEnd();
+    }
+
     /* ---------------- custom-alert-rule health (fleet-level, polled — #3304) ---------------- */
 
     /// <summary>

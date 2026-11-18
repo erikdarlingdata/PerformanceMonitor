@@ -258,6 +258,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgExtensionCensusGrid", "DatabasesCreated")] = "a count of databases the extension is created in",
         [("KnownPatternsWindow.xaml", "PatternsGrid", "CreatedBy")] = "the name of whoever created the entry, not when",
         [("StoreHealthTab.xaml", "TablesDataGrid", "Turnover")] = "rows deleted per day over live rows, a rate sorted by its number (TurnoverSort)",
+        [("StoreHealthTab.xaml", "TablesDataGrid", "PastTrigger")] = "a count of table parts past their vacuum start point, sorted by its number (PastTriggerSort)",
     };
 
     /// <summary>

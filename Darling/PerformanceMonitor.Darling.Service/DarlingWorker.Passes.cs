@@ -324,6 +324,12 @@ public sealed partial class DarlingWorker
             _nextAutovacuumCheckUtc = DateTime.UtcNow.Add(s_autovacuumCheckInterval);
             await _selfAlerts.EvaluateAutovacuumBehindAsync(
                 _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
+
+            /* #8950: on the same hourly cadence, store tables past their autovacuum start point with no vacuum in 24 hours, or with
+               autovacuum cancelled repeatedly. One catalog read plus one day of one store log class, bounded by the MCP read
+               deadline. Also two true reads in a row, failure-isolated and gated on the master switch inside. */
+            await _selfAlerts.EvaluateVacuumStalledAsync(
+                _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
         }
 
         /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a

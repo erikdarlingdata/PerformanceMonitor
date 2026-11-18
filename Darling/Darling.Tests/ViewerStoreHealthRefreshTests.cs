@@ -322,6 +322,87 @@ public sealed class ViewerStoreHealthRefreshTests
         });
     }
 
+    /// <summary>#8950: the autovacuum settings line under the header. The scripted settings read answers five minutes before the tables read,
+    /// so the strip gives the older of the two answers. A read past its limit leaves the line saying so and the tables still show, any other
+    /// failure says it failed, and with no settings read at all the line stays hidden.</summary>
+    [Fact]
+    public void TheAutovacuumSettingsLine_ShowsTheSettings_SaysWhenTheyWereLeftOut_AndStaysHiddenWithNoRead()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            await tab.RefreshAsync(force: true);
+            Assert.Equal(Visibility.Collapsed, tab.AutovacuumSettingsTextBlock.Visibility);
+            Assert.Equal("", tab.AutovacuumSettingsTextBlock.Text);
+
+            var settings = Settings(true, 3, 1, 60, -1, 200, 2, 0, -1, 65536, 20, 8192, 4, 1);
+            var settingsAt = reads.ReadAt.AddMinutes(-5);
+            var calls = new List<bool>();
+            Exception? failure = null;
+            tab.AutovacuumSettingsRead = fresh =>
+            {
+                calls.Add(fresh);
+                return failure is { } ex
+                    ? Task.FromException<StoreHealthRead<StoreAutovacuumSettings>>(ex)
+                    : Task.FromResult(new StoreHealthRead<StoreAutovacuumSettings>(settings, settingsAt));
+            };
+
+            await tab.RefreshAsync(force: true);
+            Assert.Equal([true], calls);
+            Assert.Equal(Visibility.Visible, tab.AutovacuumSettingsTextBlock.Visibility);
+            Assert.Equal(StoreHealthRows.AutovacuumSettingsText(settings), tab.AutovacuumSettingsTextBlock.Text);
+            Assert.EndsWith(
+                ", tables and indexes read " + ViewerTimeHelper.RefreshedStamp(settingsAt, ViewerTimeHelper.CurrentDisplayMode),
+                tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            failure = new StoreTableHealthTimeoutException(new TimeoutException());
+            await tab.RefreshAsync(force: true);
+            Assert.Equal(Visibility.Visible, tab.AutovacuumSettingsTextBlock.Visibility);
+            Assert.Equal("The autovacuum settings were left out. " + failure.Message, tab.AutovacuumSettingsTextBlock.Text);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.EndsWith(
+                ", tables and indexes read " + ViewerTimeHelper.RefreshedStamp(reads.ReadAt, ViewerTimeHelper.CurrentDisplayMode),
+                tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            failure = new InvalidOperationException("scripted settings failure");
+            await tab.RefreshAsync(force: true);
+            Assert.Equal("The autovacuum settings failed to load: scripted settings failure", tab.AutovacuumSettingsTextBlock.Text);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.Equal(3, calls.Count);
+        });
+    }
+
+    /// <summary>#8950: the grid keeps the reader's order, which puts the tables behind on autovacuum first, and flags them.</summary>
+    [Fact]
+    public void TheTablesBehindOnAutovacuum_ComeFirstInTheGrid_AndAreFlagged()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            tab.TablesRead = _ => Task.FromResult(new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>(
+                [
+                    TableRow("behind") with { Behind = true, BehindHours = 30, RelationsPastTrigger = 1 },
+                    TableRow("cancelled") with { AutovacuumCancels = 3 },
+                    TableRow("quiet"),
+                ],
+                reads.ReadAt));
+
+            await tab.RefreshAsync(force: true);
+
+            var rows = new List<StoreTableRow>();
+            foreach (var item in tab.TablesDataGrid.Items)
+            {
+                rows.Add((StoreTableRow)item);
+            }
+
+            Assert.Equal(["collect.behind", "collect.cancelled", "collect.quiet"], rows.ConvertAll(r => r.Table));
+            Assert.Equal("Behind on autovacuum", rows[0].Flag);
+            Assert.Equal("Behind, no vacuum in 30 h", rows[0].Behind);
+            Assert.Equal("Autovacuum cancelled repeatedly", rows[1].Flag);
+            Assert.Equal("No", rows[2].Behind);
+            Assert.Contains("1 table behind on autovacuum", tab.HeaderText.Text, StringComparison.Ordinal);
+            Assert.Contains("1 table with autovacuum cancelled 2 or more times in 24 hours", tab.HeaderText.Text, StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public void ASlowLoad_WritesASlowLoadLine_NamingTheThreeReads()
     {

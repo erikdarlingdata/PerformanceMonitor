@@ -104,7 +104,8 @@ public sealed partial class DarlingWorker : BackgroundService
        finish-to-start tick, so the delivered count sits just under that) at ~2.5 s each is ~11.9 min/day of
        this loop's wall time, of which the ~2% that crossed 5 s were the only part that logged anything. */
     private static readonly TimeSpan s_diskCheckInterval = TimeSpan.FromMinutes(5);
-    /// <summary>#7368: the Store Autovacuum Behind read runs hourly, and the alert needs it true twice in a row.</summary>
+    /// <summary>#7368: the Store Autovacuum Behind read runs hourly, and the alert needs it true twice in a row. The Store Vacuum
+    /// Stalled read (#8950) runs on the same stamp.</summary>
     private static readonly TimeSpan s_autovacuumCheckInterval = TimeSpan.FromHours(1);
 
     /* The custom-alert-rule health check's cadence (fleet-level, #3304). An integrity heuristic, not an urgent

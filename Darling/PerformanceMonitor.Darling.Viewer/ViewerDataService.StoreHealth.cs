@@ -39,10 +39,16 @@ public sealed record StoreIndexHealth(
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>One row per store table, rewrite candidates first (the reader's own order), with the time the store answered.</summary>
+    /// <summary>One row per store table, behind on autovacuum first (the reader's own order), with the time the store answered.</summary>
     public Task<StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>>> GetStoreTableHealthAsync(
         bool fresh = false, CancellationToken cancellationToken = default) =>
         DarlingStoreTableHealthCache.For(_dataSource).GetTablesAsync(_dataSource, fresh, cancellationToken);
+
+    /// <summary>The store's autovacuum settings, the workers running and the cancels the store log holds in the last day, held like the
+    /// tables read. A read past its limit throws <see cref="StoreTableHealthTimeoutException"/>.</summary>
+    public Task<StoreHealthRead<DarlingStoreTableHealthReader.StoreAutovacuumSettings>> GetStoreAutovacuumSettingsAsync(
+        bool fresh = false, CancellationToken cancellationToken = default) =>
+        DarlingStoreTableHealthCache.For(_dataSource).GetAutovacuumSettingsAsync(_dataSource, fresh, cancellationToken);
 
     /// <summary>One row per store index, and the leaf index coverage of each partitioned parent.</summary>
     public Task<StoreIndexHealth> GetStoreIndexHealthAsync(bool fresh = false, CancellationToken cancellationToken = default) =>
