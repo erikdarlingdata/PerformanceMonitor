@@ -679,7 +679,7 @@ WHERE server_id = $11 AND database_name = $12",
                 Assert.Equal(0, f.ErrorLogCheckDbErrors);
                 Assert.False(f.ReplicaReadable);
 
-                /* A row from before V275 has every new column NULL, and the fact keeps them null. */
+                /* A row from before V276 has every new column NULL, and the fact keeps them null. */
                 var old = facts["old_row"];
                 Assert.Null(old.ErrorLogState);
                 Assert.Null(old.ErrorLogCheckDbTime);

@@ -97,7 +97,7 @@ ORDER BY lower(database_name), database_name";
             DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
             bool? Flag(int i) => reader.IsDBNull(i) ? null : reader.GetBoolean(i);
             int? Count(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
-            /* #8865: the error log facts (V275), NULL on a row written before it. */
+            /* #8865: the error log facts (V276), NULL on a row written before it. */
             databases.Add(new DatabaseProtectionFact(
                 Text(1) ?? string.Empty, Text(2), Text(3), Time(4), Text(5), Text(6),
                 Time(7), Text(8), Time(9), Text(10), Time(11), Text(12),

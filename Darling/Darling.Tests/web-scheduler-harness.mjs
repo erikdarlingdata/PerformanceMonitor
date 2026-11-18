@@ -121,6 +121,8 @@ const sandbox = {
   alertBadge: () => null,
   initSidebarCollapse() {},
   initAccountMenu: async () => {},
+  getMe: async () => null,
+  renderMcpTokens: renderPage,
   initNavCollapse() {},
   initNarrowNav() {},
   initSidebarSearch() {},

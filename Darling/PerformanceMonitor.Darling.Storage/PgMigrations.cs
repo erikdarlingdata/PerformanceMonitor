@@ -3525,9 +3525,11 @@ $rung$;";
         new Migration(273, "wait-stats-hourly-rollup", V273Sql),
         /* V274 (#8978): the store's trigram text index options on the service row. Two catalog-only nullable boolean columns, no default. */
         new Migration(274, "trigram-index-store-options", V274Sql),
-        /* V275 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
+        /* V275 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
+        new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
+        /* V276 (#8865): ten raw-fact columns on collect.database_protection for the per-replica CHECKDB read from the SQL Server error log.
            Catalog-only ALTERs on a plain table, nothing is backfilled, so the upgrade stays fast. */
-        new Migration(275, "database-protection-error-log", V275Sql),
+        new Migration(276, "database-protection-error-log", V276Sql),
     };
 
     /// <summary>
@@ -3698,7 +3700,7 @@ CREATE TABLE IF NOT EXISTS collect.column_stats_state (
 );";
 
     /// <summary>
-    /// V275 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
+    /// V276 (#8865): the error-log facts on <c>collect.database_protection</c>, so CHECKDB can be judged per Availability Group replica from
     /// that replica's own SQL Server error log. <b>Raw facts only</b>: how the log read went (<c>errorlog_state</c>, message, the grant that
     /// would fix a refusal), whether the backfill reached the start of the retained logs, the archives skipped, the CHECKDB lines that
     /// did not parse (this cycle's count, or the newest count above zero carried over until a line parses), the newest completed CHECKDB
@@ -3709,7 +3711,7 @@ CREATE TABLE IF NOT EXISTS collect.column_stats_state (
     /// carries the columns from the collector's payload and these ALTERs no-op there) and an upgraded one share one physical column
     /// order. Every statement is idempotent.
     /// </summary>
-    private const string V275Sql = @"
+    private const string V276Sql = @"
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_state text;
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_message text;
 ALTER TABLE collect.database_protection ADD COLUMN IF NOT EXISTS errorlog_grant text;

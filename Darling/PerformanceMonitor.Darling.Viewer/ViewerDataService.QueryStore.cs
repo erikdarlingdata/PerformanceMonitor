@@ -430,7 +430,8 @@ public sealed partial class ViewerDataService
                 plan_id,
                 query_hash,
                 execution_type_desc,
-                replica_role
+                replica_role,
+                {{QueryStoreWeightedAverage.RankByDuration}} AS rank_cost
             FROM deduped
             WHERE rn = 1
             /*SELFKEY:deduped*/
@@ -627,7 +628,8 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the read start, $3 window end (NULL for an open end), $4 unused, $5 database filter, $6 the candidate limit.
     /// </summary>
     public static readonly string QueryStoreTopTableKeysSql = QueryStoreTopTablePrefix + QueryStoreTopTableKeysCte + "\n"
-        + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys";
+        + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys\n"
+        + "ORDER BY rank_cost DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
 
     /// <summary>
     /// #8549: the grid's table read with the kept keys bound as arrays (<c>unnest</c>), run in the same transaction as
@@ -783,6 +785,23 @@ public sealed partial class ViewerDataService
             _replicaRoles.Add(reader.IsDBNull(5) ? null : reader.GetString(5));
         }
 
+        /// <summary>How many keys are held.</summary>
+        internal int Count => _databaseNames.Count;
+
+        /// <summary>The first <paramref name="count"/> keys in the order they were added (rank order, from <see cref="QueryStoreTopTableKeysSql"/>).</summary>
+        internal TableReadKeys First(int count)
+        {
+            var first = new TableReadKeys();
+            var take = Math.Min(count, Count);
+            first._databaseNames.AddRange(_databaseNames.Take(take));
+            first._queryIds.AddRange(_queryIds.Take(take));
+            first._planIds.AddRange(_planIds.Take(take));
+            first._queryHashes.AddRange(_queryHashes.Take(take));
+            first._executionTypes.AddRange(_executionTypes.Take(take));
+            first._replicaRoles.AddRange(_replicaRoles.Take(take));
+            return first;
+        }
+
         /// <summary>Adds $6 to $11 of <see cref="QueryStoreTopTableByKeysSql"/>.</summary>
         internal void AddParameters(Npgsql.NpgsqlCommand command)
         {
@@ -884,13 +903,7 @@ public sealed partial class ViewerDataService
                ends with it. */
             await SetPerKeyFetchPlanAsync(connection, transaction, cancellationToken);
 
-            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
-            {
-                AddTableReadParameters(command, serverId, plan.ReadStart, literalEndUtc, top, databaseNames);
-                keys.AddParameters(command);
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
-            }
+            (rows, _) = await ReadTablePageByKeysAsync(connection, transaction, topSql, serverId, plan.ReadStart, literalEndUtc, top, databaseNames, keys, cancellationToken);
 
             return (rows, plan);
         }
@@ -901,6 +914,47 @@ public sealed partial class ViewerDataService
                time spent, because a read cancelled at the deadline never reaches the store's statement history and a Trace line has no listener. */
             LogTableReadFallback("Query Store grid", elapsed, "the interval-table read failed", ex);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// #8549: the grid's page, read from the rows of as few kept keys as it needs. The keys statement kept up to
+    /// <see cref="TopFill.FinalCandidates"/> keys, in rank order, and the page is the first <paramref name="top"/> of them that the text
+    /// trim keeps (the tail drops WAITFOR and the monitor's own statement). Fetching every kept key's rows read 250 keys' heap pages for a
+    /// page of 50: on a field store, 250 loops of about 13 rows, 25.3 K buffers, 8.6 s cold. The first round fetches the first
+    /// <see cref="TopFill.FirstCandidates"/> keys, and a round whose page is short and whose keys were all used fetches the next
+    /// <see cref="TopFill.NextCandidates"/> count, up to every kept key, so the page, its order and its rows are those of one fetch over
+    /// all the kept keys. The keys statement orders by the page's own sort (total duration), so a prefix of the keys holds the page's
+    /// first rows. The candidate count of the old fetch was never read by the grid, so none is returned.
+    /// Run inside the transaction that read <paramref name="keys"/>, after <see cref="SetPerKeyFetchPlanAsync"/>.
+    /// </summary>
+    /// <returns>The page's rows, and how many keys each round fetched.</returns>
+    internal static async Task<(List<ViewerQueryStoreRow> Rows, List<int> KeysPerRound)> ReadTablePageByKeysAsync(
+        Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction? transaction, string topSql, int serverId, DateTime readStart, DateTime? literalEndUtc,
+        int top, IReadOnlyList<string>? databaseNames, TableReadKeys keys, CancellationToken cancellationToken)
+    {
+        var keysPerRound = new List<int>();
+        var limit = TopFill.FirstCandidates(top);
+        for (var round = 1; ; round++)
+        {
+            var fetched = keys.First(limit);
+            keysPerRound.Add(fetched.Count);
+            List<ViewerQueryStoreRow> rows;
+            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
+            {
+                AddTableReadParameters(command, serverId, readStart, literalEndUtc, top, databaseNames);
+                fetched.AddParameters(command);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+            }
+
+            var next = TopFill.NextCandidates(top, round, limit, rows.Count, fetched.Count);
+            if (next is null)
+            {
+                return (rows, keysPerRound);
+            }
+
+            limit = next.Value;
         }
     }
 
@@ -939,12 +993,12 @@ public sealed partial class ViewerDataService
 
     /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
     /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
-    private const int QueryStorePageOrdinal = 53;
+    internal const int QueryStorePageOrdinal = 53;
 
     /// <summary>Shared by <see cref="GetQueryStoreTopQueriesAsync"/>'s raw and table paths: both
     /// <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project the same
     /// <see cref="QueryStoreTopSuffix"/> column list, in the same order.</summary>
-    private static ViewerQueryStoreRow ReadQueryStoreTopRow(System.Data.Common.DbDataReader reader) => new()
+    internal static ViewerQueryStoreRow ReadQueryStoreTopRow(System.Data.Common.DbDataReader reader) => new()
     {
         DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
         QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),

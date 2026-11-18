@@ -50,10 +50,29 @@ export function accountDetails(me) {
   return rows;
 }
 
+/** The links the popover offers besides its rows, as {text, href}. The personal-token page is offered only where the host serves it for this sign-in. */
+export function accountLinks(me) {
+  return me && me.personal_tokens === true ? [{ text: "My MCP tokens", href: "#/mcp-tokens" }] : [];
+}
+
+let meRead = null;
+
+/** The /api/me answer, read once and shared by the menu and the personal-token page; null when there is no data answer (and the next call asks again). */
+export function getMe() {
+  if (!meRead) {
+    meRead = apiGet("/api/me").then((res) => (res.kind === "data" && res.data && typeof res.data === "object" ? res.data : null));
+    meRead.then((me) => {
+      if (!me) meRead = null;
+    });
+  }
+  return meRead;
+}
+
 let panelCount = 0;
 
 /** One control: the button with the line, and (when open) the panel it discloses. Each mount gets its own, with its own open state
- *  and panel id. A disclosure, not a menu: the panel is information rows and at most one plain link. */
+ *  and panel id. A disclosure, not a menu: the panel is information rows and plain links (My MCP tokens when the host serves them, and
+ *  Sign out for a session that expires). */
 function buildControl(me) {
   const panelId = "account-panel-" + ++panelCount;
   const button = el("button", { class: "account-btn", type: "button", "aria-expanded": "false", "aria-controls": panelId }, [
@@ -85,7 +104,8 @@ function buildControl(me) {
     const rows = accountDetails(me).map(([label, value]) =>
       el("div", { class: "account-row" }, [el("span", { class: "account-label", text: label }), el("span", { class: "account-value", text: value })])
     );
-    popup = el("div", { id: panelId, class: "account-pop" }, signOut ? [...rows, signOut] : rows);
+    const links = accountLinks(me).map((l) => el("a", { class: "account-item", href: l.href, text: l.text, onClick: close }));
+    popup = el("div", { id: panelId, class: "account-pop" }, [...rows, ...links, signOut]);
     root.appendChild(popup);
     button.setAttribute("aria-expanded", "true");
     outside = (e) => {
@@ -116,11 +136,11 @@ function buildControl(me) {
  * width). Any answer but data leaves both hosts hidden: a page with no session answer shows no account line.
  */
 export async function initAccountMenu(brandHost, topbarHost) {
-  const res = await apiGet("/api/me");
-  if (res.kind !== "data" || !res.data || typeof res.data !== "object") return;
+  const me = await getMe();
+  if (!me) return;
   for (const host of [brandHost, topbarHost]) {
     if (!host) continue;
-    mount(host, buildControl(res.data));
+    mount(host, buildControl(me));
     host.hidden = false;
   }
 }

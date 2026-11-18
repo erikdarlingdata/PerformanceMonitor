@@ -233,8 +233,10 @@ module AS (
            the archive holds for the server (432,000 rows from one day of a 344-database server, 3.2 s of the read; it grows
            with the archive, not the window, so a month of history made this read take minutes). The page joins on
            sql_handle alone, so a handle outside the ranked groups was never used, and a handle inside them keeps the
-           same newest row. */
-        AND   sql_handle IN (SELECT sql_handle FROM ranked)
+           same newest row.
+           #8549: and only the groups with no host_object_name. QueryStatsRow.ModuleName shows the host when the group has one, so
+           nothing reads the stitch's answer for it. */
+        AND   sql_handle IN (SELECT sql_handle FROM ranked WHERE host_object_name IS NULL)
         GROUP BY sql_handle
     ) AS ranked_modules
 ),

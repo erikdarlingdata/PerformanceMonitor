@@ -2213,6 +2213,7 @@ public sealed partial class DarlingCollectorRunner
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
                 List<QueryStatsPlanKey>? pendingPlanKeys = null;
+                List<QueryStatsPlanShapeKey>? pendingShapeKeys = null;
                 List<QueryStatsPlanKey>? pendingTextKeys = null;
                 /* #7419: query_stats' read advanced every candidate's delta baselines. Until the rows reach the store, a run that
                    ends rolls them back, so the next run's delta covers both intervals. */
@@ -2394,7 +2395,7 @@ public sealed partial class DarlingCollectorRunner
                     if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
                     {
                         await reader.CloseAsync();
-                        pendingPlanKeys = await FetchDeferredQueryStatsPlansAsync(
+                        (pendingPlanKeys, pendingShapeKeys) = await FetchDeferredQueryStatsPlansAsync(
                             targetProvider, targetConnection, server, context, deferredRows, itemToken);
                     }
                     else if (context.PlanIdentityColumns && (object)rows is List<ProcedureStatsCollector.Row> identityRows)
@@ -2522,6 +2523,13 @@ public sealed partial class DarlingCollectorRunner
                         && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var planCache))
                     {
                         planCache.Settle(pendingPlanKeys, committed, DateTime.UtcNow);
+                    }
+
+                    /* #8994: the shapes this run stored settle with the identities. */
+                    if (pendingShapeKeys is not null
+                        && _queryStatsShapeCaches.TryGetValue(server.ServerId, out var shapeCache))
+                    {
+                        shapeCache.Settle(pendingShapeKeys, committed, DateTime.UtcNow);
                     }
 
                     /* #7419: the same rule for the texts this run read. */

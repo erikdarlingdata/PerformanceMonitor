@@ -278,6 +278,10 @@ public sealed partial class DarlingWorker
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #8737: mcp.personalTokens off, or the one warning for each reason it cannot be served as written. The result is read where the token
+           routes are built; here the start only names the reasons. */
+        DarlingPersonalTokenSettings.Resolve(config, _logger);
+
         /* #4220: web.publicBaseUrl shaped like it carries a credential (a query string, fragment, or
            userinfo — e.g. the dashboard's own sign-in link pasted in by mistake). Ruled: sending the link is
            the operator's call, not refused here; one warning at startup is the whole mitigation. */

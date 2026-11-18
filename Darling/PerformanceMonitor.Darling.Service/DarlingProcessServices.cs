@@ -49,6 +49,9 @@ internal static class DarlingProcessServices
     /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
     services.AddSingleton<StoreOwnerSource>();
 
+    /* #8737: every personal MCP token row, refreshed over the owner connection; the MCP bearer gate checks it. */
+    services.AddSingleton<DarlingPersonalTokenSnapshot>();
+
     /* #7041: the worker publishes its alert evaluator here for the MCP host's send_daily_health_report_now. */
     services.AddSingleton<DailyHealthReportHub>();
 

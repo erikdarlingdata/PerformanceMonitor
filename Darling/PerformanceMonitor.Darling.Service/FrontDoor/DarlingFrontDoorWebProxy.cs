@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Darling.Service.FrontDoor;
 /// after it has passed them, and a read-only role never gets a change through.
 ///
 /// <para><b>Routes.</b> <c>/api/ping</c>, <c>/api/session</c>, <c>/api/me</c>, <c>GET /api/front-door</c> and <c>GET /api/front-door/locate</c> are
-/// answered here. Every other <c>/api/*</c> call is forwarded to one store. <c>/auth/*</c> and the static pages are never forwarded.</para>
+/// answered here, and every <c>/api/mcp-tokens</c> path is answered with a 404 (#8737). Every other <c>/api/*</c> call is forwarded to one store. <c>/auth/*</c> and the static pages are never forwarded.</para>
 ///
 /// <para><b>Which store.</b> The <c>X-Darling-Store</c> header (a configured name, else 400), then <c>?server=</c> through the
 /// directory, then the only configured store. A name found in more than one store is refused with 409 and nothing is sent. A change
@@ -148,6 +148,15 @@ internal sealed class DarlingFrontDoorWebProxy
             return LocalGetAsync(context, LocateAsync);
         }
 
+        /* #8737: a personal MCP token belongs to a store's owner connection and a person's seat there, and a store would see only the front
+           door's shared-token session, so these paths are never sent on. This is a local answer, not a missing route: the catch-all below would
+           forward them. */
+        if (path.Equals(DarlingWebEndpoints.PersonalTokensRoute, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(DarlingWebEndpoints.PersonalTokensRoute + "/", StringComparison.OrdinalIgnoreCase))
+        {
+            return WriteJsonAsync(context, StatusCodes.Status404NotFound, new JsonObject { ["error"] = DarlingWebEndpoints.PersonalTokensUnavailableCode });
+        }
+
         /* The namespace is the front door's own: a name under it is never a store's route. */
         if (path.StartsWith("/api/front-door/", StringComparison.OrdinalIgnoreCase))
         {
@@ -226,7 +235,7 @@ internal sealed class DarlingFrontDoorWebProxy
 
     /// <summary>#8737: the calling session's own identity, from the seat the front door's gate gave this request. No store is asked.</summary>
     private Task MeAsync(HttpContext context) =>
-        WriteJsonAsync(context, StatusCodes.Status200OK, DarlingWebMe.Describe(DarlingWebSeat.FromContext(context), _oidcRoleMapping));
+        WriteJsonAsync(context, StatusCodes.Status200OK, DarlingWebMe.Describe(DarlingWebSeat.FromContext(context), _oidcRoleMapping, personalTokensServed: false));
 
     /// <summary>The store list with each store's health, and, where the store said so, its <c>admin_writes_off</c> and <c>managed_store</c>: the
     /// page takes both from the store in use, as it does from the store's own <c>/api/session</c> when it is not behind a front door, so a

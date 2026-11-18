@@ -187,7 +187,10 @@ internal sealed class QueryTagSightingBuffer
             /* One order for every flush (the seven-part identity), as Darling sorts its rows; Lite's single writer under the
                write lock cannot deadlock, the sort keeps the two stores alike. */
             /* A re-sighting moves last_seen at most once an hour, as Darling's writer does (#8716), to the flush clock less
-               ReSightingBackdate, behind the next extend's window: the count still adds up on every conflict. */
+               ReSightingBackdate, behind the next extend's window. A conflict writes only when that move is due (#8979): an update
+               in DuckDB is a delete and an insert, and a changed count alone made every re-sighted row pay it. Lite's upsert never
+               fills an object name or text sample on a conflict, so the move is the only reason to write. seen_count therefore
+               adds only on those writes and is a lower bound; nothing reads it. */
             /* last_seen is stamped HERE, at the write, from the C# UTC clock: the map pass captures its cursor clock from the
                same clock (DateTime.UtcNow, plain TIMESTAMP), so a new row, even one kept by an earlier timed-out flush, is
                never behind a cursor. */
@@ -211,7 +214,8 @@ FROM (SELECT UNNEST($1) AS sv, UNNEST($2) AS k, UNNEST($3) AS c_key, UNNEST($4) 
 ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_name, host_name) DO UPDATE SET
     seen_count = query_tag_sightings.seen_count + excluded.seen_count,
     last_seen = CASE WHEN query_tag_sightings.last_seen < excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) - INTERVAL 1 HOUR
-        THEN excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) ELSE query_tag_sightings.last_seen END";
+        THEN excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) ELSE query_tag_sightings.last_seen END
+    WHERE query_tag_sightings.last_seen < excluded.last_seen - to_seconds(CAST($13 AS BIGINT)) - INTERVAL 1 HOUR";
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.ServerId).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => KindText(e.Key.Kind)).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.Key).ToList() });

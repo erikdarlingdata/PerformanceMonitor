@@ -452,6 +452,7 @@ public sealed class DarlingWebNamedTokenTests
     [InlineData("/api/admin/servers/3")]
     [InlineData("/api/views")]
     [InlineData("/api/people")]
+    [InlineData("/api/mcp-tokens")]
     [InlineData("/api/read/get_alert_settings")]
     [InlineData("/api/read/get_known_patterns")]
     [InlineData("/api/ag")]
@@ -661,6 +662,8 @@ public sealed class DarlingWebNamedTokenTests
         // Admin: servers, people, agent changes
         { "POST", "/api/servers" }, { "PATCH", "/api/servers/3" }, { "PUT", "/api/servers/3/actions/kill_session" },
         { "PUT", "/api/people/add" }, { "PUT", "/api/agent-changes/switch" }, { "PUT", "/api/agent-changes/7/undo" },
+        // Personal MCP tokens: a token seat has no owner key, so the #8737 exception does not open for it
+        { "POST", "/api/mcp-tokens" }, { "POST", "/api/mcp-tokens/0123456789abcdef/revoke" },
         // Alerting: rules, settings, routes, mute rules, dismiss
         { "POST", "/api/alerts" }, { "PUT", "/api/alerts/3" }, { "DELETE", "/api/alerts/3" }, { "POST", "/api/alerts/validate" }, { "POST", "/api/alerts/test" },
         { "PUT", "/api/alert-settings/daily-report" }, { "PUT", "/api/alert-settings/database-protection" },
