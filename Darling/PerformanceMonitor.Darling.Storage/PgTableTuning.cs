@@ -723,9 +723,10 @@ public static class PgTableTuning
              at most every PayloadDimensions.LastSeenRefreshGuardHours, and retention deletes by last_seen. last_seen is
              indexed, so the refresh can never be HOT and fillfactor would not help; only the vacuum trigger matters. Its
              rows are far fewer than the plan dimension's, so the threshold is 1000 and not 10000.
-           - pg_statement_text: UPDATE-heavy without HOT. Every hourly refresh restamps last_seen on every statement still in
-             pg_stat_statements, and last_seen is indexed, so each refresh leaves the whole table dead; retention deletes the
-             rest. Autovacuum settings only, for the reason given for query_text_dim.
+           - pg_statement_text: DELETE-heavy, with a few updates. The hourly refresh writes a statement only when its text or
+             own-entry list changed or its last_seen is more than PayloadDimensions.LastSeenRefreshGuardHours behind (#8988), so
+             an unchanged statement is no longer rewritten each hour. last_seen is indexed twice, so the updates that remain can
+             never be HOT; retention deletes the rest. Autovacuum settings only, for the reason given for query_text_dim.
 
            Left alone on purpose: query_store_watermarks inserts one row per collection and retention deletes the oldest rows
            in key order, so whole pages empty out and VACUUM recycles them (its upsert updates an existing row only when a

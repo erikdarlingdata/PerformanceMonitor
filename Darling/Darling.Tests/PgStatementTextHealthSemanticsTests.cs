@@ -81,7 +81,7 @@ public sealed class PgStatementTextHealthSemanticsTests
         Assert.True(end > start);
         var body = source[start..end];
 
-        var upsertAt = body.IndexOf("upsert.ExecuteNonQueryAsync", StringComparison.Ordinal);
+        var upsertAt = body.IndexOf("PgStatementText.WriteFetchAsync", StringComparison.Ordinal);
         Assert.True(upsertAt > 0);
         var afterUpsert = body[upsertAt..];
         Assert.Contains("PgStatementText.CollectorName, \"SUCCESS\", queryIds.Count", afterUpsert, StringComparison.Ordinal);
