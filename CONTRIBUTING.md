@@ -267,6 +267,8 @@ until all four are there.
    previous one. Miss it and a fully-migrated store probes one rung short, so the connect-time gate refuses
    a store that is in fact current — permanently, because no later upgrade changes the answer.
 
+A PR that adds a table or a view to the `collect` schema also adds its row to `docs/darling/store-tables.csv`. The row says what the relation holds and whether a copy of the store needs it. `StoreTableInventoryLiveTests` builds a store and lists the relations in `collect`. It fails until the file matches.
+
 #### Rung numbering: `max(dev) + 1`, never pre-reserved
 
 The applier ascends and skips anything already stamped
