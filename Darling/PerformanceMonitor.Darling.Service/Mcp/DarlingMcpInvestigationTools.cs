@@ -793,6 +793,8 @@ public sealed partial class DarlingMcpInvestigationTools
         "THE WINDOW IS BOUNDED AT 100 REQUESTS, newest first: requests_returned is how many you got, truncated says the " +
         "window held more (the reports and journal are those of the returned requests only; narrow hours_back or pass " +
         "server_name or request_id), and journal_truncated says their journal held more than 200 rows. " +
+        "THE REPLY IS ALSO BOUNDED BY THE RESPONSE BYTE BUDGET: it keeps the newest requests that fit, each whole with its journal rows, report and feedback, " +
+        "and sets truncated, budget_truncated and a budget_note that says how many requests were left out and the narrower call that gets them. " +
         "Each report also carries the feedback people gave it (verdict right, partly or wrong, corrected_verdict, " +
         "missed_step, comment, author), and a window read returns family_counts: per alert family, reported, " +
         "with_feedback, marked_wrong, agent_false_positives (reports that say false_positive) and false_positives " +
@@ -809,13 +811,15 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("1-168. Default 24. Ignored with request_id.")] int hours_back = 24,
         CancellationToken cancellationToken = default) =>
         await ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken, readPolicy.HideLivePracticeAnswers,
-            await composer.KeyAsync(cancellationToken));
+            await composer.KeyAsync(cancellationToken), McpResponseBudget.DefaultBytes);
 
     /// <summary>The report read at <paramref name="mode"/>. The web panel passes <see cref="McpDataDetail.Full"/>: its role
-    /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1).</summary>
+    /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1). The MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/> as <paramref name="responseByteBudget"/> and keeps the newest requests that fit it
+    /// (#8983); the web panel passes none.</summary>
     internal static async Task<string> ReportsAsync(NpgsqlDataSource postgres, McpDataDetail mode, string? server_name,
         string? request_id, int hours_back, CancellationToken cancellationToken, bool hideLivePracticeAnswers = false,
-        PseudonymKey? key = null)
+        PseudonymKey? key = null, int? responseByteBudget = null)
     {
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
@@ -861,7 +865,7 @@ public sealed partial class DarlingMcpInvestigationTools
                     : InvestigationToolCore.Status("empty", $"No investigation request opened {McpHelpers.InTheLast($"{hours_back} hours")}.");
             }
 
-            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);
+            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key, responseByteBudget);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
