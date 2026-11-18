@@ -940,6 +940,9 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalGbBox.Text = r.DiskCriticalFreeGb.ToString(CultureInfo.InvariantCulture);
         AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
         AlertSelfDiskWarnGbBox.Text = r.SelfDiskFreeWarnGb.ToString(CultureInfo.InvariantCulture);
+        AlertSelfStoreGrowthCheckBox.IsChecked = r.SelfStoreGrowthEnabled;
+        AlertSelfStoreGrowthFloorGbBox.Text = r.SelfStoreGrowthFloorGb.ToString(CultureInfo.InvariantCulture);
+        AlertSelfStoreGrowthObjectFloorGbBox.Text = r.SelfStoreGrowthObjectFloorGb.ToString(CultureInfo.InvariantCulture);
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
@@ -1220,6 +1223,12 @@ public partial class SettingsWindow : Window
            writer accepts ([0, int.MaxValue]) — 0 is IN range because it removes the floor. */
         if (int.TryParse(AlertSelfDiskWarnGbBox.Text, out var selfDiskGb) && selfDiskGb >= 0)
             row.SelfDiskFreeWarnGb = selfDiskGb;
+        /* #9000: a floor of 0 is in range because it removes that floor. */
+        row.SelfStoreGrowthEnabled = AlertSelfStoreGrowthCheckBox.IsChecked == true;
+        if (int.TryParse(AlertSelfStoreGrowthFloorGbBox.Text, out var growthFloorGb) && growthFloorGb >= 0)
+            row.SelfStoreGrowthFloorGb = growthFloorGb;
+        if (int.TryParse(AlertSelfStoreGrowthObjectFloorGbBox.Text, out var growthObjectFloorGb) && growthObjectFloorGb >= 0)
+            row.SelfStoreGrowthObjectFloorGb = growthObjectFloorGb;
         if (int.TryParse(AlertCollectionStaleMinutesBox.Text, out var staleMin) && staleMin is >= 5 and <= 1440)
             row.CollectionStaleMinutes = staleMin;
         if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
@@ -1446,6 +1455,10 @@ public partial class SettingsWindow : Window
            constant lives on the Service assembly the viewer does not reference, and the V126 rung test
            pins this literal equal to it. */
         AlertSelfDiskWarnGbBox.Text = "50";
+        /* #9000: the V275 defaults. */
+        AlertSelfStoreGrowthCheckBox.IsChecked = true;
+        AlertSelfStoreGrowthFloorGbBox.Text = "5";
+        AlertSelfStoreGrowthObjectFloorGbBox.Text = "2";
         AlertCollectionStaleMinutesBox.Text = "30";
         AlertCollectionFailureThresholdBox.Text = "10";
         /* #3060: derived, unlike its neighbours, because this one is not merely a mirrored default — it is
@@ -1748,6 +1761,9 @@ public partial class SettingsWindow : Window
         AlertDiskCriticalGbBox.IsEnabled = enabled;
         AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
         AlertSelfDiskWarnGbBox.IsEnabled = enabled;
+        AlertSelfStoreGrowthCheckBox.IsEnabled = enabled;
+        AlertSelfStoreGrowthFloorGbBox.IsEnabled = enabled;
+        AlertSelfStoreGrowthObjectFloorGbBox.IsEnabled = enabled;
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;

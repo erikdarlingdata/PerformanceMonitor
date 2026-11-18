@@ -239,6 +239,12 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// a 4 TB store) stops paging CRITICAL. Zero removes the floor (the percent-only pre-#3528 condition);
     /// the 0-floor GB shape is <see cref="PvsFloorGb"/>'s, whose AND-qualifier composition this mirrors.</summary>
     public int SelfDiskFreeWarnGb => Math.Max(0, _config.Alerts.SelfDiskFreeWarnGb);
+
+    /// <summary>#9000: the Store Growth alert's switch and its two daily growth floors in GB, clamped on read like Store Disk Pressure's floor
+    /// (0 removes a floor).</summary>
+    public bool SelfStoreGrowthEnabled => _config.Alerts.SelfStoreGrowthEnabled;
+    public int SelfStoreGrowthFloorGb => Math.Max(0, _config.Alerts.SelfStoreGrowthFloorGb);
+    public int SelfStoreGrowthObjectFloorGb => Math.Max(0, _config.Alerts.SelfStoreGrowthObjectFloorGb);
     public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
 
     /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100].

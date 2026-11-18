@@ -646,6 +646,11 @@ public sealed partial class DarlingMcpAlertTools
                AND free space below this many GB (0 removes the floor), so a large store volume at a low
                percent stops paging CRITICAL. The pvs.floor_gb composition, not low_disk's OR pair. */
             disk_free_warn_gb = s.SelfDiskFreeWarnGb,
+            /* #9000 (V275): the Store Growth alert. It fires when the store or one object grew at least this many GB in the last 24 hours AND at
+               least 3 times its own typical day. A floor of 0 removes that floor. */
+            store_growth_enabled = s.SelfStoreGrowthEnabled,
+            store_growth_floor_gb = s.SelfStoreGrowthFloorGb,
+            store_growth_object_floor_gb = s.SelfStoreGrowthObjectFloorGb,
             collection_stale_minutes = s.CollectionStaleMinutes,
             collection_failure_threshold = s.CollectionFailureThreshold,
             /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
@@ -3864,6 +3869,10 @@ public sealed partial class DarlingMcpAlertTools
                             /* #3528: bound mirrors DarlingAlertSettings' Math.Max(0, ...) — 0 is IN range
                                because it removes the floor (the pvs.floor_gb reading), not nonsense. */
                             case "disk_free_warn_gb": AddInt("self_disk_free_warn_gb", n, "self_alerts.disk_free_warn_gb", 0, int.MaxValue); break;
+                            /* #9000: bounds mirror DarlingAlertSettings' Math.Max(0, ...), and 0 removes a floor. */
+                            case "store_growth_enabled": AddBool("self_store_growth_enabled", n, "self_alerts.store_growth_enabled"); break;
+                            case "store_growth_floor_gb": AddInt("self_store_growth_floor_gb", n, "self_alerts.store_growth_floor_gb", 0, int.MaxValue); break;
+                            case "store_growth_object_floor_gb": AddInt("self_store_growth_object_floor_gb", n, "self_alerts.store_growth_object_floor_gb", 0, int.MaxValue); break;
                             case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
                             case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
                             case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;

@@ -102,7 +102,7 @@ public sealed class ViewerSlowLoadPhasesTests
 
     [Theory]
     [InlineData("Overview", "CPU read,wait read,blocking read,deadlock read,memory read,file I/O read,CPU baseline read,wait baseline read,I/O baseline read,blocking baseline read")]
-    [InlineData("Queries", "query duration and execution count trend read,procedure duration trend read,Query Store duration trend read")]
+    [InlineData("Queries", "query duration trend read,procedure duration trend read,Query Store duration trend read,execution count trend read")]
     [InlineData("Daily Summary", "daily summary read")]
     [InlineData("Collection Health", "health summary read,collection log data start read,collection log read,duration trend read,caveats read")]
     [InlineData("File I/O", "latency trend read")]

@@ -1443,7 +1443,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #8882 (V270): deliberately NOT the shipped true. */
         TempDbGrowthFitEnabled: false,
         /* #8884 (V271): the Instance Restarted and Memory Dumps switches, shipped on. */
-        InstanceRestartedEnabled: true, MemoryDumpsEnabled: true);
+        InstanceRestartedEnabled: true, MemoryDumpsEnabled: true,
+        SelfStoreGrowthEnabled: true, SelfStoreGrowthFloorGb: 5, SelfStoreGrowthObjectFloorGb: 2);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

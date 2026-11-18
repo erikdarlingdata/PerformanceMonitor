@@ -160,32 +160,12 @@ public sealed partial class ViewerDataService
                over the table. The tie-break is the row collected last (the higher collection_id), the rule Lite's module lookup
                uses; the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before. Both
                columns of the time key are NOT NULL, so no NULL ordering applies.
-               idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it.
-               #8549: the answer is read only for a group with no host_object_name (ViewerQueryStatsRow.ModuleName shows the host when the
-               group has one, so nothing reads this answer for it). And once a collector names the host of every statement that has one,
-               the column is NULL only when dm_exec_sql_text.objectid is NULL, an ad hoc or prepared statement, which has no procedure_stats
-               row. A query_stats row of this server with a host_object_name in the hour before the window start proves the build collecting
-               then fills the column. Builds only move forward, so every row in the window came from such a build, a NULL host there is ad
-               hoc, and this lookup can only answer 'no module': it reads nothing. With no such row in that hour (a server with only ad hoc
-               statements, or a store whose column is newer than that) it reads as before. The probe reads query_stats, which every reader
-               can see; the schema version table is owner-only. Both times are naive UTC.
-               On a field store the two reads over procedure_stats were 10.15 s of an 11.35 s cold statement, to keep nothing for 25 ad hoc
-               handles. */
+               idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it. */
             WITH handles AS MATERIALIZED (
                 SELECT DISTINCT sql_handle
                 FROM ranked
                 WHERE sql_handle IS NOT NULL
                 AND   sql_handle <> ''
-                AND   host_object_name IS NULL
-                AND   NOT EXISTS
-                      (
-                          SELECT 1
-                          FROM query_stats AS q
-                          WHERE q.server_id = $1
-                          AND   q.collection_time >= $2 - interval '1 hour'
-                          AND   q.collection_time < $2
-                          AND   q.host_object_name IS NOT NULL
-                      )
             ),
             recent AS MATERIALIZED (
                 SELECT
@@ -194,7 +174,6 @@ public sealed partial class ViewerDataService
                 FROM procedure_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
-                AND   EXISTS (SELECT 1 FROM handles)
                 AND   sql_handle IN (SELECT sql_handle FROM handles)
                 GROUP BY sql_handle
             ),
@@ -587,25 +566,6 @@ public sealed partial class ViewerDataService
         return read;
     }
 
-    /// <summary>#8549: the tier the Top Queries grid reads for a window starting at <paramref name="startUtc"/>, as of
-    /// <paramref name="now"/>: Raw or Hourly (the Daily route is clamped to Hourly, as the MCP reader's twin does), decided over
-    /// the store's rollup availability and coverage. The grid and the slicer above it both ask here, so the strip never reads a
-    /// tier the grid below it did not.</summary>
-    internal async Task<(RollupAvailability Rollups, RollupCoverage Coverage, RetentionTier Tier)> ResolveQueryStatsTierAsync(
-        DateTime now, DateTime startUtc, CancellationToken cancellationToken)
-    {
-        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
-        var routedTier = RetentionTierRouter.Resolve(
-            now, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
-            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
-        if (routedTier == RetentionTier.Daily)
-        {
-            routedTier = RetentionTier.Hourly;
-        }
-
-        return (rollups, coverage, routedTier);
-    }
-
     private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedUntaggedAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
@@ -620,7 +580,14 @@ public sealed partial class ViewerDataService
             windowStartUtc: startUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
         var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
 
-        var (rollups, coverage, routedTier) = await ResolveQueryStatsTierAsync(now, startUtc, cancellationToken);
+        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var routedTier = RetentionTierRouter.Resolve(
+            now, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
+        if (routedTier == RetentionTier.Daily)
+        {
+            routedTier = RetentionTier.Hourly;
+        }
 
         var read = routedTier == RetentionTier.Hourly
             ? await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken)
@@ -1103,123 +1070,10 @@ public sealed partial class ViewerDataService
         ORDER BY bucket
         """;
 
-    /// <summary>
-    /// Query-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it.
-    ///
-    /// <para>#8549: the slicer reads the tier the grid below it reads (<see cref="ResolveQueryStatsTierAsync"/>). A window the grid
-    /// routes to the hourly rollup reads the io hourly rollup here too, when that rollup covers the window (<see cref="IoHourlyCoversWindow"/>):
-    /// it keeps every column the strip shows (query count, CPU, duration, reads, writes, physical reads). When it does not cover the
-    /// window, or the window holds no whole hour the rollup could answer, the strip keeps the raw read, never a blank column. The
-    /// hourly route buckets by the hour (60 minutes), even for a window of two hours or less, where <see cref="SlicerBuckets"/> says a minute:
-    /// a rollup has no finer grain.</para>
-    /// </summary>
+    /// <summary>Query-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it.</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
-    {
-        var (rollups, coverage, tier) = await ResolveQueryStatsTierAsync(DateTime.UtcNow, startUtc, cancellationToken);
-        if (tier == RetentionTier.Hourly
-            && IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.QueryStatsIoHourlyView, startUtc))
-        {
-            var fromClause = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsIoHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-            var ceiling = coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsIoHourlyView, startUtc);
-            if (SlicerWholeHours(startUtc, endUtc, ceiling) is { } whole)
-            {
-                return await ReadQueryStatsSlicerHourlyAsync(fromClause, serverId, startUtc, endUtc, whole, databaseNames, cancellationToken);
-            }
-        }
-
-        return await ReadQueryStatsSlicerAsync(QueryStatsSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
-    }
-
-    /// <summary>
-    /// #8549: the whole hours of [<paramref name="startUtc"/>, <paramref name="endUtc"/>] the hourly rollup can answer exactly:
-    /// from the first hour boundary at or after the start to the last boundary at or before the end, and no later than the
-    /// rollup's materialization <paramref name="ceiling"/> (an hour the rollup has not finished is read from raw). The partial hours
-    /// at either side are the strip's raw edges. Null when no whole hour is left, so the strip reads the window from raw.
-    /// </summary>
-    internal static (DateTime Start, DateTime End)? SlicerWholeHours(DateTime startUtc, DateTime endUtc, DateTime? ceiling)
-    {
-        var start = SlicerBuckets.Ceiling(startUtc, SlicerHourlyMinutes);
-        var end = SlicerBuckets.Floor(endUtc, SlicerHourlyMinutes);
-        if (ceiling is { } c && c < end)
-        {
-            end = c;
-        }
-
-        return end > start ? (start, end) : null;
-    }
-
-    /// <summary>The bucket width of the slicer on the hourly route: an hour, the rollup's own grain.</summary>
-    internal const int SlicerHourlyMinutes = 60;
-
-    /// <summary>
-    /// #8549: the slicer's hourly-route statement over <paramref name="fromClause"/> (the io hourly rollup, spliced through
-    /// <see cref="RollupCoverage.StitchedRelationSql"/>). Three parts, each row in exactly one: raw rows in the partial hour at the
-    /// window's start ([$2, $6)), rollup buckets in the whole hours ([$6, $7)), and raw rows from the last whole hour to the window's end
-    /// ([$7, $3], which also holds the hours past the rollup's ceiling). The raw parts keep the rollup's own row rule
-    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>) so a bucket reads the same whichever part it comes from. The columns are the
-    /// ones <see cref="QueryStatsSlicerSql"/> answers, in the same order. $1 server_id, $4 database names, $5 bucket minutes.
-    /// </summary>
-    internal static string BuildQueryStatsSlicerHourlySql(string fromClause) => $"""
-        WITH parts AS
-        (
-            SELECT
-                collection_time AS t, query_hash, delta_worker_time AS cpu, delta_elapsed_time AS elapsed,
-                delta_logical_reads AS reads, delta_logical_writes AS writes, delta_physical_reads AS physical
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time < $6
-            AND   sample_interval_seconds IS DISTINCT FROM 0
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            UNION ALL
-            SELECT
-                bucket, query_hash, worker_time_sum, elapsed_time_sum,
-                logical_reads_sum, logical_writes_sum, physical_reads_sum
-            FROM {fromClause}
-            WHERE server_id = $1
-            AND   bucket >= $6
-            AND   bucket < $7
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            UNION ALL
-            SELECT
-                collection_time, query_hash, delta_worker_time, delta_elapsed_time,
-                delta_logical_reads, delta_logical_writes, delta_physical_reads
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $7
-            AND   collection_time <= $3
-            AND   sample_interval_seconds IS DISTINCT FROM 0
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        )
-        SELECT
-            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', t, {TrendBucketSql.OriginSql}) AS bucket,
-            COUNT(DISTINCT query_hash) AS query_count,
-            COALESCE(SUM(cpu), 0) / 1000.0 AS total_cpu_ms,
-            COALESCE(SUM(elapsed), 0) / 1000.0 AS total_elapsed_ms,
-            COALESCE(SUM(reads), 0) AS total_reads,
-            COALESCE(SUM(writes), 0) AS total_writes,
-            COALESCE(SUM(physical), 0) AS total_physical_reads
-        FROM parts
-        GROUP BY 1
-        ORDER BY bucket
-        """;
-
-    /// <summary>#8549: <see cref="BuildQueryStatsSlicerHourlySql"/> read with the whole hours <paramref name="whole"/> and an hourly bucket.</summary>
-    internal async Task<List<TimeSliceBucket>> ReadQueryStatsSlicerHourlyAsync(
-        string fromClause, int serverId, DateTime startUtc, DateTime endUtc, (DateTime Start, DateTime End) whole,
-        IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
-    {
-        await using var command = _dataSource.CreateCommand(BuildQueryStatsSlicerHourlySql(fromClause));
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        AddServerWindowParameters(command, serverId, startUtc, endUtc);
-        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerHourlyMinutes });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(whole.Start, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(whole.End, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await ReadSlicerBucketsAsync(reader, cancellationToken);
-    }
+        => await ReadQueryStatsSlicerAsync(QueryStatsSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 
     /// <summary>
     /// Shared reader for the query-stats / procedure-stats / Query Store slicer buckets (same column shape:

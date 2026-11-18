@@ -519,30 +519,7 @@ public sealed partial class ViewerDataService
         => ReadRoutedDurationTrendAsync(
             QueryDurationTrendSql, QueryDurationTrendHourlySql, TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
             static rollups => rollups.QueryGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
-            coverIdleHours: false, executionRatePoints: null, cancellationToken);
-
-    /// <summary>
-    /// The query-stats duration trend and the execution-count trend from ONE statement (#8549): the duration
-    /// statement's <c>executions_per_second</c> column (ordinal 2 on both tiers) is the Executions chart's value, so
-    /// the Performance Trends tab draws both charts from one read of the window's <c>query_stats</c> rows (or of the
-    /// hourly rollup) where <see cref="GetQueryDurationTrendAsync"/> beside <see cref="GetExecutionCountTrendAsync"/>
-    /// reads them twice. The execution series is the one <see cref="GetExecutionCountTrendAsync"/> returns for the
-    /// same arguments: the raw statements share the per-collection CTE, the bucket expression, the window-level
-    /// database match, <c>first_collection_time</c> and <c>collection_count</c>, and the hourly route is the same
-    /// text, so each point sits at its duration point's instant with the rate as a double (not the truncated
-    /// <see cref="QueryTrendPoint.ExecutionCount"/>) and the series carries the duration series' tier and coverage.
-    /// </summary>
-    public async Task<(QueryTrendSeries Duration, QueryTrendSeries Executions)> GetQueryDurationAndExecutionCountTrendsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
-        DateTime? nowUtc = null, CancellationToken cancellationToken = default)
-    {
-        var executionRatePoints = new List<QueryTrendPoint>();
-        var duration = await ReadRoutedDurationTrendAsync(
-            QueryDurationTrendSql, QueryDurationTrendHourlySql, TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
-            static rollups => rollups.QueryGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
-            coverIdleHours: false, executionRatePoints, cancellationToken);
-        return (duration, duration with { Points = executionRatePoints });
-    }
+            coverIdleHours: false, cancellationToken);
 
     /// <summary>Procedure-stats duration trend over the window — the procedure twin of
     /// <see cref="GetQueryDurationTrendAsync"/>, routed the same way over <c>procedure_stats_hourly</c>.</summary>
@@ -552,7 +529,7 @@ public sealed partial class ViewerDataService
         => ReadRoutedDurationTrendAsync(
             ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView,
             static rollups => rollups.ProcedureGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
-            coverIdleHours: true, executionRatePoints: null, cancellationToken);
+            coverIdleHours: true, cancellationToken);
 
     /// <summary>
     /// The hourly-tier statement a routed trend runs (#3653 A6, #8821). The tier is decided over the LEGACY pair's
@@ -585,13 +562,11 @@ public sealed partial class ViewerDataService
     /// <para>#4234: the RAW arm is now BUCKETED (<see cref="ReadBucketedDurationTrendAsync"/>) — the hourly
     /// arm needs no further bucketing, because a window routed to it is already bounded to one row per hour.
     /// </para>
-    /// <para>#8549: <paramref name="executionRatePoints"/>, when given, receives the statement's
-    /// <c>executions_per_second</c> column as a series of its own, one point per served point, on either tier.</para>
     /// </summary>
     private async Task<QueryTrendSeries> ReadRoutedDurationTrendAsync(
         string rawSql, string hourlySql, string hourlyView, string dailyView, Func<RollupAvailability, bool> hourlyAvailable,
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime? nowUtc,
-        bool coverIdleHours, List<QueryTrendPoint>? executionRatePoints, CancellationToken cancellationToken)
+        bool coverIdleHours, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var tier = DurationTrendRouting.ResolveTier(
@@ -604,13 +579,13 @@ public sealed partial class ViewerDataService
         {
             (points, bucketMinutes, firstServedUtc) = await ReadBucketedDurationTrendAsync(
                 rawSql, serverId, startUtc, endUtc, databaseNames,
-                valueOrdinal: 1, executionsOrdinal: 2, firstCollectionTimeOrdinal: 4, collectionCountOrdinal: 6, executionRatePoints, cancellationToken);
+                valueOrdinal: 1, executionsOrdinal: 2, firstCollectionTimeOrdinal: 4, collectionCountOrdinal: 6, cancellationToken);
         }
         else
         {
-            points = await ReadTrendPointsAsync(
+            points = await ReadDurationTrendAsync(
                 HourlyTrendSqlFor(coverage, hourlyView, hourlySql, startUtc, coverIdleHours),
-                serverId, startUtc, endUtc, databaseNames, valueOrdinal: 1, executionsOrdinal: 2, executionRatePoints, cancellationToken);
+                serverId, startUtc, endUtc, databaseNames, cancellationToken);
             firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
@@ -803,7 +778,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     private Task<List<QueryTrendPoint>> ReadDurationTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
-        => ReadTrendPointsAsync(sql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 1, executionsOrdinal: 2, executionRatePoints: null, cancellationToken);
+        => ReadTrendPointsAsync(sql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 1, executionsOrdinal: 2, cancellationToken);
 
     /// <summary>
     /// The one loop every trend read here goes through. <paramref name="valueOrdinal"/> is the column plotted
@@ -811,12 +786,10 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryTrendPoint.ExecutionCount"/>, or null for a series that has none. The execution-count
     /// trend's hourly route reads the SAME rollup statement the duration trend does and plots its second
     /// column, which is why the ordinal is a parameter rather than a fourth SQL text.
-    /// <paramref name="executionRatePoints"/> (#8549), when given, receives that column as a series of its own:
-    /// one point per kept row, at the row's instant, with the rate as a double.
     /// </summary>
     private async Task<List<QueryTrendPoint>> ReadTrendPointsAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames,
-        int valueOrdinal, int? executionsOrdinal, List<QueryTrendPoint>? executionRatePoints, CancellationToken cancellationToken)
+        int valueOrdinal, int? executionsOrdinal, CancellationToken cancellationToken)
     {
         var items = new List<QueryTrendPoint>();
 
@@ -847,15 +820,6 @@ public sealed partial class ViewerDataService
                     ? (long)Convert.ToDouble(reader.GetValue(executions))
                     : 0,
             });
-
-            if (executionRatePoints is not null && executionsOrdinal is int rate && !reader.IsDBNull(rate))
-            {
-                executionRatePoints.Add(new QueryTrendPoint
-                {
-                    CollectionTime = reader.GetDateTime(0),
-                    Value = Convert.ToDouble(reader.GetValue(rate)),
-                });
-            }
         }
 
         return items;
@@ -873,20 +837,16 @@ public sealed partial class ViewerDataService
     /// == 1 throughout); a single merged bucket anywhere keeps <c>bucket_start</c> for every point, so the chart
     /// never mixes on-grid and off-grid timestamps in one series. A NULL value is a bucket with nothing rated
     /// (#3541 A12 at the bucket level) and is skipped, matching <see cref="ReadTrendPointsAsync"/>.
-    /// <paramref name="executionRatePoints"/> (#8549), when given, receives the <paramref name="executionsOrdinal"/>
-    /// column as a series of its own: one point per kept bucket, stamped by the same rule, with the rate as a double.
-    /// A bucket's two rates share one denominator (its rated seconds), so they are NULL together and the two series
-    /// keep the same buckets.
     /// </summary>
     private async Task<(List<QueryTrendPoint> Points, int BucketMinutes, DateTime? FirstServedUtc)> ReadBucketedDurationTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames,
         int valueOrdinal, int? executionsOrdinal, int firstCollectionTimeOrdinal, int collectionCountOrdinal,
-        List<QueryTrendPoint>? executionRatePoints, CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
-        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Value, double? ExecutionsPerSecond)>();
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Value, long ExecutionCount)>();
         var everyBucketSingleton = true;
 
         await using var command = _dataSource.CreateCommand(sql);
@@ -915,25 +875,19 @@ public sealed partial class ViewerDataService
                 reader.GetDateTime(firstCollectionTimeOrdinal),
                 Convert.ToDouble(reader.GetValue(valueOrdinal)),
                 executionsOrdinal is int executions && !reader.IsDBNull(executions)
-                    ? Convert.ToDouble(reader.GetValue(executions))
-                    : null));
+                    ? (long)Convert.ToDouble(reader.GetValue(executions))
+                    : 0));
         }
 
         var items = new List<QueryTrendPoint>(rows.Count);
         foreach (var row in rows)
         {
-            var pointTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart;
             items.Add(new QueryTrendPoint
             {
-                CollectionTime = pointTime,
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
                 Value = row.Value,
-                ExecutionCount = (long)(row.ExecutionsPerSecond ?? 0),
+                ExecutionCount = row.ExecutionCount,
             });
-
-            if (row.ExecutionsPerSecond is double rate)
-            {
-                executionRatePoints?.Add(new QueryTrendPoint { CollectionTime = pointTime, Value = rate });
-            }
         }
 
         return (items, everyBucketSingleton ? 0 : bucketMinutes, rows.Count > 0 ? rows[0].FirstCollectionTime : (DateTime?)null);
@@ -945,9 +899,7 @@ public sealed partial class ViewerDataService
     /// can serve; for an older window the SAME hourly statement the duration trend runs (the
     /// <see cref="QueryDurationTrendHourlySql"/> text over the same stitched relation, #8821), plotting its
     /// <c>executions_per_second</c> column — the two charts are one read's two columns drawn apart, and on the
-    /// hourly tier they literally are. This is the read for a caller that wants the execution series alone; the
-    /// Performance Trends tab draws both charts and takes the pair from
-    /// <see cref="GetQueryDurationAndExecutionCountTrendsAsync"/> (#8549), which returns this same series.
+    /// hourly tier they literally are.
     /// </summary>
     public async Task<QueryTrendSeries> GetExecutionCountTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
@@ -965,14 +917,14 @@ public sealed partial class ViewerDataService
         {
             (points, bucketMinutes, firstServedUtc) = await ReadBucketedDurationTrendAsync(
                 ExecutionCountTrendSql, serverId, startUtc, endUtc, databaseNames,
-                valueOrdinal: 1, executionsOrdinal: null, firstCollectionTimeOrdinal: 2, collectionCountOrdinal: 3, executionRatePoints: null, cancellationToken);
+                valueOrdinal: 1, executionsOrdinal: null, firstCollectionTimeOrdinal: 2, collectionCountOrdinal: 3, cancellationToken);
         }
         else
         {
             /* #8821: the same relation the Query Duration chart reads (the stitched legacy and successor hourly), not the frozen legacy view alone. */
             points = await ReadTrendPointsAsync(
                 HourlyTrendSqlFor(coverage, TimescaleSupport.QueryStatsHourlyView, QueryDurationTrendHourlySql, startUtc, coverIdleHours: false),
-                serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, executionRatePoints: null, cancellationToken);
+                serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, cancellationToken);
             firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
