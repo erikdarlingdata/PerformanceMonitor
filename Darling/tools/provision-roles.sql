@@ -1299,17 +1299,13 @@ REVOKE UPDATE (paused) ON config.config_service FROM mcp;
 -- #6393: update_service_flags runs as mcp and sets exactly these seven service flags (plan capture, Query Store backfill, text budget, max concurrent
 --    sweeps, fetch top N, and the two trigram text index options of #8978): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
 --    would lock the admin out; those stay Viewer-only). The write fires the config_service self-bump trigger (BEFORE UPDATE, it assigns NEW.config_version and NEW.updated_at), so it needs no further grant.
---    On a store the service has not upgraded to the trigram index option columns yet (V209 to V273) the five other flags are granted and the
---    two options are skipped with a warning; below V209 the whole grant is skipped with a warning. Re-run this script after the service has upgraded the store.
+--    Skipped, with a warning, on a store the service has not upgraded to the trigram index option columns yet (V274); re-run this script after it has.
 DO $do$
 BEGIN
    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_text_trigram_index_enabled') THEN
       GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled) ON config.config_service TO mcp;
-   ELSIF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_fetch_top_n') THEN
-      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) ON config.config_service TO mcp;
-      RAISE WARNING 'config.config_service has no query_store_text_trigram_index_enabled column yet: granted the five other mcp service flags and skipped the two trigram index options. Start the service once to migrate the store, then re-run this script.';
    ELSE
-      RAISE WARNING 'config.config_service has no query_store_fetch_top_n column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
+      RAISE WARNING 'config.config_service has no query_store_text_trigram_index_enabled column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
    END IF;
 END
 $do$;
