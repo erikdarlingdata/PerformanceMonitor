@@ -236,6 +236,20 @@ public sealed class DarlingWebHostService : BackgroundService
         await DarlingPersonalTokenSignIn.DrainPendingAsync(settings, _ownerSource, _personalSnapshot, _pendingPersonalRevokes, _logger, cancellationToken);
     }
 
+    /// <summary>
+    /// The personal-token work of one supervisor tick (#8737). The start sweep waits for the web listener; the drain of queued sign-in revokes
+    /// does not, since it needs only the owner connection and the snapshot, so a revoke still drains while the dashboard is off or failed to start.
+    /// </summary>
+    internal async Task RunPersonalTickAsync(PersonalTokenSettings? settings, bool webRunning, CancellationToken cancellationToken)
+    {
+        if (webRunning && !PersonalStartSweepDone)
+        {
+            await RunPersonalStartSweepAsync(settings, cancellationToken);
+        }
+
+        await DrainPersonalRevokesAsync(settings, cancellationToken);
+    }
+
     /// <summary>True once the start sweep of the personal-token settings has succeeded, or had nothing to do (#8737).</summary>
     internal bool PersonalStartSweepDone { get; private set; }
 
@@ -438,15 +452,7 @@ public sealed class DarlingWebHostService : BackgroundService
             if (_app is not null && _managedGroups is not null)
                 await _managedGroups.RefreshAsync(stoppingToken);
 
-            if (_app is not null && !PersonalStartSweepDone)
-            {
-                await RunPersonalStartSweepAsync(DarlingMcpHostService.PersonalTokensFor(config), stoppingToken);
-            }
-
-            if (_app is not null)
-            {
-                await DrainPersonalRevokesAsync(DarlingMcpHostService.PersonalTokensFor(config), stoppingToken);
-            }
+            await RunPersonalTickAsync(DarlingMcpHostService.PersonalTokensFor(config), _app is not null, stoppingToken);
 
             lastEnabled = toggle.Enabled;
 

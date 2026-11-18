@@ -17,7 +17,7 @@ internal enum PersonalTokenPendingAdd
     /// <summary>The owner had no entry; it was queued.</summary>
     Queued,
 
-    /// <summary>The owner already had an entry; the broader of the two stays.</summary>
+    /// <summary>The owner already had an entry; the broader of the two stays, and at equal breadth the later reason replaces the earlier.</summary>
     Merged,
 
     /// <summary>The queue is full and the entry was dropped; this is the first drop, so the caller says so.</summary>
@@ -29,7 +29,7 @@ internal enum PersonalTokenPendingAdd
 
 /// <summary>
 /// The revokes a sign-in could not make (#8737): no owner connection yet, or the store write threw. They live in memory only and are drained from
-/// the web supervisor tick, so a sign-in during a store outage keeps its session and the revoke lands within a tick of the store coming back. One
+/// the web supervisor tick, so a sign-in during a store outage keeps its session and the revoke lands on a later tick once the store answers. One
 /// entry per owner key; an entry leaves only after its revoke commits. A restart loses the queue.
 /// </summary>
 internal sealed class PersonalTokenPendingRevokes
@@ -58,15 +58,16 @@ internal sealed class PersonalTokenPendingRevokes
         }
     }
 
-    /// <summary>Queues the revoke. For an owner that already has one, the later entry wins when it is broader (all roles over operator-only), and
-    /// the reason comes from the winning entry; an equal or narrower later entry changes nothing.</summary>
+    /// <summary>Queues the revoke. For an owner that already has one, the later entry wins when it is as broad or broader (all roles over
+    /// operator-only), and the reason comes from the winning entry, so at equal breadth the journal matches the sign-in that is current; a
+    /// narrower later entry changes nothing.</summary>
     internal PersonalTokenPendingAdd Add(string ownerKey, bool operatorOnly, string reason)
     {
         lock (_gate)
         {
             if (_entries.TryGetValue(ownerKey, out var existing))
             {
-                if (existing.OperatorOnly && !operatorOnly)
+                if (existing.OperatorOnly || !operatorOnly)
                 {
                     _entries[ownerKey] = new Entry(ownerKey, operatorOnly, reason);
                 }

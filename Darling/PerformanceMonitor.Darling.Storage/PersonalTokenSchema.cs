@@ -101,14 +101,15 @@ ALTER TABLE config.mcp_personal_token ENABLE ALWAYS TRIGGER trg_mcp_personal_tok
     public static string ReassertPermissionsSql(string config, string admin, string viewer, string web, string mcp) =>
         RevokeFromEveryRoleSql(config, admin, viewer, web, mcp);
 
+    /// <summary>Doubles single quotes, for a value written into a SQL string literal.</summary>
+    private static string Lit(string value) => value.Replace("'", "''", System.StringComparison.Ordinal);
+
     /// <summary>
     /// Closes the table to every role but its owner, in the pattern of <c>config.harden_web_access_groups()</c>: custom default privileges can grant a
     /// new <c>config</c> table to roles beyond the product's four logins, so the roles to strip are PUBLIC, the four named ones and whatever
     /// <c>aclexplode</c> finds on the table or its columns. Used by the rung and by the managed-roles batch (and mirrored in
     /// <c>Darling/tools/provision-roles.sql</c>). Guarded on the table existing.
     /// </summary>
-    private static string Lit(string value) => value.Replace("'", "''", System.StringComparison.Ordinal);
-
     internal static string RevokeFromEveryRoleSql(string config, string admin, string viewer, string web, string mcp) => $"""
 DO $personal_token$
 DECLARE

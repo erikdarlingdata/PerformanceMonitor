@@ -276,16 +276,16 @@ public sealed class McpTokensWebTests
         Assert.Equal(new[] { "GET /api/mcp-tokens", "GET /api/mcp-tokens?all=1" }, urls);
     }
 
-    /// <summary>I2: a cut list says so above the table; a whole one says nothing.</summary>
+    /// <summary>I2: a cut list says so above the table, and that dead rows are left out before live ones; a whole one says nothing.</summary>
     [Fact]
-    public void EveryoneList_Truncated_SaysOnlyTheNewestAreShown()
+    public void EveryoneList_Truncated_SaysDeadRowsAreLeftOutFirst()
     {
         var cut = Run("render", Config(OidcAdmin, own: Listing(Row("a", "mine", "live")), all: Listing(Row("z", "theirs", "live", subject: "z@b.c"), truncated: true)));
         var whole = Run("render", Config(OidcAdmin, own: Listing(Row("a", "mine", "live")), all: Listing(Row("z", "theirs", "live", subject: "z@b.c"))));
 
-        Assert.Contains(cut.GetProperty("first").GetProperty("strips").EnumerateArray(), s => s.GetString()!.Contains("newest", StringComparison.Ordinal));
+        Assert.Contains(cut.GetProperty("first").GetProperty("strips").EnumerateArray(), s => s.GetString()!.Contains("left out first", StringComparison.Ordinal));
         Assert.Equal(2, cut.GetProperty("first").GetProperty("tables").GetArrayLength());
-        Assert.DoesNotContain(whole.GetProperty("first").GetProperty("strips").EnumerateArray(), s => s.GetString()!.Contains("newest", StringComparison.Ordinal));
+        Assert.DoesNotContain(whole.GetProperty("first").GetProperty("strips").EnumerateArray(), s => s.GetString()!.Contains("left out", StringComparison.Ordinal));
     }
 
     [Fact]

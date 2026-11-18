@@ -242,7 +242,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "PUT \"/api/servers/{id:int}/actions/{action}\""] = "write",
         [WebFile + "GET \"/api/people\""] = "definition read: the people with their sign-ins and grants, three small config tables (#7107)",
         [WebFile + "PUT \"/api/people/{command}\""] = "write",
-        [WebFile + "GET \"/api/mcp-tokens\""] = "definition read: the caller's personal MCP tokens, or every person's with ?all=1 (admin seat), one config table read on the owner connection, the newest 1,000 rows at most with a truncated flag (#8737)",
+        [WebFile + "GET \"/api/mcp-tokens\""] = "definition read: the caller's personal MCP tokens, or every person's with ?all=1 (admin seat), one config table read on the owner connection, 1,000 rows at most, live ones first, with a truncated flag (#8737)",
         [WebFile + "POST \"/api/mcp-tokens\""] = "write",
         [WebFile + "POST \"/api/mcp-tokens/{id}/revoke\""] = "write",
         [WebFile + "GET \"/api/proposals\""] = "definition read: the action proposals, one small config table capped at 200 rows, plus the request's server names (#7109)",
