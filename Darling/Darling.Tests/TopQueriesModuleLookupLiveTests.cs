@@ -81,7 +81,7 @@ public sealed class TopQueriesModuleLookupLiveTests
         )
         """;
 
-    /// <summary>The module CTE as it stood before the host and rung gates (#8549), comments cut: it read the stitch for every ranked handle. The oracle for what the grid shows.</summary>
+    /// <summary>The module CTE as it stood before the host and host-named-row gates (#8549), comments cut: it read the stitch for every ranked handle. The oracle for what the grid shows.</summary>
     private const string BeforeGatesModuleCte = """
         module AS MATERIALIZED (
             WITH handles AS MATERIALIZED (
@@ -274,13 +274,13 @@ public sealed class TopQueriesModuleLookupLiveTests
     }
 
     /// <summary>
-    /// #8549: the grid shows a group's host_object_name when it has one and the stitch's module only otherwise, and a window that starts at or after
-    /// the store applied the rung that added the column (V51) holds only rows written by a collector that fills it, so a NULL host there is ad hoc.
-    /// The lookup reads nothing for such a window, and only the NULL-host groups' handles for an earlier one. What the grid shows is the same as
+    /// #8549: the grid shows a group's host_object_name when it has one and the stitch's module only otherwise. A query_stats row of the server with a
+    /// host_object_name in the hour before the window start proves the build collecting then fills the column, so every NULL host in the window is
+    /// ad hoc and the lookup reads nothing. Without such a row it reads the NULL-host groups' handles only. What the grid shows is the same as
     /// the statement that read the stitch for every ranked handle.
     /// </summary>
     [Fact]
-    public async Task ModuleLookup_ReadsNoProcedureStatsForAdHocGroupsAfterTheHostRung_AndTheGridShowsTheSameModule()
+    public async Task ModuleLookup_ReadsNoProcedureStatsWithAHostNamedRowBeforeTheWindow_AndTheGridShowsTheSameModule()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -313,16 +313,23 @@ public sealed class TopQueriesModuleLookupLiveTests
         var before = Standalone(BeforeGatesModuleCte);
         var after = Standalone(ViewerDataService.TopQueriesModuleCte);
 
-        async Task SetRungAppliedAsync(DateTime? at)
+        /* The query_stats rows the lookup's probe reads: one per entry, collected at the given time for the given server, with or without a host. */
+        async Task SetQueryStatsAsync(params (DateTime At, int Server, string? Host)[] rows)
         {
-            if (at is null)
+            await ExecAsync(connection, "DELETE FROM query_stats", ct);
+            var i = 0;
+            foreach (var (at, server, host) in rows)
             {
-                await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version = 51", ct);
+                await ExecAsync(connection,
+                    @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                                               last_execution_time, creation_time, sample_interval_seconds, delta_execution_count, delta_worker_time, delta_elapsed_time,
+                                               delta_logical_reads, delta_rows, delta_logical_writes, delta_physical_reads, delta_spills, total_clr_time, plan_generation_num,
+                                               query_text, host_object_name)
+                      VALUES ($1, $2, $3, 'module-gate', 'db', '0xQ' || $1::text, '0xPLANHASH', '0xHQS' || $1::text, '0xPLANHANDLE', $2, $2, 60, 5, 1, 1, 10, 0, 0, 0, 0, 0, 1, 'SELECT 1', $4)",
+                    ct, (long)++i, at, server, host!);
             }
-            else
-            {
-                await ExecAsync(connection, "UPDATE darling_schema_version SET applied_at = $1 WHERE version = 51", ct, at.Value);
-            }
+
+            await ExecAsync(connection, "ANALYZE query_stats", ct);
         }
 
         /* What the grid shows for each ranked group: its host when it has one, else the stitch's module, else 'ad hoc' (ViewerQueryStatsRow.ModuleName). */
@@ -331,51 +338,59 @@ public sealed class TopQueriesModuleLookupLiveTests
                 ? "host " + g.Host
                 : modules.TryGetValue(g.Handle, out var m) ? $"{m.DatabaseName}.{m.SchemaName}.{m.ObjectName}" : "ad hoc").ToList();
 
-        /* Window start at or after the rung: ad hoc groups (handles with no procedure_stats row) and host-named groups, which is every group a
-           collector that fills host_object_name can produce. The statement before the gates read the history to prove the ad hoc handles absent. */
-        await SetRungAppliedAsync(WindowStart.AddHours(-2));
-        var postRung = new (string Handle, string? Host)[]
+        /* A host-named row of this server in the hour before the window start: ad hoc groups (handles with no procedure_stats row) and host-named
+           groups, which is every group a collector that fills host_object_name can produce. The statement before the gate read the history to
+           prove the ad hoc handles absent. */
+        await SetQueryStatsAsync((WindowStart.AddMinutes(-40), ServerId, "dbo.usp_collected"));
+        var withProof = new (string Handle, string? Host)[]
         {
             ("0xHADHOC1", null), ("0xHADHOC2", null), ("0xH1", "dbo.usp_1"), ("0xH2", "dbo.usp_2"), ("0xHOLDONLY", "dbo.usp_old_only"),
         };
-        var postHandles = postRung.Select(g => g.Handle).ToArray();
-        var postHosts = postRung.Select(g => g.Host).ToArray();
-        var postBeforeRows = await ReadModulesAsync(connection, before, postHandles, ct, postHosts);
-        var postAfterRows = await ReadModulesAsync(connection, after, postHandles, ct, postHosts);
-        Assert.NotEmpty(postBeforeRows);
-        Assert.Empty(postAfterRows);
-        Assert.Equal(Shown(postBeforeRows, postRung), Shown(postAfterRows, postRung));
-        var postBeforePlan = await ExplainAsync(connection, before, postHandles, ct, postHosts);
-        var postAfterPlan = await ExplainAsync(connection, after, postHandles, ct, postHosts);
-        Assert.True(ProcedureStatsRowsScanned(postBeforePlan) >= retained * 0.9,
-            $"the statement before the gates scanned {ProcedureStatsRowsScanned(postBeforePlan)} procedure_stats rows for {retained} retained; the seed no longer makes it read the history: {postBeforePlan.GetRawText()}");
-        Assert.True(ProcedureStatsRowsScanned(postAfterPlan) == 0,
-            $"a window after the rung still read {ProcedureStatsRowsScanned(postAfterPlan)} procedure_stats rows: {postAfterPlan.GetRawText()}");
+        var proofHandles = withProof.Select(g => g.Handle).ToArray();
+        var proofHosts = withProof.Select(g => g.Host).ToArray();
+        var proofBeforeRows = await ReadModulesAsync(connection, before, proofHandles, ct, proofHosts);
+        var proofAfterRows = await ReadModulesAsync(connection, after, proofHandles, ct, proofHosts);
+        Assert.NotEmpty(proofBeforeRows);
+        Assert.Empty(proofAfterRows);
+        Assert.Equal(Shown(proofBeforeRows, withProof), Shown(proofAfterRows, withProof));
+        var proofBeforePlan = await ExplainAsync(connection, before, proofHandles, ct, proofHosts);
+        var proofAfterPlan = await ExplainAsync(connection, after, proofHandles, ct, proofHosts);
+        Assert.True(ProcedureStatsRowsScanned(proofBeforePlan) >= retained * 0.9,
+            $"the statement before the gate scanned {ProcedureStatsRowsScanned(proofBeforePlan)} procedure_stats rows for {retained} retained; the seed no longer makes it read the history: {proofBeforePlan.GetRawText()}");
+        Assert.True(ProcedureStatsRowsScanned(proofAfterPlan) == 0,
+            $"a window with a host-named row before it still read {ProcedureStatsRowsScanned(proofAfterPlan)} procedure_stats rows: {proofAfterPlan.GetRawText()}");
 
-        /* Window start before the rung (the store was upgraded after these rows): groups with a NULL host still get their module, from the recent
-           rows (0xH5) and from the older history (0xHOLDONLY); an ad hoc group has none. The host-named group's handle (0xH1) is no longer read. */
-        await SetRungAppliedAsync(NewestRow);
-        var preRung = new (string Handle, string? Host)[]
+        /* No host-named row in the hour before: groups with a NULL host still get their module, from the recent rows (0xH5) and from the older
+           history (0xHOLDONLY), and an ad hoc group has none. The host-named group's handle (0xH1) is no longer read. Each of these stores has
+           query_stats rows that are NOT proof: none at all, a NULL-host row in the hour, a host-named row older than the hour or inside the
+           window, and a host-named row of another server in the hour. */
+        var noProof = new (string Handle, string? Host)[]
         {
             ("0xH5", null), ("0xHOLDONLY", null), ("0xHADHOC1", null), ("0xH1", "dbo.usp_1"),
         };
-        var preHandles = preRung.Select(g => g.Handle).ToArray();
-        var preHosts = preRung.Select(g => g.Host).ToArray();
-        var preBeforeRows = await ReadModulesAsync(connection, before, preHandles, ct, preHosts);
-        var preAfterRows = await ReadModulesAsync(connection, after, preHandles, ct, preHosts);
-        var preShown = Shown(preAfterRows, preRung);
-        Assert.Equal(Shown(preBeforeRows, preRung), preShown);
-        Assert.Equal(new[] { "db2.dbo.usp_5", "dbold.dbo.usp_old_only", "ad hoc", "host dbo.usp_1" }, preShown);
-        var preBeforePlan = await ExplainAsync(connection, before, preHandles, ct, preHosts);
-        var prePlan = await ExplainAsync(connection, after, preHandles, ct, preHosts);
-        Assert.True(ProcedureStatsRowsScanned(prePlan) > 0, "a window before the rung must read procedure_stats: " + prePlan.GetRawText());
-        Assert.True(HandleAggregateRows(prePlan).Sum() < HandleAggregateRows(preBeforePlan).Sum(),
-            $"the host-named group's handle should no longer be aggregated: {string.Join(", ", HandleAggregateRows(prePlan))} groups against {string.Join(", ", HandleAggregateRows(preBeforePlan))} before: {prePlan.GetRawText()}");
-
-        /* A store with no V51 stamp has no cut to trust: the lookup reads as before, even for a window after where the rung would have been. */
-        await SetRungAppliedAsync(null);
-        var noStampRows = await ReadModulesAsync(connection, after, preHandles, ct, preHosts);
-        Assert.Equal(preShown, Shown(noStampRows, preRung));
+        var noProofHandles = noProof.Select(g => g.Handle).ToArray();
+        var noProofHosts = noProof.Select(g => g.Host).ToArray();
+        foreach (var rows in new (DateTime At, int Server, string? Host)[][]
+        {
+            Array.Empty<(DateTime, int, string?)>(),
+            new[] { (WindowStart.AddMinutes(-40), ServerId, (string?)null) },
+            new[] { (WindowStart.AddMinutes(-61), ServerId, (string?)"dbo.usp_collected") },
+            new[] { (WindowStart.AddMinutes(1), ServerId, (string?)"dbo.usp_collected") },
+            new[] { (WindowStart.AddMinutes(-40), OtherServerId, (string?)"dbo.usp_collected") },
+        })
+        {
+            await SetQueryStatsAsync(rows);
+            var beforeRows = await ReadModulesAsync(connection, before, noProofHandles, ct, noProofHosts);
+            var afterRows = await ReadModulesAsync(connection, after, noProofHandles, ct, noProofHosts);
+            var shown = Shown(afterRows, noProof);
+            Assert.Equal(Shown(beforeRows, noProof), shown);
+            Assert.Equal(new[] { "db2.dbo.usp_5", "dbold.dbo.usp_old_only", "ad hoc", "host dbo.usp_1" }, shown);
+            var beforePlan = await ExplainAsync(connection, before, noProofHandles, ct, noProofHosts);
+            var plan = await ExplainAsync(connection, after, noProofHandles, ct, noProofHosts);
+            Assert.True(ProcedureStatsRowsScanned(plan) > 0, "a window with no host-named row before it must read procedure_stats: " + plan.GetRawText());
+            Assert.True(HandleAggregateRows(plan).Sum() < HandleAggregateRows(beforePlan).Sum(),
+                $"the host-named group's handle should no longer be aggregated: {string.Join(", ", HandleAggregateRows(plan))} groups against {string.Join(", ", HandleAggregateRows(beforePlan))} before: {plan.GetRawText()}");
+        }
     }
 
     private static string Standalone(string moduleCte) =>
