@@ -11,7 +11,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -63,26 +65,38 @@ public sealed class QueryStatsPlanShapeReuseTests
         public readonly HashSet<string> Digests = new(StringComparer.Ordinal);
     }
 
+    private readonly record struct Fetched(string? PlanXml, long? Bytes, bool Unjudged = false);
+
+    /// <summary>What the target returns for a fetched row: a plan with the row's own plan_handle in it, standing in for the
+    /// literals an ad hoc plan's XML carries, so two variants of one shape render two different plans (two digests).</summary>
+    private static Fetched Renders(QueryStatsCollector.Row row)
+    {
+        var xml = "<ShowPlanXML><StmtSimple StatementText=\"" + row.PlanHandle + "\" /></ShowPlanXML>";
+        return new Fetched(xml, xml.Length);
+    }
+
+    private static string DigestOf(string planXml) =>
+        Convert.ToHexString(PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(planXml)));
+
     /// <summary>
-    /// One run. The target renders each fetched plan with the row's own plan_handle in it, standing in for the literals
-    /// an ad hoc plan's XML carries, so two variants of one shape render two different plans (two digests). Returns how
+    /// One run, through the runner's own per-plan step (<see cref="DarlingCollectorRunner.ApplyFetchedDeferredPlan"/>), with
+    /// the target's answer for each fetched row given by <paramref name="target"/> (a rendered plan by default). Returns how
     /// many plans the run fetched.
     /// </summary>
-    private static int Run(Store store, List<QueryStatsCollector.Row> rows, DateTime now)
+    private static int Run(Store store, List<QueryStatsCollector.Row> rows, DateTime now, Func<QueryStatsCollector.Row, Fetched>? target = null)
     {
+        target ??= Renders;
         var misses = DarlingCollectorRunner.PartitionDeferredQueryStatsPlans(ServerId, rows, store.Identities, now, store.Shapes);
 
         var pending = new List<QueryStatsPlanKey>();
         var pendingShapes = new List<QueryStatsPlanShapeKey>();
-        var fetchedByShape = new Dictionary<QueryStatsPlanShapeKey, (string PlanXml, long? Bytes)>();
+        var fetchedByShape = new Dictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)>();
         foreach (var (key, row) in misses)
         {
-            row.QueryPlanXml = "<ShowPlanXML><StmtSimple StatementText=\"" + row.PlanHandle + "\" /></ShowPlanXML>";
-            row.QueryPlanXmlBytes = row.QueryPlanXml.Length;
-            var digest = "D" + row.PlanHandle;
-            store.Identities.AddPending(key, digest, row.QueryPlanXmlBytes, now);
-            pending.Add(key);
-            DarlingCollectorRunner.RecordFetchedShape(ServerId, row, digest, store.Shapes, pendingShapes, fetchedByShape, now);
+            var answer = target(row);
+            DarlingCollectorRunner.ApplyFetchedDeferredPlan(
+                ServerId, key, row, (answer.PlanXml, answer.Bytes), answer.Unjudged,
+                store.Identities, store.Shapes, pending, pendingShapes, fetchedByShape, now);
         }
 
         DarlingCollectorRunner.ShareFetchedPlansByShape(ServerId, rows, fetchedByShape);
@@ -90,7 +104,7 @@ public sealed class QueryStatsPlanShapeReuseTests
         /* What the batch stores: one dimension row per distinct plan text a row carries, and nothing for a known digest. */
         foreach (var row in rows.Where(r => r.QueryPlanXml is not null))
         {
-            store.Digests.Add("D" + row.QueryPlanXml);
+            store.Digests.Add(DigestOf(row.QueryPlanXml!));
         }
 
         store.Identities.Settle(pending, committed: true, now);
@@ -169,8 +183,8 @@ public sealed class QueryStatsPlanShapeReuseTests
         Run(store, new List<QueryStatsCollector.Row> { first }, Start);
 
         /* The store reported the digest absent (its dimension row aged out): the runner evicts it from both caches. */
-        store.Identities.Evict(new[] { "D" + first.PlanHandle });
-        store.Shapes.Evict(new[] { "D" + first.PlanHandle });
+        store.Identities.Evict(new[] { DigestOf(first.QueryPlanXml!) });
+        store.Shapes.Evict(new[] { DigestOf(first.QueryPlanXml!) });
 
         Assert.Equal(1, Run(store, new List<QueryStatsCollector.Row> { AdHoc(0) }, Start.AddMinutes(1)));
     }
@@ -186,7 +200,7 @@ public sealed class QueryStatsPlanShapeReuseTests
         row.QueryPlanXml = "<ShowPlanXML />";
         row.QueryPlanXmlBytes = 15;
         DarlingCollectorRunner.RecordFetchedShape(
-            ServerId, row, "D1", store.Shapes, pendingShapes, new Dictionary<QueryStatsPlanShapeKey, (string, long?)>(), Start);
+            ServerId, row, "D1", store.Shapes, pendingShapes, new Dictionary<QueryStatsPlanShapeKey, (string?, long?)>(), Start);
         store.Shapes.Settle(pendingShapes, committed: false, Start);
 
         Assert.Single(misses);
@@ -200,5 +214,88 @@ public sealed class QueryStatsPlanShapeReuseTests
         var rows = Enumerable.Range(0, 3).Select(_ => AdHoc(0, planHash: "0x0000000000000000")).ToList();
 
         Assert.Equal(3, Run(store, rows, Start));
+    }
+
+    /// <summary>Two runs of one shape: three variants, then two more a minute later. The first run's target answers
+    /// <paramref name="firstRun"/> for the picked row, the second run's answers <paramref name="secondRun"/> (a rendered
+    /// plan by default). Returns the rows of both runs, how many plans the second run fetched, and the cache sizes after the first run.</summary>
+    private (List<QueryStatsCollector.Row> First, List<QueryStatsCollector.Row> Second, int SecondFetched, int ShapesAfterFirst, int IdentitiesAfterFirst) TwoRuns(
+        Store store, Func<QueryStatsCollector.Row, Fetched> firstRun, Func<QueryStatsCollector.Row, Fetched>? secondRun = null)
+    {
+        var first = new List<QueryStatsCollector.Row> { AdHoc(0), AdHoc(0), AdHoc(0) };
+        Run(store, first, Start, firstRun);
+        var shapesAfterFirst = store.Shapes.Count;
+        var identitiesAfterFirst = store.Identities.Count;
+        var second = new List<QueryStatsCollector.Row> { AdHoc(0), AdHoc(0) };
+        var fetched = Run(store, second, Start.AddMinutes(1), secondRun);
+        return (first, second, fetched, shapesAfterFirst, identitiesAfterFirst);
+    }
+
+    [Fact]
+    public void APickedPlanThatAgedOut_LeavesTheShapeUncached_AndTheNextRunFetchesTheShapeAgain()
+    {
+        var store = new Store();
+        var (first, second, secondFetched, shapesAfterFirst, _) = TwoRuns(store, _ => new Fetched(null, null));
+
+        /* Nothing was fetched for the shape, so its rows ship with no plan, no size and no digest, this run only. */
+        Assert.All(first, r =>
+        {
+            Assert.Null(r.QueryPlanXml);
+            Assert.Null(r.KnownPlanDigest);
+            Assert.Null(r.QueryPlanXmlBytes);
+        });
+        Assert.Equal(0, shapesAfterFirst);
+        Assert.Equal(1, secondFetched);
+        Assert.NotNull(second[0].QueryPlanXml);
+        Assert.Equal(second[0].QueryPlanXml, second[1].QueryPlanXml);
+    }
+
+    [Fact]
+    public void APickedPlanOverTheCap_GivesTheShapesOtherRowsItsSize_AndLeavesTheShapeUncached()
+    {
+        var store = new Store();
+        var (first, _, secondFetched, shapesAfterFirst, _) = TwoRuns(store, _ => new Fetched(null, 9_999_999), _ => new Fetched(null, 8_888_888));
+
+        Assert.All(first, r =>
+        {
+            Assert.Null(r.QueryPlanXml);
+            Assert.Null(r.KnownPlanDigest);
+            Assert.Equal(9_999_999, r.QueryPlanXmlBytes);
+        });
+        Assert.Equal(0, shapesAfterFirst);
+        Assert.Equal(1, secondFetched);
+    }
+
+    [Fact]
+    public void APickedPlanTheFilterCouldNotJudge_LeavesNoShapeEntry_AndTheNextRunFetchesTheShapeAgain()
+    {
+        var store = new Store();
+        var (first, _, secondFetched, shapesAfterFirst, identitiesAfterFirst) = TwoRuns(store, _ => new Fetched(SensitiveStatements.PlaceholderText, 100, Unjudged: true));
+
+        Assert.Equal(SensitiveStatements.PlaceholderText, first[0].QueryPlanXml);
+        Assert.Null(first[1].QueryPlanXml);
+        Assert.Null(first[1].KnownPlanDigest);
+        Assert.Equal(0, shapesAfterFirst);
+        Assert.Equal(0, identitiesAfterFirst);
+        Assert.Equal(1, secondFetched);
+    }
+
+    [Fact]
+    public void APlanWithheldForItsOwnSake_KeepsItsIdentityMarker_ButNotTheShape_SoALaterCleanVariantIsStored()
+    {
+        var store = new Store();
+        var (first, second, secondFetched, shapesAfterFirst, identitiesAfterFirst) = TwoRuns(store, _ => new Fetched(SensitiveStatements.PlaceholderText, 100));
+
+        /* The marker stays in the identity cache, as before: the same plan_handle is not fetched again. */
+        Assert.Equal(SensitiveStatements.PlaceholderText, first[0].QueryPlanXml);
+        Assert.Equal(1, identitiesAfterFirst);
+        Assert.Equal(0, shapesAfterFirst);
+
+        /* The next variant judges cleanly: it is fetched, stored, and becomes the shape's plan. */
+        Assert.Equal(1, secondFetched);
+        Assert.NotNull(second[0].QueryPlanXml);
+        Assert.NotEqual(SensitiveStatements.PlaceholderText, second[0].QueryPlanXml);
+        Assert.Equal(second[0].QueryPlanXml, second[1].QueryPlanXml);
+        Assert.Equal(1, store.Shapes.Count);
     }
 }

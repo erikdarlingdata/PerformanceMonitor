@@ -187,7 +187,7 @@ public sealed class QueryStatsPlanShapeReuseLiveTests
 
                 var pending = new List<QueryStatsPlanKey>();
                 var pendingShapes = new List<QueryStatsPlanShapeKey>();
-                var fetchedByShape = new Dictionary<QueryStatsPlanShapeKey, (string PlanXml, long? Bytes)>();
+                var fetchedByShape = new Dictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)>();
                 foreach (var (key, row) in misses)
                 {
                     row.QueryPlanXml = PlanFor(row);
