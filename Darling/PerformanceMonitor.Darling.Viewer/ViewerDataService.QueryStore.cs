@@ -126,8 +126,8 @@ public sealed partial class ViewerDataService
     public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
 
     /// <summary>#7776: the collection_time bounds beside the interval-start window on the raw top read and the slicer. The floor is the
-    /// clock-skew slack below the window and the ceiling is a day of engine maximum interval plus collector-outage allowance above it
-    /// (see <see cref="QueryStoreSlicerSql"/>). The top read's inline-text fallback uses the ceiling too, so it reaches the fact rows.</summary>
+    /// clock-skew slack below the window and the ceiling is the longest a row's collection trails its interval's start
+    /// (<see cref="QueryStoreIntervalWide.CollectionCeiling"/>) above it (see <see cref="QueryStoreSlicerSql"/>). The top read's inline-text fallback uses the ceiling too, so it reaches the fact rows.</summary>
     private const string CollectionFloorSlackSql = QueryStoreIntervalWide.CollectionFloorSlackSql;
 
     /// <summary>The ceiling half of <see cref="CollectionFloorSlackSql"/>.</summary>
@@ -202,7 +202,7 @@ public sealed partial class ViewerDataService
            last interval, collected after its end, was missing. Legacy rows have no interval start and keep collection_time.
            The collection_time bounds below are chunk exclusion, not filters, with the slicer read's reasoning: the floor is implied
            by the predicate (an interval is collected after it starts; the hour is clock-skew slack) and the ceiling is the
-           slicer's 30 days (a day of engine maximum interval, the rest collector-outage allowance). They keep the
+           longest a row's collection trails its interval's start (QueryStoreIntervalWide.CollectionCeiling). They keep the
            (server_id, collection_time) index and the chunk pruning. */
         AND   COALESCE(interval_start_time_utc, collection_time) >= $2
         AND   COALESCE(interval_start_time_utc, collection_time) <= $3
@@ -1367,13 +1367,12 @@ public sealed partial class ViewerDataService
                the monitored server's interval clock and ours — an hour covers it, and the wider margin was
                only ever scanning extra chunks the floor already made redundant.
 
-               The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
-               collection_time exceeds its interval start by the interval's own length -- at most 1 day,
-               since Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus however
-               long the collector was behind, which nothing bounds. So 30 days is 1 day of engine maximum
-               and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
-               straddling an old window's edge could still omit that one bar; the data stays in the store,
-               and the alternative (no ceiling) makes every historical window scan to the present. */
+               The CEILING is the longest a row's collection_time can trail its interval's start
+               (QueryStoreIntervalWide.CollectionCeiling): the interval's own length -- at most 1 day, since
+               Query Store's INTERVAL_LENGTH_MINUTES accepts only 1/5/10/15/30/60/1440 -- plus the collector's
+               catch-up cap, which the live cutoff clamp and the backdated backfill slices both hold, plus an
+               hour of slack. So it drops no row the predicate keeps, and a historical window reads the chunks
+               collected within a day of it rather than every chunk through the present. */
             AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))

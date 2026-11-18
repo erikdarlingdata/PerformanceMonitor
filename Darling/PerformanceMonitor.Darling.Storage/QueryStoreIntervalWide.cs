@@ -877,10 +877,15 @@ SELECT EXISTS
     /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
     public const string CollectionFloorSlackSql = "interval '1 hour'";
 
-    /// <summary>The <c>collection_time</c> ceiling beside an interval-start-placed window (#7776, #7814): a day of engine-maximum interval
-    /// length plus collector-outage allowance above the window end. It is chunk exclusion, not a filter, and keeps a historical window from
-    /// scanning to the present.</summary>
-    public const string CollectionCeilingSql = "interval '30 days'";
+    /// <summary>The longest a raw row's <c>collection_time</c> can trail its interval's start: <see cref="QueryStoreCollectionCeiling.Span"/>,
+    /// which covers one interval (<see cref="IntervalSpanMargin"/>), the collector's catch-up cap and its replica look-back.</summary>
+    public static readonly TimeSpan CollectionCeiling = QueryStoreCollectionCeiling.Span;
+
+    /// <summary>The <c>collection_time</c> ceiling beside an interval-start-placed window (#7776, #7814): <see cref="CollectionCeiling"/>
+    /// above the window end, so it drops no row the window keeps. It is chunk exclusion, not a filter: a historical window reads the chunks
+    /// collected within about a day of it rather than every chunk through the present. Hours, because the same span in minutes could be the
+    /// text of <see cref="PurgeEdgeMarginSql"/>, which <see cref="WithEdgeMargin"/> rewrites.</summary>
+    public const string CollectionCeilingSql = "interval '" + QueryStoreCollectionCeiling.Hours + " hours'";
 
     /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
     /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is

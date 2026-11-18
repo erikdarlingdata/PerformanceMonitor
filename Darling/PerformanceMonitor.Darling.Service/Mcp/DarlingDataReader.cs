@@ -2820,7 +2820,8 @@ internal static class DarlingDataReader
                was returned with no bar, and the window's last interval, collected after its end, was missing. Legacy rows have no
                interval start and keep collection_time. The collection_time bounds below are chunk exclusion, not filters, as in the
                Viewer's read (#7776): the floor is implied by the predicate (an interval is collected after it starts; the hour is
-               clock-skew slack) and the ceiling is a day of engine-maximum interval plus collector-outage allowance. They keep
+               clock-skew slack) and the ceiling is the longest a row's collection trails its interval's start
+               (QueryStoreIntervalWide.CollectionCeiling). They keep
                idx_query_store_stats_time (server_id, collection_time) and the hypertable's chunk pruning; the start predicate is a
                residual filter on the rows they bring back. */
         {{QueryStoreTopRawWindowSql}}
