@@ -412,7 +412,7 @@ jobs:
   # skipped (no SQL Server on the runner) — expected. Gated like the build job so it only runs
   # when dev actually changed (or on manual dispatch).
   #
-  # #5616: six legs, the same shard cut build.yml's darling-pg job uses (run-darling-pg-shard.ps1), so the
+  # #5616: six legs, the same shard cut the pull request legs use (run-darling-pg-shard.ps1), so the
   # suite runs in about a sixth of the time and the publish job waits for the slowest leg, not the whole suite.
   # Every class still runs in exactly one leg (the Guard classes too: there is no Guard job here), and each leg
   # keeps this job's single cluster and env, so the test set is the one the unsharded step ran.
@@ -423,11 +423,11 @@ jobs:
     # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     runs-on: windows-latest
-    # Cold pg-runtime fetch + build + one shard of the live-PG suite. From numbers (#5616): build.yml's six legs
-    # ran this suite's shards in 5.5 to 10.9 minutes of test step and 7.0 to 12.8 minutes per job over the last
-    # 7 successful dev pushes; this job adds the upgrade-fixture build, so 40 minutes is over three times the
-    # slowest leg and still bounds a cluster that never comes up (pg_ctl -w).
-    timeout-minutes: 40
+    # Cold pg-runtime fetch + build + one shard of the live-PG suite. From numbers (#9015): the six legs ran the
+    # test step in 12.8 to 18.2 minutes (11-17) and 14.9 to 19.7 minutes (11-18, one leg cut off at its 22-minute
+    # step timeout), and the job ran 5.5 to 7.9 minutes longer than the step. 50 minutes is the 30-minute step
+    # plus that setup with 12 minutes to spare, and still bounds a cluster that never comes up (pg_ctl -w).
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -572,20 +572,20 @@ jobs:
       # managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset - the one live-SQL-Server E2E stays skipped
       # (no SQL Server on the runner).
       # #5616: this leg runs one shard of the suite. The cut, the chunking and the per-chunk runs are
-      # .github/scripts/run-darling-pg-shard.ps1, the ONE copy build.yml's darling-pg job calls too; the Guard filter
+      # .github/scripts/run-darling-pg-shard.ps1, the ONE copy the pull request legs call too; the Guard filter
       # is off here (no Guard job ran), so every class lands in exactly one leg, and no event is passed, so no
       # Cost=Slow class is left out. This step keeps only the env and the cluster above it.
       # #5587: the hang report build.yml's shards carry: `-longRunning 300` names a test that has run for 5 minutes,
       # and the runner output is teed to TestResults/darling-runner-<shard>.log and uploaded by the always() step
       # further down. The script's chunk loop fails the step when any chunk's runner fails.
-      # The step timeout is from numbers (#5616): build.yml's six legs ran this step for 5.5 to 10.9 minutes over the
-      # last 7 successful dev pushes (the job 7.0 to 12.8). The job's timeout is 40, and the job ran 1.5 to 2.0 minutes
-      # longer than the step there, plus this job's upgrade-fixture build, so 22 (the step timeout build.yml uses for
-      # the same step) leaves 18 minutes for the setup and the uploads. The slowest leg, 10.9 minutes, is 50% of 22,
-      # under the 70% bar. A job timeout would cancel the job and leave the uploads pending; a step timeout fails
-      # only this step.
+      # The step timeout is from numbers (#9015): the six legs ran this step for 12.8 to 18.2 minutes on 11-17 and 14.9
+      # to 19.7 minutes on 11-18 (the 11-18 leg that hit a 22-minute timeout had finished its first test host run in 18
+      # minutes). The weights table was rebuilt from five full runs, and the same table puts every leg at 17.4 to 18.0
+      # minutes, 19.1 for the slowest leg in any of those runs. 19.1 is 64% of 30, under the 70% bar (21 minutes). The
+      # job's timeout is 50: the job ran 5.5 to 7.9 minutes longer than the step. A job timeout would cancel the job and
+      # leave the uploads pending; a step timeout fails only this step.
       - name: Run Darling PG tests
-        timeout-minutes: 22
+        timeout-minutes: 30
         shell: pwsh
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
