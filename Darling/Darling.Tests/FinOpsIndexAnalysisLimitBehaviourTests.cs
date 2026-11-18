@@ -186,4 +186,18 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.NotEqual("—", collected);
         Assert.NotEmpty(collected);
     }
+
+    /* #8880: the roll-up grid draws a Heaps column after Unused, and a database's heaps count shows in it. */
+    [Fact]
+    public void TheRollupGrid_DrawsAHeapsColumnAfterUnused_WithTheDatabasesCount()
+    {
+        var tables = Run().GetProperty("sizes").GetProperty("tables").EnumerateArray().ToList();
+        var rollup = tables.Single(t => t.GetProperty("header").EnumerateArray().Any(h => h.GetString() == "Heaps"));
+        var header = rollup.GetProperty("header").EnumerateArray().Select(e => e.GetString()!).ToList();
+        var heaps = header.IndexOf("Heaps");
+        Assert.Equal("Unused", header[heaps - 1]);
+        var cells = rollup.GetProperty("rows").EnumerateArray().Select(r => r.EnumerateArray().Select(c => c.GetString()!).ToList())
+            .Where(r => r.Count == header.Count).Select(r => r[heaps]).ToList();
+        Assert.Contains("1,234", cells);
+    }
 }

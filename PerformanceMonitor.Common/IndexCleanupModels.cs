@@ -191,6 +191,32 @@ namespace PerformanceMonitor.Common
 
         /// <summary>High end of the general PAGE-compression savings band (sp_IndexCleanup: 0.60 × size).</summary>
         public decimal CompressionMaxSavingsFactor { get; init; } = 0.60m;
+
+        /// <summary>
+        /// #8880: also list large, busy heaps as <see cref="IndexCleanupRules.Heap"/> REVIEW rows. Off by default, so a caller
+        /// that does not ask for them gets exactly the sp_IndexCleanup reproduction; Darling's reader turns it on.
+        /// </summary>
+        public bool IncludeHeaps { get; init; }
+
+        /// <summary>#8880: a heap with at least this many rows (or at least <see cref="HeapMinSizeGb"/>) can be a finding.</summary>
+        public long HeapMinRows { get; init; } = 1_000_000;
+
+        /// <summary>#8880: a heap with at least this much reserved space in GB (or at least <see cref="HeapMinRows"/>) can be a finding.</summary>
+        public decimal HeapMinSizeGb { get; init; } = 1m;
+
+        /// <summary>
+        /// #8880: a heap needs at least this many reads (scans + RID lookups) since the server started to be a finding. Heaps nobody
+        /// reads, such as staging and load tables, are left alone. A short uptime can only keep a heap under this floor, never put one
+        /// over it, so the heap rule carries no uptime caveat and dedupe-only mode does not turn it off.
+        /// </summary>
+        public long HeapMinReads { get; init; } = 1_000;
+
+        /// <summary>
+        /// The server start time <see cref="ServerUptimeDays"/> was measured from, when the caller measured it. The heap finding's
+        /// note dates its counters from it, so the date and the uptime caveat never disagree. When null and
+        /// <see cref="ServerUptimeDays"/> is null too, both fall back to the newest <see cref="IndexCleanupIndexInput.SqlServerStartTime"/>.
+        /// </summary>
+        public DateTime? ServerStartTime { get; init; }
     }
 
     /// <summary>What to do with an index. Mirrors sp_IndexCleanup's <c>action</c> for the in-scope dedupe rules.</summary>
@@ -294,6 +320,12 @@ namespace PerformanceMonitor.Common
         /// collapses two or more identical unique constraints down to a single survivor.
         /// </summary>
         public const string UniqueConstraintReplacement = "Unique Constraint Replacement";
+
+        /// <summary>
+        /// #8880: a large, busy table with no clustered index. Not an sp_IndexCleanup rule: listed only when
+        /// <see cref="IndexCleanupOptions.IncludeHeaps"/> is on, as a REVIEW row with no script (choosing a clustering key needs a person).
+        /// </summary>
+        public const string Heap = "Heap";
     }
 
     /// <summary>
@@ -420,6 +452,12 @@ namespace PerformanceMonitor.Common
 
         /// <summary>Combined high-band reclaim (disabled full size + compression max).</summary>
         public decimal TotalMaxSavingsGb { get; init; }
+
+        /// <summary>
+        /// #8880: heaps listed as <see cref="IndexCleanupRules.Heap"/> findings. They are counted here only: a heap is not an analyzed
+        /// index, so it adds nothing to the table, index, size, row, reclaim or workload figures.
+        /// </summary>
+        public int Heaps { get; init; }
 
         /*
          * Workload-impact aggregates — straight SUMs over EVERY analyzed index in the scope (mirroring
