@@ -276,6 +276,17 @@ public sealed partial class DarlingWorker
            (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
         var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
+        /* #8967: the older attention rows. V277 swapped a populated plain collect.attention_events to collect.attention_events_legacy with a rename,
+           and this copies the rows still inside retention into the new table in short, paced batches, then drops the legacy table. It runs
+           whenever the legacy table exists, whatever the TimescaleDB mode, resumes at its last committed batch after a restart, never throws, and a
+           store with no legacy table finishes it at once. Drained with the other background work. */
+        var attentionLegacyCopy = AttentionLegacyCopy.RunDelayedAsync(
+            postgres, _logger, QueryStoreBackgroundIndexes.StartDelay,
+            () => DarlingRetention.EffectivePurgeRetentionDays(
+                "attention", StoreConfigProvider.ResolveFleetRetentionDays("attention", _scheduleOverrides)),
+            async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(postgres, _logger, token)),
+            stoppingToken);
+
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
            large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
@@ -2078,6 +2089,9 @@ public sealed partial class DarlingWorker
 
         /* And the self-statement key backfill (#6750), which absorbs its own failures. */
         await queryStoreSelfKeys;
+
+        /* And the attention legacy copy (#8967), which absorbs its own failures. */
+        await attentionLegacyCopy;
 
         /* And the trigram index pass (#7674): shutdown cancels a build in progress, and the next start drops its leftover. */
         await queryTextTrigramIndex;

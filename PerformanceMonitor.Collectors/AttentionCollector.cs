@@ -103,13 +103,14 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     public override string TargetTable => "attention_events";
 
     /// <summary>
-    /// A plain table on every store (#5640). The 73rd hypertable is a grid decision (#3035, #3044, #3107: the compression
-    /// band, the worker sizing and the refresh watch lines all derive from the hypertable count), and attention rows are
-    /// low volume: the ring buffer caps the detail at 1,000 events per read (its MAX_EVENTS_LIMIT default), and a healthy server reads near zero.
-    /// The 30-day retention is the time-sliced DELETE the sweep runs for any table that is not a hypertable. The only
-    /// holder of this opt-out; <c>AttentionPlainTableTests</c> pins it.
+    /// A hypertable on a TimescaleDB store with no compression policy (#8967). It was a plain table from #5640 on, with a 30-day
+    /// time-sliced DELETE, but the table holds about 0.7 GB a day on a busy store, so those deletes left dead space that only a
+    /// vacuum reclaims. As a hypertable, retention drops a whole day's chunk at once. The saving from compressing it is unmeasured,
+    /// and the 73rd compression slot is a grid decision (#3035, #3044, #3107: the compression band, the worker sizing and the
+    /// refresh watch lines all derive from the hypertable count), so it joins none of that: no policy, no phase slot, no worker,
+    /// and <c>HypertableCount</c> does not move. A store without TimescaleDB keeps a plain table and the DELETE.
     /// </summary>
-    public override bool StaysPlainTable => true;
+    public override bool CompressionDeferred => true;
 
     public override string PrefixIdColumnName => "attention_event_id";
 

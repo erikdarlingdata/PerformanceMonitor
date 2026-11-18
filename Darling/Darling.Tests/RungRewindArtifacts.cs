@@ -855,6 +855,10 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // (the probe's sentinel is the object floor one) and the re-run of V276 adds them back on their defaults. Safe on a store that never had them.
         new(276, "hasStoreGrowthAlertSettings",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS self_store_growth_enabled, DROP COLUMN IF EXISTS self_store_growth_floor_gb, DROP COLUMN IF EXISTS self_store_growth_object_floor_gb;"),
+        // V277 (#8967): the progress table of the attention_events copy, the probe's sentinel. The rewind drops it and the re-run of V277 makes it
+        // again. The swap itself (a populated plain table renamed to _legacy beside an empty one) is not undone here: V277's re-run does nothing
+        // once _legacy exists, and a rewound store keeps both tables, which an older build reads as just the new one. Safe on a store that never had it.
+        new(277, "hasAttentionLegacyCopy", @"DROP TABLE IF EXISTS collect.attention_events_legacy_copy;"),
     ];
 
     /// <summary>

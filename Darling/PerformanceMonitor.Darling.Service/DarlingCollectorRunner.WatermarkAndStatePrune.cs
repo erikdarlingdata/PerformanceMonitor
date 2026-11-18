@@ -614,62 +614,18 @@ RETURNING s.state_key";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-
-            /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
-               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first, then
-               (#5515) to WidenedWatermarkWindow, and falls back to the true unbounded read only on a second
-               miss, instead of skipping straight to it. */
-            var autoWindow = collectedSince is null;
-            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
-
-            var sql = BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: true);
-            using (var command = new NpgsqlCommand(sql, connection))
+            var primary = await ReadDatabaseWatermarkAsync(
+                connection, serverId, tableName, columnName, databaseColumnName, databaseName, collectedSince, cancellationToken);
+            if (!string.Equals(tableName, AttentionLegacyTableWatermark.TargetTable, StringComparison.Ordinal))
             {
-                /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
-                command.CommandTimeout = CommandTimeoutSeconds;
-                command.Parameters.AddWithValue(serverId);
-                command.Parameters.AddWithValue(databaseName);
-                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
-                   timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
-
-                var result = await command.ExecuteScalarAsync(cancellationToken);
-                if (result is DateTime dt)
-                {
-                    return (dt, true);
-                }
+                return (primary, true);
             }
 
-            if (autoWindow)
-            {
-                /* #5515: the same second rung as the server-scoped twin. A database whose newest row is days old
-                   (a quiet Azure database's last deadlock or blocked-process report) missed the 6 h probe on
-                   every cycle and paid the unbounded read each time, per database; the week answers it. */
-                using (var widened = new NpgsqlCommand(sql, connection))
-                {
-                    widened.CommandTimeout = CommandTimeoutSeconds;
-                    widened.Parameters.AddWithValue(serverId);
-                    widened.Parameters.AddWithValue(databaseName);
-                    widened.Parameters.AddWithValue(DateTime.SpecifyKind(
-                        DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
-                    var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
-                    if (widenedResult is DateTime widenedDt)
-                    {
-                        return (widenedDt, true);
-                    }
-                }
-
-                using var fallback = new NpgsqlCommand(
-                    BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
-                fallback.CommandTimeout = CommandTimeoutSeconds;
-                fallback.Parameters.AddWithValue(serverId);
-                fallback.Parameters.AddWithValue(databaseName);
-                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
-                if (fallbackResult is DateTime fallbackDt)
-                {
-                    return (fallbackDt, true);
-                }
-            }
+            /* #8967: the per-database twin of the server-scoped read. While the swapped-out attention table exists, the new table holds only
+               what was written since the swap, so the greater of the two tables' MAX for this server and database is the watermark. */
+            var legacy = await AttentionLegacyTableWatermark.ReadAsync(
+                connection, serverId, columnName, CommandTimeoutSeconds, cancellationToken, databaseColumnName, databaseName);
+            return (primary is { } p && legacy is { } l ? (p >= l ? p : l) : primary ?? legacy, true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -685,6 +641,72 @@ RETURNING s.state_key";
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
         return (null, !failed);
+    }
+
+    /// <summary>
+    /// The read behind <see cref="ReadLastCollectedTimeForDatabaseAsync"/> on one open connection: the bounded probe, the widened week,
+    /// then the unbounded MAX. Throws on a store fault; the caller owns the warning and the fallback window.
+    /// </summary>
+    private static async Task<DateTime?> ReadDatabaseWatermarkAsync(
+        NpgsqlConnection connection, int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime? collectedSince, CancellationToken cancellationToken)
+    {
+        /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
+           SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first, then
+           (#5515) to WidenedWatermarkWindow, and falls back to the true unbounded read only on a second
+           miss, instead of skipping straight to it. */
+        var autoWindow = collectedSince is null;
+        var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+        var sql = BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: true);
+        using (var command = new NpgsqlCommand(sql, connection))
+        {
+            /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(databaseName);
+            /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+               timestamptz and Postgres would convert it into the session zone on the way in. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            if (result is DateTime dt)
+            {
+                return dt;
+            }
+        }
+
+        if (autoWindow)
+        {
+            /* #5515: the same second rung as the server-scoped twin. A database whose newest row is days old
+               (a quiet Azure database's last deadlock or blocked-process report) missed the 6 h probe on
+               every cycle and paid the unbounded read each time, per database; the week answers it. */
+            using (var widened = new NpgsqlCommand(sql, connection))
+            {
+                widened.CommandTimeout = CommandTimeoutSeconds;
+                widened.Parameters.AddWithValue(serverId);
+                widened.Parameters.AddWithValue(databaseName);
+                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                if (widenedResult is DateTime widenedDt)
+                {
+                    return widenedDt;
+                }
+            }
+
+            using var fallback = new NpgsqlCommand(
+                BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
+            fallback.CommandTimeout = CommandTimeoutSeconds;
+            fallback.Parameters.AddWithValue(serverId);
+            fallback.Parameters.AddWithValue(databaseName);
+            var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+            if (fallbackResult is DateTime fallbackDt)
+            {
+                return fallbackDt;
+            }
+        }
+        return null;
     }
 
     /// <summary>True when the seed read is the Query Store one the per-batch side table (#5684) answers.</summary>

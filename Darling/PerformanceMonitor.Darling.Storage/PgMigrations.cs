@@ -3194,6 +3194,78 @@ $rung$;";
             .Replace("__TABLE__", table, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// V277 (#8967): <c>collect.attention_events</c> becomes a TimescaleDB hypertable on a store that has the extension and rows, by
+    /// SWAP, not by <c>migrate_data</c>. The table keeps about 0.7 GB a day for 30 days, and <c>create_hypertable(..., migrate_data =&gt; true)</c>
+    /// holds ACCESS EXCLUSIVE for the whole rewrite (past <see cref="MigrationCommandTimeoutSeconds"/> on a big store, which would fail
+    /// this startup-critical rung on every start). So the rung only renames, which is catalog-only: the populated plain table and its index
+    /// become <c>attention_events_legacy</c> and <c>idx_attention_events_time_legacy</c>, and an EMPTY <c>attention_events</c> with the same
+    /// columns and index takes its place. The start-path hypertable step (<c>TimescaleSupport.ConvertToHypertablesAsync</c>) turns that empty
+    /// table into a hypertable. Nothing copies the legacy rows in this rung. The text is on <see cref="AttentionSwapSql"/>, which that step
+    /// runs too, so a store that gains the extension later swaps the same way and never runs <c>migrate_data</c> on this table.
+    ///
+    /// <para>The rename runs only when the extension exists, the table is a plain table, no <c>_legacy</c> table exists and the table holds a
+    /// row. An empty table, a fresh store, a plain-PostgreSQL store, an already-converted table and a re-run all do nothing, so the rung is
+    /// idempotent. The lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, V171's.</para>
+    ///
+    /// <para>Always: <c>collect.attention_events_legacy_copy</c>, the progress row of the copy that moves the legacy rows into the new table.
+    /// It is the probe's sentinel (created last) and is created empty on every store. Nothing in this rung writes it. It is never dropped,
+    /// not even when the copy ends: the probe reads it, and a store whose copy is done must still read as this rung. The copy deletes its row.</para>
+    ///
+    /// <para>No GRANT: the new table is created by the migrating login, so the <c>collect</c> schema's default privileges give the read roles
+    /// SELECT at creation and the managed-roles sweep re-asserts it at every start, the way it covers every table a rung creates. The writer
+    /// owns the table. An older build ignores the legacy table, so the Viewer, the web pages and the tools show only the rows written since the
+    /// swap until the copy ends.</para>
+    /// </summary>
+    private static readonly string V277Sql = AttentionSwapSql((MigrationCommandTimeoutSeconds - 20) + "s") + @"
+
+CREATE TABLE IF NOT EXISTS collect.attention_events_legacy_copy (
+    next_page bigint NOT NULL,
+    last_page bigint NOT NULL,
+    cutoff timestamp NOT NULL
+);";
+
+    /// <summary>
+    /// The swap of <c>collect.attention_events</c> to a table a hypertable can replace (#8967), shared by V277 and
+    /// <c>TimescaleSupport.ConvertToHypertablesAsync</c>. Runs in a transaction, because the lock timeout is <c>SET LOCAL</c>. Catalog-only:
+    /// two renames, one CREATE TABLE ... LIKE and one CREATE INDEX on the new empty table. See <see cref="V277Sql"/> for when it does nothing.
+    /// The hypertable check goes through <c>EXECUTE</c> so <c>timescaledb_information</c> is parsed only on a store that has it.
+    /// </summary>
+    internal static string AttentionSwapSql(string lockTimeout) => "SET LOCAL lock_timeout = '" + lockTimeout + @"';
+DO $swap$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    IF to_regclass('timescaledb_information.hypertables') IS NULL
+       OR to_regclass('collect.attention_events') IS NULL
+       OR to_regclass('collect.attention_events_legacy') IS NOT NULL THEN
+        RETURN;
+    END IF;
+
+    IF (SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('collect.attention_events')) <> 'r' THEN
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''attention_events'')'
+    INTO v_hypertable;
+    IF v_hypertable THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM collect.attention_events LIMIT 1) THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE collect.attention_events RENAME TO attention_events_legacy;
+    IF to_regclass('collect.idx_attention_events_time') IS NOT NULL THEN
+        ALTER INDEX collect.idx_attention_events_time RENAME TO idx_attention_events_time_legacy;
+    END IF;
+
+    CREATE TABLE collect.attention_events (LIKE collect.attention_events_legacy INCLUDING DEFAULTS INCLUDING STORAGE);
+    CREATE INDEX idx_attention_events_time ON collect.attention_events(server_id, collection_time);
+END
+$swap$;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3529,6 +3601,8 @@ $rung$;";
         new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
         /* V276 (#9000): the Store Growth alert's switch and its two size floors on the alert settings. Three catalog-only columns with defaults, no backfill. */
         new Migration(276, "store-growth-alert-settings", V276Sql),
+        /* V277 (#8967): attention_events becomes a hypertable by swap: a catalog-only rename of the populated plain table to _legacy, an empty table in its place, and the copy-progress table. */
+        new Migration(277, "attention-events-hypertable-swap", V277Sql),
     };
 
     /// <summary>

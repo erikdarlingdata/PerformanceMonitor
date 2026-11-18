@@ -259,8 +259,9 @@ public sealed class AttentionWatermarkCacheLiveTests
             Assert.Equal(fresh.Watermarks, cached.Watermarks);
 
             /* The store is read when the cache is empty: the first run (an empty store, so the 6-hour probe, the week and the
-               unbounded MAX), the run after the failed write (one probe), and the first run after the restart. Never otherwise. */
-            Assert.Equal(new[] { 3, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0 }, cached.Reads);
+               unbounded MAX), the run after the failed write (one probe), and the first run after the restart. Never otherwise.
+               Each of those reads also asks once whether the swapped-out legacy table exists (#8967), and there is none here. */
+            Assert.Equal(new[] { 4, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0 }, cached.Reads);
             Assert.All(fresh.Reads.Skip(1), reads => Assert.True(reads >= 1));
 
             /* Each event is stored once: the tie rows are kept, the failed write's event comes back on the next run, and

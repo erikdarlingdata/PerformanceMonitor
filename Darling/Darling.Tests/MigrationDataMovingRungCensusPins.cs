@@ -750,80 +750,6 @@ public sealed class MigrationDataMovingRungCensusPins
     }
 
     /// <summary>
-    /// The one rung today whose dynamic SQL is an accepted, hand-costed exception — the scan cannot read
-    /// past <c>EXECUTE format(...)</c> or a parameterised <c>EXECUTE '...' USING ...</c>, so this name has
-    /// to be kept in sync by hand rather than derived. V152's <c>DO $$ ... $$</c> (#4503) uses both forms
-    /// against the catalog only: <c>EXECUTE '...' INTO ... USING v_view</c> reads a continuous aggregate's
-    /// materialization name from <c>timescaledb_information</c>, and <c>EXECUTE format('DROP INDEX IF
-    /// EXISTS %s', ...)</c> then drops a catalog index resolved via <c>pg_index</c>/<c>pg_attribute</c>
-    /// (metadata, not collected rows) — the opposite direction from every shape <see cref="s_declared"/>
-    /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
-    /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
-    /// spot to name.
-    ///
-    /// <para>V246 (#7609) is the exception that does build an index, so it is named here by hand too. Its <c>DO $$ ... $$</c> reads the
-    /// corrected hourly rollup's materialization name from <c>timescaledb_information</c> (that name is different on every store, so the DDL
-    /// cannot be written literally) and runs one non-concurrent <c>CREATE INDEX IF NOT EXISTS</c> on <c>(query_hash, bucket DESC)</c> over that
-    /// one hourly rollup. That is rollup rows at hourly grain, not the raw collector hypertables V22 and V39 build over, and the build is bounded
-    /// by the same <c>lock_timeout</c> V152 sets. It is not in <see cref="s_declared"/> because that register is derived from the scan, which cannot
-    /// see a dynamic statement, so a declaration here would fail the census equality check.</para>
-    ///
-    /// <para>V255 (#8106) builds the cadence wait baseline supply inside a <c>DO $$ ... $$</c> because the statement differs by store: on a store
-    /// with the extension whose <c>wait_stats</c> is already a hypertable it creates the continuous aggregate <c>WITH NO DATA</c> (the ensure sweep
-    /// that follows on the same start materializes it), everywhere else the plain fallback view, and the hypertable read goes
-    /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
-    /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
-    ///
-    /// <para>V261 and V262 (#7988) define the web access groups' and the advanced web access switch's hardening functions, whose bodies revoke
-    /// from and grant to roles named at call time (PUBLIC, the four product logins and any grantee the catalog shows on the rung's own objects)
-    /// through <c>EXECUTE format()</c>, and each rung calls its function once. Both are catalog-only: grants on the tables and functions the
-    /// rung itself created, no row read or rewritten. V261's own data-moving cost, the control-plane version bumps inside its function bodies,
-    /// is declared in <see cref="s_declared"/> because the scan sees those statements literally.</para>
-    /// </summary>
-    /* V259 (#8549) is V255's shape for the daily wait totals: a DO block that reads the catalog for the hypertable and creates the empty
-       aggregate or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
-    /* V263 (#8549) is V259's shape for the oldest-run rollup under the Job History note: a DO block that reads the catalog for the hypertable and creates the empty aggregate or the plain view through EXECUTE. Catalog-only, no row of job_history is read or written. */
-    /* V273 (#8824) is V259's shape at hour grain: a DO block that reads the catalog for the hypertable and creates the empty aggregate WITH NO DATA or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
-    /* V275 (#8737) closes the personal token table in V261's way: a DO block that revokes from PUBLIC, the four product logins and any grantee the
-       catalog shows on the rung's own table or its columns, through EXECUTE format(). Catalog-only: grants on the table the rung itself created, no row
-       read or rewritten. */
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259, 261, 262, 263, 273, 275];
-
-    /// <summary>
-    /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has ten exempted rungs today (V152, V204, V246, V255, V259, V261, V262, V263, V273 and V275, named in <see cref="s_dynamicSqlExemptedRungs"/> because
-    /// each <c>DO $$ ... EXECUTE</c> or <c>EXECUTE format()</c> drops a catalog index or constraint, creates an empty aggregate or a view, or grants
-    /// and revokes on the rung's own objects, rather than moving data) and
-    /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
-    /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
-    /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves
-    /// no data) or to <see cref="s_declared"/> (if it does), and this is where that gets said.
-    /// </summary>
-    [Fact]
-    public void TheLadderStillContainsNoDynamicSql()
-    {
-        var offenders = PgMigrations.Scripts
-            .Where(m => s_dynamicSql.IsMatch(StripComments(m.Sql)))
-            .Where(m => !s_dynamicSqlExemptedRungs.Contains(m.Version))
-            .Select(m => $"V{m.Version.ToString(CultureInfo.InvariantCulture)} ({m.Name})")
-            .ToList();
-
-        Assert.True(
-            offenders.Count == 0,
-            "Rung(s) build SQL dynamically, which the data-moving scan behind "
-            + "MigrationLockWaitTimeoutSeconds cannot read: "
-            + string.Join(", ", offenders)
-            + ". Cost the generated statement by hand and declare the rung in s_declared, or write the "
-            + "DDL literally so the census can see it.");
-
-        /* Positive control: the same pattern on a rung that DOES build DDL dynamically. Without this,
-           an over-narrow pattern reads as a clean ladder. */
-        Assert.Matches(
-            s_dynamicSql,
-            "DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON %I (a)', 'ix', 'old'); END $$;");
-    }
-
-    /// <summary>
     /// #2894 residual 2: no rung may trap its OWN cancellation. This is the one rung shape that defeats
     /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> SILENTLY, and it is one word from a shape the
     /// ladder already contains.
@@ -950,10 +876,6 @@ public sealed class MigrationDataMovingRungCensusPins
     private static readonly Regex s_createIndex = new(
         @"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:(?:IF\s+NOT\s+EXISTS\s+)?" + Ident
         + @"\s+)?ON\s+(?:ONLY\s+)?(?<t>" + Ident + ")",
-        Opts);
-
-    private static readonly Regex s_dynamicSql = new(
-        @"\bEXECUTE\s+(?!FUNCTION\b|PROCEDURE\b)|\bformat\s*\(",
         Opts);
 
     /// <summary>

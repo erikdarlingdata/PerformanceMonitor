@@ -7,6 +7,7 @@ analysis_collection_caveats,internal,no,caveats noted on analysis runs
 analysis_findings,internal,no,analysis findings
 analysis_state,internal,no,analysis progress
 attention_events,collected,yes,
+attention_events_legacy_copy,internal,no,progress of the one-time copy of the swapped-out table
 blocked_process_baseline,derived,derived,rollup view
 blocked_process_reports,collected,yes,
 collection_health_hourly,derived,derived,rollup view

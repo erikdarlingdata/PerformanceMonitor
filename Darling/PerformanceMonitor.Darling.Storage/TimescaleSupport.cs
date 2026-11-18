@@ -158,13 +158,21 @@ public static partial class TimescaleSupport
     private const int BackfillTimeoutSeconds = 6 * 60 * 60;
 
     /// <summary>
-    /// The tables converted to hypertables — the shared collector catalog less the entries that declare
-    /// <see cref="ICollectorSchemaInfo.StaysPlainTable"/> (the attention table, #5640: the 73rd hypertable is a
-    /// grid decision, and its rows are low volume). Pinned by test so scope can never silently widen to the
-    /// registry/config/analysis tables (see the class remarks for why those stay plain) nor silently narrow:
-    /// <c>AttentionPlainTableTests</c> lists the opt-outs.
+    /// The tables on the hypertable GRID — the shared collector catalog less the entries that declare
+    /// <see cref="ICollectorSchemaInfo.StaysPlainTable"/> (the small tables, #5640) and less the entries that declare
+    /// <see cref="ICollectorSchemaInfo.CompressionDeferred"/> (the attention table, #8967: a hypertable with no compression policy,
+    /// phase slot or worker). Compression, the phase order and the worker sizing read this list. Pinned by test so scope can never
+    /// silently widen to the registry/config/analysis tables (see the class remarks for why those stay plain) nor silently narrow:
+    /// <c>AttentionPlainTableTests</c> lists the opt-outs and the deferrals.
     /// </summary>
     public static IReadOnlyList<ICollectorSchemaInfo> HypertableTables { get; } =
+        CollectorCatalog.All.Where(c => !c.StaysPlainTable && !c.CompressionDeferred).ToArray();
+
+    /// <summary>
+    /// Every table <see cref="ConvertToHypertablesAsync"/> converts: <see cref="HypertableTables"/> plus the compression-deferred
+    /// ones (#8967), which are hypertables that carry no policy.
+    /// </summary>
+    public static IReadOnlyList<ICollectorSchemaInfo> ConvertedTables { get; } =
         CollectorCatalog.All.Where(c => !c.StaysPlainTable).ToArray();
 
     /// <summary>
@@ -172,7 +180,8 @@ public static partial class TimescaleSupport
     /// (<see cref="HypertableTables"/>) PLUS <c>collection_log</c>, which is a hypertable (converted by the
     /// V23 migration) but lives OUTSIDE the catalog. Worker sizing derives from THIS so it is not under-sized
     /// by one background-worker slot for collection_log's compression policy. The <c>+ 1</c> must move if
-    /// another non-catalog table is ever converted (pinned by test).
+    /// another non-catalog table is ever converted (pinned by test). A compression-deferred table (#8967) is
+    /// a hypertable too but has no policy job, so it adds no slot and is not counted here.
     /// </summary>
     public static int HypertableCount => HypertableTables.Count + 1;
 
@@ -13052,22 +13061,53 @@ LEFT JOIN LATERAL (
     }
 
     /// <summary>
-    /// Converts every collector table to a hypertable (<see cref="HypertableTables"/> scope;
+    /// Converts every collector table to a hypertable (<see cref="ConvertedTables"/> scope;
     /// <see cref="CreateHypertableSql"/> per table). Failure-isolated per table: one failed
     /// conversion warns and the sweep continues — that table stays a plain PG table, keeps
     /// working (COPY and DELETE-based retention are hypertable-agnostic), and is retried on the
     /// next service start. Returns the number of tables that converted (or no-op'd) cleanly.
     /// </summary>
-    public static async Task<int> ConvertToHypertablesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    public static Task<int> ConvertToHypertablesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
+        ConvertToHypertablesAsync(connection, logger, AttentionConversionMaxHeapBytes, cancellationToken);
+
+    /// <summary>
+    /// The largest heap <c>collect.attention_events</c> may have for the conversion to copy it (#8967). <c>create_hypertable</c> with
+    /// <c>migrate_data</c> holds an exclusive lock for the whole copy, so a table over this is left alone until the swap has given it
+    /// back empty. Internal so a test can lower it.
+    /// </summary>
+    internal const long AttentionConversionMaxHeapBytes = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// The conversion walk with the attention heap limit given. <c>attention_events</c> is converted when its own heap is under
+    /// <paramref name="attentionMaxHeapBytes"/>, and that is read from the table, not from what the swap did: a hypertable's parent has
+    /// no heap, a freshly swapped table is empty, and a populated plain table the swap could not move (a busy lock) is big. The hourly
+    /// pass runs this too, so a table the swap left behind is skipped each pass until the swap succeeds.
+    /// </summary>
+    internal static async Task<int> ConvertToHypertablesAsync(
+        NpgsqlConnection connection, ILogger? logger, long attentionMaxHeapBytes, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
+        /* #8967: a populated plain attention table is swapped for an empty one first (a catalog-only rename, behind a short lock
+           timeout), so the conversion below never runs migrate_data over a big table. A failed swap warns and the pass goes on. */
+        await SwapAttentionEventsAsync(connection, logger, cancellationToken);
+
         var converted = 0;
-        foreach (var schema in HypertableTables)
+        foreach (var schema in ConvertedTables)
         {
+            if (string.Equals(schema.TargetTable, "attention_events", StringComparison.Ordinal)
+                && await AttentionHeapBytesAsync(connection, cancellationToken) is { } heapBytes
+                && heapBytes >= attentionMaxHeapBytes)
+            {
+                logger?.LogWarning(
+                    "collect.attention_events is a plain table with {HeapMb} MB of data, so this pass does not convert it to a hypertable: the copy would hold an exclusive lock on it for its whole length. The next hourly pass tries again (#8967).",
+                    heapBytes / (1024 * 1024));
+                continue;
+            }
+
             try
             {
                 using var command = new NpgsqlCommand(CreateHypertableSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds };
@@ -13082,8 +13122,52 @@ LEFT JOIN LATERAL (
         }
 
         logger?.LogInformation("TimescaleDB: {Converted}/{Total} collector table(s) are hypertables",
-            converted, HypertableTables.Count);
+            converted, ConvertedTables.Count);
         return converted;
+    }
+
+    /// <summary>
+    /// The heap size of <c>collect.attention_events</c> in bytes, or null when the table does not exist or the read failed (the
+    /// conversion then tries as it always did). A hypertable's parent relation holds no rows, so it reads as 0.
+    /// </summary>
+    private static async Task<long?> AttentionHeapBytesAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand("SELECT pg_relation_size(to_regclass('collect.attention_events'))", connection) { CommandTimeout = SetupTimeoutSeconds };
+            return await command.ExecuteScalarAsync(cancellationToken) as long?;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>How long the runtime swap waits for its lock before it gives up (#8967). The rung waits longer, with the ladder's own budget.</summary>
+    internal const string AttentionSwapLockTimeout = "5s";
+
+    /// <summary>
+    /// Runs <see cref="PgMigrations.AttentionSwapSql"/> in its own transaction (#8967): on a store that has TimescaleDB and a populated plain
+    /// <c>collect.attention_events</c>, rename it to <c>_legacy</c> and put an empty table in its place for the conversion to make a hypertable.
+    /// Does nothing for an empty, fresh, plain-PostgreSQL, already converted or already swapped table. Failure-isolated: a busy lock or any
+    /// other fault warns, rolls back and leaves the table as it was. Whether the conversion that follows may copy the table is decided
+    /// from the table's size, not from this method.
+    /// </summary>
+    internal static async Task SwapAttentionEventsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(PgMigrations.AttentionSwapSql(AttentionSwapLockTimeout), connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "The attention_events swap did not run (#8967). The table stays as it was and the next hourly pass tries again: {Message}",
+                ex.Message);
+        }
     }
 
     /// <summary>
