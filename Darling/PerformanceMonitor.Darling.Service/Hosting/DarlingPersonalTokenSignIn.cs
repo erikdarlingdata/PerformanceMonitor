@@ -168,7 +168,11 @@ internal static class DarlingPersonalTokenSignIn
                 }
                 else
                 {
-                    /* Stop the pass: each further entry would pay the same connect timeout inside the supervisor loop. */
+                    /* Stop the pass, on purpose, for any store failure other than the missing table. An outage would cost every further entry the
+                       same connect timeout inside the supervisor loop, and a command failure that belongs to one entry (a lock timeout on that
+                       person's rows, say) is treated like an outage: the rest wait for the next tick, and the loop pays at most one command
+                       timeout per tick. No entry can fail forever: the owner key is a hash, the reason is a constant, and the journal payload has
+                       the shape that creating the token already wrote. */
                     logger.LogDebug(ex, "A queued MCP personal token revoke ({Reason}) is still pending; the pass stops and the next supervisor tick retries.", entry.Reason);
                     break;
                 }
