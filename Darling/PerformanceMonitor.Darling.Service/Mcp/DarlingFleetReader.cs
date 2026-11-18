@@ -728,100 +728,12 @@ AND   s.server_id <> 0";
     /// <see cref="FleetLastCollectionSql"/> gives, and one further one that is specific to this read: the
     /// rows there are NOT collector runs, so banding them through <c>CollectorHealth.HealthStatus</c> would
     /// apply a staleness ladder built for a per-server cadence to a fleet-wide maintenance pass that has
-    /// none.</para></summary>
-    public const string FleetCollectionHealthSql = $@"
-SELECT
-    server_id,
-    collector_name,
-    COUNT(*) AS total_runs,
-    -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
-    -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
-    -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
-    -- the shared predicate is for: NULL under this NOT would have dropped it.
-    SUM(CASE WHEN status = 'SUCCESS'
-              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-             THEN 1 ELSE 0 END) AS success_count,
-    SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-    MAX(collection_time) AS last_run_time,
-    -- #2804: the fleet rollup bands through the SAME CollectorHealth.HealthStatus as the per-server
-    -- grid, so it has to feed the classifier the same inputs. Left unselected, AbandonedCount would
-    -- default to 0 here and this count alone would keep calling a partially-abandoning collector
-    -- HEALTHY while every other surface called it WARNING -- and it would COMPILE, because the
-    -- default is silent. That is the #2779/#2784 failure shape: one surface fixed, its sibling
-    -- quietly left on the old reading.
-    --
-    -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
-    -- window can still hold cycles written before #2803 gave abandonment its own status:
-    -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
-    -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
-    -- filter correct against current writes and silently wrong against older ones, failing in
-    -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
-    -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
-    -- for query_store), so equality against one rendered sentence matches one collector.
-    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-             THEN 1 ELSE 0 END) AS abandoned_count,
-    -- #3240: same reasoning as abandoned_count above — this rollup bands through the SAME shared
-    -- classifier as the per-server surfaces, and an unselected count defaults to 0, COMPILES, and
-    -- would band an extension-missing collector FAILING here (no success, staleness path) while every
-    -- other surface says EXTENSION_MISSING. APPENDED, read positionally.
-    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
-    -- #3819: the two instants that, with last_run_time above, say whether this collector STOPPED
-    -- producing rather than never having produced here. The fleet card counts the rows where they do
-    -- (regressed_collector_count), so an install that flips a productive collector to a named skip is a
-    -- NUMBER on the card and in the install countersign rather than a status word nobody re-reads.
-    --
-    -- Both are plain aggregates, which is the whole reason the fleet read can ask this at all: the
-    -- per-server twin resolves the same predicate through its existing ranked subquery, but this
-    -- statement has none, and adding one to hold a window function would put a sort of the fleet's whole
-    -- 7-day collection_log in front of a GROUP BY that hashes today. #3735 memoized this read because
-    -- three concurrent copies of it crossed the mcp role's 15 s statement_timeout; buying a boolean with
-    -- a fleet-wide sort would spend that headroom again. Nothing here needs the streak's WIDTH, only
-    -- whether the newest run is inside one, and two MAX()es answer that.
-    --
-    -- A NULL status counts as non-skip, like the per-server twin: it is not one of the declared skip
-    -- words, and reading it as one would let an unwritten status manufacture a streak. APPENDED, read
-    -- positionally.
-    MAX(CASE WHEN status IS NULL
-              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
-             THEN collection_time END) AS last_non_skip_time,
-    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
-    -- #3885: the instant the current zero-row-SUCCESS streak began after -- the newest run that was NOT a
-    -- success storing nothing. With last_run_time above and the collector's shipped cadence, this is what
-    -- CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns turns into the run count the
-    -- produced-then-stopped predicate reads, so the fleet's regressed_collector_count includes a collector
-    -- that stopped PRODUCING and not only one that started SKIPPING. The measured case is the reason the
-    -- card needs it: job_history went dark on 41 of 43 servers, every run SUCCESS, and the number on the
-    -- card an install countersign reads stayed 0 for a fortnight.
-    --
-    -- ONE plain aggregate, deliberately, and an ESTIMATE downstream rather than the per-server read's exact
-    -- width: that one counts runs off a ranked subquery it already has, and this statement has none. Adding
-    -- one to hold a window function would put a sort of the fleet's whole 7-day collection_log in front of
-    -- a GROUP BY that hashes today -- and #3735 memoized this read precisely because three concurrent
-    -- copies of it crossed the mcp role's 15 s statement_timeout. The estimate's error direction and its
-    -- bound are documented on the classifier; it reads HIGH across a saturated sweep, never low, which is
-    -- the only direction safe for a count whose job is to stop this class hiding under HEALTHY.
-    --
-    -- The abandonment exclusion is success_count's own (#2926): a pre-#2803 abandoned cycle is stored as
-    -- SUCCESS with zero rows plus the budget note, and that is data loss rather than a quiet source.
-    -- APPENDED, read positionally.
-    MAX(CASE WHEN NOT (status = 'SUCCESS'
-                       AND COALESCE(rows_collected, 0) = 0
-                       AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-             THEN collection_time END) AS last_zero_row_streak_break_time,
-    -- #4812: the fleet rollup bands through the SAME CollectorHealth.HealthStatus as the per-server grid, whose
-    -- ladder ends by reading the newest run note (a cycle that lost half its databases still records SUCCESS,
-    -- and the note is the only record). Left unselected, LatestRunNote would default to null here, COMPILE,
-    -- and band that collector HEALTHY beside a tab saying WARNING - the #2804/#3240 shape again. Plain
-    -- aggregates only (an ordered aggregate would replace the hash aggregate with a sort of the week); the
-    -- rollup keeps the same value per hour. APPENDED, read positionally.
-    {CollectionHealthRollupSupport.LatestRunNoteRawSql}
-FROM v_collection_log
-WHERE collection_time >= $1
-AND   server_id <> 0
-AND   {CollectionCycleRow.NotCycleRowSql}
-GROUP BY server_id, collector_name";
+    /// none.</para>
+    ///
+    /// <para>The statement itself, its two-level form and the reasons for each aggregate (#8570) are
+    /// <see cref="CollectionHealthRollupSupport.FleetCollectionHealthRawSql"/>, which the viewer's
+    /// <c>FleetCollectionHealthByServerSql</c> shares.</para></summary>
+    public const string FleetCollectionHealthSql = CollectionHealthRollupSupport.FleetCollectionHealthRawSql;
 
     /* ─────────── #3893 arm 2: the same read, composed from the hourly aggregate + a raw head slice ───────────
        Moved to CollectionHealthRollupSupport in Storage (#4226) so the viewer's ViewerDataService reads the

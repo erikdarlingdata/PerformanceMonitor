@@ -711,39 +711,7 @@ LIMIT 1";
     /// <c>UpdateCollectorHealthTextAsync</c>), rather than baking it into the shared read every other
     /// caller also pays for.</para>
     /// </summary>
-    public const string FleetCollectionHealthByServerSql = $"""
-        SELECT
-            server_id,
-            collector_name,
-            COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS'
-                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                     THEN 1 ELSE 0 END) AS success_count,
-            SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-            MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            MAX(collection_time) AS last_run_time,
-            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-                     THEN 1 ELSE 0 END) AS abandoned_count,
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
-            MAX(CASE WHEN status IS NULL
-                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
-                     THEN collection_time END) AS last_non_skip_time,
-            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
-            MAX(CASE WHEN NOT (status = 'SUCCESS'
-                               AND COALESCE(rows_collected, 0) = 0
-                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-                     THEN collection_time END) AS last_zero_row_streak_break_time,
-            -- #4812: the newest run's partial-database-failure note, so the Overview cards band a collector that
-            -- lost half its databases the way its own Collection Health tab does (the rollup keeps the same value
-            -- per hour). Plain aggregates only. APPENDED, read positionally.
-            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
-        FROM v_collection_log
-        WHERE collection_time >= $1
-        AND   server_id <> 0
-        AND   {CollectionCycleRow.NotCycleRowSql}
-        GROUP BY server_id, collector_name
-        """;
+    public const string FleetCollectionHealthByServerSql = CollectionHealthRollupSupport.FleetCollectionHealthRawSql;
 
     /// <summary><see cref="FleetCollectionHealthByServerSql"/> served from
     /// <c>collect.collection_health_hourly</c> when <see cref="CollectionHealthRollupSupport.RollupUsableAsync"/>

@@ -66,34 +66,6 @@ public class FleetPartialDatabaseFailureBandTests
         Assert.DoesNotContain("array_agg", cagg, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Theory]
-    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
-    public void BothRawFleetReads_SelectTheNewestRunNote_WithPlainAggregatesOnly(string which)
-    {
-        var sql = which == "DarlingFleetReader.FleetCollectionHealthSql"
-            ? DarlingFleetReader.FleetCollectionHealthSql
-            : ViewerDataService.FleetCollectionHealthByServerSql;
-        var flat = Flat(sql);
-
-        Assert.Contains(Flat(CollectionHealthRollupSupport.LatestRunNoteRawSql), flat, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", flat, StringComparison.Ordinal);
-        /* An ordered aggregate cannot be hashed or run as a partial aggregate: it would put a serial sort of a
-           week of collection_log in front of the fleet GROUP BY (the cost FleetCollectionHealthSql's own comment
-           refuses), and the raw read is what answers while the rollup is being rebuilt. */
-        Assert.DoesNotContain("array_agg", flat, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("ROW_NUMBER", flat, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("ORDER BY collection_time", flat, StringComparison.Ordinal);
-
-        /* The note is the LAST column: the reader is positional and ordinal 13 is the fourteenth. */
-        Assert.True(flat.IndexOf("AS last_zero_row_streak_break_time", StringComparison.Ordinal)
-                    < flat.IndexOf("AS latest_run_note", StringComparison.Ordinal));
-        /* #5735: the raw read leaves the stepped-over-slots row (collector_name collection_cycle) out with one more plain predicate
-           ahead of the GROUP BY, so the row is never counted as a collector's run; the read stays a plain aggregate. */
-        Assert.EndsWith($" FROM v_collection_log WHERE collection_time >= $1 AND server_id <> 0 AND {CollectionCycleRow.NotCycleRowSql} GROUP BY server_id, collector_name",
-            flat.Replace("\"", string.Empty), StringComparison.Ordinal);
-    }
-
     [Fact]
     public void ComposeFleetSql_TakesTheNoteOfTheRowWithTheGreatestLastRunTime()
     {

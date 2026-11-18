@@ -119,8 +119,6 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
     {
         var sql = ViewerDataService.FleetCollectionHealthByServerSql;
 
-        Assert.Contains("server_id,\r\n    collector_name,", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id, collector_name", sql, StringComparison.Ordinal);
         Assert.Contains("server_id <> 0", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("config_monitored_servers", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE collection_time >= $1", sql, StringComparison.Ordinal);

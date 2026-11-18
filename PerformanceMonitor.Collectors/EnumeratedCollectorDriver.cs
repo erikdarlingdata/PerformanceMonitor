@@ -443,7 +443,14 @@ public static class EnumeratedCollectorDriver
     /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedByNotePredicateSql =
-        "(rows_collected = 0 AND COALESCE(error_message, '') LIKE '" + WholeCycleBudgetNoteSqlPattern + "')";
+        "(rows_collected = 0 AND " + AbandonedNoteMatchSql + ")";
+
+    /// <summary>The note half of <see cref="AbandonedByNotePredicateSql"/> (#8570): the part that reads
+    /// <c>error_message</c>, which is never NULL because of the <c>COALESCE</c>. The fleet collection health read
+    /// evaluates it once per row, into a group key, and applies the <c>rows_collected = 0</c> half to the sign of
+    /// <c>rows_collected</c> that the same group key carries. The predicate's value is unchanged.</summary>
+    public const string AbandonedNoteMatchSql =
+        "COALESCE(error_message, '') LIKE '" + WholeCycleBudgetNoteSqlPattern + "'";
 
     /// <summary>
     /// The era-invariant abandonment key the five Collection-Health reads count on (#2926): this status, or
