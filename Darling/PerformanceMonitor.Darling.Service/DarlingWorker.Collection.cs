@@ -933,6 +933,8 @@ public sealed partial class DarlingWorker
             identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
             resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
             digestWindowReason: muteRuleService.DigestWindowReason,
+            /* #9000: the Store Growth switch and its two floors, read live. */
+            storeGrowthSettings: () => new StoreGrowthSettings(alertSettings.SelfStoreGrowthEnabled, alertSettings.SelfStoreGrowthFloorGb, alertSettings.SelfStoreGrowthObjectFloorGb),
             /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
             agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
             /* #6873: the three database protection switches, read live. Off until an operator turns each on. */

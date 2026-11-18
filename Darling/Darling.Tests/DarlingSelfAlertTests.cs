@@ -386,6 +386,9 @@ public sealed class DarlingSelfAlertTests
         /// in this file assume. The hold tests set it true.</summary>
         public bool HoldSelfHealth { get; set; }
 
+        /// <summary>#9000: the Store Growth switch and floors the evaluator reads, at the shipped defaults.</summary>
+        public StoreGrowthSettings StoreGrowth { get; set; } = new(true, 5, 2);
+
         private DarlingSelfAlertEvaluator BuildCore() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
@@ -408,7 +411,8 @@ public sealed class DarlingSelfAlertTests
             checkDbOverdueEnabled: () => CheckDbOverdueEnabled,
             protectionThresholds: ProtectionThresholds,
             identityCapacityEnabled: () => IdentityCapacityEnabled,
-            resolveThreshold: ResolveThreshold);
+            resolveThreshold: ResolveThreshold,
+            storeGrowthSettings: () => StoreGrowth);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
