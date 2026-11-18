@@ -110,7 +110,7 @@ public sealed class ForcePlanTargetRecommendationIndexLiveTests
     }
 
     /// <summary>Ten servers, eight databases of thirty queries each, a capture every fifteen minutes for the lookback (96 captures,
-    /// the newest at <paramref name="now"/> less 15 minutes times the capture number), each capture's state named after its number so a
+    /// the capture with row number k at <paramref name="now"/> less 1 hour less 15 minutes times k, so the newest is an hour old and carries state number 95), each capture's state named after its number so a
     /// wrong pick shows in the row. Plus, for one target query, a newer capture that carries no recommendation (the partial index
     /// leaves it out and the statement's own filter does too).</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
