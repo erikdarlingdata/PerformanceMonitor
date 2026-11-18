@@ -151,11 +151,14 @@ public static class BaselineDiscontinuities
     /// walk is deterministic. <b>Only four collectors can write a label</b>
     /// (<see cref="ServerEpoch.ObserveInstance"/> from <c>cpu_utilization</c> and <c>wait_stats</c>,
     /// <see cref="ServerEpoch.ObserveStatements"/> from <c>pg_statement_stats</c>,
-    /// <see cref="ServerEpoch.ObservePostmaster"/> from <c>pg_wait_stats</c>), so the read names them: with the
-    /// collector in the predicate, <c>collection_log</c>'s <c>(server_id, collector_name, collection_time)</c> index serves the
-    /// window, instead of every row of the server in it being read and its note tested (#8570). A fifth
-    /// carrier must be added here. Built from the label constants by concatenation so a renamed label reds the read
-    /// at compile time rather than leaving it matching a token nothing writes — the
+    /// <see cref="ServerEpoch.ObservePostmaster"/> from <c>pg_wait_stats</c>), so the read names them. On Darling the
+    /// collector filter lets <c>idx_collection_log_watermark</c> and the compressed chunks' <c>server_id, collector_name</c>
+    /// segments narrow the read, instead of every row of the server in the window being read and its note tested
+    /// (#8570). Lite (DuckDB) runs the same text but has no such index, only <c>(server_id, collection_time)</c>: there
+    /// the filter just narrows the rows whose note is compared. A fifth carrier must be added here. The collector
+    /// names are read from each collector's <c>Instance.Name</c> at run time (which is why this is <c>static readonly</c>,
+    /// not <c>const</c>), so a rename stays consistent. The labels are constants joined by concatenation, so a renamed
+    /// label reds the read at compile time rather than leaving it matching a token nothing writes — the
     /// <c>EnumeratedCollectorDriver.AbandonedByNotePredicateSql</c> idiom.
     /// </summary>
     public static readonly string MarkerRowsSql =
