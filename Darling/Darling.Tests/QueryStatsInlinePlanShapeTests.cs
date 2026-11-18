@@ -269,6 +269,14 @@ public sealed class QueryStatsInlinePlanShapeTests
         return session;
     }
 
+    /// <summary>A plan the filter cannot parse (it is cut off) that holds an auto-parameter token and a parameter value: a
+    /// probe would have been made had it parsed, so the filter withholds it whole without asking the judge. This is the
+    /// marker's second trigger, with the read's budget NOT spent.</summary>
+    private static string UnparseableAutoParameterPlan(string statementText) =>
+        "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
+        + "<StmtSimple StatementText=\"" + statementText + " WHERE id = @1\"><QueryPlan><ParameterList>"
+        + "<ColumnReference Column=\"@1\" ParameterCompiledValue=\"(1)\" /></ParameterList>";
+
     /// <summary>Reads one statement of <paramref name="shape"/> through the collector's inline read (the main query's 46
     /// columns), with <paramref name="plan"/> in the plan column.</summary>
     private async Task<QueryStatsCollector.Row> ReadInlineAsync(CollectorContext context, int shape, string plan)
@@ -332,6 +340,30 @@ public sealed class QueryStatsInlinePlanShapeTests
         Assert.NotNull(real.QueryPlanXml);
 
         /* And the shape's plan from then on is that real plan. */
+        var later = await ReadInlineAsync(InlineContext(null), 0, PlanWith("SELECT * FROM dbo.t0 WHERE id = 3"));
+        Run(store, new List<QueryStatsCollector.Row> { later }, Start.AddMinutes(2));
+        Assert.Equal(realDigest, later.KnownPlanDigest);
+        Assert.Null(later.QueryPlanXml);
+    }
+
+    [Fact]
+    public async Task APlanTheFilterWithheldForItsOwnSake_IsNeverCachedAsTheShapesPlan_AndTheNextCleanSightingStoresTheRealPlan()
+    {
+        var store = new Store();
+        var withheld = await ReadInlineAsync(InlineContext(null), 0, UnparseableAutoParameterPlan("SELECT * FROM dbo.t0"));
+
+        Assert.True(withheld.QueryPlanXmlIsPlaceholder);
+        Assert.True(SensitiveStatements.IsWithheldPlan(withheld.QueryPlanXml));
+        Run(store, new List<QueryStatsCollector.Row> { withheld }, Start);
+        Assert.Null(withheld.KnownPlanDigest);
+
+        var real = await ReadInlineAsync(InlineContext(null), 0, PlanWith("SELECT * FROM dbo.t0 WHERE id = 2"));
+        Assert.False(real.QueryPlanXmlIsPlaceholder);
+        var realDigest = ProcedureStatsPlanReuse.DigestOf(real.QueryPlanXml!);
+        Run(store, new List<QueryStatsCollector.Row> { real }, Start.AddMinutes(1));
+        Assert.Null(real.KnownPlanDigest);
+        Assert.NotNull(real.QueryPlanXml);
+
         var later = await ReadInlineAsync(InlineContext(null), 0, PlanWith("SELECT * FROM dbo.t0 WHERE id = 3"));
         Run(store, new List<QueryStatsCollector.Row> { later }, Start.AddMinutes(2));
         Assert.Equal(realDigest, later.KnownPlanDigest);

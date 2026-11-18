@@ -1130,7 +1130,7 @@ OPTION(RECOMPILE);";
             /* #8994: the filter hands back its whole-plan marker both when the read's budget ran out (TryXml false) and when
                the plan was withheld whole for its own sake. Either way the row holds no plan of this statement, and the host
                must not remember the marker as its shape's plan. */
-            row.QueryPlanXmlIsPlaceholder = string.Equals(row.QueryPlanXml, SensitiveStatements.PlaceholderText, StringComparison.Ordinal);
+            row.QueryPlanXmlIsPlaceholder = SensitiveStatements.IsWithheldPlan(row.QueryPlanXml);
             rows.Add(row);
         }
 
