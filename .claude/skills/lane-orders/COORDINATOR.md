@@ -18,6 +18,7 @@ The coordinator fills these per wave, in every brief:
 - Dispatch each lane as a `lane` agent (Claude Code: `subagent_type: "lane"`) where the harness defines that type. It runs on the default tier (Sonnet) in its own worktree, with the skill loaded and a context watchdog attached. A worker agent may be used instead when its first step is creating its own worktree under `.claude/worktrees/`. Where neither type exists, use a general agent on the default tier with worktree isolation (Claude Code: `isolation: "worktree"`). Put the orders in its brief.
 - A lane that fixes review findings also runs on the default tier. The top tier reviews, and the default tier fixes what the review found.
 - Give each lane its own rig port.
+- Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not exclude that path.
 - Set a wall-clock check at each lane's deadline. Do not wait on notifications.
 - Measure a field number before a plan depends on it. A design built on a derived figure (a lag, a row count, a timing) gets that figure measured first, read-only, by whoever has access to the field.
 - Stack or serialize PRs that touch the same files. Each parallel PR on the same files needs a conflict fix and another CI run.
