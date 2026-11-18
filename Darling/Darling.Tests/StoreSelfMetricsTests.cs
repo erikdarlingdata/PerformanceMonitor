@@ -403,6 +403,7 @@ public sealed class StoreSelfMetricsTests
             ["collect.column_stats"] = "the current column statistics rows, replaced in place per statistic (V272 doc): a store table, not a catalogue table, purged by its own retention",
             ["collect.column_stats_state"] = "the column statistics cursor, one row per server and database, bytes too small to matter (V272 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
+            ["collect.attention_events_legacy_copy"] = "the progress row of the one-time copy of the swapped-out attention table, bytes too small to matter (V277 doc)",
         };
 
         var unaccounted = plainTables
