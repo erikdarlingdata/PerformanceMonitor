@@ -413,9 +413,10 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// <summary>
     /// Stores one fetch (#8988): the batch upsert (<see cref="UpsertSql"/>), then the server's fetch marker, so the due
     /// check measures from the fetch and not from <c>last_seen</c>. The marker follows the upsert, so a fetch whose upsert
-    /// failed leaves the old marker and is retried at the next pass.
+    /// failed leaves the old marker and is retried at the next pass. Returns the rows the upsert wrote, which is fewer than the
+    /// rows fetched when the guard skipped unchanged ones.
     /// </summary>
-    public static async Task WriteFetchAsync(
+    public static async Task<int> WriteFetchAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyList<long> queryIds, IReadOnlyList<string> texts,
         IReadOnlyList<string?> ownEntries, IReadOnlyList<string?> candidates, DateTime naiveNow,
         int commandTimeoutSeconds, CancellationToken cancellationToken)
@@ -425,6 +426,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         var stamps = new DateTime[queryIds.Count];
         Array.Fill(stamps, naiveNow);
 
+        int written;
         await using (var upsert = postgres.CreateCommand(UpsertSql))
         {
             upsert.CommandTimeout = commandTimeoutSeconds;
@@ -434,7 +436,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             upsert.Parameters.AddWithValue(stamps);
             upsert.Parameters.AddWithValue(ownEntries.ToArray());
             upsert.Parameters.AddWithValue(candidates.ToArray());
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            written = await upsert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using var marker = postgres.CreateCommand(MarkerUpsertSql);
@@ -443,6 +445,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         marker.Parameters.AddWithValue(naiveNow.ToString(MarkerFormat, CultureInfo.InvariantCulture));
         marker.Parameters.AddWithValue(naiveNow);
         await marker.ExecuteNonQueryAsync(cancellationToken);
+        return written;
     }
 
     /// <summary>

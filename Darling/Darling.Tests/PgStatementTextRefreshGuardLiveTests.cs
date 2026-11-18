@@ -40,7 +40,7 @@ public sealed class PgStatementTextRefreshGuardLiveTests
         }
     }
 
-    private static Task WriteAsync(NpgsqlDataSource postgres, int serverId, Batch batch, DateTime at, CancellationToken ct) =>
+    private static Task<int> WriteAsync(NpgsqlDataSource postgres, int serverId, Batch batch, DateTime at, CancellationToken ct) =>
         PgStatementText.WriteFetchAsync(postgres, serverId, batch.Ids, batch.Texts, batch.Own, batch.Candidates, at, 120, ct);
 
     private static async Task<(string Xmin, DateTime LastSeen, string Text, string? Own)> RowAsync(NpgsqlConnection c, int serverId, long queryId, CancellationToken ct)
@@ -83,16 +83,18 @@ public sealed class PgStatementTextRefreshGuardLiveTests
         await using var store = await OpenStoreAsync(scratch, ct);
         var batch = Batch.Of(3000, i => "select " + i, i => i % 2 == 0 ? "[[10,20]]" : null);
 
+        int firstWritten;
         await using (var first = NpgsqlDataSource.Create(scratch.ConnectionString))
         {
-            await WriteAsync(first, 7, batch, T0, ct);
+            firstWritten = await WriteAsync(first, 7, batch, T0, ct);
         }
 
         var before = await RowAsync(store, 7, 2, ct);
         var countersBefore = await CountersAsync(scratch.ConnectionString, ct);
+        int secondWritten;
         await using (var second = NpgsqlDataSource.Create(scratch.ConnectionString))
         {
-            await WriteAsync(second, 7, batch, T0 + TimeSpan.FromHours(1), ct);
+            secondWritten = await WriteAsync(second, 7, batch, T0 + TimeSpan.FromHours(1), ct);
         }
 
         var after = await RowAsync(store, 7, 2, ct);
@@ -103,6 +105,14 @@ public sealed class PgStatementTextRefreshGuardLiveTests
         Assert.Equal(before, after);
         Assert.Equal(T0, after.LastSeen);
         Assert.Equal(0, await CountAsync(store, "SELECT count(*) FROM collect.pg_statement_text WHERE last_seen <> timestamp '2026-11-18 04:00:00'", ct));
+
+        /* The return value is the rows the upsert wrote: every new row, then none for the unchanged refetch, then the one
+           row whose text changed. */
+        Assert.Equal(3000, firstWritten);
+        Assert.Equal(0, secondWritten);
+        var oneChanged = Batch.Of(3000, i => i is 5 ? "select changed" : "select " + i, i => i % 2 == 0 ? "[[10,20]]" : null);
+        await using var third = NpgsqlDataSource.Create(scratch.ConnectionString);
+        Assert.Equal(1, await WriteAsync(third, 7, oneChanged, T0 + TimeSpan.FromHours(2), ct));
     }
 
     [Fact]
