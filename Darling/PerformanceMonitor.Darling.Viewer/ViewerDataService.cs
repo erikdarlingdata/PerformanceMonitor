@@ -1576,7 +1576,7 @@ SELECT
     /* V274 (#8978) adds the store's trigram text index options to the service row. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_service') AND attname = 'query_store_text_trigram_index_enabled' AND NOT attisdropped),
-    /* V276 (#8865) adds the error-log facts to the database protection rows. Found by catalog, as the V268 line above is. */
+    /* V275 (#8865) adds the error-log facts to the database protection rows. Found by catalog, as the V268 line above is. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.database_protection') AND attname = 'replica_readable' AND NOT attisdropped)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
@@ -1854,12 +1854,12 @@ SELECT
         /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
-        /* V276 (#8865): the error-log facts on collect.database_protection. Column-existence sentinel, newest-first, and the TOP rung, so a
+        /* V275 (#8865): the error-log facts on collect.database_protection. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 274 and showing a spurious upgrade
            banner on a store that is current. */
         if (hasDatabaseProtectionErrorLog)
         {
-            return 276;
+            return 275;
         }
         /* V274 (#8978): the store's trigram text index options on the service row. Column-existence sentinel, and the rung below the newest. */
         if (hasTrigramIndexStoreOptions)

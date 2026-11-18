@@ -849,9 +849,9 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // (the probe's sentinel is the Query Store one) and the re-run of V274 adds them back as NULL. Safe on a store that never had them.
         new(274, "hasTrigramIndexStoreOptions",
             @"ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_text_trigram_index_enabled, DROP COLUMN IF EXISTS query_store_text_trigram_index_enabled;"),
-        // V276 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
-        // last one, replica_readable; the rewind drops all ten and a re-run of V276 adds them back. Safe on a store that never had them.
-        new(276, "hasDatabaseProtectionErrorLog",
+        // V275 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
+        // last one, replica_readable; the rewind drops all ten and a re-run of V275 adds them back. Safe on a store that never had them.
+        new(275, "hasDatabaseProtectionErrorLog",
             @"ALTER TABLE IF EXISTS collect.database_protection
     DROP COLUMN IF EXISTS errorlog_state, DROP COLUMN IF EXISTS errorlog_message, DROP COLUMN IF EXISTS errorlog_grant,
     DROP COLUMN IF EXISTS errorlog_backfill_complete, DROP COLUMN IF EXISTS errorlog_skipped_archives, DROP COLUMN IF EXISTS errorlog_unparsed_lines,
