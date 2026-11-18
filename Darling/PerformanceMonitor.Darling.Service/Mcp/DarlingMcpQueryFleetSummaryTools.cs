@@ -621,6 +621,23 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         return (rows, pairs);
     }
 
+    /// <summary>
+    /// Waits on both source reads. When one read is cancelled (the caller cancelled, or the deadline cut the call) and the
+    /// other faulted, <see cref="Task.WhenAll(Task[])"/> surfaces the fault; this surfaces the cancellation instead, so a
+    /// cut call reaches the caller as a cancellation and not as a tool error.
+    /// </summary>
+    internal static async Task AwaitBothReadsAsync(Task planRead, Task qsRead)
+    {
+        try
+        {
+            await Task.WhenAll(planRead, qsRead);
+        }
+        catch (Exception) when (planRead.IsCanceled || qsRead.IsCanceled)
+        {
+            await (planRead.IsCanceled ? planRead : qsRead);
+        }
+    }
+
     /// <summary>The limit's note: how many of the pairs the reply lists. The budget hook restates it for the rows it keeps, so the note never names a count the reply does not list.</summary>
     private static string LimitCutNote(int limit, int shown, int pairs) =>
         $"limit {limit} cut the list: {shown} of {pairs} server, database and source rows are shown, the heaviest by CPU. Raise limit (most {MaxLimit}) to see more.";
@@ -638,23 +655,6 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         [Description("Maximum server and database rows, ranked by CPU. Default 50, most 200.")] int limit = DefaultLimit,
         CancellationToken cancellationToken = default) =>
         GetQueryFleetSummary(postgres, query_hash, hours_back, as_of, limit, McpResponseBudget.DefaultBytes, cancellationToken);
-
-    /// <summary>
-    /// Waits on both source reads. When one read is cancelled (the caller cancelled, or the deadline cut the call) and the
-    /// other faulted, <see cref="Task.WhenAll(Task[])"/> surfaces the fault; this surfaces the cancellation instead, so a
-    /// cut call reaches the caller as a cancellation and not as a tool error.
-    /// </summary>
-    internal static async Task AwaitBothReadsAsync(Task planRead, Task qsRead)
-    {
-        try
-        {
-            await Task.WhenAll(planRead, qsRead);
-        }
-        catch (Exception) when (planRead.IsCanceled || qsRead.IsCanceled)
-        {
-            await (planRead.IsCanceled ? planRead : qsRead);
-        }
-    }
 
     /// <summary>
     /// get_query_fleet_summary under an explicit <paramref name="responseByteBudget"/> (#8812): the MCP tool passes the shared 32 KB budget
