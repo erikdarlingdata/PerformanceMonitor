@@ -16,23 +16,35 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// The opt-in trigram index on the Query Store text, <c>collect.query_store_text.query_sql_text</c> (#8570), which lets
+/// The opt-in trigram index on the Query Store text, <c>collect.query_store_text (server_id, query_sql_text)</c> (#8570), which lets
 /// <c>find_queries_by_text</c> search a server's Query Store text through the index instead of walking the server's rows in primary-key
-/// order. Measured on a seeded store of 1,000,000 texts of about 300 characters (40 servers): a 32.7 second build, 398 MB (92% of the
-/// table), and about 0.07 ms added to each inserted row (0.004 ms without it). A no-match search of one server read 11,325 buffers in
-/// 52 ms without it and 47 buffers in 0.3 ms with it. So it is off by default, it is never built by a migration rung, and turning the
-/// option off drops it.
+/// order. Measured on a seeded store of 1,000,000 texts of about 250 characters (40 servers): a 29 to 32 second build, 315 MB (86% of the
+/// table), and about 0.02 ms added to each inserted row (0.002 ms without it), the same as the index on the text alone on those rows. A
+/// no-match search of one server read 1,301 buffers in 34 ms without it and 340 buffers in 0.7 ms with it. So it is off by default, it is
+/// never built by a migration rung, and turning the option off drops it.
+///
+/// <para><b>The server is a key of the index.</b> <c>server_id</c> is its first column (the <c>btree_gin</c> operator class), so the server
+/// filter is applied inside the index, beside the text's trigrams, and only that server's candidates are read from the table and rechecked.
+/// An index on the text alone hands back every server's candidates and filters them after the recheck: on a seeded store of 6.9 million texts
+/// over 40 servers, a one-server search of a pattern made of common trigrams rechecked 521,267 rows to keep 27, and took 2.0 to 2.5 s; with the
+/// server key it rechecked 13,023 and took 0.37 to 0.48 s, and a no-match one went from 0.81 s to 0.07 s. The two indexes are the same size
+/// (2.1 GB there).</para>
+///
+/// <para><b>The index it replaces.</b> The index on the text alone (<see cref="ReplacedIndexName"/>) is left in place until this one is valid,
+/// so the search keeps reading through it while this one waits for its extensions or builds, and it is dropped once this one is valid. Turning
+/// the option off drops both.</para>
 ///
 /// <para><b>Write cost.</b> <c>query_sql_text</c> only changes when Query Store renumbers a <c>query_id</c>, so the liveness touch of
 /// <c>last_seen</c> stays a HOT update when the page has room (the table runs at fillfactor 90) and writes nothing to this index. A touch
 /// that cannot stay on its page, an insert and a text overwrite each add the row's trigrams, which GIN's fast update collects in its
 /// pending list and merges in bulk.</para>
 ///
-/// <para><b>One pass.</b> <see cref="RunPassAsync"/> follows the plan-cache index's pass (<see cref="QueryTextTrigramIndex"/>): option off and
-/// index present, drop it (<c>DROP INDEX CONCURRENTLY</c>); option on and index valid, nothing; a build running in another backend, nothing;
-/// inside the wait after a failed build, nothing; then create <c>pg_trgm</c> (a login that cannot is reported as
+/// <para><b>One pass.</b> <see cref="RunPassAsync"/> follows the plan-cache index's pass (<see cref="QueryTextTrigramIndex"/>): option off,
+/// drop this index and the one it replaces (<c>DROP INDEX CONCURRENTLY</c>); option on and index valid, drop the replaced one if it is still
+/// there; a build running in another backend, nothing;
+/// inside the wait after a failed build, nothing; then create <c>pg_trgm</c> and <c>btree_gin</c> (a login that cannot is reported as
 /// <see cref="TrigramIndexStatus.WaitingOnExtension"/> with the statement an operator runs, and is not asked again), drop an INVALID
-/// leftover, and build with <c>CREATE INDEX CONCURRENTLY</c>. A failed build drops its own leftover at once and waits
+/// leftover, build with <c>CREATE INDEX CONCURRENTLY</c>, and drop the replaced one. A failed build drops its own leftover at once and waits
 /// <see cref="QueryTextTrigramIndex.Backoff"/> before the next try. The table is a plain table on every store (not a hypertable), so both
 /// statements are always <c>CONCURRENTLY</c>.</para>
 ///
@@ -46,10 +58,19 @@ public static class QueryStoreTextTrigramIndex
     public const string TableName = "collect.query_store_text";
 
     /// <summary>The index's bare name.</summary>
-    public const string IndexBareName = "ix_query_store_text_trgm";
+    public const string IndexBareName = "ix_query_store_text_server_trgm";
 
     /// <summary>The index's schema-qualified name.</summary>
     public const string IndexName = "collect." + IndexBareName;
+
+    /// <summary>The index this one replaces, on <c>query_sql_text</c> alone (see the class summary).</summary>
+    public const string ReplacedIndexName = "collect.ix_query_store_text_trgm";
+
+    /// <summary>The statement an operator runs when the store login cannot create the extensions the index needs.</summary>
+    public const string OperatorStatement = "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS btree_gin;";
+
+    /// <summary>The server key's extension, created after <c>pg_trgm</c>.</summary>
+    internal const string CreateKeyExtensionSql = "CREATE EXTENSION IF NOT EXISTS btree_gin";
 
     /// <summary>The option's name in <c>darling.json</c>, which the health note and the search's messages name.</summary>
     public const string OptionName = "queryStoreTextTrigramIndexEnabled";
@@ -63,26 +84,33 @@ public static class QueryStoreTextTrigramIndex
     /// <summary>Time between passes.</summary>
     public static readonly TimeSpan PassInterval = QueryTextTrigramIndex.PassInterval;
 
-    /// <summary>One catalog read: the table, the index, the extension and any build in progress on the table. No parameters.</summary>
+    /// <summary>One catalog read: the table, the index, the index it replaces, both extensions and any build in progress on the table. No
+    /// parameters.</summary>
     internal const string StateSql = $@"
 SELECT to_regclass('{TableName}') IS NOT NULL AS table_exists,
        i.indisvalid,
        CASE WHEN i.indexrelid IS NULL THEN NULL ELSE pg_relation_size(i.indexrelid) END AS index_size_bytes,
        ext.nspname AS extension_schema,
-       EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_trgm') AS extension_available,
+       (SELECT count(*) FROM pg_available_extensions WHERE name IN ('pg_trgm', 'btree_gin')) = 2 AS extension_available,
        EXISTS (SELECT 1 FROM pg_stat_progress_create_index AS p
                WHERE p.relid = to_regclass('{TableName}')
-               AND   p.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS build_running
+               AND   p.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS build_running,
+       key_ext.nspname AS key_extension_schema,
+       to_regclass('{ReplacedIndexName}') IS NOT NULL AS replaced_index_exists
 FROM (SELECT 1) AS one
 LEFT JOIN pg_index AS i ON i.indexrelid = to_regclass('{IndexName}')
-LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm') AS ext ON true";
+LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm') AS ext ON true
+LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'btree_gin') AS key_ext ON true";
 
     internal const string DropSql = "DROP INDEX CONCURRENTLY IF EXISTS " + IndexName;
 
-    /// <summary>The build, with the operator class named in the schema the extension lives in (it is not always on the search path).</summary>
-    internal static string CreateIndexSql(string extensionSchema) =>
+    internal const string DropReplacedSql = "DROP INDEX CONCURRENTLY IF EXISTS " + ReplacedIndexName;
+
+    /// <summary>The build, with each operator class named in the schema its extension lives in (it is not always on the search path).</summary>
+    internal static string CreateIndexSql(string extensionSchema, string keyExtensionSchema) =>
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS " + IndexBareName
-        + " ON " + TableName + " USING gin (query_sql_text "
+        + " ON " + TableName + " USING gin (server_id "
+        + QueryTextTrigramIndex.QuoteIdentifier(keyExtensionSchema) + ".int4_ops, query_sql_text "
         + QueryTextTrigramIndex.QuoteIdentifier(extensionSchema) + ".gin_trgm_ops)";
 
     /// <summary>Reads the catalog state on an open connection. The sample-index fields of the record stay at their defaults.</summary>
@@ -97,7 +125,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             reader.IsDBNull(2) ? null : reader.GetInt64(2),
             reader.IsDBNull(3) ? null : reader.GetString(3),
             reader.GetBoolean(4),
-            reader.GetBoolean(5));
+            reader.GetBoolean(5),
+            KeyExtensionSchema: reader.IsDBNull(6) ? null : reader.GetString(6),
+            ReplacedIndexExists: reader.GetBoolean(7));
     }
 
     /// <summary>
@@ -133,12 +163,21 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
 
         if (!enabled)
         {
-            if (state.IndexValid is null)
+            if (state.IndexValid is null && !state.ReplacedIndexExists)
             {
                 return true;
             }
 
-            await DropAsync(connection, tracker, logger, "the option is off", cancellationToken).ConfigureAwait(false);
+            if (state.IndexValid is not null)
+            {
+                await DropAsync(connection, tracker, logger, DropSql, IndexName, "the option is off", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (state.ReplacedIndexExists)
+            {
+                await DropAsync(connection, tracker, logger, DropReplacedSql, ReplacedIndexName, "the option is off", cancellationToken).ConfigureAwait(false);
+            }
+
             return false;
         }
 
@@ -146,6 +185,11 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         {
             tracker.ClearExtensionBlock();
             tracker.Succeeded();
+            if (state.ReplacedIndexExists)
+            {
+                await DropReplacedAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
+
             return false;
         }
 
@@ -157,40 +201,53 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         }
 
         var extensionSchema = state.ExtensionSchema;
-        if (extensionSchema is null)
+        var keyExtensionSchema = state.KeyExtensionSchema;
+        if (extensionSchema is null || keyExtensionSchema is null)
         {
             if (snapshot.ExtensionBlocked)
             {
                 /* Not asked again: the statement was refused once, and a retry every pass would log and fail forever. The catalog read above
-                   notices when an operator creates the extension. */
+                   notices when an operator creates the extensions. */
                 return false;
             }
 
             try
             {
-                await using var create = new NpgsqlCommand(QueryTextTrigramIndex.CreateExtensionSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds };
-                await create.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                extensionSchema = (await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false)).ExtensionSchema;
+                if (extensionSchema is null)
+                {
+                    await using var create = new NpgsqlCommand(QueryTextTrigramIndex.CreateExtensionSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds };
+                    await create.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                if (keyExtensionSchema is null)
+                {
+                    await using var createKey = new NpgsqlCommand(CreateKeyExtensionSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds };
+                    await createKey.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                var created = await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false);
+                (extensionSchema, keyExtensionSchema) = (created.ExtensionSchema, created.KeyExtensionSchema);
             }
             catch (PostgresException ex)
             {
-                /* The plan-cache index's pass may have created the extension at the same moment (two IF NOT EXISTS creates race on the
-                   catalog's unique index), so the catalog decides: an extension that exists now is used. */
-                extensionSchema = (await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false)).ExtensionSchema;
-                if (extensionSchema is null)
+                /* The plan-cache index's pass may have created pg_trgm at the same moment (two IF NOT EXISTS creates race on the catalog's
+                   unique index), so the catalog decides: an extension that exists now is used. */
+                var after = await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false);
+                (extensionSchema, keyExtensionSchema) = (after.ExtensionSchema, after.KeyExtensionSchema);
+                if (extensionSchema is null || keyExtensionSchema is null)
                 {
                     tracker.BlockExtension(QueryTextTrigramIndex.ErrorText(ex));
                     logger.LogWarning(
-                        "The trigram index on {Table} is waiting on the pg_trgm extension, which this login could not create ({SqlState}: {Message}). "
+                        "The trigram index on {Table} is waiting on the {Extension} extension, which this login could not create ({SqlState}: {Message}). "
                         + "Run this in the store database as a role that may create it, and the next pass builds the index: {Statement}",
-                        TableName, ex.SqlState, QueryTextTrigramIndex.ErrorText(ex), QueryTextTrigramIndex.OperatorStatement);
+                        TableName, extensionSchema is null ? "pg_trgm" : "btree_gin", ex.SqlState, QueryTextTrigramIndex.ErrorText(ex), OperatorStatement);
                     return false;
                 }
             }
         }
 
         tracker.ClearExtensionBlock();
-        if (extensionSchema is null)
+        if (extensionSchema is null || keyExtensionSchema is null)
         {
             return false;
         }
@@ -198,17 +255,21 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         if (state.IndexValid == false)
         {
             logger.LogWarning("Query Store text trigram index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", IndexName);
-            await DropAsync(connection, tracker, logger, "an INVALID leftover", cancellationToken).ConfigureAwait(false);
+            await DropAsync(connection, tracker, logger, DropSql, IndexName, "an INVALID leftover", cancellationToken).ConfigureAwait(false);
         }
 
         tracker.BeginBuild(utcNow);
         var started = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            await using var build = new NpgsqlCommand(CreateIndexSql(extensionSchema), connection) { CommandTimeout = buildTimeoutSeconds };
+            await using var build = new NpgsqlCommand(CreateIndexSql(extensionSchema, keyExtensionSchema), connection) { CommandTimeout = buildTimeoutSeconds };
             await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             tracker.Succeeded();
             logger.LogInformation("Query Store text trigram index {Index} built in {Seconds:F1}s (valid).", IndexName, started.Elapsed.TotalSeconds);
+            if (state.ReplacedIndexExists)
+            {
+                await DropReplacedAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -233,18 +294,37 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     private static async Task DropAsync(
-        NpgsqlConnection connection, QueryTextTrigramIndexTracker tracker, ILogger logger, string reason, CancellationToken cancellationToken)
+        NpgsqlConnection connection, QueryTextTrigramIndexTracker tracker, ILogger logger, string dropSql, string index, string reason,
+        CancellationToken cancellationToken)
     {
         tracker.BeginDrop();
         try
         {
-            await using var drop = new NpgsqlCommand(DropSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            await using var drop = new NpgsqlCommand(dropSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            logger.LogInformation("Query Store text trigram index {Index} dropped ({Reason}).", IndexName, reason);
+            logger.LogInformation("Query Store text trigram index {Index} dropped ({Reason}).", index, reason);
         }
         finally
         {
             tracker.EndPhase();
+        }
+    }
+
+    /* The index on the text alone goes once this one is valid. A drop that does not finish is a Warning, not a failed build: this index
+       serves the search either way, and the next pass drops the replaced one again. */
+    private static async Task DropReplacedAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var drop = new NpgsqlCommand(DropReplacedSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            logger.LogInformation("Query Store text trigram index {Index} dropped (replaced by {Replacement}).", ReplacedIndexName, IndexName);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Dropping {Index}, which {Replacement} replaces, did not finish and the next pass tries again: {Message}",
+                ReplacedIndexName, IndexName, QueryTextTrigramIndex.ErrorText(ex));
         }
     }
 
@@ -279,9 +359,13 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             static (wait, ct) => Task.Delay(wait, ct),
             cancellationToken);
 
-    /// <summary>The status word for a catalog reading and the tracker's memory. Pure; the same rules as the plan-cache index's.</summary>
-    public static TrigramIndexStatus Classify(TrigramCatalogState state, QueryTextTrigramIndexTracker.Snapshot snapshot) =>
-        QueryTextTrigramIndex.Classify(state, snapshot);
+    /// <summary>The status word for a catalog reading and the tracker's memory. Pure; the plan-cache index's rules, with the extensions
+    /// counted as installed only when both are.</summary>
+    public static TrigramIndexStatus Classify(TrigramCatalogState state, QueryTextTrigramIndexTracker.Snapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        return QueryTextTrigramIndex.Classify(state with { ExtensionSchema = state.KeyExtensionSchema is null ? null : state.ExtensionSchema }, snapshot);
+    }
 
     /// <summary>The store health read for the index: the catalog on <paramref name="connection"/> beside the tracker's memory.</summary>
     public static async Task<TrigramIndexHealth> ReadHealthAsync(
@@ -299,15 +383,16 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             state.IndexSizeBytes,
             status == TrigramIndexStatus.Building,
             snapshot.BuildStartedUtc,
-            state.ExtensionSchema is not null,
+            state.ExtensionSchema is not null && state.KeyExtensionSchema is not null,
             state.ExtensionAvailable,
             snapshot.Failures,
             snapshot.LastError ?? (status == TrigramIndexStatus.WaitingOnExtension ? snapshot.ExtensionError : null),
             snapshot.LastSqlState,
             snapshot.LastFailedUtc,
             snapshot.NextAttemptUtc,
-            status == TrigramIndexStatus.WaitingOnExtension ? QueryTextTrigramIndex.OperatorStatement : null,
-            OptionSource: snapshot.OptionSource);
+            status == TrigramIndexStatus.WaitingOnExtension ? OperatorStatement : null,
+            OptionSource: snapshot.OptionSource,
+            ReplacedIndexExists: state.ReplacedIndexExists);
     }
 
     /// <summary>One sentence for the health block's note, per status.</summary>
@@ -318,7 +403,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         return health.Status switch
         {
             TrigramIndexStatus.Off => "The option " + OptionName + " is off and there is no trigram index on the Query Store text. find_queries_by_text reads one server's Query Store text in key order under a time budget.",
-            TrigramIndexStatus.DropPending => "The option " + OptionName + " is off. The index still exists and the service drops it on its next pass.",
+            TrigramIndexStatus.DropPending => "The option " + OptionName + " is off. An index still exists and the service drops it on its next pass.",
             TrigramIndexStatus.Dropping => "The option " + OptionName + " is off. The service is dropping the index now.",
             TrigramIndexStatus.Pending => "The option is on and the index does not exist yet. The service builds it in the background after startup, and an INVALID leftover is dropped first.",
             TrigramIndexStatus.Building => "A build is running. Collection is not waiting for it. The size is what has been written so far (" + size + ").",
@@ -327,8 +412,10 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             TrigramIndexStatus.Failed => "The last build failed. Its leftover was dropped and the service tries again at next_attempt_at, after a wait that doubles to a cap of "
                 + ((int)QueryTextTrigramIndex.BackoffCap.TotalHours).ToString(CultureInfo.InvariantCulture) + " hours.",
             _ => health.ExtensionAvailable
-                ? "The store login cannot create the pg_trgm extension. Run operator_statement in the store database as a role that may create it (a superuser, or the database owner). The next pass then builds the index. It is not retried until then."
-                : "The server does not ship the pg_trgm extension. Install the PostgreSQL contrib package, then run operator_statement in the store database as a role that may create it.",
-        };
+                ? "The store login cannot create the pg_trgm and btree_gin extensions the index needs. Run operator_statement in the store database as a role that may create them (a superuser, or the database owner). The next pass then builds the index. It is not retried until then."
+                : "The server does not ship the pg_trgm and btree_gin extensions. Install the PostgreSQL contrib package, then run operator_statement in the store database as a role that may create them.",
+        } + (health.ReplacedIndexExists && health.Enabled && health.Status != TrigramIndexStatus.Ready
+            ? " Until then the index it replaces, on the text alone (" + ReplacedIndexName + "), still serves the search."
+            : "");
     }
 }
