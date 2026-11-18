@@ -417,7 +417,10 @@ WHERE calls > 0";
        ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
     WHERE e.extname OPERATOR(pg_catalog.=) 'pg_stat_statements')";
 
-    public override string Name => "pg_statement_stats";
+    /// <summary>The name this collector logs its <c>collection_log</c> rows under. A constant so the baseline marker read (#8570) names it without a second spelling.</summary>
+    public const string CollectorName = "pg_statement_stats";
+
+    public override string Name => CollectorName;
 
     public override string TargetTable => "pg_statement_stats";
 

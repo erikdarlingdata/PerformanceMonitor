@@ -148,7 +148,13 @@ public static class BaselineDiscontinuities
     /// The marker rows for one server inside a window — every <c>collection_log</c> row whose note carries one
     /// of the three epoch labels. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> the window (naive UTC, both sides
     /// inclusive, like every trend read beside it). Oldest first, then by collector, so <see cref="Compose"/>'s
-    /// walk is deterministic. Built from the label constants by concatenation so a renamed label reds the read
+    /// walk is deterministic. <b>Only four collectors can write a label</b>
+    /// (<see cref="ServerEpoch.ObserveInstance"/> from <c>cpu_utilization</c> and <c>wait_stats</c>,
+    /// <see cref="ServerEpoch.ObserveStatements"/> from <c>pg_statement_stats</c>,
+    /// <see cref="ServerEpoch.ObservePostmaster"/> from <c>pg_wait_stats</c>), so the read names them: with the
+    /// collector in the predicate, <c>collection_log</c>'s <c>(server_id, collector_name, collection_time)</c> index serves the
+    /// window, instead of every row of the server in it being read and its note tested (#8570). A fifth
+    /// carrier must be added here. Built from the label constants by concatenation so a renamed label reds the read
     /// at compile time rather than leaving it matching a token nothing writes — the
     /// <c>EnumeratedCollectorDriver.AbandonedByNotePredicateSql</c> idiom.
     /// </summary>
@@ -158,6 +164,8 @@ public static class BaselineDiscontinuities
         + "WHERE server_id = $1\n"
         + "AND   collection_time >= $2\n"
         + "AND   collection_time <= $3\n"
+        + "AND   collector_name IN ('" + CpuUtilizationCollector.CollectorName + "', '" + WaitStatsCollector.CollectorName
+        + "', '" + PgStatementStatsCollector.CollectorName + "', '" + PgWaitStatsCollector.CollectorName + "')\n"
         + "AND   error_message IS NOT NULL\n"
         + "AND   (error_message LIKE '%" + ServerEpoch.IdentityChangesMeasurement + "=%'\n"
         + "   OR  error_message LIKE '%" + ServerEpoch.StatementsChangesMeasurement + "=%'\n"
