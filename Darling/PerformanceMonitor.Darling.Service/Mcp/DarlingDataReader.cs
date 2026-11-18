@@ -3450,6 +3450,16 @@ internal static class DarlingDataReader
     /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
     internal const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
 
+    /// <summary>#8570: the daily-summary top read's own <c>work_mem</c>, set with <c>SET LOCAL</c> on the read's transaction, as the
+    /// analysis pass sets it for its plan-regression daily read (<c>PgFactCollector.PlanRegressionWorkMemSql</c>, #5812). The read
+    /// groups every plan of the window, and its final hash aggregate holds the numeric sums of each group: about 2.6KB a group, so
+    /// 264MB for 100,000 groups on the measured plant. A hash node may use <c>work_mem</c> times <c>hash_mem_multiplier</c> (2 by
+    /// default), so 64MB still spilled 37MB there in five batches and 128MB spilled 1.5MB. 256MB is the first size that kept the
+    /// plant in memory. A hash takes memory only as it grows, so a small server's read uses what it needs. The read has four such
+    /// nodes (three partial, one final) under a parallel plan, so the most one read can take is four times 512MB. It is set only
+    /// when the daily statement runs.</summary>
+    internal const string QueryStoreTopDailyWorkMemSql = "SET LOCAL work_mem = '256MB'";
+
     /// <summary>Test-only fault injection: when set, <see cref="TryGetQueryStoreTopFromTableAsync"/> throws the
     /// returned exception right after the gate chose the interval table. Never set by product code.</summary>
     internal static readonly System.Threading.AsyncLocal<Func<Exception>?> TestOnlyTableReadFault = new();
@@ -3503,6 +3513,13 @@ internal static class DarlingDataReader
             var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
 
             var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
+
+            /* #8570: the daily statement's final aggregate spills at the server's own work_mem on a busy store. */
+            if (dailySpan is not null)
+            {
+                await using var workMem = new NpgsqlCommand(QueryStoreTopDailyWorkMemSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+                await workMem.ExecuteNonQueryAsync(cancellationToken);
+            }
 
             /* #5882: the first_execution_time floor of both reads reaches PurgeEdgeMargin (26 hours) before the window,
                because an interval may span a day. When the server's own intervals are shorter, the floor shrinks to what
