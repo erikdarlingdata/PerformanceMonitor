@@ -344,10 +344,17 @@ public partial class ViewerServerTab
     {
         try
         {
-            var clock = await _dataService.GetServerClockAsync(_server.ServerId);
-            if (clock is not null)
+            if (_server.IsPostgres)
             {
-                _serverClock = clock;
+                await RefreshPgServerClockAsync();
+            }
+            else
+            {
+                var clock = await _dataService.GetServerClockAsync(_server.ServerId);
+                if (clock is not null)
+                {
+                    _serverClock = clock;
+                }
             }
         }
         catch

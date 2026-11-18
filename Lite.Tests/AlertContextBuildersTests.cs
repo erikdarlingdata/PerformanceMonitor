@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
@@ -659,6 +660,7 @@ public class AlertContextBuildersTests
                 JobName = "Backup Job",
                 RunDateTime = runTime,
                 UtcOffsetMinutes = -240,
+                RunDurationSeconds = 2324,
                 StepId = 2,
                 StepName = "Backup databases",
                 Message = new string('x', 350)
@@ -672,7 +674,8 @@ public class AlertContextBuildersTests
             new List<(string, string)>
             {
                 ("Job", "Backup Job"),
-                ("Failed At", "2026-06-19 07:15:00Z"),
+                ("Started", "2026-06-19 07:15:00Z"),
+                ("Failed At", "2026-06-19 07:53:44Z"),
                 ("Step", "2: Backup databases"),
                 ("Message", new string('x', 300) + "...")
             },
@@ -680,6 +683,64 @@ public class AlertContextBuildersTests
 
         var expected = AlertFingerprint.ForKey(Server, AlertFingerprint.Job, "Backup Job", new[] { "Backup Job" });
         Assert.Equal(expected!.DedupKey, Assert.Single(context.Incidents!).DedupKey);
+    }
+
+    [Fact]
+    public void BuildFailedJobContext_UnknownDuration_ShowsOnlyRunStarted()
+    {
+        var context = AlertContextBuilders.BuildFailedJobContext(Server, new List<FailedJobInfo>
+        {
+            new()
+            {
+                JobName = "Backup Job",
+                RunDateTime = new DateTime(2026, 6, 19, 3, 15, 0),
+                UtcOffsetMinutes = -240,
+                StepId = 0
+            }
+        });
+
+        Assert.Equal(
+            new List<(string, string)>
+            {
+                ("Job", "Backup Job"),
+                ("Run Started", "2026-06-19 07:15:00Z")
+            },
+            context!.Details[0].Fields);
+    }
+
+    [Fact]
+    public void BuildFailedJobContext_DurationWithoutOffset_MarksBothInstantsUnconverted()
+    {
+        var context = AlertContextBuilders.BuildFailedJobContext(Server, new List<FailedJobInfo>
+        {
+            new()
+            {
+                JobName = "Backup Job",
+                RunDateTime = new DateTime(2026, 6, 19, 3, 15, 0),
+                RunDurationSeconds = 60
+            }
+        });
+
+        var fields = context!.Details[0].Fields;
+        Assert.Equal("2026-06-19 03:15:00" + AlertTimestamp.UnknownOffsetMarker, fields.Single(f => f.Label == "Started").Value);
+        Assert.Equal("2026-06-19 03:16:00" + AlertTimestamp.UnknownOffsetMarker, fields.Single(f => f.Label == "Failed At").Value);
+    }
+
+    [Fact]
+    public void FailedJobFingerprint_IsKeyedOnTheJobAlone_NotTheDurationOrTheStart()
+    {
+        /* #8972: the duration changes what the card SAYS, never what identifies the failed run. The incident
+           key is the job name alone, and the re-fire watermark (AlertEngine's max of RunDateTime) reads the
+           start, which is the same for a run whatever its duration. */
+        var start = new DateTime(2026, 6, 19, 3, 15, 0);
+        var withDuration = new FailedJobInfo { JobName = "Backup Job", RunDateTime = start, RunDurationSeconds = 2324 };
+        var without = new FailedJobInfo { JobName = "Backup Job", RunDateTime = start };
+
+        Assert.Equal(
+            AlertContextBuilders.FailedJobIncidents(Server, [without]).Single().DedupKey,
+            AlertContextBuilders.FailedJobIncidents(Server, [withDuration]).Single().DedupKey);
+        Assert.Equal(without.RunDateTime, withDuration.RunDateTime);
+        Assert.NotEqual(withDuration.RunDateTime, withDuration.FailedAt);
     }
 
     [Fact]

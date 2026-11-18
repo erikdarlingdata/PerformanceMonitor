@@ -185,6 +185,12 @@ public sealed class DarlingAnalysisService
     public string? WindowEmptyMessage { get; private set; }
 
     /// <summary>
+    /// True when <see cref="WindowEmptyMessage"/> says retention removed the window (#8910) rather than that collection may
+    /// have missed it. The MCP tools read it to drop their pointer at collection health, which is green for that window.
+    /// </summary>
+    public bool WindowEmptyRemovedByRetention { get; private set; }
+
+    /// <summary>
     /// How much of the last pass's window the collector actually observed (#3538 A2), stamped by the
     /// fact collector and carried out here the way <see cref="WindowEmptyMessage"/> is, because the
     /// findings list cannot say it: a pass over a window with a three-hour hole returns the SAME shape as
@@ -416,6 +422,7 @@ public sealed class DarlingAnalysisService
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
+        WindowEmptyRemovedByRetention = false;
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
@@ -543,7 +550,11 @@ public sealed class DarlingAnalysisService
                    read (wait_stats on a SQL Server target, pg_database_stats on a PostgreSQL one, #3665), so
                    "unstamped" is not a third state here — Coverage is null only when collection threw, and
                    that unwinds through the catch below, never through this test. */
-                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count);
+                /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and the
+                   message says so instead of blaming collection. The read costs one MIN, and only on this branch. */
+                var retention = await ReadRetentionBoundaryAsync(CoverageTableFor(engineKind), context.ServerId, context.CancellationToken);
+                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count, retention);
+                WindowEmptyRemovedByRetention = retention?.RemovedWindow(context.TimeRangeEnd) == true;
 
                 _logger?.LogWarning(
                     "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
@@ -1154,6 +1165,48 @@ WHERE server_id = $1";
     /// </summary>
     internal static string CoverageTableFor(string? engineKind) =>
         MonitoredEngineKind.IsPostgres(engineKind) ? PgTargetCoverageTable : SqlServerCoverageTable;
+
+    /// <summary>
+    /// The oldest row the store holds for a server in <paramref name="coverageTable"/> and the fleet retention in force for that
+    /// collector (the fleet override or the default, <see cref="DarlingRetentionHorizons.FleetRetentionDaysSql"/>, the rule the
+    /// purge applies), for the window-empty answer to tell a window retention removed from one collection missed (#8910).
+    /// Null when the server has no row, or when the read fails: a failed read must not turn an answer into an error, and the
+    /// answer then keeps its collection wording. An abandonment is not swallowed.
+    /// </summary>
+    public async Task<RetentionBoundary?> ReadRetentionBoundaryAsync(string coverageTable, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            /* The table is one of the two coverage tables, and FleetRetentionDaysSql checks the name against the catalog. */
+            var sql = $"SELECT MIN(collection_time), {DarlingRetentionHorizons.FleetRetentionDaysSql(coverageTable)} FROM {coverageTable} WHERE server_id = $1";
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(serverId);
+
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+                return null;
+
+            var oldest = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+            var days = Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+            /* drop_chunks drops a chunk only once its whole range is past the cutoff, so a purge leaves up to one chunk of rows
+               BEFORE the horizon, and a daily sweep can lag it by a day more. A first row later than the horizon by the slack is a
+               store that never held the window. */
+            var horizon = DateTime.UtcNow.AddDays(-days);
+            return new RetentionBoundary(
+                oldest,
+                horizon,
+                horizon + RetentionBoundary.HorizonSlack,
+                horizon.AddDays(-(TimescaleSupport.ChunkIntervalDays + 1)),
+                coverageTable,
+                string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{days} days of retention for {coverageTable}"));
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
+        {
+            _logger?.LogWarning(ex, "[DarlingAnalysisService] The retention boundary read of {Table} failed; the window-empty answer keeps its collection wording.", coverageTable);
+            return null;
+        }
+    }
 
     /// <summary>
     /// The PostgreSQL-target engine set's data-span gate (#3542, D3): the same measurement over

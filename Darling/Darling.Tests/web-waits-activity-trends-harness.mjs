@@ -203,7 +203,7 @@ const trendReads = () => fetches.filter((f) => f.includes("get_server_trend")).m
 const lastChart = () => modules.charts.chartCalls[modules.charts.chartCalls.length - 1] || null;
 const chartInfo = () => {
   const c = lastChart();
-  return c && { labels: c.spec.series.map((s) => s.label), points: c.spec.points.length, unit: c.spec.unit, id: c.id };
+  return c && { labels: c.spec.series.map((s) => s.label), dashed: c.spec.series.filter((s) => s.dashed).map((s) => s.label), colors: c.spec.series.map((s) => s.color), points: c.spec.points.length, unit: c.spec.unit, id: c.id };
 };
 const texts = (root, cls) => all(root, (n) => String(n.className).includes(cls)).map((n) => n.textContent);
 

@@ -554,6 +554,10 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     private static string LimitCutNote(int limit, int shown, int pairs) =>
         $"limit {limit} cut the list: {shown} of {pairs} server, database and source rows are shown, the heaviest by CPU. Raise limit (most {MaxLimit}) to see more.";
 
+    /// <summary>#8942: said beside the engine status, and beside <c>empty</c> on a mixed store: PostgreSQL statements are not in this read, and get_pg_top_queries is where they are.</summary>
+    internal const string FleetSqlServerOnlySentence =
+        "get_query_fleet_summary covers SQL Server statements only, so a PostgreSQL statement is not in it. For PostgreSQL statements use get_pg_top_queries.";
+
     [McpServerTool(Name = "get_query_fleet_summary"), Description("Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. <<GUIDE>> Where one statement runs and what it costs on every monitored server, in one read: one entry per server, database and source (plan_cache or query_store) for a query_hash, ranked by CPU. Use it instead of calling get_query_trend or get_top_queries_by_cpu once per server. There is no server_name: it reads the whole fleet. Give a query_hash (from get_top_queries_by_cpu, get_query_store_top or a plan). Each entry has source, execution_count, cpu_ms, elapsed_ms, avg_cpu_ms, avg_elapsed_ms and the first and last hour the statement was seen. hours_back reaches 2160 (90 days), default 168; a 42-target store answered in 4.3 s (7 days), 5.8 s (28 days) and 9.0 s (90 days) with a cold cache. Reads the plan cache's hourly tier, the tier get_query_trend reads, with the newest hours the rollup has not built yet summed from the raw rows, so no hour is counted twice and none is left out. It also reads Query Store (the corrected hourly rollup plus the raw tail) for up to 7 days: each row has a source of plan_cache or query_store, and a longer window answers the plan cache in full and says the Query Store part was cut to 7 days. limit defaults to 50 and reaches 200: server_database_pairs counts every server, database and source entry in the window (a server and database present in both sources counts once per source), and truncated is true when limit cut entries. The answer is held to the 32,768-byte response budget: when entries were left off the end (the lightest by CPU), budget_truncated is true, budget_note says how many fit, and rows_returned and servers_returned count what is listed. A statement that ran nowhere in the window answers status empty.")]
     public static Task<string> GetQueryFleetSummary(
         NpgsqlDataSource postgres,
@@ -667,11 +671,20 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 : null;
             if (rows.Count == 0)
             {
+                /* #8942: both sources read SQL Server tables. On a store with no SQL Server target the true negative would be false (a PostgreSQL
+                   statement is not in them at all), so the answer is the engine status the other gated reads use, and it does not send the caller to a
+                   SQL Server read. A mixed store keeps the true negative and says what it cannot see. */
+                if (await DarlingEngineCapability.FleetNotCollectedMessageAsync(postgres, "query_stats", cancellationToken) is { } engineGap)
+                {
+                    return McpHelpers.Status("not_collected", $"{engineGap} {FleetSqlServerOnlySentence}");
+                }
+
+                var postgresNote = await DarlingEngineCapability.AnyPostgresTargetAsync(postgres, cancellationToken) ? " " + FleetSqlServerOnlySentence : "";
                 return McpHelpers.Status(
                     "empty",
                     $"query_hash '{hash}' has no plan-cache or Query Store history on any monitored server in the {hours_back} hours ending {windowEnd:yyyy-MM-ddTHH:mm:ssZ} " +
                     $"(the plan-cache {sourceWord} tier was read; Query Store was read for {qsHours} hours). " +
-                    "Confirm the hash with get_top_queries_by_cpu before concluding the statement did not run." + (qsNote is null ? "" : " " + qsNote));
+                    "Confirm the hash with get_top_queries_by_cpu before concluding the statement did not run." + postgresNote + (qsNote is null ? "" : " " + qsNote));
             }
 
             var payload = JsonSerializer.SerializeToNode(new

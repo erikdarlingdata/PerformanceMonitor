@@ -124,6 +124,40 @@ public sealed class WebPlainTextTests
     }
 
     [Fact]
+    public void PrefixedHoursBackFields_AndTheRawStatsTable_AreSaidInWords()
+    {
+        // #8929: the underscore before hours_back is a word character, so the plain hours_back rule never matched these.
+        var o = Run(
+        [
+            "covers effective_hours_back, not hours_back; compare to baseline_hours_back or pass trend_hours_back for a trend",
+            "The window reaches further back than this server's raw query_store_stats retains, and query_store_stats is large.",
+        ], out _);
+        Assert.DoesNotContain("_hours_back", o[0], StringComparison.Ordinal);
+        Assert.Contains("covers only the part of the time range it holds, not the time range", o[0], StringComparison.Ordinal);
+        Assert.Contains("the baseline range", o[0], StringComparison.Ordinal);
+        Assert.Contains("the trend range", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("query_store_stats", o[1], StringComparison.Ordinal);
+        Assert.Contains("raw query statistics retains, and the raw query statistics is large.", o[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnErrorCellThatQuotesTheTable_OrAPrefixedField_KeepsTheName_WhileTheStripSaysItInWords()
+    {
+        // #8929: a Last Error or collector Error cell reads plainTextNamed, and a real error quotes the relation or column it failed on.
+        string[] inputs =
+        [
+            "ERROR: relation \"collect.query_store_stats\" does not exist",
+            "column effective_hours_back does not exist; also baseline_hours_back and trend_hours_back",
+        ];
+        var doc = RunDoc(inputs, out _);
+
+        Assert.Equal(inputs, doc.Named);
+        Assert.Contains("collect.query_store_stats", doc.Named[0], StringComparison.Ordinal);
+        Assert.Contains("raw query statistics", doc.Out[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("effective_hours_back", doc.Out[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheHealthOutputSentence_NamesNoField()
     {
         var o = Run(

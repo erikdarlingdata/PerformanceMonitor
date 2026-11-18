@@ -97,6 +97,11 @@ const bloatBuckets = (...buckets) => ({
   message: BLOAT_TEXT,
   hints: { arm: "NothingTrusted", candidate_index_count: 40, suppressed_by_reason: buckets },
 });
+const bloatSomeTrusted = {
+  status: "no_answers",
+  message: "answered_only excluded every row in this window: pg-a has 2 candidate btree indexes in the last 48 hours, 1 of them with a trusted bloat answer, but none of the rows inside this window carries one.",
+  hints: { arm: "PartialCoverage", candidate_index_count: 2, trusted_index_count: 1, suppressed_by_reason: [{ reason: "ColumnWidthsNotVisible", index_count: 1, index_bytes: 1000000 }] },
+};
 const bloatReply = (reason) => bloatBuckets({ reason, index_count: 40, index_bytes: 1000000 });
 /* The list is sorted by bytes and then count, so the grant bucket can come first or second whatever its share of the indexes. */
 const GRANT_BUCKET = { reason: "ColumnWidthsNotVisible", index_count: 30, index_bytes: 4000000000 };
@@ -156,6 +161,7 @@ try {
   const storageEmpty = await draw("storage", {
     get_pg_index_bloat: { status: "empty", message: "No index bloat rows for pg-a in the last 24 hours. Index coverage was not measured in this window." },
   });
+  const storageSomeTrusted = await draw("storage", { get_pg_index_bloat: bloatSomeTrusted });
   const storageGrantFirst = await draw("storage", { get_pg_index_bloat: bloatBuckets(GRANT_BUCKET, PARTIAL_BUCKET) });
   const storageGrantSecond = await draw("storage", { get_pg_index_bloat: bloatBuckets({ ...PARTIAL_BUCKET, index_count: 2, index_bytes: 5000000000 }, { ...GRANT_BUCKET, index_count: 38, index_bytes: 1000000000 }) });
 
@@ -226,6 +232,7 @@ try {
     bloatOther: strip(panelTitled(storageOther, "Index Bloat (answered ranking)")),
     bloatEmptyFirst: strip(panelTitled(storageEmpty, "Index Bloat (estimated)")),
     bloatEmptySecond: strip(panelTitled(storageEmpty, "Index Bloat (answered ranking)")),
+    bloatSomeTrusted: strip(panelTitled(storageSomeTrusted, "Index Bloat (answered ranking)")),
     bloatGrantFirst: strip(panelTitled(storageGrantFirst, "Index Bloat (answered ranking)")),
     bloatGrantSecond: strip(panelTitled(storageGrantSecond, "Index Bloat (answered ranking)")),
     /* A parenthesized issue reference in a service sentence is dropped from any text the page shows. */

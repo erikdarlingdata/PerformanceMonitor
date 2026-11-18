@@ -44,7 +44,7 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// aggregating rows; a database that errors is skipped and logged, matching the original
     /// collectors.
     /// </summary>
-    bool RunsPerDatabase(CollectorTargetInfo target);
+    new bool RunsPerDatabase(CollectorTargetInfo target);
 
     /// <summary>
     /// True when the per-database read on an Azure SQL Database logical server skips the databases monitored as

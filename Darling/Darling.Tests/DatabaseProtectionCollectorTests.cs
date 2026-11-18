@@ -962,7 +962,7 @@ public sealed class DatabaseProtectionCollectorTests
     public void TheTableAfterV223AndTheNewRung_IsTheGeneratorsOutput()
     {
         var v223 = PgMigrations.Scripts.Single(m => m.Version == 223).Sql.Replace("collect.", "", StringComparison.Ordinal);
-        var rung = PgMigrations.Scripts.Single(m => m.Version == 274);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == 276);
         Assert.Equal("database-protection-error-log", rung.Name);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

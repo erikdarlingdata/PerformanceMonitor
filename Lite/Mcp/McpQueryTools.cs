@@ -573,11 +573,14 @@ public sealed class McpQueryTools
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
-                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path.
+                   the filter has rows. One existence test of the unfiltered window tells the two apart
+                   (QueryStoreWindowHasRowsAsync: the top read at top 1 with a fill that ranks until it finds a
+                   showable group, since a bounded top-1 page is empty under enough WAITFOR groups); it runs only
+                   on this path.
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
                 if ((execution_type != null || module_name != null)
-                    && (await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, 1, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd)).Count > 0)
+                    && await dataService.QueryStoreWindowHasRowsAsync(resolved.ServerId, hours_back, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd))
                     return module_name is null
                         ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
                         /* The module miss hands back the window it read: "did not run" is a claim about that

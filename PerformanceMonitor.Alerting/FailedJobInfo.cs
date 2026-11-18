@@ -44,6 +44,27 @@ public class FailedJobInfo
     public int? UtcOffsetMinutes { get; set; }
 
     /// <summary>
+    /// #8972: how long the failed run lasted, in seconds (the job-outcome row's <c>run_duration</c>,
+    /// converted by <see cref="FailedJobsQuery.RunDurationToSeconds"/>). Null when the row supplied none.
+    /// <see cref="RunDateTime"/> is when the run STARTED, so the failure instant is the start plus this.
+    /// </summary>
+    public int? RunDurationSeconds { get; set; }
+
+    /// <summary>
+    /// When the run failed (start plus <see cref="RunDurationSeconds"/>) in the same server clock as
+    /// <see cref="RunDateTime"/>, or null when the duration is unknown.
+    /// </summary>
+    public DateTime? FailedAt => RunDurationSeconds is int seconds ? RunDateTime.AddSeconds(seconds) : null;
+
+    /// <summary>
+    /// <see cref="FailedAt"/> as an alert body renders it, with the same UTC or marked-unconverted treatment as
+    /// <see cref="RunDateTimeFormatted"/>. Null when the duration is unknown.
+    /// </summary>
+    public string? FailedAtFormatted => FailedAt is DateTime failedAt
+        ? AlertTimestamp.ForServerInstant(failedAt, UtcOffsetMinutes)
+        : null;
+
+    /// <summary>
     /// <see cref="RunDateTime"/> in naive UTC, or null when <see cref="UtcOffsetMinutes"/> is absent. The
     /// frame the alert body and <c>alert_time</c> share.
     /// </summary>

@@ -43,6 +43,23 @@ public sealed class StoreTableRow
     public string DeadRows { get; init; } = "";
     public long DeadRowsSort { get; init; }
     public string Autovacuum { get; init; } = "";
+
+    /// <summary>"Behind, no vacuum in 30 h" when a relation of the table is past its vacuum or insert trigger and no vacuum completed on it
+    /// within <see cref="BehindWindow"/>; "No" otherwise. <see cref="BehindSort"/> orders the behind rows by how long, longest first.</summary>
+    public string Behind { get; init; } = "";
+    public double BehindSort { get; init; }
+    public bool IsBehind { get; init; }
+
+    /// <summary>Autovacuums of the table cancelled in the last <see cref="CancelWindow"/>, from the store log, and when the latest was.</summary>
+    public string AutovacuumCancels { get; init; } = "";
+    public long AutovacuumCancelsSort { get; init; }
+    public bool IsCancelledRepeatedly { get; init; }
+    public string LastCancel { get; init; } = "";
+    public DateTime? LastCancelUtc { get; init; }
+
+    /// <summary>How many of the table's relations (the table, its chunks or partitions) are past their vacuum or insert trigger.</summary>
+    public string PastTrigger { get; init; } = "";
+    public int PastTriggerSort { get; init; }
     public string AllVisible { get; init; } = "";
     public double? AllVisibleSort { get; init; }
     public string Turnover { get; init; } = "";
@@ -136,11 +153,47 @@ internal static class StoreHealthRows
                 ? DescribeReason(reason)
                 : "no estimate";
 
-    /// <summary>The Flag cell: a rewrite candidate, a table past the empty space floors whose end could not be read, or nothing.</summary>
-    internal static string FlagText(StoreTableHealthRow r) =>
-        r.RewriteCandidate ? "Rewrite candidate"
-        : r.PastRewriteFloors && r.TailOccupied is null ? "Mostly empty, end not checked"
-        : "";
+    /// <summary>The Flag cell: behind on autovacuum, autovacuum cancelled repeatedly, a rewrite candidate or a table past the empty space
+    /// floors whose end could not be read, each that applies, or nothing.</summary>
+    internal static string FlagText(StoreTableHealthRow r)
+    {
+        var flags = new List<string>();
+        if (r.Behind)
+        {
+            flags.Add("Behind on autovacuum");
+        }
+
+        if (r.RepeatedlyCancelled)
+        {
+            flags.Add("Autovacuum cancelled repeatedly");
+        }
+
+        if (r.RewriteCandidate)
+        {
+            flags.Add("Rewrite candidate");
+        }
+        else if (r.PastRewriteFloors && r.TailOccupied is null)
+        {
+            flags.Add("Mostly empty, end not checked");
+        }
+
+        return string.Join(", ", flags);
+    }
+
+    /// <summary>A number of hours in whole hours below three days, then in whole days ("30 h", "4 days"), as the web page writes it.</summary>
+    internal static string HoursText(double hours) =>
+        hours < 72
+            ? string.Create(CultureInfo.CurrentCulture, $"{Math.Floor(hours):N0} h")
+            : string.Create(CultureInfo.CurrentCulture, $"{Math.Floor(hours / 24):N0} days");
+
+    /// <summary>A window in whole hours as words: "24 hours".</summary>
+    private static string WindowText(TimeSpan window) => CountText.Plural((long)window.TotalHours, "hour");
+
+    /// <summary>The "Autovacuum behind" cell: how long the relation past its trigger has gone without a completed vacuum, or "No".</summary>
+    internal static string BehindText(StoreTableHealthRow r) =>
+        !r.Behind ? "No"
+        : r.BehindHours is { } hours ? "Behind, no vacuum in " + HoursText(hours)
+        : "Behind";
 
     /// <summary>Whether plain VACUUM can give the empty space back. Only read for a table past the floors.</summary>
     internal static string VacuumCanReturnText(StoreTableHealthRow r) => r.TailOccupied switch
@@ -165,7 +218,7 @@ internal static class StoreHealthRows
             Table = QualifiedName(r.SchemaName, r.TableName),
             Kind = r.Kind.Replace('_', ' '),
             Flag = FlagText(r),
-            IsFlagged = r.RewriteCandidate,
+            IsFlagged = r.RewriteCandidate || r.Behind || r.RepeatedlyCancelled,
             TotalSize = PgDisplay.Bytes(r.TotalBytes),
             TotalSizeSort = r.TotalBytes,
             HeapSize = PgDisplay.Bytes(r.HeapBytes),
@@ -182,6 +235,16 @@ internal static class StoreHealthRows
             DeadRows = Number(r.DeadRows),
             DeadRowsSort = r.DeadRows,
             Autovacuum = AutovacuumText(r),
+            Behind = BehindText(r),
+            BehindSort = r.Behind ? 1 + (r.BehindHours ?? 0) : 0,
+            IsBehind = r.Behind,
+            AutovacuumCancels = Number(r.AutovacuumCancels),
+            AutovacuumCancelsSort = r.AutovacuumCancels,
+            IsCancelledRepeatedly = r.RepeatedlyCancelled,
+            LastCancel = FleetWideTimestamp(r.LastAutovacuumCancel),
+            LastCancelUtc = r.LastAutovacuumCancel,
+            PastTrigger = Number(r.RelationsPastTrigger),
+            PastTriggerSort = r.RelationsPastTrigger,
             AllVisible = r.PctAllVisible is { } pct ? string.Create(CultureInfo.CurrentCulture, $"{pct:N1}%") : PgDisplay.NotApplicableText,
             AllVisibleSort = r.PctAllVisible,
             Turnover = r.TurnoverPerDay is { } turnover ? Share(turnover) : PgDisplay.NotApplicableText,
@@ -200,7 +263,8 @@ internal static class StoreHealthRows
         };
     }
 
-    /// <summary>The table rows, in the reader's order (rewrite candidates first).</summary>
+    /// <summary>The table rows, in the reader's order (behind on autovacuum first, then autovacuum cancelled repeatedly, then rewrite
+    /// candidates).</summary>
     internal static List<StoreTableRow> Tables(IEnumerable<StoreTableHealthRow> rows) => rows.Select(Table).ToList();
 
     private static string IndexFlags(StoreIndexHealthRow r)
@@ -320,11 +384,14 @@ internal static class StoreHealthRows
     internal static List<StoreCoverageRow> CoverageRows(IEnumerable<StoreIndexCoverageRow> rows) =>
         rows.Select(Coverage).OrderByDescending(r => r.IsFlagged).ToList();
 
-    /// <summary>The header's counts line: tables, total size, rewrite candidates and tables with no usable estimate.</summary>
+    /// <summary>The header's counts line: tables, total size, tables behind on autovacuum, tables with autovacuum cancelled repeatedly,
+    /// rewrite candidates and tables with no usable estimate.</summary>
     internal static string HeaderText(IReadOnlyList<StoreTableHealthRow> rows)
     {
         var summary = Summarize(rows);
         var text = $"{CountText.Plural(summary.TableCount, "store table")}, {PgDisplay.Bytes(summary.TotalBytes)} in total. "
+            + $"{CountText.Plural(summary.Behind, "table")} behind on autovacuum (past the start point, no vacuum in {WindowText(BehindWindow)}). "
+            + $"{CountText.Plural(summary.RepeatedlyCancelled, "table")} with autovacuum cancelled {RepeatedCancelMinimum} or more times in {WindowText(CancelWindow)}. "
             + $"{CountText.Plural(summary.RewriteCandidates, "rewrite candidate")}. "
             + $"{CountText.Plural(summary.WithoutEstimate, "table")} without a usable empty space estimate";
         text += summary.WithoutEstimateByReason.Count == 0
@@ -342,6 +409,42 @@ internal static class StoreHealthRows
         }
 
         return text;
+    }
+
+    /// <summary>A duration in seconds the way the web page writes it: "30 s", "1 min", "2 h".</summary>
+    private static string SecondsText(int seconds) =>
+        seconds < 60 ? $"{Number(seconds)} s"
+        : seconds < 3600 ? $"{Number(seconds / 60)} min"
+        : $"{Number(seconds / 3600)} h";
+
+    /// <summary>
+    /// The store's autovacuum settings line, from the read's own figures, with the web page's wording: the write budget first (the most
+    /// all autovacuum workers together may dirty per second, or unthrottled when the cost delay is 0), then the settings in force, then
+    /// the cancels the store log holds in the window. A setting that falls back to another (an <c>autovacuum_</c> setting of -1) names
+    /// the one in force.
+    /// </summary>
+    internal static string AutovacuumSettingsText(StoreAutovacuumSettings s)
+    {
+        static string From(string setting, string own) => setting.Length > 0 && setting != own ? $" (from {setting})" : "";
+
+        var budget = s.WriteBudgetMBps is { } mbps
+            ? string.Create(CultureInfo.CurrentCulture, $"Autovacuum write budget {mbps:N1} MB/s: the most autovacuum may write per second. ")
+            : "Autovacuum write budget: unthrottled, the cost delay is 0, so vacuum does not sleep. ";
+        var parts = new[]
+        {
+            (s.AutovacuumOn ? "Autovacuum is on" : "Autovacuum is off") + $": {Number(s.WorkersRunning)} of {Number(s.MaxWorkers)} workers running",
+            "it looks for work every " + SecondsText(s.NaptimeSeconds),
+            $"cost limit {Number(s.CostLimit)}" + From(s.CostLimitSetting, "autovacuum_vacuum_cost_limit"),
+            string.Create(CultureInfo.CurrentCulture, $"cost delay {s.CostDelayMs:0.##} ms") + From(s.CostDelaySetting, "autovacuum_vacuum_cost_delay"),
+            PgDisplay.Bytes(s.WorkMemKb * 1024) + " of memory per worker" + From(s.WorkMemSetting, "autovacuum_work_mem"),
+        };
+        var cancels = s.CancelsInWindow == 0
+            ? $"The store log has no cancelled autovacuum in the last {WindowText(CancelWindow)}."
+            : $"The store log has {CountText.Plural(s.CancelsInWindow, "cancelled autovacuum")} in the last {WindowText(CancelWindow)}"
+              + (s.CancelsUnresolved > 0
+                  ? $", {Number(s.CancelsUnresolved)} for a relation the store no longer has or one in another database."
+                  : ".");
+        return budget + string.Join(", ", parts) + ". " + cancels;
     }
 
     /// <summary>The maintenance verdict and its reasons, one reason per line.</summary>
