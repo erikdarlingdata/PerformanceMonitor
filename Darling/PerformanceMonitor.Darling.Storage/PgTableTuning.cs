@@ -727,15 +727,47 @@ public static class PgTableTuning
              pg_stat_statements, and last_seen is indexed, so each refresh leaves the whole table dead; retention deletes the
              rest. Autovacuum settings only, for the reason given for query_text_dim.
 
-           Left alone on purpose: procedure_stats_totals and query_store_watermarks insert one row per collection and
-           retention deletes the oldest rows in key order, so whole pages empty out and VACUUM recycles them (their upserts
-           update an existing row only when a batch is retried). query_store_text and query_store_plan_map have had fillfactor
-           90 since V149 (#4250). */
+           Left alone on purpose: query_store_watermarks inserts one row per collection and retention deletes the oldest rows
+           in key order, so whole pages empty out and VACUUM recycles them (its upsert updates an existing row only when a
+           batch is retried). query_store_text and query_store_plan_map have had fillfactor 90 since V149 (#4250). */
         "ALTER TABLE collect.oversized_plan_backlog SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.query_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.collector_state SET (fillfactor = 80)",
         "ALTER TABLE collect.query_text_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.pg_statement_text SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        /* #8966: twelve more plain tables with steady DELETE churn. None is a hypertable, and every one is created by a
+           migration, so it exists before the first tuning pass. The stock trigger (50 rows + 20% of the table) lets a
+           fifth of the rows sit dead before a vacuum starts, and their space is reusable only after that vacuum, so
+           these tables spend much of their life a fifth to a third empty.
+
+           Classified by write path:
+           - Delete-and-rebuild rollups: query_store_compose_stamp, query_store_compose_fleet and query_store_hash_hourly
+             clear an hour and insert it again, query_store_hash_daily, query_store_top_daily and plan_regression_daily do
+             the same for a day, and each ages out the rows below its floor. Every rebuild leaves the previous build dead.
+           - attention_events: inserts plus the time-sliced retention DELETE that stands in for a Timescale policy.
+           These seven are the largest plain tables on a busy store, so they take 0.05 + 10000 rather than 0.02: a vacuum
+           pass also scans every index on its table, and the autovacuum cost budget is shared by every worker, so a
+           tighter trigger on a table this size would hold a worker that other tables are waiting for.
+
+           - pg_io_stats_hourly: clears and rebuilds an hour, and prunes below the retention floor.
+           - analysis_findings, fleet_sweep_server_verdicts and procedure_stats_totals: inserts plus a retention DELETE of the
+             oldest rows. Whole pages empty out, but only a vacuum makes them reusable.
+           - collection_log_hourly: UPDATE-heavy. Every pass upserts the newest CollectionLogHourly.RecomputeHours hours, so a
+             row is rewritten many times. The upsert changes only value columns (the key columns, the only indexed ones,
+             never change), so every update can be HOT when the page has room; fillfactor 80 gives it that room.
+           These are smaller, so 0.02 + 1000 starts cleanup after about 2% of the rows are dead. */
+        "ALTER TABLE collect.query_store_compose_stamp SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_compose_fleet SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_hash_hourly SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_hash_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_top_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.plan_regression_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.attention_events SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.pg_io_stats_hourly SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.analysis_findings SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.fleet_sweep_server_verdicts SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.procedure_stats_totals SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.collection_log_hourly SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         /* #3934: the store-metrics latest read (DarlingStoreMetricsReader.StoreMetricsLatestSql) took each
            object's newest row with DISTINCT ON (object_kind, object_name) ... ORDER BY object_kind,
            object_name, metric_time DESC over the WHOLE table — the only index was idx_store_metrics_time
