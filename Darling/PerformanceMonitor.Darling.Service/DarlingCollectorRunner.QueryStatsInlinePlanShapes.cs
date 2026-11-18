@@ -57,7 +57,7 @@ public sealed partial class DarlingCollectorRunner
         DateTime now)
     {
         var pendingShapes = new List<QueryStatsPlanShapeKey>();
-        var storedByShape = new Dictionary<QueryStatsPlanShapeKey, (string PlanXml, long? Bytes)>();
+        var storedByShape = new Dictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)>();
         foreach (var row in rows)
         {
             if (row.QueryPlanXml is null
