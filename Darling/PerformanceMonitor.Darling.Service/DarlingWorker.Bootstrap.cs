@@ -110,11 +110,12 @@ public sealed partial class DarlingWorker
                 _analyzerConfig = config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
                 /* #7674: the trigram index option is read by get_store_metrics and by the all-servers find_queries_by_text refusal from process
                    start, long before the migrations finish (and for good when they fail). Set it the moment the file loads, not when the
-                   background pass starts, or a valid index reads as "option off, being dropped" while the option is on. */
-                QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+                   background pass starts, or a valid index reads as "option off, being dropped" while the option is on. #8978: the file value
+                   until the store is read; the store's value, when its column holds one, replaces it after the first config load. */
+                QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.SourceFile);
                 /* #8570: the Query Store text index's option, for the same reason: get_store_metrics and find_queries_by_text read it from
                    process start. */
-                QueryStoreTextTrigramIndex.SharedTracker.Configure(config.QueryStoreTextTrigramIndexEnabled);
+                QueryStoreTextTrigramIndex.SharedTracker.Configure(config.QueryStoreTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.SourceFile);
                 _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
                 break;
             }

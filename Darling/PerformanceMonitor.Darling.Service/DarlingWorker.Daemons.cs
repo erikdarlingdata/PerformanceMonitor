@@ -1319,6 +1319,18 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #8978: sets both trigram index trackers to the options as resolved from <paramref name="config"/> (the store's value when its column
+    /// holds one, else darling.json's) and records which, for get_store_metrics. Called after each store config load is applied.
+    /// </summary>
+    internal static void ConfigureTrigramIndexTrackers(DarlingConfig config)
+    {
+        QueryTextTrigramIndexTracker.Shared.Configure(
+            config.QueryTextTrigramIndexResolved, DarlingConfig.TrigramIndexOptionSource(config.QueryTextTrigramIndexStoreValue));
+        QueryStoreTextTrigramIndex.SharedTracker.Configure(
+            config.QueryStoreTextTrigramIndexResolved, DarlingConfig.TrigramIndexOptionSource(config.QueryStoreTextTrigramIndexStoreValue));
+    }
+
+    /// <summary>
     /// Applies a control-plane reload at a SAFE point (top of a sweep, never mid-collection): re-reads the
     /// store, hot-swaps the held config's alert/SMTP/webhook/capture/analysis settings IN PLACE (the
     /// by-reference DarlingAlertSettings seam + the runner's capture provider reflect it immediately),
@@ -1356,6 +1368,8 @@ public sealed partial class DarlingWorker
         StoreConfigProvider.ApplyToConfig(config, view);
         _collectorState.SigningStatus.Publish(config.Webhooks, config.NotificationRoutes, DateTime.UtcNow); // #5998: presence and dates for the web page, no key text
         DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
+        /* #8978: a store write to a trigram index option shows in get_store_metrics now; the pass acts on it at its next pass. */
+        ConfigureTrigramIndexTrackers(config);
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);

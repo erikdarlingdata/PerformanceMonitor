@@ -82,7 +82,8 @@ public sealed record TrigramIndexHealth(
     string? OperatorStatement,
     bool SampleIndexExists = false,
     bool? SampleIndexValid = null,
-    long? SampleIndexSizeBytes = null);
+    long? SampleIndexSizeBytes = null,
+    string? OptionSource = null);
 
 /// <summary>
 /// What this process remembers about the trigram index between passes: whether the option is on, whether a build or a drop is
@@ -102,11 +103,19 @@ public sealed class QueryTextTrigramIndexTracker
     /// <summary>A consistent copy of the tracker's fields.</summary>
     public sealed record Snapshot(
         bool Configured, bool Enabled, PhaseKind Phase, DateTime? BuildStartedUtc, int Failures, string? LastError, string? LastSqlState,
-        DateTime? LastFailedUtc, DateTime? NextAttemptUtc, bool ExtensionBlocked, string? ExtensionError);
+        DateTime? LastFailedUtc, DateTime? NextAttemptUtc, bool ExtensionBlocked, string? ExtensionError, string? OptionSource = null);
+
+    /// <summary>#8978: the option's value came from <c>darling.json</c> (the store column is NULL, or the store is not read yet).</summary>
+    public const string SourceFile = "file";
+
+    /// <summary>#8978: the option's value came from the store's <c>config.config_service</c> column, which overrides the file.</summary>
+    public const string SourceStore = "store";
 
     private readonly object _gate = new();
     private bool _configured;
     private bool _enabled;
+    private bool _resolved;
+    private string? _optionSource;
     private PhaseKind _phase;
     private DateTime? _buildStartedUtc;
     private int _failures;
@@ -126,14 +135,43 @@ public sealed class QueryTextTrigramIndexTracker
     public int SampleBuildsStarted { get { lock (_gate) { return _sampleBuildsStarted; } } }
 
     /// <summary>
-    /// Sets whether the option is on. The worker calls it the moment <c>darling.json</c> loads, before it migrates the store, so the
-    /// MCP host (which answers from process start) reads the real option. Until it is called the tracker is unconfigured and
+    /// Sets whether the option is on, as resolved: the store's value when its column holds one, else <c>darling.json</c>'s (#8978). The
+    /// pass calls it at the start of every pass with the value it acts on, and the worker calls it with <paramref name="optionSource"/>
+    /// the moment it loads <c>darling.json</c> (before it migrates the store) and each time it applies the store's config, so the health
+    /// read carries the option from process start and follows a store write before the next pass. Once called, a later
+    /// <see cref="ConfigureFromFile"/> is ignored. Until either is called the tracker is unconfigured and
     /// <see cref="QueryTextTrigramIndex.Classify"/> reports <see cref="TrigramIndexStatus.Unconfigured"/>, never Off or DropPending.
-    /// The pass entry point calls it again with the same value.
     /// </summary>
-    public void Configure(bool enabled)
+    public void Configure(bool enabled, string? optionSource = null)
     {
-        lock (_gate) { _configured = true; _enabled = enabled; }
+        lock (_gate)
+        {
+            _configured = true;
+            _enabled = enabled;
+            _resolved = true;
+            _optionSource = optionSource ?? _optionSource;
+        }
+    }
+
+    /// <summary>
+    /// Sets the option from <c>darling.json</c> alone, for a host that loads the file on its own: the MCP and web hosts call it from
+    /// their own loads, so get_store_metrics reads the real option even when such a host loads before the worker does. Ignored once
+    /// <see cref="Configure"/> has set the value, so a host that loads the file later (the MCP host started by the store's mcp_enabled)
+    /// cannot put back a value the store has overridden.
+    /// </summary>
+    public void ConfigureFromFile(bool enabled)
+    {
+        lock (_gate)
+        {
+            if (_resolved)
+            {
+                return;
+            }
+
+            _configured = true;
+            _enabled = enabled;
+            _optionSource = SourceFile;
+        }
     }
 
     /// <summary>A copy of the fields.</summary>
@@ -142,7 +180,7 @@ public sealed class QueryTextTrigramIndexTracker
         lock (_gate)
         {
             return new Snapshot(_configured, _enabled, _phase, _buildStartedUtc, _failures, _lastError, _lastSqlState, _lastFailedUtc,
-                _nextAttemptUtc, _extensionBlocked, _extensionError);
+                _nextAttemptUtc, _extensionBlocked, _extensionError, _optionSource);
         }
     }
 
@@ -383,9 +421,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     /// <summary>
-    /// One pass (see the class summary). Returns true when the pass is settled for good: the option is off and no index remains, so the
-    /// loop can end (the option is read at start). Throws only on cancellation or on a failure to read the catalog; a failed build, drop or
-    /// extension create is recorded in <paramref name="tracker"/> and logged.
+    /// One pass (see the class summary). Returns true when there is nothing to do: the option is off and no index remains. The loop goes on
+    /// regardless, because the option is read at every pass (#8978) and can be turned on later. Throws only on cancellation or on a failure
+    /// to read the catalog; a failed build, drop or extension create is recorded in <paramref name="tracker"/> and logged.
     /// </summary>
     public static Task<bool> RunPassAsync(
         NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, DateTime utcNow, ILogger logger,
@@ -655,42 +693,64 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     /// <summary>
-    /// The background entry point: records the option, waits <paramref name="firstDelay"/>, then makes a pass every
-    /// <paramref name="interval"/> until shutdown (or, with the option off, until no index remains). Never throws: a pass that fails is a
-    /// Warning and the next interval tries again.
+    /// The background entry point: makes a pass every <paramref name="interval"/> until shutdown, after <paramref name="firstDelay"/>.
+    /// <paramref name="enabled"/> is the option's live, resolved value (#8978: the store's <c>config.config_service</c> column when it holds
+    /// one, else <c>darling.json</c>), read at the start of every pass, so a store write takes effect at the next pass with no restart. With
+    /// the option off and no index the pass is one catalog read. Never throws: a pass that fails is a Warning and the next interval tries again.
     /// </summary>
-    public static async Task RunAsync(
-        NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
-        TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
+    public static Task RunAsync(
+        NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
+        TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
+        RunLoopAsync(
+            enabled, tracker, logger, "Trigram index", firstDelay, interval,
+            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+            static (wait, ct) => Task.Delay(wait, ct),
+            cancellationToken);
+
+    /// <summary>
+    /// #8978: the loop under both indexes' <c>RunAsync</c>, with the pass and the wait passed in so a test steps it without a store or a clock.
+    /// Reads <paramref name="enabled"/> once before the first wait and again at the start of every pass, sets <paramref name="tracker"/> to the
+    /// value each pass acts on, and runs until <paramref name="cancellationToken"/> is cancelled, whatever a pass returns.
+    /// </summary>
+    internal static async Task RunLoopAsync(
+        Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval,
+        Func<bool, CancellationToken, Task<bool>> pass, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken)
     {
-        tracker.Configure(enabled);
+        ArgumentNullException.ThrowIfNull(enabled);
         try
         {
-            await Task.Delay(firstDelay, cancellationToken).ConfigureAwait(false);
+            bool? last = null;
+            tracker.Configure(enabled());
+            await delay(firstDelay, cancellationToken).ConfigureAwait(false);
             while (true)
             {
                 try
                 {
-                    if (await RunPassAsync(postgres, enabled, tracker, DateTime.UtcNow, logger, cancellationToken).ConfigureAwait(false))
+                    var on = enabled();
+                    tracker.Configure(on);
+                    if (last is { } previous && previous != on)
                     {
-                        return;
+                        logger.LogInformation("{Index} option is now {State}; this pass acts on it.", indexLabel, on ? "on" : "off");
                     }
+
+                    last = on;
+                    await pass(on, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    logger.LogWarning("Trigram index pass failed and is tried again in {Interval}: {ExceptionType}: {Message}", interval, ex.GetType().Name, ErrorText(ex));
+                    logger.LogWarning("{Index} pass failed and is tried again in {Interval}: {ExceptionType}: {Message}", indexLabel, interval, ex.GetType().Name, ErrorText(ex));
                 }
 
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                await delay(interval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            logger.LogDebug("Trigram index pass was cancelled at shutdown.");
+            logger.LogDebug("{Index} pass was cancelled at shutdown.", indexLabel);
         }
         catch (Exception ex)
         {
-            logger.LogInformation("Trigram index pass stopped at shutdown: {ExceptionType}: {Message}", ex.GetType().Name, ErrorText(ex));
+            logger.LogInformation("{Index} pass stopped at shutdown: {ExceptionType}: {Message}", indexLabel, ex.GetType().Name, ErrorText(ex));
         }
     }
 
@@ -760,7 +820,8 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             status == TrigramIndexStatus.WaitingOnExtension ? OperatorStatement : null,
             state.SampleIndexValid is not null,
             state.SampleIndexValid,
-            state.SampleIndexSizeBytes);
+            state.SampleIndexSizeBytes,
+            snapshot.OptionSource);
     }
 
     /// <summary>One sentence for the health block's note, per status.</summary>

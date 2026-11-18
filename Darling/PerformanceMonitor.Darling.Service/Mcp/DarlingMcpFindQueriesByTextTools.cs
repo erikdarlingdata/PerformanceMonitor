@@ -730,7 +730,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// state. Null <paramref name="health"/> is a catalog read that failed. Pure, so each state is tested without a store.</summary>
     internal static string AllServersRefusal(TrigramIndexHealth? health)
     {
-        var lead = "Searching every server at once needs the opt-in trigram index on the plan-cache text (queryTextTrigramIndexEnabled in darling.json), and ";
+        var lead = "Searching every server at once needs the opt-in trigram index on the plan-cache text (update_service_flags query_text_trigram_index_enabled, or queryTextTrigramIndexEnabled in darling.json), and ";
         var tail = " Until then, name one server with server_name (database_name makes it faster).";
         if (health is null)
         {
@@ -738,15 +738,18 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         }
 
         var minutes = ((int)QueryTextTrigramIndex.StartDelay.TotalMinutes).ToString(CultureInfo.InvariantCulture);
+        var passMinutes = ((int)QueryTextTrigramIndex.PassInterval.TotalMinutes).ToString(CultureInfo.InvariantCulture);
         var state = health.Status switch
         {
             TrigramIndexStatus.Unconfigured =>
                 "the service has not read darling.json yet, so the option is not known (state: not configured yet). Try again in a moment.",
             TrigramIndexStatus.Off =>
-                "the option is off (state: off). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service: the index is built in the background about "
-                + minutes + " minutes after start and can take many minutes on a large store.",
+                "the option is off (state: off). Set update_service_flags query_text_trigram_index_enabled true (no restart; the next index pass, at most "
+                + passMinutes + " minutes away, builds it), or, while the store holds no value for it, queryTextTrigramIndexEnabled true in darling.json and restart "
+                + "the service. The build runs in the background and can take many minutes on a large store.",
             TrigramIndexStatus.DropPending or TrigramIndexStatus.Dropping =>
-                "the option is off and the service is dropping the index (state: being dropped). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service to keep it.",
+                "the option is off and the service is dropping the index (state: being dropped). Set update_service_flags query_text_trigram_index_enabled true, or queryTextTrigramIndexEnabled "
+                + "true in darling.json and restart the service while the store holds no value for it, to build it again.",
             TrigramIndexStatus.Pending =>
                 "the option is on but the index is not built yet (state: pending). The service builds it in the background about " + minutes + " minutes after start.",
             TrigramIndexStatus.Building =>
@@ -776,7 +779,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
             ? ""
             : snapshot.Enabled
                 ? " The trigram index on the Query Store text is turned on; get_store_metrics query_store_text_index says whether it is ready."
-                : " The opt-in trigram index on the Query Store text makes this search an index read: queryStoreTextTrigramIndexEnabled in darling.json.";
+                : " The opt-in trigram index on the Query Store text makes this search an index read: update_service_flags query_store_text_trigram_index_enabled, or queryStoreTextTrigramIndexEnabled in darling.json.";
         return StoppedAdvice(database) + index;
     }
 

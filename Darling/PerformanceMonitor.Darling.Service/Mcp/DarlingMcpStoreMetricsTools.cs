@@ -866,6 +866,8 @@ public sealed class DarlingMcpStoreMetricsTools
             {
                 status = trigramHealth.Status.ToString(),
                 enabled = trigramHealth.Status == TrigramIndexStatus.Unconfigured ? (bool?)null : trigramHealth.Enabled,
+                /* #8978: where enabled came from: "store" (config.config_service holds a value, set by update_service_flags) or "file" (darling.json). */
+                option_source = trigramHealth.Status == TrigramIndexStatus.Unconfigured ? null : trigramHealth.OptionSource,
                 table = QueryTextTrigramIndex.TableName,
                 index_name = QueryTextTrigramIndex.IndexName,
                 exists = trigramHealth.Exists,
@@ -913,6 +915,8 @@ public sealed class DarlingMcpStoreMetricsTools
             {
                 status = health.Status.ToString(),
                 enabled = health.Status == TrigramIndexStatus.Unconfigured ? (bool?)null : health.Enabled,
+                /* #8978: where enabled came from, as in query_text_index. */
+                option_source = health.Status == TrigramIndexStatus.Unconfigured ? null : health.OptionSource,
                 table = QueryStoreTextTrigramIndex.TableName,
                 index_name = QueryStoreTextTrigramIndex.IndexName,
                 exists = health.Exists,

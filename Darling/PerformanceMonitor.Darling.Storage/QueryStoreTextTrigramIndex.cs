@@ -101,9 +101,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     /// <summary>
-    /// One pass (see the class summary). Returns true when the pass is settled for good: the option is off and no index remains, so the
-    /// loop can end (the option is read at start). Throws only on cancellation or on a failure to read the catalog; a failed build, drop or
-    /// extension create is recorded in <paramref name="tracker"/> and logged.
+    /// One pass (see the class summary). Returns true when there is nothing to do: the option is off and no index remains. The loop goes on
+    /// regardless, because the option is read at every pass (#8978) and can be turned on later. Throws only on cancellation or on a failure
+    /// to read the catalog; a failed build, drop or extension create is recorded in <paramref name="tracker"/> and logged.
     /// </summary>
     public static Task<bool> RunPassAsync(
         NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, DateTime utcNow, ILogger logger,
@@ -265,44 +265,19 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     /// <summary>
-    /// The background entry point: records the option, waits <paramref name="firstDelay"/>, then makes a pass every
-    /// <paramref name="interval"/> until shutdown (or, with the option off, until no index remains). Never throws: a pass that fails is a
-    /// Warning and the next interval tries again.
+    /// The background entry point: makes a pass every <paramref name="interval"/> until shutdown, after <paramref name="firstDelay"/>.
+    /// <paramref name="enabled"/> is the option's live, resolved value (#8978: the store's <c>config.config_service</c> column when it holds
+    /// one, else <c>darling.json</c>), read at the start of every pass, so a store write takes effect at the next pass with no restart. With
+    /// the option off and no index the pass is one catalog read. Never throws: a pass that fails is a Warning and the next interval tries again.
     /// </summary>
-    public static async Task RunAsync(
-        NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
-        TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
-    {
-        tracker.Configure(enabled);
-        try
-        {
-            await Task.Delay(firstDelay, cancellationToken).ConfigureAwait(false);
-            while (true)
-            {
-                try
-                {
-                    if (await RunPassAsync(postgres, enabled, tracker, DateTime.UtcNow, logger, cancellationToken).ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-                {
-                    logger.LogWarning("Query Store text trigram index pass failed and is tried again in {Interval}: {ExceptionType}: {Message}", interval, ex.GetType().Name, QueryTextTrigramIndex.ErrorText(ex));
-                }
-
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            logger.LogDebug("Query Store text trigram index pass was cancelled at shutdown.");
-        }
-        catch (Exception ex)
-        {
-            logger.LogInformation("Query Store text trigram index pass stopped at shutdown: {ExceptionType}: {Message}", ex.GetType().Name, QueryTextTrigramIndex.ErrorText(ex));
-        }
-    }
+    public static Task RunAsync(
+        NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
+        TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
+        QueryTextTrigramIndex.RunLoopAsync(
+            enabled, tracker, logger, "Query Store text trigram index", firstDelay, interval,
+            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+            static (wait, ct) => Task.Delay(wait, ct),
+            cancellationToken);
 
     /// <summary>The status word for a catalog reading and the tracker's memory. Pure; the same rules as the plan-cache index's.</summary>
     public static TrigramIndexStatus Classify(TrigramCatalogState state, QueryTextTrigramIndexTracker.Snapshot snapshot) =>
@@ -331,7 +306,8 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             snapshot.LastSqlState,
             snapshot.LastFailedUtc,
             snapshot.NextAttemptUtc,
-            status == TrigramIndexStatus.WaitingOnExtension ? QueryTextTrigramIndex.OperatorStatement : null);
+            status == TrigramIndexStatus.WaitingOnExtension ? QueryTextTrigramIndex.OperatorStatement : null,
+            OptionSource: snapshot.OptionSource);
     }
 
     /// <summary>One sentence for the health block's note, per status.</summary>

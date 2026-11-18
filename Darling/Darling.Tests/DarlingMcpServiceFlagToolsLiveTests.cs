@@ -24,7 +24,8 @@ namespace Darling.Tests;
 /// <summary>
 /// <c>update_service_flags</c> (#6393) as the provisioned, NOSUPERUSER <c>mcp</c> login, on a store provisioned by the shipped
 /// <c>DarlingManagedRoles.BuildProvisioningSql</c>: the tool changes only the flags it is given, refuses an out-of-range value without
-/// writing, moves the reload beacon, and the role's column grant covers the five flags and nothing else on <c>config_service</c>.
+/// writing, moves the reload beacon, and the role's column grant covers the seven flags and nothing else on <c>config_service</c>.
+/// #8978: the two trigram index options are tri-state (NULL = darling.json governs), set by a value and cleared by <c>reset_to_file</c>.
 /// </summary>
 [Collection("pg-cluster-roles")]
 public sealed class DarlingMcpServiceFlagToolsLiveTests
@@ -39,12 +40,17 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>The whole service row as one comparable string (booleans read t or f): every column the tool or the role could touch.</summary>
+    /// <summary>The whole service row as one comparable string (booleans read t or f, and a NULL trigram index option reads n): every
+    /// column the tool or the role could touch.</summary>
     private static async Task<string> RowAsync(NpgsqlConnection owner, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
             "SELECT concat_ws('|', paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled, " +
-            "query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, config_version) FROM config.config_service WHERE id = 1", owner);
+            "query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, " +
+            "CASE WHEN query_text_trigram_index_enabled IS NULL THEN 'n' WHEN query_text_trigram_index_enabled THEN 't' ELSE 'f' END, " +
+            "CASE WHEN query_store_text_trigram_index_enabled IS NULL THEN 'n' WHEN query_store_text_trigram_index_enabled THEN 't' ELSE 'f' END, " +
+            "config_version) " +
+            "FROM config.config_service WHERE id = 1", owner);
         return (string)(await command.ExecuteScalarAsync(ct))!;
     }
 
@@ -135,12 +141,71 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
             /* paused, mcp_enabled, mcp_port, web_enabled, web_port are untouched; config_version moved by the self-bump trigger. */
             var versionAfter = await VersionAsync(owner, ct);
             Assert.True(versionAfter > versionBefore, "config_version must move so the running service reloads");
-            Assert.Equal($"f|t|t|5188|t|5199|f|128|3|250|{versionAfter}", await RowAsync(owner, ct));
+            Assert.Equal($"f|t|t|5188|t|5199|f|128|3|250|n|n|{versionAfter}", await RowAsync(owner, ct));
 
             var all = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
                 mcp, false, true, 4, 16, 0, cancellationToken: ct));
             Assert.Equal("updated", (string)all["status"]!);
-            Assert.Equal($"f|f|t|5188|t|5199|t|4|16|0|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+            Assert.Equal($"f|f|t|5188|t|5199|t|4|16|0|n|n|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheTrigramIndexOptions_AreSetByAValue_AndClearedByResetToFile()
+    {
+        await WithMcpStoreAsync(true, async (mcp, owner, ct) =>
+        {
+            var versionBefore = await VersionAsync(owner, ct);
+
+            var set = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
+                mcp, query_text_trigram_index_enabled: true, query_store_text_trigram_index_enabled: false, cancellationToken: ct));
+            Assert.Equal("updated", (string)set["status"]!);
+            /* Unset, the options read null: darling.json governs them. */
+            Assert.Null(set["previous"]!["query_text_trigram_index_enabled"]);
+            Assert.Null(set["previous"]!["query_store_text_trigram_index_enabled"]);
+            Assert.True((bool)set["settings"]!["query_text_trigram_index_enabled"]!);
+            Assert.False((bool)set["settings"]!["query_store_text_trigram_index_enabled"]!);
+            var versionAfterSet = await VersionAsync(owner, ct);
+            Assert.True(versionAfterSet > versionBefore, "config_version must move so the running service reloads the options");
+            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|t|f|{versionAfterSet}", await RowAsync(owner, ct));
+
+            /* A reset alone is a valid call; it empties the one option named and keeps the other. */
+            var reset = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
+                mcp, reset_to_file: ["query_text_trigram_index_enabled"], cancellationToken: ct));
+            Assert.Equal("updated", (string)reset["status"]!);
+            Assert.True((bool)reset["previous"]!["query_text_trigram_index_enabled"]!);
+            Assert.Null(reset["settings"]!["query_text_trigram_index_enabled"]);
+            Assert.False((bool)reset["settings"]!["query_store_text_trigram_index_enabled"]!);
+            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|n|f|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+
+            /* A reset of one option rides with a value for the other. */
+            var both = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
+                mcp, query_text_trigram_index_enabled: false, reset_to_file: ["query_store_text_trigram_index_enabled"], cancellationToken: ct));
+            Assert.Equal("updated", (string)both["status"]!);
+            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|f|n|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+        });
+    }
+
+    [Theory]
+    [InlineData("capture_plans", false)]
+    [InlineData("query_text_trigram_index_enabled", true)]
+    [InlineData("query_store_text_trigram_index_enabled", true)]
+    public async Task AResetThatNamesAnUnknownOption_OrAlsoCarriesAValue_IsRefused_AndWritesNothing(string resetName, bool sendValueToo)
+    {
+        await WithMcpStoreAsync(true, async (mcp, owner, ct) =>
+        {
+            var before = await RowAsync(owner, ct);
+            var answer = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
+                mcp,
+                capture_plans: true,
+                query_text_trigram_index_enabled: sendValueToo && resetName == "query_text_trigram_index_enabled" ? true : null,
+                query_store_text_trigram_index_enabled: sendValueToo && resetName == "query_store_text_trigram_index_enabled" ? true : null,
+                reset_to_file: [resetName],
+                cancellationToken: ct));
+
+            Assert.Equal("invalid", (string)answer["status"]!);
+            Assert.Contains(resetName, (string)answer["message"]!, StringComparison.Ordinal);
+            Assert.Equal(before, await RowAsync(owner, ct));
         });
     }
 
