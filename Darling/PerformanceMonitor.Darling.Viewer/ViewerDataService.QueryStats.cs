@@ -162,11 +162,13 @@ public sealed partial class ViewerDataService
                columns of the time key are NOT NULL, so no NULL ordering applies.
                idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it.
                #8549: the answer is read only for a group with no host_object_name (ViewerQueryStatsRow.ModuleName shows the host when the
-               group has one, so nothing reads this answer for it). And since the rung that added host_object_name (V51, query-stats-host-object)
-               the collector names the host of every statement that has one: the column is NULL only when dm_exec_sql_text.objectid is
-               NULL, an ad hoc or prepared statement, which has no procedure_stats row. A window that starts at or after the time this
-               store applied V51 holds only such rows, so a NULL host in it is ad hoc and this lookup can only answer 'no module': it
-               reads nothing then. A window that starts earlier, or a store with no V51 stamp, reads as before. Both times are naive UTC.
+               group has one, so nothing reads this answer for it). And once a collector names the host of every statement that has one,
+               the column is NULL only when dm_exec_sql_text.objectid is NULL, an ad hoc or prepared statement, which has no procedure_stats
+               row. A query_stats row of this server with a host_object_name in the hour before the window start proves the build collecting
+               then fills the column. Builds only move forward, so every row in the window came from such a build, a NULL host there is ad
+               hoc, and this lookup can only answer 'no module': it reads nothing. With no such row in that hour (a server with only ad hoc
+               statements, or a store whose column is newer than that) it reads as before. The probe reads query_stats, which every reader
+               can see; the schema version table is owner-only. Both times are naive UTC.
                On a field store the two reads over procedure_stats were 10.15 s of an 11.35 s cold statement, to keep nothing for 25 ad hoc
                handles. */
             WITH handles AS MATERIALIZED (
@@ -175,7 +177,15 @@ public sealed partial class ViewerDataService
                 WHERE sql_handle IS NOT NULL
                 AND   sql_handle <> ''
                 AND   host_object_name IS NULL
-                AND   NOT EXISTS (SELECT 1 FROM darling_schema_version WHERE version = 51 AND applied_at <= $2)
+                AND   NOT EXISTS
+                      (
+                          SELECT 1
+                          FROM query_stats AS q
+                          WHERE q.server_id = $1
+                          AND   q.collection_time >= $2 - interval '1 hour'
+                          AND   q.collection_time < $2
+                          AND   q.host_object_name IS NOT NULL
+                      )
             ),
             recent AS MATERIALIZED (
                 SELECT
