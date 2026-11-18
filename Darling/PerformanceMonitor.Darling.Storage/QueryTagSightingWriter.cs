@@ -85,8 +85,14 @@ public static class QueryTagSightingWriter
     /// full row copy, tens of millions a day on a busy store). A row is now written only when it fills an object name or text
     /// sample or its hourly <c>last_seen</c> move is due. The same test sits twice: as a <c>NOT EXISTS</c> filter in the select
     /// list, so an unchanged row never reaches the insert and takes no row lock, and in the conflict arm's <c>WHERE</c>, which
-    /// decides when a concurrent writer got there first. <c>ORDER BY u.ord</c> keeps the rows in the caller's identity order
+    /// decides when a concurrent writer got there first. <c>ORDER BY</c> the ordinal keeps the rows in the caller's identity order
     /// (<see cref="SortByIdentity"/>), which the filter's join could otherwise change.</para>
+    /// <para><b>The text samples stay out of every work area (#9038).</b> A flush can carry thousands of samples of up to
+    /// <see cref="TextSampleChars"/> characters, and a multi-argument <c>unnest</c> in <c>FROM</c> is always held in a tuple store that
+    /// spills to temporary files past <c>work_mem</c>, as would a sort of the filtered rows with their text. The scan and
+    /// the sort here carry only the narrow columns, a <c>has_text</c> flag (built by a streaming <c>unnest</c> in the select
+    /// list, which holds nothing) and the ordinal. The filter probes the unique index once per flushed row, and a row that
+    /// survives it takes its sample from the parameter array by ordinal.</para>
     /// <para><b><c>seen_count</c> is a lower bound.</b> It adds the flush's buffered count only on a write that happens
     /// anyway. A flush whose re-sighting writes nothing drops its count. Nothing reads the column.</para>
     /// The time source is the statement's own <c>now()</c>, reached through the column default and read as <c>EXCLUDED.last_seen</c> (the insert list leaves <c>last_seen</c> out). That is the same clock as the stored value, and it keeps the comparison <c>timestamptz</c> against <c>timestamptz</c>.</para>
@@ -94,21 +100,26 @@ public static class QueryTagSightingWriter
     internal const string UpsertSql = """
 INSERT INTO collect.query_tag_sightings AS t
     (server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count)
-SELECT u.server_id, u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample, u.seen_count
-FROM unnest($1::integer[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[])
-    WITH ORDINALITY AS u(server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count, ord)
-WHERE NOT EXISTS (
-    SELECT 1
-    FROM collect.query_tag_sightings AS s
-    WHERE s.server_id = u.server_id AND s.key_kind = u.key_kind AND s.key = u.key
-      AND COALESCE(s.application_name, '') = COALESCE(u.application_name, '')
-      AND COALESCE(s.login_name, '') = COALESCE(u.login_name, '')
-      AND COALESCE(s.host_name, '') = COALESCE(u.host_name, '')
-      AND COALESCE(s.database_name, '') = COALESCE(u.database_name, '')
-      AND NOT ((s.object_name IS NULL AND u.object_name IS NOT NULL)
-            OR (s.text_sample IS NULL AND u.text_sample IS NOT NULL)
-            OR s.last_seen < now() - $11::interval - interval '1 hour'))
-ORDER BY u.ord
+SELECT k.server_id, k.key_kind, k.key, k.database_name, k.object_name, k.application_name, k.login_name, k.host_name, ($9::text[])[k.ord], k.seen_count
+FROM (
+    SELECT u.server_id, u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.seen_count, u.ord
+    FROM unnest($1::integer[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[],
+                (SELECT array_agg(x.t IS NOT NULL) FROM (SELECT unnest($9::text[]) AS t) AS x), $10::bigint[])
+        WITH ORDINALITY AS u(server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, has_text, seen_count, ord)
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM collect.query_tag_sightings AS s
+        WHERE s.server_id = u.server_id AND s.key_kind = u.key_kind AND s.key = u.key
+          AND COALESCE(s.application_name, '') = COALESCE(u.application_name, '')
+          AND COALESCE(s.login_name, '') = COALESCE(u.login_name, '')
+          AND COALESCE(s.host_name, '') = COALESCE(u.host_name, '')
+          AND COALESCE(s.database_name, '') = COALESCE(u.database_name, '')
+          AND NOT ((s.object_name IS NULL AND u.object_name IS NOT NULL)
+                OR (s.text_sample IS NULL AND u.has_text)
+                OR s.last_seen < now() - $11::interval - interval '1 hour'))
+    ORDER BY u.ord
+) AS k
+ORDER BY k.ord
 ON CONFLICT (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''))
 DO UPDATE SET
     last_seen = CASE
