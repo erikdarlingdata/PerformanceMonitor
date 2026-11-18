@@ -511,7 +511,15 @@ OPTION(RECOMPILE);";
                 }
 
                 enumerateOk = true;
-                enumerated.Add(new DatabaseProtectionErrorLogState.ArchiveInfo(reader.GetInt32(1), reader.GetDateTime(2)));
+
+                /* #8865: SQL Server on Linux can keep more than 99 archives, and sp_readerrorlog on archive 100 or higher fails the whole
+                   batch with a severe error through SqlClient (sqlcmd hides it). Those archives are left out as if they were not retained,
+                   so the backfill ends at archive 99. */
+                var archive = reader.GetInt32(1);
+                if (archive <= DatabaseProtectionErrorLogState.MaxReadableArchive)
+                {
+                    enumerated.Add(new DatabaseProtectionErrorLogState.ArchiveInfo(archive, reader.GetDateTime(2)));
+                }
             }
         }
 
@@ -591,13 +599,16 @@ OPTION(RECOMPILE);";
        database compatibility level 130 and master may be lower. sp_readerrorlog filters on its search string in the server, so only the
        CHECKDB lines come back. #8865: the one search string is the command, which the instance never translates. A second string on the
        English " executed by " would drop every completion line of an instance whose error log is in another language, and those lines
-       must come back to be counted as unparsed.
+       must come back to be counted as unparsed. Message 8957 does not start with the command in every language (some put a word or the
+       login first), so the lines kept are those with a "(" after the command, where 8957 names the database in every language; the
+       English corruption advisories that only tell the reader to run DBCC CHECKDB mostly have none, and the collector ignores the rest.
        #8865: the lines are not matched to databases here. Matching every database against every line cost databases x lines (45 s for
        2,000 databases and 56,000 lines, most of the 60 s budget). The server instead keeps the newest line per head, which is at most a
        few lines per database however many days the logs hold, and the collector matches those to its rows by name. The head (binary
        collation) is the text before " executed by " on an English line: the database and the options. A line without it (another
-       language) has no marker to cut at, so its head is the text up to the first ")": the database, or a shorter part of a name that holds
-       ")", which only merges such lines further. A line of message 5235 ("... terminated abnormally due to error state N") has the same
+       language) has no marker to cut at, so its head is the text up to the first ")" after the first "(" that follows the command: the
+       words and login before the command, the command and the database (or a shorter part of a name that holds ")", which only merges
+       such lines further). The time and counts after it, which differ on every line, are left out. A line of message 5235 ("... terminated abnormally due to error state N") has the same
        head as the good line it would shadow, so it is dropped before the reduction. */
     private const string SupplementalQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -729,7 +740,11 @@ FROM
                             ISNULL
                             (
                                 NULLIF(CHARINDEX(N' executed by ', l.text), 0),
-                                ISNULL(NULLIF(CHARINDEX(N')', l.text), 0), 1000)
+                                ISNULL
+                                (
+                                    NULLIF(CHARINDEX(N')', l.text, CHARINDEX(N'(', l.text, CHARINDEX(N'DBCC CHECKDB', l.text))), 0),
+                                    1000
+                                )
                             )
                         )
                     ) COLLATE Latin1_General_100_BIN2
@@ -737,7 +752,7 @@ FROM
                     l.log_date DESC
             )
     FROM @lines AS l
-    WHERE l.text LIKE N'DBCC CHECKDB (%'
+    WHERE l.text LIKE N'%DBCC CHECKDB%(%'
     AND   l.text NOT LIKE N'% terminated abnormally due to error state %'
 ) AS r
 WHERE r.n = 1
@@ -815,7 +830,7 @@ OPTION(RECOMPILE);";
                 if (name is null)
                 {
                     /* #8865: a completion line in another language names no database this build can find, and is counted, not dropped. */
-                    if (CheckDbErrorLogLine.IsUnreadableCompletion(text))
+                    if (CheckDbErrorLogLine.IsUnreadableCompletion(text, names))
                     {
                         unreadable++;
                     }

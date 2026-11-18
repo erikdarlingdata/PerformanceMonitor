@@ -21,8 +21,8 @@ namespace PerformanceMonitor.Collectors;
 /// database's name followed by what the log writes after a name (<c>) WITH </c>, <c>) executed by </c>, <c>, noindex</c>),
 /// while the options are engine keywords and never hold <c>)</c>. Only the text after that name is parsed, and the
 /// error count is the last <c>found N errors and repaired M errors</c>, since the name and the login can hold the same
-/// words. The parse is English only: the message text is localised by the instance, and a CHECKDB line in another
-/// language (<see cref="IsUnreadableCompletion"/>) is counted as not parsed rather than guessed at.
+/// words. The parse is English only: the message text is localised by the instance, and a CHECKDB completion line in
+/// another language (<see cref="IsUnreadableCompletion"/>) is counted as not parsed rather than guessed at.
 /// </summary>
 public static class CheckDbErrorLogLine
 {
@@ -32,7 +32,8 @@ public static class CheckDbErrorLogLine
     /// <summary>Added to the options when the check ran with NOINDEX, which skips the nonclustered indexes.</summary>
     public const string NoIndex = "noindex";
 
-    private const string Prefix = "DBCC CHECKDB (";
+    private const string Command = "DBCC CHECKDB";
+    private const string Prefix = Command + " (";
     private const string WithMarker = ") WITH ";
     private const string ExecutedByMarker = " executed by ";
     private const string AbnormalEnd = " terminated abnormally due to error state ";
@@ -77,16 +78,45 @@ public static class CheckDbErrorLogLine
     }
 
     /// <summary>
-    /// #8865: a CHECKDB line that came back from the log but cannot be read here: it starts with the command (which the instance never
-    /// translates) and has neither the English <c> executed by </c> of message 8957 nor the English wording of message 5235. That is
-    /// the shape of a completion line on an instance whose error log is in another language. A line that only mentions the command
-    /// further in is not a CHECKDB record and is not counted.
+    /// #8865: a CHECKDB completion line that came back from the log but cannot be read here, which is what an instance whose error log is in
+    /// another language writes. Message 8957 keeps the command (<c>DBCC CHECKDB</c>, never translated) and the database in parentheses
+    /// after it in every language, but not always at the start: some put a word or the login first, Korean writes no space before the
+    /// parenthesis, and Turkish puts the login between the command and the parenthesised name. So the line counts when it holds the
+    /// command, then a database of <paramref name="names"/> in parentheses after it (closed by <c>)</c>, or by <c>, </c> before a second
+    /// argument), and has neither the English <c> executed by </c> of message 8957 nor the English wording of message 5235. An English
+    /// corruption advisory that tells the reader to run DBCC CHECKDB names no database in parentheses after the command, and is not
+    /// counted; nor is a line about a database the collector does not list.
     /// </summary>
-    public static bool IsUnreadableCompletion(string text) =>
-        !string.IsNullOrEmpty(text)
-        && text.StartsWith(Prefix, StringComparison.Ordinal)
-        && !text.Contains(ExecutedByMarker, StringComparison.Ordinal)
-        && !text.Contains(AbnormalEnd, StringComparison.Ordinal);
+    public static bool IsUnreadableCompletion(string text, IReadOnlySet<string> names)
+    {
+        ArgumentNullException.ThrowIfNull(names);
+        if (string.IsNullOrEmpty(text)
+            || text.Contains(ExecutedByMarker, StringComparison.Ordinal)
+            || text.Contains(AbnormalEnd, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var command = text.IndexOf(Command, StringComparison.Ordinal);
+        if (command < 0)
+        {
+            return false;
+        }
+
+        for (var open = text.IndexOf('(', command + Command.Length); open >= 0; open = text.IndexOf('(', open + 1))
+        {
+            for (var end = open + 1; end < text.Length; end++)
+            {
+                var closes = text[end] == ')' || (text[end] == ',' && end + 1 < text.Length && text[end + 1] == ' ');
+                if (closes && names.Contains(text.Substring(open + 1, end - open - 1)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 
     /* #8865: the arguments CHECKDB takes after the name inside the parentheses. */
     private static readonly string[] SecondArguments = { NoIndex, "repair_allow_data_loss", "repair_fast", "repair_rebuild" };

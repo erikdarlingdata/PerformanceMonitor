@@ -757,21 +757,27 @@ public sealed class DatabaseProtectionCollectorTests
     public async Task ALineInAnotherLanguage_IsCountedUnparsed_AndTheCountHoldsUntilALineParses()
     {
         /* #8865: on an instance whose error log is not English the 8957 line has no "executed by", so before the fix the server never
-           returned it and the count stayed 0. The line still starts with the command. An English line about a database this collector
-           does not list is not ours and is not counted. */
+           returned it and the count stayed 0. Some languages start the line with the command (German), others put the login first
+           (Japanese) or between the command and the name (Turkish). A line about a database this collector does not list is not ours,
+           and an English corruption advisory that names the command is not a completion: neither is counted. */
         var table = Shape();
         Add(table, "A", "FULL", null, Full, Log, role: "PRIMARY");
+        Add(table, "B", "FULL", null, Full, Log, role: "PRIMARY");
+        Add(table, "C", "FULL", null, Full, Log, role: "PRIMARY");
         var state = SettledState();
         var context = ContextWith(state);
         var rows = await ReadWithAsync(context, table, Logs(1));
         var lines = LineShape();
         lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB (A) WITH physical_only wurde von sa ausgeführt und hat 0 Fehler gefunden und 0 Fehler repariert.");
+        lines.Rows.Add(Checked.AddDays(-1), "sa から実行された DBCC CHECKDB (B) では、0 個のエラーが見つかり、0 個のエラーが修復されました。経過時間: 0 時間 0 分 0 秒。");
+        lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB sa tarafından yürütülen (C) 0 hata buldu ve 0 hatayı onardı. Geçen süre: 0 saat 0 dakika 0 saniye.");
         lines.Rows.Add(Checked.AddDays(-1), "DBCC CHECKDB (Ventes) a été exécuté par sa et a trouvé 0 erreurs et réparé 0 erreurs.");
+        lines.Rows.Add(Checked.AddDays(-1), "Sort operation failed during an index build. The overwriting of the allocation page in database 'A' was prevented by terminating the sort. Run DBCC CHECKDB to check for allocation and consistency errors.");
         lines.Rows.Add(Checked.AddDays(-1), CheckLine("NotListed"));
 
         await ApplyAsync(context, rows, Status((0, true)), lines);
 
-        Assert.Equal(2, rows[0].ErrorLogUnparsedLines);
+        Assert.All(rows, r => Assert.Equal(3, r.ErrorLogUnparsedLines));
         Assert.Null(rows[0].ErrorLogCheckDbTime);
 
         /* The log rolls over and the next cycles read no CHECKDB line: the instance still writes lines this build cannot read, so the
@@ -779,9 +785,9 @@ public sealed class DatabaseProtectionCollectorTests
         state = Carry(context, state);
         context = ContextWith(state);
         rows = await ReadWithAsync(context, table, Logs(1));
-        Assert.Equal(2, rows[0].ErrorLogUnparsedLines);
+        Assert.Equal(3, rows[0].ErrorLogUnparsedLines);
         await ApplyAsync(context, rows, Status((0, true)), LineShape());
-        Assert.Equal(2, rows[0].ErrorLogUnparsedLines);
+        Assert.Equal(3, rows[0].ErrorLogUnparsedLines);
         Assert.Empty(context.PendingState);
 
         /* A cycle that parses a line and finds none unreadable clears it. */
@@ -794,6 +800,42 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.Equal(0, rows[0].ErrorLogUnparsedLines);
         Assert.Equal(Checked, rows[0].ErrorLogCheckDbTime);
         Assert.Equal(string.Empty, Carry(context, state).GetValueOrDefault(DatabaseProtectionErrorLogState.UnparsedKey, string.Empty));
+    }
+
+    [Fact]
+    public async Task ArchivesNumberedFromAHundred_AreNeverPlanned_AndTheBackfillEndsWithoutThem()
+    {
+        /* #8865: only SQL Server on Linux keeps more than 99 archives, and reading archive 100 or higher fails the whole batch with a
+           severe error through SqlClient, so the archives past 99 are left out of the list as if the instance did not retain them. */
+        var table = Shape();
+        Add(table, "A", "FULL", null, Full, Log);
+        var logs = LogShape();
+        foreach (var archive in new[] { 0, 1, 2, 99, 100, 101 })
+        {
+            logs.Rows.Add(true, archive, Checked.AddDays(-archive), DBNull.Value);
+        }
+
+        var state = new Dictionary<string, string>(StringComparer.Ordinal);
+        var planned = new List<int>();
+        DatabaseProtectionCollector.Row row = default;
+        for (var cycle = 0; cycle < 5; cycle++)
+        {
+            var context = ContextWith(state);
+            var rows = await ReadWithAsync(context, table, logs);
+            var plan = context.DatabaseProtectionErrorLogPlan!;
+            planned.AddRange(plan.Read.Select(a => a.Archive));
+            await ApplyAsync(context, rows, Status(plan.Read.Select(a => (a.Archive, true)).ToArray()), LineShape());
+            row = rows[0];
+            state = Carry(context, state);
+            if (row.ErrorLogBackfillComplete == true)
+            {
+                break;
+            }
+        }
+
+        Assert.True(row.ErrorLogBackfillComplete);
+        Assert.Contains(99, planned);
+        Assert.DoesNotContain(planned, a => a >= 100);
     }
 
     [Fact]
@@ -1501,9 +1543,10 @@ INSERT #backupset VALUES
 
     /// <summary>
     /// #8865: on an instance whose error log is not in English the 8957 line has no " executed by ", and a read that also searched for those
-    /// words never returned it, so nothing was counted. The line (planted with xp_logevent in the shape German writes) must come back and be
-    /// counted as unparsed. The log is cycled afterwards so the line leaves the current log; the count is server-wide, so a test that
-    /// counts unparsed lines compares with a cycle of its own taken before it plants anything.
+    /// words never returned it, so nothing was counted. Japanese puts the login before the command, so the line does not start with it
+    /// either. The line (planted with xp_logevent in the Japanese shape) must come back and add one unparsed line to what the same read
+    /// counted before it was planted. The database has a name of its own each run and is dropped after it, and a line about a database
+    /// the collector does not list is never counted, so the planted line counts for no later read or test.
     /// </summary>
     [Fact]
     public async Task ACheckDbLineInAnotherLanguage_ComesBack_AndIsCountedUnparsed()
@@ -1512,29 +1555,29 @@ INSERT #backupset VALUES
         Assert.SkipWhen(cs is null, "Set DARLING_TEST_SQL to a SQL Server host to run the database protection live SQL test.");
         var ct = TestContext.Current.CancellationToken;
         var major = await MajorVersionAsync(cs!, ct);
-        const string Database = "pm_8865_localized";
+        var database = "pm_8865_localized_" + Guid.NewGuid().ToString("N")[..8];
 
         try
         {
-            await ExecuteAsync(cs!, $"CREATE DATABASE [{Database}];", ct);
-            await ExecuteAsync(
-                cs!,
-                $"EXECUTE master.dbo.xp_logevent 60000, N'DBCC CHECKDB ({Database}) wurde von sa ausgeführt und hat 0 Fehler gefunden und 0 Fehler repariert. Verstrichene Zeit: 0 Stunden 0 Minuten 0 Sekunden.', informational;",
-                ct);
-
+            await ExecuteAsync(cs!, $"CREATE DATABASE [{database}];", ct);
             await using var connection = new SqlConnection(cs);
             await connection.OpenAsync(ct);
+            var (before, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
+
+            await ExecuteAsync(
+                cs!,
+                $"EXECUTE master.dbo.xp_logevent 60000, N'sa から実行された DBCC CHECKDB ({database}) では、0 個のエラーが見つかり、0 個のエラーが修復されました。経過時間: 0 時間 0 分 0 秒。', informational;",
+                ct);
             var (rows, _) = await RunCycleAsync(connection, new Dictionary<string, string>(StringComparer.Ordinal), major, ct);
 
-            var row = rows.Single(r => r.DatabaseName == Database);
+            var row = rows.Single(r => r.DatabaseName == database);
             Assert.Equal(DatabaseProtectionCollector.ErrorLogRead, row.ErrorLogState);
-            Assert.True(row.ErrorLogUnparsedLines >= 1);
+            Assert.Equal(before.Single(r => r.DatabaseName == database).ErrorLogUnparsedLines + 1, row.ErrorLogUnparsedLines);
             Assert.Null(row.ErrorLogCheckDbTime);
         }
         finally
         {
-            await ExecuteAsync(cs!, "EXECUTE sys.sp_cycle_errorlog;", ct);
-            await DropDatabaseAsync(cs!, Database, ct);
+            await DropDatabaseAsync(cs!, database, ct);
         }
     }
 

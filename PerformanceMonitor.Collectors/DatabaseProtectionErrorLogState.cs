@@ -69,6 +69,12 @@ public static class DatabaseProtectionErrorLogState
     /// </summary>
     public const int ArchivesPerCycle = 3;
 
+    /// <summary>
+    /// The highest archive number read. #8865: Windows keeps at most 99 archives; SQL Server on Linux can keep more, and reading archive
+    /// 100 or higher fails the whole supplemental batch with a severe error, so those are treated as not retained.
+    /// </summary>
+    public const int MaxReadableArchive = 99;
+
     /// <summary>An archive that failed this many times is skipped for good rather than blocking the markers.</summary>
     public const int MaxArchiveAttempts = 2;
 

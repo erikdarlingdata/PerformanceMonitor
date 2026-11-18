@@ -83,7 +83,8 @@ public class CheckDbErrorLogLineTests
         Assert.True(CheckDbErrorLogLine.TryParse(text, name, out _, out var errors));
         Assert.Equal(7, errors);
 
-        const string login = "DBCC CHECKDB (Sales) executed by DOM\found 0 errors and repaired 0 errors found 5 errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 1 seconds.";
+        /* A login may hold the same words: read left to right, the first count here would be the login's 0. */
+        const string login = "DBCC CHECKDB (Sales) executed by found 0 errors and repaired 0 errors found 5 errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 1 seconds.";
         Assert.True(CheckDbErrorLogLine.TryParse(login, "Sales", out _, out var loginErrors));
         Assert.Equal(5, loginErrors);
     }
@@ -92,16 +93,43 @@ public class CheckDbErrorLogLineTests
     public void ALineWhoseCountCannotBeRead_IsNotParsed() =>
         Assert.False(CheckDbErrorLogLine.TryParse("DBCC CHECKDB (Sales) WITH physical_only ausgeführt von sa hat 0 Fehler gefunden", "Sales", out _, out _));
 
+    /* #8865: message 8957 as the 2022 instance's sys.messages writes it in the languages whose line does not start with the command, plus
+       two that do. The command is never translated, but some languages put a word or the login before it, Korean writes no space before
+       the parenthesis and Turkish puts the login between the command and the parenthesised name. */
     [Theory]
-    [InlineData("DBCC CHECKDB (Sales) WITH physical_only wurde von sa ausgeführt und hat 0 Fehler gefunden und 0 Fehler repariert.", true)]
-    [InlineData("DBCC CHECKDB (Ventes) a été exécuté par sa et a trouvé 0 erreurs et réparé 0 erreurs.", true)]
-    [InlineData("DBCC CHECKDB (Sales) WITH no_infomsgs executed by sa found 0 errors and repaired 0 errors.", false)]
-    [InlineData("DBCC CHECKDB (Sales) WITH no_infomsgs executed by sa terminated abnormally due to error state 5. Elapsed time: 0 hours 0 minutes 0 seconds.", false)]
-    [InlineData("Some job said DBCC CHECKDB (Sales) ran.", false)]
-    public void ACheckDbLineWithoutTheEnglishMarkers_IsACompletionThatCannotBeRead(string text, bool unreadable)
+    [InlineData("pt", "O DBCC CHECKDB (Sales) WITH no_infomsgs executado por sa encontrou 0 erros e reparou 0 erros. Tempo decorrido: 0 horas 0 minutos 0 segundos.")]
+    [InlineData("pl", "Polecenie DBCC CHECKDB (Sales) WITH no_infomsgs wykonane przez sa spowodowało znalezienie 0 i naprawienie błędów 0. Upłynęło czasu: 0 godz. 0 min 0 s.")]
+    [InlineData("hu", "A(z) sa felhasználó által végrehajtott DBCC CHECKDB (Sales) WITH no_infomsgs utasítás 0 hibát talált, és 0 hibát kijavított. Eltelt idő: 0 óra, 0 perc, 0 másodperc.")]
+    [InlineData("ja", "sa から実行された DBCC CHECKDB (Sales) WITH no_infomsgs では、0 個のエラーが見つかり、0 個のエラーが修復されました。経過時間: 0 時間 0 分 0 秒。")]
+    [InlineData("ko", "sa이(가) 실행한 DBCC CHECKDB(Sales) WITH no_infomsgs에서 0개의 오류를 찾아 0개의 오류를 복구했습니다. 경과 시간: 0시간 0분 0초.")]
+    [InlineData("zh-TW", "sa 執行的 DBCC CHECKDB (Sales) WITH no_infomsgs 發現 0 個錯誤並修復了 0 個錯誤。經過時間: 0 小時 0 分 0 秒。")]
+    [InlineData("zh-CN", "由 sa 执行的 DBCC CHECKDB (Sales) WITH no_infomsgs 发现 0 个错误，已修复 0 个错误。占用时间: 0 小时 0 分钟 0 秒。")]
+    [InlineData("tr", "DBCC CHECKDB sa tarafından yürütülen (Sales) WITH no_infomsgs 0 hata buldu ve 0 hatayı onardı. Geçen süre: 0 saat 0 dakika 0 saniye.")]
+    [InlineData("de", "DBCC CHECKDB (Sales) wurde von sa ausgeführt, hat 0 Fehler gefunden und 0 Fehler repariert. Verstrichene Zeit: 0 Stunden, 0 Minuten, 0 Sekunden.")]
+    [InlineData("ru", "DBCC CHECKDB (Sales, noindex), выполненная sa, обнаружила ошибки (0) и исправила ошибки (0). Затраченное время: 0 ч 0 мин 0 с.")]
+    public void ACheckDbCompletionInAnotherLanguage_IsUnreadable(string language, string text)
     {
-        /* #8865: on an instance whose error log is not English, the 8957 line still starts with the command, which is never translated,
-           but has neither " executed by " nor the English 5235 wording. */
-        Assert.Equal(unreadable, CheckDbErrorLogLine.IsUnreadableCompletion(text));
+        var names = new HashSet<string>(StringComparer.Ordinal) { "Sales" };
+
+        Assert.True(CheckDbErrorLogLine.IsUnreadableCompletion(text, names), language);
+        /* About a database the collector does not list, it is not ours to count. */
+        Assert.False(CheckDbErrorLogLine.IsUnreadableCompletion(text.Replace("Sales", "Other", StringComparison.Ordinal), names), language);
+    }
+
+    /* #8865: English lines that name the command but are not a completion: corruption advisories (602, 823, 1522, 8646, 9100, as the
+       2022 instance's sys.messages writes them, filled in), the English 8957 line itself and message 5235. None is counted. */
+    [Theory]
+    [InlineData("Could not find an entry for table or index with partition ID 72057594038321152 in database 5. This error can occur if a stored procedure references a dropped table, or metadata is corrupted. Drop and re-create the stored procedure, or execute DBCC CHECKDB.")]
+    [InlineData("The operating system returned error 21(The device is not ready.) to SQL Server during a read at offset 0x00000000012000 in file 'D:\\Data\\Sales.mdf'. Additional messages in the SQL Server error log and operating system error log may provide more detail. This is a severe system-level error condition that threatens database integrity and must be corrected immediately. Complete a full database consistency check (DBCC CHECKDB). This error can be caused by many factors; for more information, see SQL Server Books Online.")]
+    [InlineData("Sort operation failed during an index build. The overwriting of the allocation page in database 'Sales' was prevented by terminating the sort. Run DBCC CHECKDB to check for allocation and consistency errors. It may be necessary restore the database from backup.")]
+    [InlineData("Unable to find index entry in index ID 2, of table 5, in database 'Sales'. The indicated index is corrupt or there is a problem with the current update plan. Run DBCC CHECKDB or DBCC CHECKTABLE. If the problem persists, contact product support.")]
+    [InlineData("Possible index corruption detected. Run DBCC CHECKDB.")]
+    [InlineData("DBCC CHECKDB (Sales) WITH no_infomsgs executed by sa found 0 errors and repaired 0 errors.")]
+    [InlineData("DBCC CHECKDB (Sales) WITH no_infomsgs executed by sa terminated abnormally due to error state 5. Elapsed time: 0 hours 0 minutes 0 seconds.")]
+    public void AnEnglishLineNamingTheCommand_IsNotAnUnreadableCompletion(string text)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal) { "Sales", "5" };
+
+        Assert.False(CheckDbErrorLogLine.IsUnreadableCompletion(text, names));
     }
 }
