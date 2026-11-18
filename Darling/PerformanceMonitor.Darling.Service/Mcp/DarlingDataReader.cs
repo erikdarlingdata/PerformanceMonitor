@@ -3006,13 +3006,16 @@ internal static class DarlingDataReader
                 FROM ranked AS k
                 ORDER BY k.total_executions * k.avg_duration_ms DESC, k.database_name, k.query_id, k.plan_id, k.query_hash, k.execution_type_desc, k.replica_role
             ) AS r
-            /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
-               both keep reading one t.query_text. First arm is collect.query_store_text (one row per
+            /* #2150: resolve the text inside the lateral so the projection and the WAITFOR and self-statement tests
+               below all read one t.query_text. First arm is collect.query_store_text (one row per
                query_id, where the collector lands text once the separate fetch is on); second arm is the
                newest inline query_text, which is where text lived before the cutover and is what keeps
-               existing history readable. */
+               existing history readable. OFFSET 0 keeps the lookup a subquery of its own, run once for each
+               candidate the LIMIT reaches. Without it the planner copies the lookup into the projection and into
+               each text test, and runs every copy. */
             LEFT JOIN LATERAL (
         {{QueryStoreTopTextLookupSql}}
+            OFFSET 0
             ) AS t ON TRUE
             /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
                (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
