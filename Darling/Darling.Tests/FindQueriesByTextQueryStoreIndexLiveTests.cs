@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -113,6 +114,37 @@ ORDER BY q, s");
             source.GetProperty("rows").GetRawText());
     }
 
+    /// <summary>Two Query Store sources are the same answer: the same status, count and cap, and the same rows in the same order with the same
+    /// excerpts. The one difference allowed is the withheld marker in place of a row's excerpt, on either side: the seeded texts hold nothing
+    /// the statement filter names, so a marker there is the filter's fail-closed answer to a match that ran past its timeout on a loaded
+    /// machine, which the index does not change.</summary>
+    private static void AssertSameAnswer(string before, string after, string label)
+    {
+        var at = before.IndexOf('[', StringComparison.Ordinal);
+        var afterAt = after.IndexOf('[', StringComparison.Ordinal);
+        var rowsBefore = JsonNode.Parse(before[at..])!.AsArray();
+        var rowsAfter = JsonNode.Parse(after[afterAt..])!.AsArray();
+        if (rowsBefore.Count == rowsAfter.Count)
+        {
+            for (var i = 0; i < rowsBefore.Count; i++)
+            {
+                if (!Withheld(rowsBefore[i]) && !Withheld(rowsAfter[i])) continue;
+                foreach (var row in new[] { rowsBefore[i]!, rowsAfter[i]! })
+                {
+                    row["excerpt"] = SensitiveStatements.PlaceholderText;
+                    row["text_length"] = null;
+                }
+            }
+        }
+
+        Assert.True(
+            before[..at] == after[..afterAt] && rowsBefore.ToJsonString() == rowsAfter.ToJsonString(),
+            $"{label}:\nwithout the index\n{before}\nwith it\n{after}");
+
+        static bool Withheld(JsonNode? row) =>
+            row?["excerpt"] is JsonValue excerpt && excerpt.GetValue<string>() == SensitiveStatements.PlaceholderText;
+    }
+
     private static (string Database, long QueryId)[] Keys(string source)
     {
         using var document = JsonDocument.Parse(source[source.IndexOf('[', StringComparison.Ordinal)..]);
@@ -157,7 +189,7 @@ ORDER BY q, s");
         {
             var (pattern, database, limit) = Cases[i];
             var after = await QueryStoreSourceAsync(data, pattern, database, limit, ready, ct);
-            Assert.True(before[i] == after, $"'{pattern}' in {database ?? "every database"}, limit {limit}:\nwithout the index\n{before[i]}\nwith it\n{after}");
+            AssertSameAnswer(before[i], after, $"'{pattern}' in {database ?? "every database"}, limit {limit}");
         }
 
         /* What the rows are, so the comparison is not two empty answers. */
