@@ -13075,13 +13075,19 @@ LEFT JOIN LATERAL (
         }
 
         /* #8967: a populated plain attention table is swapped for an empty one first (a catalog-only rename, behind a short lock
-           timeout), so the conversion below never runs migrate_data over a big table. A failed swap warns and the pass goes on: the
-           table stays plain and the next start tries again. */
-        await SwapAttentionEventsAsync(connection, logger, cancellationToken);
+           timeout), so the conversion below never runs migrate_data over a big table. A failed swap leaves that table populated and
+           plain, so the pass skips it (migrate_data over it is the multi-minute exclusive copy the swap exists to avoid) and the next
+           start tries the swap again. The rest of the pass goes on. */
+        var attentionSafe = await SwapAttentionEventsAsync(connection, logger, cancellationToken);
 
         var converted = 0;
         foreach (var schema in ConvertedTables)
         {
+            if (!attentionSafe && string.Equals(schema.TargetTable, "attention_events", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             try
             {
                 using var command = new NpgsqlCommand(CreateHypertableSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds };
@@ -13109,7 +13115,12 @@ LEFT JOIN LATERAL (
     /// Does nothing for an empty, fresh, plain-PostgreSQL, already converted or already swapped table. Failure-isolated: a busy lock or any
     /// other fault warns, rolls back and leaves the table as it was.
     /// </summary>
-    internal static async Task SwapAttentionEventsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    /// <returns>
+    /// True when <c>collect.attention_events</c> is safe for the conversion to take next: the swap ran, or there was nothing to swap. False
+    /// when the swap failed, which leaves a populated plain table the conversion must not copy, so the warning says it is skipped and the
+    /// next start tries again.
+    /// </returns>
+    internal static async Task<bool> SwapAttentionEventsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -13117,10 +13128,14 @@ LEFT JOIN LATERAL (
             using var command = new NpgsqlCommand(PgMigrations.AttentionSwapSql(AttentionSwapLockTimeout), connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning("The attention_events swap did not run (#8967) - the table stays as it was and the next start tries again: {Message}", ex.Message);
+            logger?.LogWarning(
+                "The attention_events swap did not run (#8967). The table stays as it was, is not converted to a hypertable on this pass, and the next start tries again: {Message}",
+                ex.Message);
+            return false;
         }
     }
 

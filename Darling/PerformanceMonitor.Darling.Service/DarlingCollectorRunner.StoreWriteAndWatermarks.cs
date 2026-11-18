@@ -1139,67 +1139,16 @@ public sealed partial class DarlingCollectorRunner
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-
-            /* #4197: an explicit collectedSince (query_store's clamped floor, per WatermarkPolicy.ReadFloor)
-               stays exactly what #2344/#2795 shipped — one bounded read, and a null result falls through to
-               the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
-               used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
-               measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
-               the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
-               the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. A
-               hit is never NEWER than the unbounded answer, and equals it whenever the column rises with
-               collection_time (instance_id, event_time); see WatermarkPolicy.RecentWatermarkWindow's remarks. For
-               job_history's run_datetime, which does not, a hit can be OLDER than the unbounded MAX, which only
-               widens the caller's re-read; its natural-key dedupe drops the repeats. */
-            var autoWindow = collectedSince is null;
-            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
-
-            var sql = BuildServerWatermarkSql(tableName, columnName, bounded: true);
-            using var command = new NpgsqlCommand(sql, connection);
-            /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
-               here, and it silently governed a read whose measured cost exceeded it. */
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
-               timestamptz and Postgres would convert it into the session zone on the way in. */
-            command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
-
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
+            var primary = await ReadServerWatermarkAsync(connection, serverId, tableName, columnName, collectedSince, cancellationToken);
+            if (!string.Equals(tableName, AttentionLegacyTableWatermark.TargetTable, StringComparison.Ordinal))
             {
-                return dt;
+                return primary;
             }
 
-            if (autoWindow)
-            {
-                /* #5515: the probe found no row in RecentWatermarkWindow, which is every cycle's answer for a
-                   quiet server (no job run or trace event for hours). Before the whole slice, try the week:
-                   the SAME bounded statement with an older bound, so the chunks of seven days answer a server
-                   whose newest row is that recent, where the unbounded MAX opened every chunk in retention,
-                   compressed ones included (5,426 blocks a call on job_history). */
-                using var widened = new NpgsqlCommand(sql, connection);
-                widened.CommandTimeout = CommandTimeoutSeconds;
-                widened.Parameters.AddWithValue(serverId);
-                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
-                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
-                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
-                if (widenedResult is DateTime widenedDt)
-                {
-                    return widenedDt;
-                }
-
-                /* Still no row: a gap wider than the week, or a genuinely empty table. Either way only the true
-                   unbounded MAX answers correctly; a null here would read as first-run, which is not scoped to
-                   the window the way it is for query_store's clamped callers. */
-                using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
-                fallback.CommandTimeout = CommandTimeoutSeconds;
-                fallback.Parameters.AddWithValue(serverId);
-                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
-                if (fallbackResult is DateTime fallbackDt)
-                {
-                    return fallbackDt;
-                }
-            }
+            /* #8967: while the swapped-out attention table exists, the new table holds only what was written since the swap, so its MAX
+               is NULL or short. The legacy table never changes, which makes the greater of the two exact at any copy progress. */
+            var legacy = await AttentionLegacyTableWatermark.ReadAsync(connection, serverId, columnName, CommandTimeoutSeconds, cancellationToken);
+            return primary is { } p && legacy is { } l ? (p >= l ? p : l) : primary ?? legacy;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1217,6 +1166,77 @@ public sealed partial class DarlingCollectorRunner
                 + "collector's default window, which re-collects data already stored: {Message}",
                 serverId, tableName, columnName, ex.Message);
         }
+        return null;
+    }
+
+    /// <summary>
+    /// The read behind <see cref="GetLastCollectedTimeAsync"/> on one open connection: the bounded probe, the widened week, then the
+    /// unbounded MAX. Throws on a store fault; the caller owns the warning and the fallback window.
+    /// </summary>
+    private static async Task<DateTime?> ReadServerWatermarkAsync(
+        NpgsqlConnection connection, int serverId, string tableName, string columnName, DateTime? collectedSince, CancellationToken cancellationToken)
+    {
+        /* #4197: an explicit collectedSince (query_store's clamped floor, per WatermarkPolicy.ReadFloor)
+           stays exactly what #2344/#2795 shipped — one bounded read, and a null result falls through to
+           the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
+           used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
+           measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
+           the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
+           the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. A
+           hit is never NEWER than the unbounded answer, and equals it whenever the column rises with
+           collection_time (instance_id, event_time); see WatermarkPolicy.RecentWatermarkWindow's remarks. For
+           job_history's run_datetime, which does not, a hit can be OLDER than the unbounded MAX, which only
+           widens the caller's re-read; its natural-key dedupe drops the repeats. */
+        var autoWindow = collectedSince is null;
+        var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+        var sql = BuildServerWatermarkSql(tableName, columnName, bounded: true);
+        using var command = new NpgsqlCommand(sql, connection);
+        /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
+           here, and it silently governed a read whose measured cost exceeded it. */
+        command.CommandTimeout = CommandTimeoutSeconds;
+        command.Parameters.AddWithValue(serverId);
+        /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+           timestamptz and Postgres would convert it into the session zone on the way in. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result is DateTime dt)
+        {
+            return dt;
+        }
+
+        if (autoWindow)
+        {
+            /* #5515: the probe found no row in RecentWatermarkWindow, which is every cycle's answer for a
+               quiet server (no job run or trace event for hours). Before the whole slice, try the week:
+               the SAME bounded statement with an older bound, so the chunks of seven days answer a server
+               whose newest row is that recent, where the unbounded MAX opened every chunk in retention,
+               compressed ones included (5,426 blocks a call on job_history). */
+            using var widened = new NpgsqlCommand(sql, connection);
+            widened.CommandTimeout = CommandTimeoutSeconds;
+            widened.Parameters.AddWithValue(serverId);
+            widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+            var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+            if (widenedResult is DateTime widenedDt)
+            {
+                return widenedDt;
+            }
+
+            /* Still no row: a gap wider than the week, or a genuinely empty table. Either way only the true
+               unbounded MAX answers correctly; a null here would read as first-run, which is not scoped to
+               the window the way it is for query_store's clamped callers. */
+            using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
+            fallback.CommandTimeout = CommandTimeoutSeconds;
+            fallback.Parameters.AddWithValue(serverId);
+            var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+            if (fallbackResult is DateTime fallbackDt)
+            {
+                return fallbackDt;
+            }
+        }
+
         return null;
     }
 
