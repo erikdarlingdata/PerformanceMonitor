@@ -180,10 +180,12 @@ internal static class CollectorTestContext
         DateTime? watermark = null,
         bool capturePlanXml = false,
         bool watermarkFromUtcColumn = false,
-        int serverId = 42)
+        int serverId = 42,
+        IReadOnlyDictionary<string, string>? state = null)
         => new()
         {
             ServerId = serverId,
+            State = state ?? CollectorContext.NoState,
             ServerName = "test-server",
             CollectionTime = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc),
             Deltas = deltas,

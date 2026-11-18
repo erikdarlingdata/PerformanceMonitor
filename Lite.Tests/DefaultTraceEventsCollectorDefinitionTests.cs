@@ -450,13 +450,17 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            It is used only while its event time is not ahead of the stored watermark; no host code, generic wiring.
 
            ELEVEN since #8146. long_query_completions declares the ring-buffer position key (xe_ring_position) the loss accounting compares
-           each run against; blocked_process_report and deadlocks gained the same key. Staged with the run, generic wiring, no host code. */
+           each run against; blocked_process_report and deadlocks gained the same key. Staged with the run, generic wiring, no host code.
+
+           TWELVE since #8981. memory_pressure_events persists the raw ring-buffer position it has stored (confirmed and pending, with the
+           instance start time) so the first read after a service restart skips by raw timestamp, not by a guess at the held record.
+           A MAX() over its rows cannot recover it: a raw timestamp is not a stored column. Staged with the run, generic wiring, no host code. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "long_query_completions", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
+        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "long_query_completions", "memory_pressure_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
     }
 
     [Fact]
