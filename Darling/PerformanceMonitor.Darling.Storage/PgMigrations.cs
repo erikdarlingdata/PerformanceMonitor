@@ -3525,6 +3525,8 @@ $rung$;";
         new Migration(273, "wait-stats-hourly-rollup", V273Sql),
         /* V274 (#8978): the store's trigram text index options on the service row. Two catalog-only nullable boolean columns, no default. */
         new Migration(274, "trigram-index-store-options", V274Sql),
+        /* V275 (#8737): the personal MCP token store. A new table created empty, owner-only: nothing is backfilled and no existing row moves. */
+        new Migration(PersonalTokenSchema.Version, "mcp-personal-tokens", PersonalTokenSchema.CreateSql),
     };
 
     /// <summary>

@@ -728,11 +728,16 @@ public sealed class ViewerSchemaVersionGateTests
         var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        /* #8978: the V274 sentinel (the trigram index options on the service row) is the last parameter, so a store that has every sentinel
-           but that one is a V273 store and maps to 273, not 274. */
+        /* #8737: the V275 sentinel (the personal token table) is the last parameter, so a store that has every sentinel but that one is a
+           V274 store and maps to 274, not 275. The V274 sentinel (#8978, the trigram index options on the service row) is the one before it. */
+        var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV275[^1] = false;
+        Assert.Equal("hasPersonalTokens", map.GetParameters()[^1].Name);
+        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^2].Name);
+        Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV274[^1] = false;
-        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^1].Name);
+        allButV274[^2] = false;
         Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
 
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes

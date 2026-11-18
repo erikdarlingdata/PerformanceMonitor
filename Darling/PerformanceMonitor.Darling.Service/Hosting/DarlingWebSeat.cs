@@ -378,7 +378,7 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>
     /// The group-level write gate: may THIS seat make THIS request? Pure over (seat, method, path) so the
     /// matrix pins without a server. An edit seat may do anything. A read-only seat gets every safe method,
-    /// plus exactly one unsafe-method exception: <c>POST /api/compose/run</c>, which is read-only by
+    /// plus three unsafe-method exceptions, each a POST matched exactly. The first is <c>POST /api/compose/run</c>, which is read-only by
     /// construction (it compiles a panel spec into bound SELECTs on the viewer-role pool — the SPA runs every
     /// custom-view panel through it, so blocking it would break the read surface the viewer seat exists to
     /// grant). Everything else non-GET is refused — INCLUDING write endpoints that do not exist yet, which is
@@ -388,6 +388,10 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// A grant gives the approve power to a person whatever the role of their sign-in, so the press endpoint, not this gate, decides: a seat
     /// that cannot edit presses only as the enabled person its key maps to, and the press API checks that person's grant. A seat with no
     /// owner key (the reads-only shared token, a front door's viewer, an older cookie) names nobody and stays refused here.</para>
+    /// <para>The third (#8737): a seat signed in with an <see cref="OwnerKey"/> may POST <c>/api/mcp-tokens</c> and
+    /// <c>/api/mcp-tokens/{id}/revoke</c>, matched exactly (<see cref="IsPersonalTokenWritePath"/>), to make and revoke their own personal MCP
+    /// tokens. The route decides the rest: a read-only seat makes <c>reader</c> tokens only, revokes only its own, and is held by the per-person
+    /// cap and the 24-hour create ceiling. A seat with no owner key stays refused here.</para>
     /// </summary>
     internal static bool IsRequestAllowed(DarlingWebSeat seat, string method, string path)
     {
@@ -407,7 +411,50 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         }
 
         return string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase)
-            || (seat.OwnerKey is not null && IsProposalPressPath(path));
+            || (seat.OwnerKey is not null && (IsProposalPressPath(path) || IsPersonalTokenWritePath(path)));
+    }
+
+    /// <summary>True for exactly <c>/api/mcp-tokens</c> or <c>/api/mcp-tokens/{id}/revoke</c>, the id 16 lowercase hex characters, with no
+    /// other segment and no trailing slash (#8737). A person signed in with an owner key makes and revokes their own personal MCP tokens whatever
+    /// the role of their sign-in; the route, not this gate, decides which role a token may take and whose token may be revoked.</summary>
+    internal static bool IsPersonalTokenWritePath(string path)
+    {
+        const string Route = "/api/mcp-tokens";
+        if (string.Equals(path, Route, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        const string Suffix = "/revoke";
+        if (!path.StartsWith(Route + "/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(Suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var start = Route.Length + 1;
+        var length = path.Length - Suffix.Length - start;
+        return length == PersonalTokenIdLength && IsPersonalTokenId(path.Substring(start, length));
+    }
+
+    private const int PersonalTokenIdLength = 16;
+
+    /// <summary>True for a personal token id: 16 lowercase hex characters.</summary>
+    internal static bool IsPersonalTokenId(string? id)
+    {
+        if (id is null || id.Length != PersonalTokenIdLength)
+        {
+            return false;
+        }
+
+        foreach (var c in id)
+        {
+            if (!(c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>True for exactly <c>/api/proposals/{id}/first-press</c> or <c>/api/proposals/{id}/confirm</c>, the id a GUID in its hyphenated

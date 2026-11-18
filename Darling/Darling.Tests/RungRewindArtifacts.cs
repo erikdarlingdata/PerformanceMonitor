@@ -849,6 +849,8 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // (the probe's sentinel is the Query Store one) and the re-run of V274 adds them back as NULL. Safe on a store that never had them.
         new(274, "hasTrigramIndexStoreOptions",
             @"ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_text_trigram_index_enabled, DROP COLUMN IF EXISTS query_store_text_trigram_index_enabled;"),
+        // V275 (#8737): the personal MCP token table. The rewind drops it (its triggers go with it); a re-run of V275 creates it again.
+        new(275, "hasPersonalTokens", "DROP TABLE IF EXISTS config.mcp_personal_token;"),
     ];
 
     /// <summary>

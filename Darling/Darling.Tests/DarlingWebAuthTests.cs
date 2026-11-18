@@ -497,4 +497,37 @@ public sealed class DarlingWebAuthTests
         Assert.Contains("document.getElementById('return').value = location.pathname + location.search + location.hash;",
             withoutOidc, StringComparison.Ordinal);
     }
+
+    /// <summary>#8735, #8737 (Erik): the dashboard's token sign-in knows nothing of personal MCP tokens. A real minted <c>dpt1_</c> value posted to
+    /// <c>/auth/login</c> is refused exactly like a random wrong token: the same status, the same redirect and body, and no session cookie.</summary>
+    [Fact]
+    public async Task Login_ValidPersonalToken_RefusedLikeAnyWrongToken()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        await using var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        await using var app = builder.Build();
+        var host = new DarlingWebHostService(
+            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
+            accessToken: new string('t', 40), oidcClient: null, requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: Key);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        using var server = app.GetTestServer();
+
+        var minted = PersonalTokenFormat.Mint().Value;
+        Assert.StartsWith("dpt1_", minted, StringComparison.Ordinal);
+
+        var wrong = await DarlingWebHostGateLiveTests.PostSignIn(server, "localhost", IPAddress.Loopback, "not-the-token-" + Guid.NewGuid().ToString("N"));
+        var personal = await DarlingWebHostGateLiveTests.PostSignIn(server, "localhost", IPAddress.Loopback, minted);
+
+        Assert.Equal(0, wrong.Response.Headers.SetCookie.Count);
+        Assert.Equal(0, personal.Response.Headers.SetCookie.Count);
+        Assert.Equal(wrong.Response.StatusCode, personal.Response.StatusCode);
+        Assert.Equal(wrong.Response.Headers.Location.ToString(), personal.Response.Headers.Location.ToString());
+        Assert.Equal(await new System.IO.StreamReader(wrong.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken),
+            await new System.IO.StreamReader(personal.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken));
+    }
 }

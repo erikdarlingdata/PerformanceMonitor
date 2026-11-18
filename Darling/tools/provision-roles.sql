@@ -1250,6 +1250,35 @@ BEGIN
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $web_groups$;
+-- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+DO $personal_token$
+DECLARE
+    r text;
+    c text;
+BEGIN
+    IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('config.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('config.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('config.mcp_personal_token'))
+              AND (rolname IN ('admin', 'viewer', 'web', 'mcp') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON config.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
+    END IF;
+END $personal_token$;
 
 COMMIT;
 
@@ -2089,7 +2118,7 @@ DECLARE
    v_row config.config_notification_routes%ROWTYPE;
    -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
    -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
-   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{1,64}$', false);
+   v_operator boolean := COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{1,64}|personal token [A-Za-z0-9._:-]{1,64} of [^[:cntrl:]]{1,207})$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -2241,7 +2270,7 @@ DECLARE
    v_before jsonb;
    v_after jsonb;
 BEGIN
-   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{1,64}$' THEN
+   IF p_actor IS NULL OR p_actor !~ '^operator:([A-Za-z0-9._: -]{1,64}|personal token [A-Za-z0-9._:-]{1,64} of [^[:cntrl:]]{1,207})$' THEN
       RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
    END IF;
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
@@ -2402,7 +2431,7 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{1,64}$', false) THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:([A-Za-z0-9._: -]{1,64}|personal token [A-Za-z0-9._:-]{1,64} of [^[:cntrl:]]{1,207})$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
@@ -3682,7 +3711,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'person_deleted', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'person_deleted', 'mcp_personal_token_created', 'mcp_personal_token_revoked', 'mcp_personal_token_expiry_cut', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -4113,3 +4142,32 @@ BEGIN
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $web_groups$;
+-- V275 (#8737): the personal MCP token table. No role but the store owner reads or writes it, so nothing is granted back.
+DO $personal_token$
+DECLARE
+    r text;
+    c text;
+BEGIN
+    IF pg_catalog.to_regclass('config.mcp_personal_token') IS NOT NULL THEN
+        FOR r IN
+            WITH grantees AS (
+                SELECT a.grantee FROM pg_catalog.pg_class AS o CROSS JOIN LATERAL pg_catalog.aclexplode(o.relacl) AS a
+                WHERE o.oid = pg_catalog.to_regclass('config.mcp_personal_token')
+                UNION
+                SELECT a.grantee FROM pg_catalog.pg_attribute AS t CROSS JOIN LATERAL pg_catalog.aclexplode(t.attacl) AS a
+                WHERE t.attrelid = pg_catalog.to_regclass('config.mcp_personal_token')
+            )
+            SELECT 'PUBLIC'
+            UNION
+            SELECT pg_catalog.quote_ident(rolname) FROM pg_catalog.pg_roles
+            WHERE oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid = pg_catalog.to_regclass('config.mcp_personal_token'))
+              AND (rolname IN ('admin', 'viewer', 'web', 'mcp') OR oid IN (SELECT grantee FROM grantees))
+        LOOP
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.mcp_personal_token FROM %s CASCADE', r);
+            FOR c IN SELECT attname FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.mcp_personal_token') AND attnum > 0 AND NOT attisdropped LOOP
+                EXECUTE pg_catalog.format('REVOKE ALL (%I) ON config.mcp_personal_token FROM %s CASCADE', c, r);
+            END LOOP;
+        END LOOP;
+    END IF;
+END $personal_token$;

@@ -601,4 +601,73 @@ public sealed class DarlingSignInThrottleTests
         Assert.Equal(60, DarlingSignInThrottle.GlobalMaxAttempts);
         Assert.Equal(TimeSpan.FromHours(1), DarlingSignInThrottle.GlobalWindow);
     }
+
+    [Fact]
+    public void Released_DoesNotRecordMiss()
+    {
+        var throttle = new DarlingSignInThrottle();
+        for (var i = 0; i < DarlingSignInThrottle.FreeFailures + 5; i++)
+        {
+            var attempt = throttle.BeginAttempt("a", T0);
+            Assert.True(attempt.IsReserved);
+            throttle.Released(attempt);
+        }
+
+        Assert.False(throttle.BeginAttempt("a", T0).IsHeld);
+    }
+
+    [Fact]
+    public void Released_DoesNotExemptFromTotalBudget()
+    {
+        var throttle = new DarlingSignInThrottle(globalMaxAttempts: 8);
+        throttle.Released(throttle.BeginAttempt("worker", T0));
+        Assert.Equal(0, throttle.RecentSuccessCount);
+        Assert.Equal(0, throttle.GlobalCount);
+
+        for (var i = 0; i < 8; i++)
+        {
+            Miss(throttle, "src-" + i, T0.AddMinutes(1));
+        }
+
+        var worker = throttle.BeginAttempt("worker", T0.AddMinutes(2));
+        Assert.True(worker.IsHeld);
+        Assert.Equal(SignInHold.Total, worker.Hold);
+    }
+
+    [Fact]
+    public async Task Released_FreesInFlightWaiter()
+    {
+        var throttle = new DarlingSignInThrottle();
+        var inFlight = Enumerable.Range(0, DarlingSignInThrottle.FreeFailures + 1)
+            .Select(_ => throttle.BeginAttempt("a", T0)).ToList();
+        Assert.All(inFlight, a => Assert.True(a.IsReserved));
+
+        var waiting = throttle.BeginAttemptAsync("a", () => T0, default);
+        await Task.Delay(50);
+        Assert.False(waiting.IsCompleted);
+
+        throttle.Released(inFlight[0]);
+        var admitted = await waiting.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(admitted.IsReserved);
+        Assert.Equal(DarlingSignInThrottle.FreeFailures + 1, throttle.GlobalCount);
+    }
+
+    [Fact]
+    public void Released_OnHeldAttempt_NoOp()
+    {
+        var throttle = new DarlingSignInThrottle();
+        for (var i = 0; i <= DarlingSignInThrottle.FreeFailures; i++)
+        {
+            Miss(throttle, "a", T0);
+        }
+
+        var held = throttle.BeginAttempt("a", T0);
+        Assert.True(held.IsHeld);
+        var before = throttle.GlobalCount;
+
+        throttle.Released(held);
+
+        Assert.Equal(before, throttle.GlobalCount);
+        Assert.True(throttle.BeginAttempt("a", T0).IsHeld);
+    }
 }

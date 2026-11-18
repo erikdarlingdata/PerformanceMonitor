@@ -267,10 +267,54 @@ public sealed class ReadCallerTests
             PersonalDataNames(new[] { "Record.cookie", "Record.authToken", "Record.Authorization", "x.request_headers", "x.remote_ip_address", "x.user_name", "Offer.userAgent", "OfMcpClient.userAgent", "Record.caller", "x.distinct_callers" }));
     }
 
+    /// <summary>#8737: a personal token's caller name is rendered as the person and the token, split at the LAST <c>/</c>, because a subject
+    /// may hold one and a token name may not. The store identity carries the same text, and a file token whose name merely starts with
+    /// <c>personal:</c> (it cannot hold a <c>/</c>) stays a named token.</summary>
+    [Theory]
+    [InlineData("personal:alice@corp/ci", "personal token ci of alice@corp")]
+    [InlineData("personal:a/b@corp/ci", "personal token ci of a/b@corp")]
+    [InlineData("personal:noslash", "named token personal:noslash")]
+    [InlineData("ops-lead", "named token ops-lead")]
+    public void APersonalCallerName_IsRenderedAsThePersonAndTheToken(string name, string expected)
+    {
+        Assert.Equal(expected, ReadCaller.OfMcpIdentity(name, "a-bearer-value-0123456789abcdef"));
+
+        ReadCaller.SetAmbientMcpToken(ReadCaller.OfMcpIdentity(name, "a-bearer-value-0123456789abcdef"));
+        try
+        {
+            Assert.Equal(expected, ReadCaller.StoreTokenIdentity());
+        }
+        finally
+        {
+            ReadCaller.SetAmbientMcpToken(null);
+        }
+    }
+
     private static IEnumerable<string> InsertColumns(string sql)
     {
         var open = sql.IndexOf('(');
         var close = sql.IndexOf(')', open);
         return sql[(open + 1)..close].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>M4: a personal identity fits the 256-character identity columns with the longest token name and client name, and a long
+    /// subject is cut on whole text elements (#3625): no joined emoji is split and no lone surrogate is kept.</summary>
+    [Fact]
+    public void APersonalIdentityWithALongSubject_FitsTheIdentityColumns_AndKeepsWholeTextElements()
+    {
+        const string Family = "\U0001F468\u200D\U0001F469\u200D\U0001F467";
+        var subject = string.Concat(Enumerable.Repeat(Family, 25));
+        var longestName = new string('n', 64);
+
+        var rendered = ReadCaller.OfTokenName("personal:" + subject + "/" + longestName);
+        var stored = "mcp:" + rendered + ", client says: " + new string('c', ReadCaller.MaxLength);
+
+        Assert.StartsWith("personal token " + longestName + " of " + Family, rendered, StringComparison.Ordinal);
+        Assert.True(stored.Length <= 256, $"{stored.Length} characters");
+        var kept = rendered[("personal token " + longestName + " of ").Length..].TrimEnd('.');
+        Assert.Equal(string.Empty, kept.Replace(Family, string.Empty, StringComparison.Ordinal));
+
+        /* A subject that fits is kept as it is. */
+        Assert.Equal("personal token ci of alice@corp", ReadCaller.OfTokenName("personal:alice@corp/ci"));
     }
 }

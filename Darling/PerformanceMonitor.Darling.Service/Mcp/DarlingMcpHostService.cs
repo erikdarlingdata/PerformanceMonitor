@@ -113,6 +113,24 @@ public sealed class DarlingMcpHostService : BackgroundService
     private readonly StoreOwnerSource _ownerSource;
     private readonly PseudonymKeySource? _pseudonymKeys;
 
+    /* #8737: the process's personal-token snapshot (a DI singleton the process disposes). Null in a test-constructed host unless the test
+       sets PersonalSnapshot; a start with no snapshot serves no personal token. */
+    private readonly DarlingPersonalTokenSnapshot? _personalSnapshot;
+
+    /// <summary>The personal-token snapshot the bearer gate checks and the supervisor refreshes (#8737). A test sets it.</summary>
+    internal DarlingPersonalTokenSnapshot? PersonalSnapshot
+    {
+        get => _personalSnapshot;
+        init => _personalSnapshot = value;
+    }
+
+    /* #8737: true while the running listener serves personal tokens, so the supervisor tick refreshes the snapshot. */
+    private volatile bool _servesPersonalTokens;
+
+    /* #8737: when the last failed last-used flush was logged at Warning; later failures inside FlushWarnEvery go to Debug. */
+    private DateTime _lastFlushWarnUtc = DateTime.MinValue;
+    private static readonly TimeSpan FlushWarnEvery = TimeSpan.FromMinutes(5);
+
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
@@ -171,6 +189,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     {
         _processServices = processServices;
         _ownerSource = ownerSource ?? new StoreOwnerSource();
+        _personalSnapshot = processServices?.GetService<DarlingPersonalTokenSnapshot>();
         _pseudonymKeys = pseudonymKeys;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
@@ -330,6 +349,13 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             lastEnabled = toggle.Enabled;
 
+            /* #8737: a listener that serves personal tokens reloads them on every tick (a revocation reaches the gate within one tick) and
+               writes their last-used times. Awaited here, never left running: a stop, or a snapshot the process has disposed, ends the loop. */
+            if (_app is not null && _servesPersonalTokens && await PersonalTokenTickStopsAsync(stoppingToken))
+            {
+                break;
+            }
+
             try
             {
                 await Task.Delay(SupervisorPollInterval, stoppingToken);
@@ -383,6 +409,95 @@ public sealed class DarlingMcpHostService : BackgroundService
         ReleaseServerCertificate();
 
         _runningPort = 0;
+        _servesPersonalTokens = false;
+    }
+
+    /// <summary>
+    /// One supervisor tick's personal-token work (#8737), awaited. True only when the service is stopping (cancellation, or the snapshot
+    /// disposed with the process): the supervisor loop then ends. Any other failure, an <see cref="ObjectDisposedException"/> from a data
+    /// source the worker replaced included, is logged and the next tick tries again, so it never ends MCP supervision.
+    /// </summary>
+    internal async Task<bool> PersonalTokenTickStopsAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await RefreshPersonalTokensAsync(stoppingToken);
+            return false;
+        }
+        catch (Exception ex) when ((ex is OperationCanceledException or ObjectDisposedException) && stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogDebug("The personal MCP token refresh stopped with the service ({Reason})", ex.GetType().Name);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "The personal MCP token refresh failed; personal tokens are refused until a refresh succeeds");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Starts serving (#8737): a listener that serves personal tokens reloads the snapshot first, so a start, and a restart after the
+    /// listener was toggled off, never serves the copy from before (a token revoked meanwhile would pass until the next tick). A reload that
+    /// fails leaves the snapshot unavailable, which refuses every personal token.
+    /// </summary>
+    internal async Task StartListenerAsync(WebApplication app, bool servesPersonalTokens, CancellationToken cancellationToken)
+    {
+        if (servesPersonalTokens)
+        {
+            await RefreshPersonalTokensAsync(cancellationToken);
+        }
+
+        await app.StartAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The personal MCP tokens (#8737) a start serves, from <c>darling.json</c>: null when the feature is off or cannot be served, and always
+    /// null on a front door, which holds no store. <see cref="DarlingPersonalTokenSettings.Resolve"/> already logged its warnings once at the
+    /// worker's start, so it is called here without a logger.
+    /// </summary>
+    internal static PersonalTokenSettings? PersonalTokensFor(DarlingConfig config) =>
+        config.IsFrontDoor ? null : DarlingPersonalTokenSettings.Resolve(config, null);
+
+    /// <summary>
+    /// The supervisor's personal-token work for one tick (#8737): reload the snapshot over the owner connection, then write the last-used
+    /// times. Each runs whatever the other did: a failed flush is logged (at Warning at most every five minutes) and its ids stay pending for
+    /// the next tick. Cancellation and a disposed snapshot (the process is stopping) propagate to the caller, which treats them as a stop.
+    /// </summary>
+    internal async Task RefreshPersonalTokensAsync(CancellationToken cancellationToken)
+    {
+        var snapshot = _personalSnapshot;
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await snapshot.RefreshAsync(_ownerSource, _logger, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not ObjectDisposedException)
+        {
+            _logger.LogWarning(ex, "Refreshing the personal MCP tokens failed; personal tokens are refused until a refresh succeeds");
+        }
+
+        try
+        {
+            await snapshot.FlushLastUsedAsync(_ownerSource, DateTimeOffset.UtcNow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not ObjectDisposedException)
+        {
+            var now = DateTime.UtcNow;
+            if (now - _lastFlushWarnUtc >= FlushWarnEvery)
+            {
+                _lastFlushWarnUtc = now;
+                _logger.LogWarning(ex, "Writing the personal MCP tokens' last-used times failed; they are kept and written on a later tick");
+            }
+            else
+            {
+                _logger.LogDebug(ex, "Writing the personal MCP tokens' last-used times failed again; they are kept and written on a later tick");
+            }
+        }
     }
 
     /// <summary>Failed-start cleanup: a partially built app / data source / certificate must not leak between attempts.
@@ -632,7 +747,16 @@ public sealed class DarlingMcpHostService : BackgroundService
                role, unreadable, under the length floor, a shared name or value) is left out with one Critical line. Named tokens were
                configured and none can be served, with no legacy token: the start stops, because serving the listener open would drop
                the credentials the operator asked every client to present. */
-            var tokenSet = DarlingMcpTokenSet.Resolve(config.Mcp, bearerToken, writes, _logger);
+            /* #8737: personal tokens are served beside the file tokens when darling.json asks for them and this process holds the snapshot the
+               gate checks (a front door never serves them). */
+            var personal = PersonalTokensFor(config);
+            if (personal is not null && _personalSnapshot is null)
+            {
+                _logger.LogWarning("MCP personal tokens are not served: this process has no personal token snapshot registered.");
+                personal = null;
+            }
+
+            var tokenSet = DarlingMcpTokenSet.Resolve(config.Mcp, bearerToken, writes, _logger, personal);
             if (config.Mcp.HasNamedTokens && !tokenSet.HasAnyToken)
             {
                 _logger.LogCritical("MCP named tokens (mcp.tokens) are set but none can be served, and no legacy token is set; MCP server not started.");
@@ -646,6 +770,17 @@ public sealed class DarlingMcpHostService : BackgroundService
                     "MCP named tokens are served: {Tokens}. Each request's tools follow its token's role; every MCP request, loopback included, must present a token.",
                     string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ", " +
                         McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(t.Name, default, t.DataDetail))) + ")")));
+                writes = tokenSet.Union;
+            }
+
+            if (tokenSet.Personal is { } served)
+            {
+                _logger.LogWarning(
+                    "MCP personal tokens are served alongside the file tokens: each person's token is served its own role (reader, or operator when " +
+                    "an admin mints one and mcp.personalTokens.adminRole is operator; admins may mint {AdminRole}), at {DataDetail}. Every MCP request, " +
+                    "loopback included, must present a token.",
+                    served.AdminRole,
+                    McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(null, default, served.DataDetail))));
                 writes = tokenSet.Union;
             }
 
@@ -976,8 +1111,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
-            await _app.StartAsync(stoppingToken);
+            await StartListenerAsync(_app, tokenSet.Personal is not null, stoppingToken);
             _runningPort = effectivePort;
+            _servesPersonalTokens = tokenSet.Personal is not null;
             return true;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -1352,7 +1488,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     {
         /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
            the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
-        var perRequest = tokens is { HasNamed: true };
+        var perRequest = tokens is { PerRequest: true };
         DarlingMcpWritePolicy.Effective PolicyOf(IServiceProvider sp) =>
             DarlingMcpTokenSet.CallerOf(sp.GetService<IHttpContextAccessor>())?.Policy ?? tokens!.LegacyPolicy;
 
@@ -1468,7 +1604,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             options.ServerInstructions = DarlingMcpInstructions.Build(
                 declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection), agentMuteRules);
 
-            if (tokens is { HasNamed: true })
+            if (tokens is { PerRequest: true })
             {
                 roleInstructions.Clear();
                 if (tokens.LegacyToken.Length > 0)
@@ -1484,6 +1620,23 @@ public sealed class DarlingMcpHostService : BackgroundService
                     roleInstructions[entry.Role] = DarlingMcpInstructions.BuildForNamedToken(
                         declaredPeers, catalog,
                         DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy, agentMuteRules);
+                }
+
+                /* #8737: a personal token is served operator or reader, so both roles' texts exist whatever mcp.tokens holds. */
+                if (tokens.Personal is not null)
+                {
+                    foreach (var role in new[] { McpTokenEntry.OperatorRole, McpTokenEntry.ReaderRole })
+                    {
+                        if (roleInstructions.ContainsKey(role))
+                        {
+                            continue;
+                        }
+
+                        var policy = tokens.PolicyForRole(role, null);
+                        roleInstructions[role] = DarlingMcpInstructions.BuildForNamedToken(
+                            declaredPeers, catalog,
+                            DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy, agentMuteRules);
+                    }
                 }
             }
         });
@@ -1526,16 +1679,18 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* #6542: with named tokens served, each request gets its own token's tool set: tools/list shows it, and a call
                        outside it fails as an unknown tool, because tools/call dispatches over this same collection. The legacy
                        token, when one is served beside them, gets the set its settings give it. */
-                    if (tokens is { HasNamed: true })
+                    if (tokens is { PerRequest: true })
                     {
                         var caller = DarlingMcpTokenSet.CallerOf(context);
                         var policy = caller?.Policy ?? tokens.LegacyPolicy;
                         sessionOptions.ToolCollection = DarlingMcpWritePolicy.FilterToolCollection(sessionOptions.ToolCollection, policy);
 
                         /* The instructions follow the token too (#6542): the tools its role is served and the sentences its role needs. */
-                        var role = caller?.Name is { } name
-                            ? tokens.Named.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal))?.Role
-                            : LegacyRoleKey;
+                        /* A personal caller carries its role (#8737); a named token's is looked up by its name. */
+                        var role = caller?.Role
+                            ?? (caller?.Name is { } name
+                                ? tokens.Named.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal))?.Role
+                                : LegacyRoleKey);
                         if (role is not null && roleInstructions.TryGetValue(role, out var instructions))
                             sessionOptions.ServerInstructions = instructions;
                     }
@@ -2357,9 +2512,45 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #6542: named tokens always gate the listener, whatever flags the caller passed. A request that skipped the gate would carry
            no caller and be served the legacy token's tool set. */
-        if (networkMode || requireTokenWhenLoopbackOnly || tokens is { HasNamed: true })
+        if (networkMode || requireTokenWhenLoopbackOnly || tokens is { PerRequest: true })
         {
             var token = bearerToken;
+
+            /* #8737: the snapshot the personal check reads. A token set that serves personal tokens without one would refuse them all
+               silently, so the pipeline is not built. */
+            var personalSnapshot = _personalSnapshot;
+            if (tokens?.Personal is not null && personalSnapshot is null)
+            {
+                throw new InvalidOperationException("Personal MCP tokens are served but the host holds no personal token snapshot.");
+            }
+
+            /* THREE client states, never the token's value. Each one is a different next step
+               for the operator, which is the whole point of logging this at all:
+
+                 no header            -> a client that was never configured with a token
+                 header, not a Bearer -> a client configured wrong (Basic, a bare token, an
+                                         empty "Bearer ") - it IS sending something
+                 a Bearer that misses -> a token that does not match this endpoint's
+
+               Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
+               testing only it reported "nothing was presented" about a client that presented
+               a malformed header - collapsing precisely the ambiguity this exists to resolve.
+               None of the three says anything about what the token IS.
+
+               #8737: every refused token goes through here, so a dead, unavailable or wrong-secret personal token is answered with the
+               same status, headers and (empty) body as an unknown token, and logs the same state. */
+            void RefuseToken(HttpContext context, string authorization, IPAddress? remote, DateTime at)
+            {
+                var refusal = DescribeBearerRefusal(authorization);
+                refusals.Report(
+                    _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
+                    remote,
+                    refusal,
+                    at,
+                    state: refusal);
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.Headers.WWWAuthenticate = "Bearer";
+            }
 
             app.Use(async (context, next) =>
             {
@@ -2420,13 +2611,57 @@ public sealed class DarlingMcpHostService : BackgroundService
                     }
                 }
 
+                /* #8737: with personal tokens served, a presented Bearer is checked against the snapshot first. Only a value that is not
+                   dpt1_-shaped, or a dpt1_ value whose id no personal token has, goes on to the file tokens below. A live token is the caller.
+                   A dead one (revoked, expired, or older than maxLifetimeDays now allows) and a check that cannot be made (the snapshot is unavailable) give the reservation back
+                   without a miss or a success: neither says anything about guessing, and neither may exempt the source from the total
+                   budget. A wrong secret on a known id is one miss, and the file tokens are not compared (a dpt1_ value with a known id is
+                   that person's token, whatever a file token holds). */
+                var presented = ExtractBearerToken(authorization);
+                if (tokens?.Personal is not null && presented is not null)
+                {
+                    var personalNow = new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc));
+                    var check = personalSnapshot!.Check(presented, personalNow, tokens.Personal.MaxLifetimeDays);
+                    switch (check.Outcome)
+                    {
+                        case PersonalTokenOutcome.Live:
+                            context.Items[DarlingMcpTokenSet.CallerKey] = tokens.PersonalCaller(check.Row!);
+                            personalSnapshot.MarkUsed(check.Row!.TokenId, personalNow);
+                            tokenThrottle.Accepted(attempt);
+                            await next(context);
+                            return;
+
+                        case PersonalTokenOutcome.Dead:
+                            tokenThrottle.Released(attempt);
+                            if (personalSnapshot.ShouldLogDead(check.Row!.TokenId, personalNow))
+                            {
+                                _logger.LogWarning(
+                                    "personal token {Name} of {Subject} is expired/revoked and still in use from {Source}",
+                                    check.Row.TokenName, check.Row.Subject, source);
+                            }
+
+                            RefuseToken(context, authorization, remote, now);
+                            return;
+
+                        case PersonalTokenOutcome.Unavailable:
+                            tokenThrottle.Released(attempt);
+                            RefuseToken(context, authorization, remote, now);
+                            return;
+
+                        case PersonalTokenOutcome.WrongSecret:
+                            tokenThrottle.Missed(attempt);
+                            RefuseToken(context, authorization, remote, now);
+                            return;
+                    }
+                }
+
                 /* #6542: with named tokens served, the presented token is compared with every served token (each in constant
                    time, never stopping early) and the caller it matches is stored on the request: its tool set and identity
                    follow from it. With none, the one legacy token is compared exactly as before. */
                 bool authorized;
-                if (tokens is { HasNamed: true })
+                if (tokens is { PerRequest: true })
                 {
-                    var caller = tokens.Match(ExtractBearerToken(authorization));
+                    var caller = tokens.Match(presented);
                     authorized = caller is not null;
                     if (caller is not null)
                     {
@@ -2443,28 +2678,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     /* The reserved attempt's miss is recorded now: the wait is computed from recorded misses,
                        and attempts waiting on this one are decided again. */
                     tokenThrottle.Missed(attempt);
-
-                    /* THREE client states, never the token's value. Each one is a different next step
-                       for the operator, which is the whole point of logging this at all:
-
-                         no header            -> a client that was never configured with a token
-                         header, not a Bearer -> a client configured wrong (Basic, a bare token, an
-                                                 empty "Bearer ") - it IS sending something
-                         a Bearer that misses -> a token that does not match this endpoint's
-
-                       Review catch on #2479: ExtractBearerToken returns null for the first TWO, so
-                       testing only it reported "nothing was presented" about a client that presented
-                       a malformed header - collapsing precisely the ambiguity this exists to resolve.
-                       None of the three says anything about what the token IS. */
-                    var refusal = DescribeBearerRefusal(authorization);
-                    refusals.Report(
-                        _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
-                        remote,
-                        refusal,
-                        now,
-                        state: refusal);
-                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    context.Response.Headers.WWWAuthenticate = "Bearer";
+                    RefuseToken(context, authorization, remote, now);
                     return;
                 }
 
