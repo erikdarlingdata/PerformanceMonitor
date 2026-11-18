@@ -261,14 +261,14 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
     }
 
     [Fact]
-    public void TheHistory_FollowsTheGridsTierChoice_ThroughTheGridsOwnPreCheckAndGate()
+    public void TheHistory_FollowsTheGridsTierChoiceForEveryDatabase_ThroughTheGridsOwnPreCheckAndGate()
     {
         var history = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpQueryStoreHistoryTools.cs");
         Assert.Contains("DarlingDataReader.QueryStoreTopMayReadTable(start, end)", history, StringComparison.Ordinal);
         Assert.Contains("QueryStoreIntervalWide.ResolveReadAsync(", history, StringComparison.Ordinal);
         Assert.Contains("DarlingDataReader.QueryStoreTopMinWindow", history, StringComparison.Ordinal);
         var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs");
-        Assert.Contains("if (QueryStoreTopMayReadTable(startUtc, endUtc))", reader, StringComparison.Ordinal);
+        Assert.Contains("if (QueryStoreTopMayReadTableFor(startUtc, endUtc, databases))", reader, StringComparison.Ordinal);
     }
 
     [Fact]

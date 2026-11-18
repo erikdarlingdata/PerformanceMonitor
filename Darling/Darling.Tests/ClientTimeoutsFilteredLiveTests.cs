@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #8971 end to end on a real PostgreSQL store: seeded <c>collection_log</c> runs and <c>attention_events</c> count and sample rows, the real
 /// <see cref="DarlingAlertReadAdapter"/>, the real <see cref="AlertEngine"/>, and the real <see cref="DarlingAlertDeliverer"/> writing through
-/// <see cref="PgAlertHistoryStore"/>. A storm whose exact rate is sub-millisecond cancels, crossing the bar and dipping under it, writes no
+/// <see cref="PgAlertHistoryStore"/>. A storm whose exact rate is cancels under the 1 s duration floor, crossing the bar and dipping under it, writes no
 /// <c>config_alert_log</c> row. A storm a mute rule silences after the filters writes one Muted row per cooldown.
 /// </summary>
 public sealed class ClientTimeoutsFilteredLiveTests
@@ -74,7 +74,7 @@ public sealed class ClientTimeoutsFilteredLiveTests
             await counts.ExecuteNonQueryAsync(ct);
         }
 
-        foreach (var (n, app, durationUs) in new[] { (shortSamples, "Core Microsoft SqlClient Data Provider", 30L), (realSamples, realApp, 90_000_000L) })
+        foreach (var (n, app, durationUs) in new[] { (shortSamples, "Core Microsoft SqlClient Data Provider", 4_000L), (realSamples, realApp, 90_000_000L) })
         {
             if (n == 0)
             {
@@ -160,7 +160,7 @@ public sealed class ClientTimeoutsFilteredLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Pg), "Set DARLING_TEST_PG to a Postgres connection string to run the live filtered Client Timeouts tests.");
 
-        /* Eight-minute cycles: five minutes of 155 attentions a minute, 150 of every 155 sampled events under 1 ms, then three quiet
+        /* Eight-minute cycles: five minutes of 155 attentions a minute, 150 of every 155 sampled events under 1 s, then three quiet
            minutes, so the 3-minute rate crosses the Critical bar on the exact count and falls to zero once a cycle. The filters leave
            5 a minute. A mute rule that would match everything is in place and must not turn the crossings into Muted rows. */
         var rows = await SweepAsync(
@@ -174,7 +174,7 @@ public sealed class ClientTimeoutsFilteredLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Pg), "Set DARLING_TEST_PG to a Postgres connection string to run the live filtered Client Timeouts tests.");
 
-        /* 155 a minute, 50 of every 155 sampled events under 1 ms and 105 from a muted backup app: the filters leave 105 a minute, the
+        /* 155 a minute, 50 of every 155 sampled events under 1 s and 105 from a muted backup app: the filters leave 105 a minute, the
            mute takes it to zero. Eleven minutes, a run a minute, the default five-minute cooldown: three Muted rows, as for any muted storm. */
         var rows = await SweepAsync(
             11, _ => (155, 50, 105), realApp: "backup", isMuted: ctx => ctx.ClientAppName == "backup");

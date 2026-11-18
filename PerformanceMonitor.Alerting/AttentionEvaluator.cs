@@ -160,7 +160,7 @@ public sealed record AttentionReading(
 /// events.</para>
 ///
 /// <para><b>Filtered is not muted (#8971).</b> The built-in filters (SSMS IntelliSense, the VS Code mssql metadata connections, events under
-/// 1 ms, Azure Data Studio and dbatools metadata) are part of what the rate counts. They are judged first and alone: when they bring the rate
+/// 1 s, Azure Data Studio and dbatools metadata) are part of what the rate counts. They are judged first and alone: when they bring the rate
 /// under the Warning bar, the finding is Filtered and no mute rule is asked, and the engine records nothing, as for any reading under the bar.
 /// Only a crossing that survives the filters and is then silenced by a mute rule or a digest window is Muted. The left-out events stay in
 /// <c>attention_events</c>, and <c>get_client_timeouts</c> counts them for any range.</para>
@@ -193,7 +193,7 @@ public static class AttentionEvaluator
     /// list and the history keep seeing them. SSMS matches "Microsoft SQL Server Management Studio" followed by anything and ending in
     /// "IntelliSense", so a renamed SSMS build still matches. VS Code matches a closed list, see <see cref="IsVsCodeMssqlMetadata"/>.
     /// Two more cuts are NOT by application name, because they are made on the sampled events inside the shared read (<see cref="AttentionWindowSql.SampleGroups"/>) and
-    /// reach the evaluator as counts on the group (#7061): events under the 1 ms duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), and Azure Data Studio's
+    /// reach the evaluator as counts on the group (#7061): events under the 1 s duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), and Azure Data Studio's
     /// metadata statements (<see cref="AttentionWindowSql.AzdataMetadataPredicate"/>). Azure Data Studio's query editor connects as plain <c>azdata</c> too, so <c>azdata</c> is not excluded by name. The dbatools SMO catalog reads (<see cref="AttentionWindowSql.DbatoolsSmoMetadataPredicate"/>, #8877) are cut the same way, by name and statement shape together.
     /// </summary>
     public static bool IsExcludedApp(string? clientAppName) =>
@@ -589,7 +589,7 @@ public static class AttentionEvaluator
         if (finding.ShortSamples > 0)
         {
             text += string.Create(CultureInfo.InvariantCulture,
-                $" {finding.ShortSamples:N0} of the {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationUs / 1000} ms (a cancel on a command that had already finished) and are left out of the rate judged.");
+                $" {finding.ShortSamples:N0} of the {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} (too short to be a client timeout) and are left out of the rate judged.");
         }
 
         if (finding.AzdataMetadataSamples > 0)
@@ -673,11 +673,11 @@ public static class AttentionEvaluator
     /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense and the VS Code mssql metadata connections (<see cref="IsExcludedApp"/>), left out of the judged count (#6552, #6856).</param>
     /// <param name="ExcludedSsmsSamples">The part of <paramref name="ExcludedSamples"/> from SSMS IntelliSense (#6856).</param>
     /// <param name="ExcludedVsCodeSamples">The part of <paramref name="ExcludedSamples"/> from the VS Code mssql extension's metadata connections (#6856).</param>
-    /// <param name="ShortSamples">Sampled events in the span under the 1 ms duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), left out of the judged count (#7061).</param>
+    /// <param name="ShortSamples">Sampled events in the span under the 1 s duration floor (<see cref="AttentionWindowSql.MinInterruptDurationUs"/>), left out of the judged count (#7061).</param>
     /// <param name="AzdataMetadataSamples">Sampled events in the span that are Azure Data Studio metadata queries (see <see cref="AttentionWindowSql.AzdataMetadataPredicate"/>), left out of the judged count (#7061).</param>
     /// <param name="DbatoolsMetadataSamples">Sampled events in the span that are dbatools SMO metadata reads (see <see cref="AttentionWindowSql.DbatoolsSmoMetadataPredicate"/>), left out of the judged count (#8877).</param>
     /// <param name="Filtered">True when the exact count crossed a bar and the built-in filters alone (SSMS IntelliSense, VS Code mssql metadata, events under
-    /// 1 ms, Azure Data Studio and dbatools metadata) bring the rate under the Warning bar (#8971). No mute rule was asked. The alert did not cross, so the engine
+    /// 1 s, Azure Data Studio and dbatools metadata) bring the rate under the Warning bar (#8971). No mute rule was asked. The alert did not cross, so the engine
     /// records nothing for it, as for a reading under the bar: no row, no standing alert and no resolution. <paramref name="JudgedCount"/> is the count after the
     /// filters, and <paramref name="Severity"/>, <paramref name="RatePerMinute"/> and <paramref name="BarCrossed"/> are the exact count's grade.</param>
     public sealed record Finding(

@@ -17,7 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// The judged count in the <c>get_client_timeouts</c> answer (#7061): <c>count_judged</c> and <c>rate_per_minute_judged</c> must be what
 /// <see cref="AttentionEvaluator.Evaluate"/> judges for the same reading, with the SSMS and VS Code names, the sampled events under the
-/// 1 ms duration floor and Azure Data Studio's metadata statements all left out. The Darling twin is <c>ClientTimeoutsJudgedCountTests</c>.
+/// 1 s duration floor and Azure Data Studio's metadata statements all left out. The Darling twin is <c>ClientTimeoutsJudgedCountTests</c>.
 /// </summary>
 public sealed class ClientTimeoutsJudgedCountTests
 {
@@ -42,7 +42,7 @@ public sealed class ClientTimeoutsJudgedCountTests
         var created = new DateTime(2026, 10, 1, 11, 59, 0, DateTimeKind.Utc);
         var samples = new[]
         {
-            new ClientTimeoutSample(created, created, "sales", "etl", "ws-1", 51, 400, "fp-a", "SELECT 1", BelowDurationFloor: true),
+            new ClientTimeoutSample(created, created, "sales", "etl", "ws-1", 51, 4_000, "fp-a", "SELECT 1", BelowDurationFloor: true),
             new ClientTimeoutSample(created, created, "sales", "azdata", "ws-2", 52, 90_000, "fp-b", "create table #sver", AzdataMetadata: true),
             new ClientTimeoutSample(created, created, "sales", AttentionWindowSql.DbatoolsClientApp, "ws-4", 54, 90_000, "fp-d", "SELECT name FROM sys.schemas WHERE name = @_msparam_0", DbatoolsMetadata: true),
             new ClientTimeoutSample(created, created, "sales", "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense", "ws-3", 53, 90_000, "fp-c", "SELECT 3"),

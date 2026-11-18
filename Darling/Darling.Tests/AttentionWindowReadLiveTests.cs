@@ -120,8 +120,9 @@ public sealed class AttentionWindowReadLiveTests
             }
 
             await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 30_000_000);
-            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 999);
-            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 1000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 999_999);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 1_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-ms", "SELECT four ms", ct, durationUs: 4_000);
             await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-none", "SELECT no duration", ct, durationUs: null);
             for (var i = 0; i < 3; i++)
             {
@@ -135,18 +136,18 @@ public sealed class AttentionWindowReadLiveTests
 
             var window = await adapter.GetAttentionWindowAsync(server.ToString(CultureInfo.InvariantCulture), Lookback, ct);
 
-            /* 6 + 4 + 3 + 1 + 3 = 17 samples. Short: the six SqlClient ones, the 999 us one and the azdata #SVer at 20 us = 8. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
-            Assert.Equal(17, window.SampleGroups.Sum(g => g.Samples));
-            Assert.Equal(8, window.SampleGroups.Sum(g => g.ShortSamples));
+            /* 6 + 5 + 3 + 1 + 3 = 18 samples. Short (#9030, floor 1 s): the six SqlClient ones, the 999,999 us one, the 4 ms one and the azdata #SVer at 20 us = 9. The one at exactly 1 s, the 30 s one and the one with no duration count. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
+            Assert.Equal(18, window.SampleGroups.Sum(g => g.Samples));
+            Assert.Equal(9, window.SampleGroups.Sum(g => g.ShortSamples));
             Assert.Equal(4, window.SampleGroups.Sum(g => g.AzdataMetadataSamples));
 
             var reading = AttentionEvaluator.Read(window, now)!;
-            Assert.Equal(8, reading.ShortSamples);
+            Assert.Equal(9, reading.ShortSamples);
             Assert.Equal(4, reading.AzdataMetadataSamples);
 
             var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
             Assert.NotNull(finding);
-            Assert.Equal(100d * 5 / 17, finding!.JudgedCount, 6);
+            Assert.Equal(100d * 5 / 18, finding!.JudgedCount, 6);
         });
     }
 
@@ -279,7 +280,7 @@ public sealed class AttentionWindowReadLiveTests
 
             var rows = new (int Minute, long Count, int Short, int Passing)[]
             {
-                (0, 100, 3, 1),   /* 100 x 1/4 = 25 */
+                (0, 100, 3, 1),   /* three of 4 ms are short, the one at exactly 1 s passes: 100 x 1/4 = 25 */
                 (1, 50, 0, 0),    /* no samples: the full 50 */
                 (2, 80, 0, 4),    /* every sample passes: the full 80 */
                 (3, 40, 2, 0),    /* every sample is short: 0 */
@@ -291,12 +292,12 @@ public sealed class AttentionWindowReadLiveTests
                 await RowAsync(connection, id++, server, at, "count", count, null, null, null, null, ct);
                 for (var i = 0; i < shortOnes; i++)
                 {
-                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 25);
+                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000);
                 }
 
                 for (var i = 0; i < passing; i++)
                 {
-                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: minute == 4 ? null : 30_000_000);
+                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: minute == 4 ? null : minute == 0 ? 1_000_000 : 30_000_000);
                 }
             }
 

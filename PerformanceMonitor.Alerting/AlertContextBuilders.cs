@@ -789,8 +789,8 @@ public static class AlertContextBuilders
 
         if (finding.ShortSamples > 0)
         {
-            reading.Fields.Add(("Under 1 ms", string.Create(CultureInfo.InvariantCulture,
-                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under 1 ms (a cancel on a command that had already finished); they are left out of the rate judged")));
+            reading.Fields.Add(($"Under {AttentionWindowSql.MinInterruptDurationText}", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} (too short to be a client timeout); they are left out of the rate judged")));
         }
 
         if (finding.AzdataMetadataSamples > 0)

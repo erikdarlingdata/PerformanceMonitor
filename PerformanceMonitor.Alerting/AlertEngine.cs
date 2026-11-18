@@ -3025,7 +3025,7 @@ public sealed class AlertEngine
     /// a delivery: it neither starts the delivery cooldown nor records an escalation tier, and it is throttled by a cooldown of
     /// its own (round 2 of #5714).</para>
     ///
-    /// <para><b>Filtered.</b> A crossing that the built-in filters alone (SSMS IntelliSense, VS Code mssql metadata, events under 1 ms,
+    /// <para><b>Filtered.</b> A crossing that the built-in filters alone (SSMS IntelliSense, VS Code mssql metadata, events under 1 s,
     /// Azure Data Studio and dbatools metadata) take under the Warning bar is a Filtered finding (#8971). It is handled as a reading under the bar:
     /// nothing is recorded, no alert stands, and a standing alert resolves. A storm of filtered noise therefore writes no alert-log rows.</para>
     /// </summary>

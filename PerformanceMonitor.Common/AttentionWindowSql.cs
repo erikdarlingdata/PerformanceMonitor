@@ -42,11 +42,25 @@ public static class AttentionWindowSql
     /// <summary>How many entries each top list holds.</summary>
     public const int TopCount = 5;
 
-    /// <summary>The duration floor (#7061), in microseconds: a sampled attention that lasted under 1 ms is left out of the judged rate and the
-    /// baseline. Such events have no statement text and last 20 to 40 microseconds: the SqlClient driver cancelling a command that has already
-    /// finished, which no user saw. A real client timeout lasts about as long as the command timeout, often 30 s. A sample with NO recorded
+    /// <summary>The duration floor (#7061, raised from 1 ms to 1 s in #9030), in microseconds: a sampled attention that lasted under 1 s is
+    /// left out of the judged rate and the baseline. The shortest are the SqlClient driver cancelling a command that has already finished, with
+    /// no statement text and 20 to 40 microseconds. Busy servers also show cancels of a few milliseconds that no command timeout can explain:
+    /// a client command timeout under 1 s is very rare, and a real one lasts about as long as the command timeout, often 30 s. Cancels of long
+    /// queries (minutes or hours) are few, still client aborts, and keep counting. An event of exactly 1 s counts. A sample with NO recorded
     /// duration (NULL) is not under the floor and still counts, the way every sample did before the floor.</summary>
-    public const long MinInterruptDurationUs = 1000;
+    public const long MinInterruptDurationUs = 1_000_000;
+
+    /// <summary>The floor as it reads in a message: "1 s" for a whole number of seconds, "N ms" for a whole number of milliseconds, else
+    /// microseconds. Follows <see cref="MinInterruptDurationUs"/>, so no message carries its own copy of the value (#9030).</summary>
+    public static string MinInterruptDurationText => DurationText(MinInterruptDurationUs);
+
+    /// <summary>A microsecond count as "N s" (whole seconds), "N ms" (whole milliseconds) or "N µs".</summary>
+    public static string DurationText(long microseconds) => microseconds switch
+    {
+        > 0 when microseconds % 1_000_000 == 0 => $"{microseconds / 1_000_000} s",
+        > 0 when microseconds % 1000 == 0 => $"{microseconds / 1000} ms",
+        _ => $"{microseconds} µs",
+    };
 
     /// <summary>The client application Azure Data Studio connects under. Its SQL Tools Service names every connection <c>azdata</c>, the query
     /// editor's too (connection pooling is on by default, and with it the service adds no purpose suffix to the name), so the name alone cannot

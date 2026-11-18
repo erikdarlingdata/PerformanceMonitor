@@ -211,11 +211,12 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     }
 
     /// <summary>
-    /// The grid's tier choice (#5300), mirroring <c>DarlingDataReader.TryGetQueryStoreTopFromTableAsync</c>: the same
-    /// pre-check (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>), the same gate
-    /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>, with <see cref="DarlingDataReader.QueryStoreTopMinWindow"/> and
-    /// the window's end as the literal end), on one connection in one read-only REPEATABLE READ transaction so the gate's
-    /// decision and the read it authorizes see one snapshot. Null (never an empty list) when the gate says raw or anything
+    /// The grid's tier choice (#5300), mirroring <c>DarlingDataReader.TryGetQueryStoreTopFromTableAsync</c> for a read over
+    /// every database: the same pre-check (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>) and the same gate
+    /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>, with <see cref="DarlingDataReader.QueryStoreTopMinWindow"/>), on one
+    /// connection in one read-only REPEATABLE READ transaction so the gate's decision and the read it authorizes see one
+    /// snapshot. The window's end is the gate's literal end: this read places its rows by collection time, so for an end before
+    /// <c>applied_through</c> the table's newest snapshot of an interval can sit past the end where raw holds an earlier one. Null (never an empty list) when the gate says raw or anything
     /// before the table read fails; a fault falls back to raw, as the grid's does. Cancellation propagates.
     /// </summary>
     private static Task<(List<HistoryRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryReadFromTableAsync(
