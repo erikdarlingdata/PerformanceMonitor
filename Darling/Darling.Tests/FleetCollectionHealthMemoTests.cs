@@ -353,14 +353,6 @@ public sealed class FleetCollectionHealthMemoTests
         var lineStart = reader.LastIndexOf('\n', callSites[0]) + 1;
         var line = reader[lineStart..reader.IndexOf('\n', callSites[0])];
         Assert.Contains("(scanNow, scanToken) => ReadFailingCollectorCountsAsync(postgres, scanNow, scanToken)", line, StringComparison.Ordinal);
-
-        /* #3893 arm 2 changed the one line deliberately: the statement is now CHOSEN (composed from the hourly
-           aggregate when both guards pass, else this raw scan). #4477 widened the composition to carry any
-           hole hours read raw alongside the aggregate, and the deadline still follows the command. */
-        Assert.Contains(
-            "var composedSql = plan.Usable ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthSql, plan.HoleHours) : null;\n        await using var command = postgres.CreateCommand(composedSql ?? FleetCollectionHealthSql);\n        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;",
-            reader,
-            StringComparison.Ordinal);
     }
 }
 

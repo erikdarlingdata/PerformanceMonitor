@@ -383,8 +383,8 @@ public static class EnumeratedCollectorDriver
     /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
     /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
     /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
-    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
-    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
+    /// <c>FleetCollectionHealthRawReadLiveTests</c> proves the composed read equals the raw read
+    /// (<c>DarlingFleetReader.FleetCollectionHealthSql</c>), not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedStatus = "ABANDONED";
 
@@ -413,8 +413,8 @@ public static class EnumeratedCollectorDriver
     /// already-materialized buckets keeps the OLD meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ...
     /// IF NOT EXISTS</c> will not re-define it) or the fleet card bands a week under the old predicate while every
     /// per-server surface uses the new one. That is #3698's known price for baking a row filter;
-    /// <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions to
-    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
+    /// <c>FleetCollectionHealthRawReadLiveTests</c> proves the composed read equals the raw read
+    /// (<c>DarlingFleetReader.FleetCollectionHealthSql</c>), not the buckets already on disk.</para>
     /// </summary>
     public const string WholeCycleBudgetNoteSqlPattern = "wall-clock budget (%s) reached; cycle abandoned";
 
@@ -439,8 +439,8 @@ public static class EnumeratedCollectorDriver
     /// Changing it no longer changes only the SQL a read sends: a week of already-materialized buckets keeps the OLD
     /// meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ... IF NOT EXISTS</c> will not re-define it) or
     /// the fleet card bands a week under the old predicate while every per-server surface uses the new one. That is
-    /// #3698's known price for baking a row filter; <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions
-    /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
+    /// #3698's known price for baking a row filter; <c>FleetCollectionHealthRawReadLiveTests</c> proves the composed
+    /// read equals the raw read (<c>DarlingFleetReader.FleetCollectionHealthSql</c>), not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedByNotePredicateSql =
         "(rows_collected = 0 AND " + AbandonedNoteMatchSql + ")";
@@ -469,8 +469,8 @@ public static class EnumeratedCollectorDriver
     /// Changing it no longer changes only the SQL a read sends: a week of already-materialized buckets keeps the OLD
     /// meaning, so the aggregate must be dropped and rebuilt (<c>CREATE ... IF NOT EXISTS</c> will not re-define it) or
     /// the fleet card bands a week under the old predicate while every per-server surface uses the new one. That is
-    /// #3698's known price for baking a row filter; <c>CollectionHealthAggregateTests</c> pins the CREATE's expressions
-    /// to <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, not the buckets already on disk.</para>
+    /// #3698's known price for baking a row filter; <c>FleetCollectionHealthRawReadLiveTests</c> proves the composed
+    /// read equals the raw read (<c>DarlingFleetReader.FleetCollectionHealthSql</c>), not the buckets already on disk.</para>
     /// </summary>
     public const string AbandonedRunPredicateSql =
         "(status = '" + AbandonedStatus + "' OR " + AbandonedByNotePredicateSql + ")";
