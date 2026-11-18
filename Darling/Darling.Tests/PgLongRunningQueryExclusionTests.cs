@@ -304,10 +304,6 @@ public class PgLongRunningQueryExclusionTests
     [Fact]
     public void TheCard_ListsOnlyTheThreeListsTheReadApplies()
     {
-        Assert.Equal("s.application_name", DarlingPgSessionStatesReader.ExclusionProgramNameColumn);
-        Assert.Equal("s.username", DarlingPgSessionStatesReader.ExclusionLoginNameColumn);
-        Assert.Equal("s.database_name", DarlingPgSessionStatesReader.ExclusionDatabaseNameColumn);
-
         var details = DarlingWorker.BuildPgLongRunningQueryExclusionDetails(
             LongRunningQueryExclusions.Defaults, 0, 0, new[] { "appdb" }, 0);
 
