@@ -66,13 +66,22 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
         var lowDiskPercent = settings?.LowDiskThresholdPercent ?? 10;
         var lowDiskGb = settings?.LowDiskThresholdGb ?? 5;
 
-        var fleet = await DarlingFleetReader.GetFleetOverviewAsync(
-            _postgres, start, end, DateTime.UtcNow, worstCount: int.MaxValue, cancellationToken: ct).ConfigureAwait(false);
-
-        var alertsByServer = await ReadAlertCountsAsync(start, end, ct).ConfigureAwait(false);
-        var jobsByServer = await ReadFailedJobsAsync(start, end, fleet.Cards.Select(c => c.ServerId).ToList(), ct).ConfigureAwait(false);
-
-        var disks = await ReadVolumesAsync(start, end, ct).ConfigureAwait(false);
+        /* #8570: the fleet cards, the alert counts, the failed jobs and the disk snapshot are independent reads, so they run together,
+           each its own command on its own pooled connection, and the build waits on the slowest rather than their sum. The failed-jobs
+           read takes the enabled servers' ids from the registry rather than from the cards, so it need not wait for the fleet read; the
+           cards are built for exactly those servers, and each card looks up only its own server's jobs. All four are awaited before any
+           is used, so a failed read never leaves another running past the build. */
+        var serverIds = await ReadEnabledServerIdsAsync(ct).ConfigureAwait(false);
+        var fleetRead = DarlingFleetReader.GetFleetOverviewAsync(
+            _postgres, start, end, DateTime.UtcNow, worstCount: int.MaxValue, cancellationToken: ct);
+        var alertsRead = ReadAlertCountsAsync(start, end, ct);
+        var jobsRead = ReadFailedJobsAsync(start, end, serverIds, ct);
+        var disksRead = ReadVolumesAsync(start, end, ct);
+        await Task.WhenAll(fleetRead, alertsRead, jobsRead, disksRead).ConfigureAwait(false);
+        var fleet = await fleetRead.ConfigureAwait(false);
+        var alertsByServer = await alertsRead.ConfigureAwait(false);
+        var jobsByServer = await jobsRead.ConfigureAwait(false);
+        var disks = await disksRead.ConfigureAwait(false);
 
         var servers = new List<DailyHealthServerReport>(fleet.Cards.Count);
         foreach (var card in fleet.Cards)
@@ -214,6 +223,27 @@ WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
 AND   lower(a.metric_name) <> lower($3)
 GROUP BY a.server_id, a.metric_name";
+
+    /// <summary>The enabled servers' ids: the servers the fleet overview builds its cards for, read on their own so the failed-jobs read
+    /// can start alongside the fleet read. $ none.</summary>
+    internal const string EnabledServerIdsSql = @"
+SELECT s.server_id
+FROM servers AS s
+WHERE s.is_enabled";
+
+    private async Task<List<int>> ReadEnabledServerIdsAsync(CancellationToken ct)
+    {
+        var ids = new List<int>();
+        await using var command = _postgres.CreateCommand(EnabledServerIdsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            ids.Add(reader.GetInt32(0));
+        }
+
+        return ids;
+    }
 
     private async Task<Dictionary<int, IReadOnlyList<DailyHealthAlertCount>>> ReadAlertCountsAsync(DateTime start, DateTime end, CancellationToken ct)
     {
