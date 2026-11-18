@@ -13067,7 +13067,24 @@ LEFT JOIN LATERAL (
     /// working (COPY and DELETE-based retention are hypertable-agnostic), and is retried on the
     /// next service start. Returns the number of tables that converted (or no-op'd) cleanly.
     /// </summary>
-    public static async Task<int> ConvertToHypertablesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    public static Task<int> ConvertToHypertablesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
+        ConvertToHypertablesAsync(connection, logger, AttentionConversionMaxHeapBytes, cancellationToken);
+
+    /// <summary>
+    /// The largest heap <c>collect.attention_events</c> may have for the conversion to copy it (#8967). <c>create_hypertable</c> with
+    /// <c>migrate_data</c> holds an exclusive lock for the whole copy, so a table over this is left alone until the swap has given it
+    /// back empty. Internal so a test can lower it.
+    /// </summary>
+    internal const long AttentionConversionMaxHeapBytes = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// The conversion walk with the attention heap limit given. <c>attention_events</c> is converted when its own heap is under
+    /// <paramref name="attentionMaxHeapBytes"/>, and that is read from the table, not from what the swap did: a hypertable's parent has
+    /// no heap, a freshly swapped table is empty, and a populated plain table the swap could not move (a busy lock) is big. The hourly
+    /// pass runs this too, so a table the swap left behind is skipped each pass until the swap succeeds.
+    /// </summary>
+    internal static async Task<int> ConvertToHypertablesAsync(
+        NpgsqlConnection connection, ILogger? logger, long attentionMaxHeapBytes, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -13075,16 +13092,19 @@ LEFT JOIN LATERAL (
         }
 
         /* #8967: a populated plain attention table is swapped for an empty one first (a catalog-only rename, behind a short lock
-           timeout), so the conversion below never runs migrate_data over a big table. A failed swap leaves that table populated and
-           plain, so the pass skips it (migrate_data over it is the multi-minute exclusive copy the swap exists to avoid) and the next
-           start tries the swap again. The rest of the pass goes on. */
-        var attentionSafe = await SwapAttentionEventsAsync(connection, logger, cancellationToken);
+           timeout), so the conversion below never runs migrate_data over a big table. A failed swap warns and the pass goes on. */
+        await SwapAttentionEventsAsync(connection, logger, cancellationToken);
 
         var converted = 0;
         foreach (var schema in ConvertedTables)
         {
-            if (!attentionSafe && string.Equals(schema.TargetTable, "attention_events", StringComparison.Ordinal))
+            if (string.Equals(schema.TargetTable, "attention_events", StringComparison.Ordinal)
+                && await AttentionHeapBytesAsync(connection, cancellationToken) is { } heapBytes
+                && heapBytes >= attentionMaxHeapBytes)
             {
+                logger?.LogWarning(
+                    "collect.attention_events is a plain table with {HeapMb} MB of data, so this pass does not convert it to a hypertable: the copy would hold an exclusive lock on it for its whole length. The next hourly pass tries again (#8967).",
+                    heapBytes / (1024 * 1024));
                 continue;
             }
 
@@ -13106,6 +13126,23 @@ LEFT JOIN LATERAL (
         return converted;
     }
 
+    /// <summary>
+    /// The heap size of <c>collect.attention_events</c> in bytes, or null when the table does not exist or the read failed (the
+    /// conversion then tries as it always did). A hypertable's parent relation holds no rows, so it reads as 0.
+    /// </summary>
+    private static async Task<long?> AttentionHeapBytesAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand("SELECT pg_relation_size(to_regclass('collect.attention_events'))", connection) { CommandTimeout = SetupTimeoutSeconds };
+            return await command.ExecuteScalarAsync(cancellationToken) as long?;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>How long the runtime swap waits for its lock before it gives up (#8967). The rung waits longer, with the ladder's own budget.</summary>
     internal const string AttentionSwapLockTimeout = "5s";
 
@@ -13113,14 +13150,10 @@ LEFT JOIN LATERAL (
     /// Runs <see cref="PgMigrations.AttentionSwapSql"/> in its own transaction (#8967): on a store that has TimescaleDB and a populated plain
     /// <c>collect.attention_events</c>, rename it to <c>_legacy</c> and put an empty table in its place for the conversion to make a hypertable.
     /// Does nothing for an empty, fresh, plain-PostgreSQL, already converted or already swapped table. Failure-isolated: a busy lock or any
-    /// other fault warns, rolls back and leaves the table as it was.
+    /// other fault warns, rolls back and leaves the table as it was. Whether the conversion that follows may copy the table is decided
+    /// from the table's size, not from this method.
     /// </summary>
-    /// <returns>
-    /// True when <c>collect.attention_events</c> is safe for the conversion to take next: the swap ran, or there was nothing to swap. False
-    /// when the swap failed, which leaves a populated plain table the conversion must not copy, so the warning says it is skipped and the
-    /// next start tries again.
-    /// </returns>
-    internal static async Task<bool> SwapAttentionEventsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    internal static async Task SwapAttentionEventsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -13128,14 +13161,12 @@ LEFT JOIN LATERAL (
             using var command = new NpgsqlCommand(PgMigrations.AttentionSwapSql(AttentionSwapLockTimeout), connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "The attention_events swap did not run (#8967). The table stays as it was, is not converted to a hypertable on this pass, and the next start tries again: {Message}",
+                "The attention_events swap did not run (#8967). The table stays as it was and the next hourly pass tries again: {Message}",
                 ex.Message);
-            return false;
         }
     }
 

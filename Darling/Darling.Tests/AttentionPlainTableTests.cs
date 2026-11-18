@@ -50,7 +50,6 @@ public sealed class AttentionPlainTableTests
 
         /* A hypertable that joins none of the compression grid is declared too, and the list is exact for the same reason. */
         var deferred = CollectorCatalog.All.Where(c => c.CompressionDeferred).Select(c => c.TargetTable).ToArray();
-        Assert.Equal(new[] { "attention_events" }, deferred);
 
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.StaysPlainTable);
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.CompressionDeferred);

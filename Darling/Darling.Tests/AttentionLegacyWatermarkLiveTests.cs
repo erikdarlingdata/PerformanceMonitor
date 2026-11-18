@@ -65,14 +65,16 @@ public sealed class AttentionLegacyWatermarkLiveTests
     }
 
     /// <summary>One row, written the way a sample row is: its event_time is the watermark column and collection_time the run's.</summary>
-    private static async Task InsertAsync(NpgsqlConnection connection, string table, long id, int serverId, DateTime eventTime, CancellationToken ct)
+    private static async Task InsertAsync(
+        NpgsqlConnection connection, string table, long id, int serverId, DateTime eventTime, CancellationToken ct, string? database = null)
     {
         await using var command = new NpgsqlCommand(
-            $"INSERT INTO collect.{table} (attention_event_id, collection_time, server_id, server_name, event_kind, event_time, attention_count) "
-            + "VALUES ($1, $2, $3, 'watermark-test', 'sample', $2, 0)", connection);
+            $"INSERT INTO collect.{table} (attention_event_id, collection_time, server_id, server_name, event_kind, event_time, attention_count, database_name) "
+            + "VALUES ($1, $2, $3, 'watermark-test', 'sample', $2, 0, $4)", connection);
         command.Parameters.AddWithValue(id);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(eventTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(database is null ? DBNull.Value : database);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -82,7 +84,7 @@ public sealed class AttentionLegacyWatermarkLiveTests
         await InsertAsync(c, "attention_events", 1, ServerId, Base, ct);
         await InsertAsync(c, "attention_events", 2, ServerId, Base.AddHours(-5), ct);
         await InsertAsync(c, "attention_events", 3, OtherServerId, Base.AddHours(9), ct);
-        Assert.True(await TimescaleSupport.SwapAttentionEventsAsync(c, null, ct));
+        await TimescaleSupport.SwapAttentionEventsAsync(c, null, ct);
         Assert.Equal(3L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events_legacy", ct));
         Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events", ct));
     }
@@ -150,13 +152,14 @@ public sealed class AttentionLegacyWatermarkLiveTests
                 await using var held = await reader.BeginTransactionAsync(ct);
                 await ExecAsync(reader, "LOCK TABLE collect.attention_events IN ACCESS SHARE MODE", ct);
 
-                await TimescaleSupport.ConvertToHypertablesAsync(c, log, ct);
+                await TimescaleSupport.ConvertToHypertablesAsync(c, log, 1, ct);
 
-                /* The populated table was not converted (the conversion would have copied it under an exclusive lock), and it was not swapped. */
+                /* The populated table was not converted (the conversion would have copied it under an exclusive lock), and it was not swapped. The two
+                   warnings are the swap's and the conversion's skip. The limit is lowered to one byte so a two-row table counts as big. */
                 Assert.Equal(0L, await ScalarAsync(c, HypertableCountSql, ct));
                 Assert.Equal(2L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events", ct));
                 Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM pg_class WHERE oid = to_regclass('collect.attention_events_legacy')", ct));
-                Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+                Assert.Equal(2, log.CountAtLevel(LogLevel.Warning));
                 await held.RollbackAsync(ct);
             }
 
@@ -168,6 +171,80 @@ public sealed class AttentionLegacyWatermarkLiveTests
             Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events", ct));
             Assert.Equal(2L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events_legacy", ct));
             Assert.Equal(0, next.CountAtLevel(LogLevel.Warning));
+        });
+    }
+
+    [Fact]
+    public async Task ThePerDatabaseWatermark_ReadsTheGreaterOfTheNewAndTheLegacyTable_ForTheServerAndDatabase()
+    {
+        await RunAsync(async (store, ct) =>
+        {
+            var c = store.Connection;
+            await InsertAsync(c, "attention_events", 1, ServerId, Base, ct, "db_a");
+            await InsertAsync(c, "attention_events", 2, ServerId, Base.AddHours(-5), ct, "db_a");
+            await InsertAsync(c, "attention_events", 3, ServerId, Base.AddHours(9), ct, "db_b");
+            await InsertAsync(c, "attention_events", 4, OtherServerId, Base.AddHours(11), ct, "db_a");
+            await TimescaleSupport.SwapAttentionEventsAsync(c, null, ct);
+            Assert.Equal(4L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events_legacy", ct));
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events", ct));
+
+            await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
+            var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+
+            /* New table empty: legacy's newest row for this server and database, not another database's or another server's later row. */
+            Assert.Equal(Base, await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_a", ct));
+            Assert.Equal(Base.AddHours(9), await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_b", ct));
+
+            /* A database with no row in either table reads as a first run. */
+            Assert.Null(await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_c", ct));
+
+            /* The new table holds only an older row for the database: legacy still wins. A newer row: the new table wins. */
+            await InsertAsync(c, "attention_events", 10, ServerId, Base.AddHours(-1), ct, "db_a");
+            Assert.Equal(Base, await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_a", ct));
+            await InsertAsync(c, "attention_events", 11, ServerId, Base.AddHours(2), ct, "db_a");
+            Assert.Equal(Base.AddHours(2), await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_a", ct));
+
+            /* Once the legacy table is gone the new table is read alone. */
+            await ExecAsync(c, "DROP TABLE collect.attention_events_legacy", ct);
+            Assert.Equal(Base.AddHours(2), await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_a", ct));
+            Assert.Null(await runner.GetLastCollectedTimeForDatabaseAsync(ServerId, "attention_events", "event_time", "database_name", "db_b", ct));
+        });
+    }
+
+    [Fact]
+    public async Task WithTheLegacyTablePresent_APlainNewTableOverTheLimitIsNotConverted_AndOneUnderItIs()
+    {
+        await RunAsync(async (store, ct) =>
+        {
+            var c = store.Connection;
+
+            /* The swap ran and the create on the new table failed or never happened: the new table is plain, the legacy table is there, and the
+               collector has been filling the new one. The hourly pass's swap returns early, and only the table's own size decides. */
+            await InsertAsync(c, "attention_events", 1, ServerId, Base, ct);
+            await TimescaleSupport.SwapAttentionEventsAsync(c, null, ct);
+            await InsertAsync(c, "attention_events", 2, ServerId, Base.AddHours(1), ct);
+            await InsertAsync(c, "attention_events", 3, ServerId, Base.AddHours(2), ct);
+
+            var over = new CapturingTestLogger();
+            await TimescaleSupport.ConvertToHypertablesAsync(c, over, 1, ct);
+
+            Assert.Equal(0L, await ScalarAsync(c, HypertableCountSql, ct));
+            Assert.Equal(2L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events", ct));
+            Assert.Equal(1, over.CountAtLevel(LogLevel.Warning));
+
+            var under = new CapturingTestLogger();
+            await TimescaleSupport.ConvertToHypertablesAsync(c, under, ct);
+
+            Assert.Equal(1L, await ScalarAsync(c, HypertableCountSql, ct));
+            Assert.Equal(2L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events", ct));
+            Assert.Equal(1L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events_legacy", ct));
+            Assert.Equal(0, under.CountAtLevel(LogLevel.Warning));
+
+            /* Already a hypertable: a later pass converts it again without a warning, whatever the limit. */
+            var again = new CapturingTestLogger();
+            await TimescaleSupport.ConvertToHypertablesAsync(c, again, 1, ct);
+            Assert.Equal(1L, await ScalarAsync(c, HypertableCountSql, ct));
+            Assert.Equal(0, again.CountAtLevel(LogLevel.Warning));
         });
     }
 

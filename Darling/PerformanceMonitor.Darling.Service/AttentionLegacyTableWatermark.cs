@@ -28,12 +28,15 @@ internal static class AttentionLegacyTableWatermark
 
     /// <summary>
     /// The server's newest <paramref name="columnName"/> in the legacy table, or NULL when there is no legacy table or no row for the
-    /// server. The legacy table is the whole retained history, so the read is bounded the way the live table's is: anchored on the
-    /// server's newest <c>collection_time</c> (one step down the <c>(server_id, collection_time)</c> index) and probed over the recent
-    /// window, then the week, then unbounded only for a server whose last stretch held no timestamped row.
+    /// server. With <paramref name="databaseColumnName"/> and <paramref name="databaseName"/> the answer is for that one database only
+    /// (the Azure SQL Database per-database read). The legacy table is the whole retained history, so the read is bounded the way the
+    /// live table's is: anchored on the server's newest <c>collection_time</c> (one step down the <c>(server_id, collection_time)</c>
+    /// index) and probed over the recent window, then the week, then unbounded only for a server (or database) whose last stretch held
+    /// no timestamped row.
     /// </summary>
     internal static async Task<DateTime?> ReadAsync(
-        NpgsqlConnection connection, int serverId, string columnName, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, int serverId, string columnName, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        string? databaseColumnName = null, string? databaseName = null)
     {
         using (var exists = new NpgsqlCommand($"SELECT to_regclass('{LegacyTable}') IS NOT NULL", connection) { CommandTimeout = commandTimeoutSeconds })
         {
@@ -55,11 +58,19 @@ internal static class AttentionLegacyTableWatermark
             return null;
         }
 
+        var perDatabase = databaseColumnName is not null && databaseName is not null;
         foreach (var window in new[] { WatermarkPolicy.RecentWatermarkWindow, WatermarkPolicy.WidenedWatermarkWindow })
         {
             using var bounded = new NpgsqlCommand(
-                DarlingCollectorRunner.BuildServerWatermarkSql(LegacyTable, columnName, bounded: true), connection) { CommandTimeout = commandTimeoutSeconds };
+                perDatabase
+                    ? DarlingCollectorRunner.BuildServerWatermarkForDatabaseSql(LegacyTable, columnName, databaseColumnName!, bounded: true)
+                    : DarlingCollectorRunner.BuildServerWatermarkSql(LegacyTable, columnName, bounded: true), connection) { CommandTimeout = commandTimeoutSeconds };
             bounded.Parameters.AddWithValue(serverId);
+            if (perDatabase)
+            {
+                bounded.Parameters.AddWithValue(databaseName!);
+            }
+
             bounded.Parameters.AddWithValue(DateTime.SpecifyKind(newestCollected - window, DateTimeKind.Unspecified));
             if (await bounded.ExecuteScalarAsync(cancellationToken) is DateTime hit)
             {
@@ -68,8 +79,15 @@ internal static class AttentionLegacyTableWatermark
         }
 
         using var unbounded = new NpgsqlCommand(
-            DarlingCollectorRunner.BuildServerWatermarkSql(LegacyTable, columnName, bounded: false), connection) { CommandTimeout = commandTimeoutSeconds };
+            perDatabase
+                ? DarlingCollectorRunner.BuildServerWatermarkForDatabaseSql(LegacyTable, columnName, databaseColumnName!, bounded: false)
+                : DarlingCollectorRunner.BuildServerWatermarkSql(LegacyTable, columnName, bounded: false), connection) { CommandTimeout = commandTimeoutSeconds };
         unbounded.Parameters.AddWithValue(serverId);
+        if (perDatabase)
+        {
+            unbounded.Parameters.AddWithValue(databaseName!);
+        }
+
         return await unbounded.ExecuteScalarAsync(cancellationToken) as DateTime?;
     }
 }
