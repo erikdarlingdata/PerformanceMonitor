@@ -849,6 +849,10 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // (the probe's sentinel is the Query Store one) and the re-run of V274 adds them back as NULL. Safe on a store that never had them.
         new(274, "hasTrigramIndexStoreOptions",
             @"ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_text_trigram_index_enabled, DROP COLUMN IF EXISTS query_store_text_trigram_index_enabled;"),
+        // V275 (#8967): the progress table of the attention_events copy, the probe's sentinel. The rewind drops it and the re-run of V275 makes it
+        // again. The swap itself (a populated plain table renamed to _legacy beside an empty one) is not undone here: V275's re-run does nothing
+        // once _legacy exists, and a rewound store keeps both tables, which an older build reads as just the new one. Safe on a store that never had it.
+        new(275, "hasAttentionLegacyCopy", @"DROP TABLE IF EXISTS collect.attention_events_legacy_copy;"),
     ];
 
     /// <summary>

@@ -784,11 +784,13 @@ public sealed class MigrationDataMovingRungCensusPins
        aggregate or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
     /* V263 (#8549) is V259's shape for the oldest-run rollup under the Job History note: a DO block that reads the catalog for the hypertable and creates the empty aggregate or the plain view through EXECUTE. Catalog-only, no row of job_history is read or written. */
     /* V273 (#8824) is V259's shape at hour grain: a DO block that reads the catalog for the hypertable and creates the empty aggregate WITH NO DATA or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259, 261, 262, 263, 273];
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259, 261, 262, 263, 273, 275];
 
     /// <summary>
-    /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has nine exempted rungs today (V152, V204, V246, V255, V259, V261, V262, V263 and V273, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. V275 (#8967) is exempt too: its one
+    /// <c>EXECUTE</c> reads <c>timescaledb_information</c> for a yes or no, and the rest of the rung renames two relations, creates an
+    /// empty table and an index on it, and reads one row to see whether the table is empty. The
+    /// ladder has ten exempted rungs today (V152, V204, V246, V255, V259, V261, V262, V263, V273 and V275, named in <see cref="s_dynamicSqlExemptedRungs"/> because
     /// each <c>DO $$ ... EXECUTE</c> or <c>EXECUTE format()</c> drops a catalog index or constraint, creates an empty aggregate or a view, or grants
     /// and revokes on the rung's own objects, rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
