@@ -3318,6 +3318,22 @@ internal static class DarlingDataReader
     internal static bool QueryStoreTopMayReadTable(DateTime startUtc, DateTime endUtc) =>
         StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow;
 
+    /// <summary>
+    /// The first half of the tier choice of <c>get_query_store_top</c> and its window probe (#8570): for every database it is
+    /// <see cref="QueryStoreTopMayReadTable"/>, and for a read that names its databases it is the schema version alone, at any
+    /// window length (<see cref="QueryStoreTopTableMinWindow"/>). The interval table holds one row per interval and its key leads
+    /// with the server and the database, so a named read finds its rows there directly, where raw reads every snapshot the
+    /// window's batches hold for the server. An exclusion list counts as every database (<see cref="DatabaseFilter.IsAll"/>): it
+    /// leaves nearly the whole server in the read, and over a short window of the whole server raw reads fewer buffers.
+    /// </summary>
+    internal static bool QueryStoreTopMayReadTableFor(DateTime startUtc, DateTime endUtc, DatabaseFilter databases) =>
+        databases.IsAll ? QueryStoreTopMayReadTable(startUtc, endUtc) : StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion;
+
+    /// <summary>The shortest window the gate lets <see cref="QueryStoreTopMayReadTableFor"/>'s reads take from the interval
+    /// table: <see cref="QueryStoreTopMinWindow"/> for every database, none for a read that names its databases.</summary>
+    internal static TimeSpan QueryStoreTopTableMinWindow(DatabaseFilter databases) =>
+        databases.IsAll ? QueryStoreTopMinWindow : TimeSpan.Zero;
+
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         CancellationToken cancellationToken = default) =>
@@ -3346,12 +3362,12 @@ internal static class DarlingDataReader
         (DateOnly Start, DateOnly EndExclusive)? DailySpan = null);
 
     /// <summary>
-    /// #3953: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
-    /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/> unchanged,
-    /// exactly as before this table existed. <paramref name="endUtc"/> doubles as the gate's clause-4 literal
-    /// end: every caller of this MCP surface (the tool and its <c>/api/read</c> mirror) already resolves
-    /// <c>as_of</c> to a concrete instant before calling in, so there is no "open end" case to thread through
-    /// the way the viewer's WPF presets have.
+    /// #3953: reads <c>query_store_interval_wide</c> when the gate (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>)
+    /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/>. The gate is asked with
+    /// no literal end, whatever <c>as_of</c> resolved <paramref name="endUtc"/> to: raw places the window by the interval's
+    /// start and reads every snapshot up to the collection ceiling, so for an end before <c>applied_through</c> raw and the
+    /// table give the same newest snapshot of each interval. A read that names its databases has no minimum window
+    /// (<see cref="QueryStoreTopMayReadTableFor"/>).
     /// </summary>
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
@@ -3386,12 +3402,11 @@ internal static class DarlingDataReader
         string? executionType, string? moduleName, CancellationToken cancellationToken = default, QueryTagFilter? tags = null)
     {
     #pragma warning restore CA1068
-        /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
-           has no live schema probe to save (StorageVersion.SchemaVersion is a compiled constant), but every
-           call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
-           pays ReadSourceInputsSql plus the unindexed PlainTableFloorSql scan for a read that can only ever
-           land on raw (UseTable's clause 5). */
-        if (QueryStoreTopMayReadTable(startUtc, endUtc))
+        /* Review D4R H1: the window check first, before the gate's own round trips even open: a read over every database
+           under QueryStoreTopMinWindow can only land on raw (UseTable's clause 5), so it skips the second connection, the
+           transaction, ReadSourceInputsSql and PlainTableFloorSql. A read that names its databases has no minimum window
+           (QueryStoreTopMayReadTableFor), so it always asks the gate. */
+        if (QueryStoreTopMayReadTableFor(startUtc, endUtc, databases))
         {
             var table = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databases, executionType, moduleName, tags, cancellationToken);
@@ -3480,8 +3495,11 @@ internal static class DarlingDataReader
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* No literal end (UseTable's clause 4 is skipped): this read places its window by the interval's start and reads
+               every snapshot up to the collection ceiling, so for an end before applied_through it already shows each
+               interval's newest snapshot, the row the table holds. */
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, QueryStoreTopTableMinWindow(databases),
                 McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
@@ -3681,7 +3699,7 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// Whether the window holds any row <c>get_query_store_top</c> can show, with no ranking cut. It answers for the tier the
-    /// top read serves the window from: the same tier choice (<see cref="QueryStoreTopMayReadTable"/>, then
+    /// top read serves the window from: the same tier choice (<see cref="QueryStoreTopMayReadTableFor"/>, then
     /// <see cref="QueryStoreIntervalWide.ResolveReadAsync"/> and the built-days span in one read-only REPEATABLE READ
     /// transaction, raw when the gate says raw or the table path faults), the same window bounds, edge margin and database
     /// list, and the same exclusions (the monitor's own statements by the key table once
@@ -3698,7 +3716,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
-        if (QueryStoreTopMayReadTable(startUtc, endUtc)
+        if (QueryStoreTopMayReadTableFor(startUtc, endUtc, databases)
             && await TryQueryStoreWindowHasRowsFromTableAsync(postgres, serverId, startUtc, endUtc, databases, cancellationToken) is { } fromTable)
         {
             ReadScope.NoteSource(ReadScope.SourceIntervalTable);
@@ -3744,8 +3762,11 @@ internal static class DarlingDataReader
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* No literal end (UseTable's clause 4 is skipped): this read places its window by the interval's start and reads
+               every snapshot up to the collection ceiling, so for an end before applied_through it already shows each
+               interval's newest snapshot, the row the table holds. */
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, QueryStoreTopTableMinWindow(databases),
                 McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
