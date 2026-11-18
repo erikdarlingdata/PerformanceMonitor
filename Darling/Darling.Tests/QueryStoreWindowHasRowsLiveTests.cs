@@ -25,7 +25,8 @@ namespace Darling.Tests;
 /// <summary>
 /// Pins <see cref="DarlingDataReader.QueryStoreWindowHasRowsAsync"/> (#8570), the existence probe the empty answers of
 /// <c>get_query_store_top</c> and <c>get_query_store_aborts</c> ask in place of a top-1 page. Its answer equals "the top-1
-/// read returned a row" on every tier (raw, the interval table, the daily summary with the interval table's edges), for
+/// read returned a row" on every tier (raw, the interval table, the daily summary with the interval table's edges, with the
+/// full <c>first_execution_time</c> floor and with the narrower one a server of short intervals resolves), for
 /// ordinary activity, an empty window, a window that holds only the monitor's own statements (by the key table and by the
 /// marker in the text), only WAITFOR statements, rows of a database outside the list, and rows outside the window. The one
 /// place the two differ is pinned too: more WAITFOR groups ranking first than the top read keeps candidates, where the top-1
@@ -55,19 +56,6 @@ public sealed class QueryStoreWindowHasRowsLiveTests
         "(@cutoff_time datetime2(7))SELECT /* " + PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker + " */ qsrs.plan_id";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-    [Fact]
-    public void TheTableAndDailyRows_CarryTheEdgeMargin_SoANarrowedMarginReachesThem()
-    {
-        var narrow = QueryStoreIntervalWide.EdgeMarginSqlFor(TimeSpan.FromMinutes(61));
-        foreach (var rows in new[] { DarlingDataReader.QueryStoreWindowProbeTableRowsSql, DarlingDataReader.QueryStoreWindowProbeDailyRowsSql })
-        {
-            Assert.Contains(QueryStoreIntervalWide.PurgeEdgeMarginSql, rows, StringComparison.Ordinal);
-            var narrowed = QueryStoreIntervalWide.WithEdgeMargin(rows, narrow);
-            Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, narrowed, StringComparison.Ordinal);
-            Assert.Contains(narrow, narrowed, StringComparison.Ordinal);
-        }
-    }
 
     /* ───────────────────────────── live ───────────────────────────── */
 
@@ -200,6 +188,7 @@ FROM generate_series({firstQuery}, {firstQuery + queries - 1}) AS q", connection
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = end });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingDataReader.QueryStoreWindowProbeSampleRows });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
         return ExplainBuffers.RowsRead(await explain.ExecuteScalarAsync(ct), new HashSet<string>(StringComparer.Ordinal) { "query_store_text" });
     }
@@ -423,6 +412,104 @@ FROM generate_series({firstQuery}, {firstQuery + queries - 1}) AS q", connection
             {
                 DarlingDataReader.TestOnlyTableReadFault.Value = null;
             }
+        });
+    }
+
+    /// <summary>One interval-table row of statement <paramref name="queryId"/> in <paramref name="database"/>, its
+    /// interval starting at <paramref name="intervalStart"/>, collected at <paramref name="collected"/> and first executed
+    /// at <paramref name="firstExecution"/>.</summary>
+    private static async Task SeedWideRowAsync(
+        NpgsqlConnection connection, int serverId, string database, long queryId, DateTime intervalStart, DateTime collected,
+        DateTime firstExecution, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand($@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+ avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
+VALUES (@collected, {serverId}, '{database}', {queryId}, {queryId}, 'Regular', @first, @collected,
+        'h{queryId}', 10, 1000, 5, 5, 5, 5, 5, 'ph', {queryId}, @started)", connection);
+        command.Parameters.Add(new NpgsqlParameter("collected", NpgsqlDbType.Timestamp) { Value = collected });
+        command.Parameters.Add(new NpgsqlParameter("first", NpgsqlDbType.Timestamp) { Value = firstExecution });
+        command.Parameters.Add(new NpgsqlParameter("started", NpgsqlDbType.Timestamp) { Value = intervalStart });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// A server whose Query Store intervals are 60 minutes resolves a <c>first_execution_time</c> floor of three hours
+    /// before the read (<see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/>) in place of 26, and the probe reads with
+    /// that floor as the top read does. A row first executed exactly at the floor counts on both tiers, and one a minute
+    /// before it counts on neither, though the 26-hour floor would take it. The daily read's trailing edge carries its own
+    /// floor, three hours before its first instant <c>E</c>: a row a minute below that floor counts on the interval table,
+    /// whose single floor sits at the window start, and not on the daily read.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WithTheNarrowerEdgeMarginOfShortIntervals_TheProbeAnswersAsTheTopOneRead_AtTheFloorAndJustBelowIt(bool daily)
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            const int server = 1;
+            var start = End.AddHours(-72);
+            var trailingEdge = End.Date;
+            var margin = QueryStoreIntervalWide.EdgeMarginFor(TimeSpan.FromMinutes(60));
+            Assert.True(margin < QueryStoreIntervalWide.PurgeEdgeMargin);
+            var databases = new[] { "db0", "dbfloor", "dbbelow", "dbtrailfloor", "dbtrailbelow" };
+
+            await RegisterServerAsync(connection, server, tableCoverage: true, ct);
+            await SeedWideAsync(connection, server, "db0", 1, 3, 0, LastSeedHour, ct);
+
+            /* A 60-minute interval length for every database the server has rows for, captured every six hours from two
+               days before the window, so the oldest capture is more than a day before the read starts. */
+            await ExecAsync(connection, $"""
+                INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
+                SELECT row_number() OVER (), c.c, {server}, 'srv{server}', d.d, 60
+                FROM generate_series(timestamp '{start.AddDays(-2):yyyy-MM-dd HH:mm}', timestamp '{End:yyyy-MM-dd HH:mm}', interval '6 hours') AS c(c)
+                CROSS JOIN unnest(ARRAY['{string.Join("', '", databases)}']) AS d(d)
+                """, ct);
+
+            var readStart = (await DarlingDataReader.GetQueryStoreTopWithReachAsync(source, server, start, End, 1, DatabaseFilter.All, null, null, ct))
+                .Table?.ReadStart;
+            Assert.NotNull(readStart);
+            var floor = readStart.Value - margin;
+            var trailingFloor = trailingEdge - margin;
+            var minute = TimeSpan.FromMinutes(1);
+            await SeedWideRowAsync(connection, server, "dbfloor", 21, readStart.Value, readStart.Value.AddMinutes(2), floor, ct);
+            await SeedWideRowAsync(connection, server, "dbbelow", 22, readStart.Value, readStart.Value.AddMinutes(2), floor - minute, ct);
+            await SeedWideRowAsync(connection, server, "dbtrailfloor", 23, trailingEdge, trailingEdge.AddMinutes(2), trailingFloor, ct);
+            await SeedWideRowAsync(connection, server, "dbtrailbelow", 24, trailingEdge, trailingEdge.AddMinutes(2), trailingFloor - minute, ct);
+            await FillSelfKeysAsync(connection, ct);
+
+            if (daily)
+            {
+                var built = await QueryStoreTopDaily.RunTickAsync(source, BuildNow, RetentionDays, NullLogger.Instance, ct);
+                Assert.Equal(0, built.Failed);
+                Assert.True(built.Built > 0);
+            }
+
+            /* The table serves from the same start, the daily read's days are 01-12 and 01-13 (its trailing edge starts at
+               01-14 00:00), and the server's margin is the narrower one. */
+            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(source, server, start, End, 1, DatabaseFilter.All, null, null, ct);
+            Assert.Equal(readStart, read.Table?.ReadStart);
+            if (daily)
+            {
+                Assert.Equal(new DateOnly(2026, 1, 12), read.DailySpan?.Start);
+                Assert.Equal(DateOnly.FromDateTime(trailingEdge), read.DailySpan?.EndExclusive);
+            }
+            else
+            {
+                Assert.Equal(0, read.DailyDaysUsed);
+            }
+
+            Assert.Equal(margin, await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, server, readStart.Value, End, 30, ct));
+
+            const string table = ReadScope.SourceIntervalTable;
+            await AssertAnswersAsTopOneAsync(source, server, start, End, DatabaseFilter.One("dbfloor"), true, table, "first executed at the floor", ct);
+            await AssertAnswersAsTopOneAsync(source, server, start, End, DatabaseFilter.One("dbbelow"), false, table, "first executed a minute below the floor", ct);
+            await AssertAnswersAsTopOneAsync(source, server, start, End, DatabaseFilter.One("dbtrailfloor"), true, table, "first executed at the trailing edge's floor", ct);
+            await AssertAnswersAsTopOneAsync(source, server, start, End, DatabaseFilter.One("dbtrailbelow"), !daily, table, "first executed a minute below the trailing edge's floor", ct);
+            await AssertAnswersAsTopOneAsync(source, server, start, End, DatabaseFilter.Of(new[] { "dbbelow", "dbtrailfloor" }), true, table, "a list with one row inside the floors", ct);
         });
     }
 
