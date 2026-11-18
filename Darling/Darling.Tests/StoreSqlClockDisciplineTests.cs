@@ -119,14 +119,19 @@ public sealed class StoreSqlClockDisciplineTests
     private static readonly string[] AmbiguousFrameColumns = ["sample_time", "event_time", "last_execution_time"];
 
     /// <summary>
-    /// The one bare <c>now()</c> left in the store's SQL, and it is waived on ARITHMETIC, not on being
+    /// The bare <c>now()</c> calls left in the store's SQL. The first is waived on ARITHMETIC, not on being
     /// harmless: across UTC-12..UTC+14 its 48-hour window delivers 34–60 hours, 34h still covers the refresh
     /// cadence (startup, then riding the 24-hour purge) and 60h is still inside the 4-day raw retention. The
     /// query's own remarks carry the derivation and the two numbers that have to keep holding.
+    /// <c>QueryTagSightingWriter.cs:UpsertSql</c> is waived on its column TYPE (#8979):
+    /// <c>query_tag_sightings.last_seen</c> is <c>timestamptz</c> (<c>QueryTagSchema.cs</c>), so its
+    /// <c>now()</c> comparison has no session time zone shift. The scan keys on names, and
+    /// <c>last_seen</c> is naive in other tables.
     /// </summary>
     private static readonly HashSet<string> Waived = new(StringComparer.Ordinal)
     {
         "DarlingModuleMap.cs:RefreshSql",
+        "QueryTagSightingWriter.cs:UpsertSql",
     };
 
     [Fact]

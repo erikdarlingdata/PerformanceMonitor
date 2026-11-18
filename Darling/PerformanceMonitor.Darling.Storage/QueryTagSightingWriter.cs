@@ -26,8 +26,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>One statement per flush, and no connection for an empty one.</b> The same identity sighted twice is
 /// collapsed first (a single <c>INSERT ... ON CONFLICT DO UPDATE</c> cannot touch one row twice), with the occurrences
 /// added to <c>seen_count</c>. The conflict target is the table's own unique index (V194), so a key seen under the same
-/// caller in the same database again adds to <c>seen_count</c>, moves <c>last_seen</c> at most once an hour (#8716), to a stamp behind the
-/// map's extend window (<see cref="ReSightingBackdate"/>), and keeps its first text sample.</para>
+/// caller in the same database again moves <c>last_seen</c> at most once an hour (#8716), to a stamp behind the
+/// map's extend window (<see cref="ReSightingBackdate"/>), and keeps its first text sample. A re-sighting that fills nothing
+/// and is not due for the hourly move writes no row at all (#8979), so <c>seen_count</c> is a lower bound (see
+/// <see cref="UpsertSql"/>).</para>
 ///
 /// <para><b>The database is part of the identity (V194).</b> One hash seen in two databases is two rows, so the map
 /// builder, which resolves a key against every sighting row it has, tests a database rule against each of them. An
@@ -73,12 +75,20 @@ public static class QueryTagSightingWriter
     /// <see cref="ReSightingBackdate"/>.
     /// <para><b>A re-sighting moves <c>last_seen</c> at most once an hour (#8716).</b> <c>last_seen</c> is indexed, so bumping it on
     /// every conflict made every update non-HOT: each one wrote all four indexes, and a busy store's table and its
-    /// <c>last_seen</c> index grew by hundreds of thousands of pages a day with autovacuum removing nothing. The count still
-    /// adds up on every conflict (it is not indexed). <c>last_seen</c> moves to <c>now()</c> when the conflict fills an object
+    /// <c>last_seen</c> index grew by hundreds of thousands of pages a day with autovacuum removing nothing. <c>last_seen</c> moves to <c>now()</c> when the conflict fills an object
     /// name or text sample the row lacked, because those are what the map resolver reads and the map's changed-keys read
     /// (<see cref="QueryTagMapStore.ChangedKeysSql"/>) finds a key by this column. Otherwise it moves when the stored value
     /// is over an hour older than the backdated stamp, to <c>now()</c> less <see cref="ReSightingBackdate"/>, so an active
     /// row moves once an hour and never inside the extend window.
+    /// <para><b>A conflict writes only when one of those happens (#8979).</b> The count was the one thing every conflict
+    /// changed, and a changed count alone made PostgreSQL write a new heap version of every re-sighted row (HOT, but still a
+    /// full row copy, tens of millions a day on a busy store). A row is now written only when it fills an object name or text
+    /// sample or its hourly <c>last_seen</c> move is due. The same test sits twice: as a <c>NOT EXISTS</c> filter in the select
+    /// list, so an unchanged row never reaches the insert and takes no row lock, and in the conflict arm's <c>WHERE</c>, which
+    /// decides when a concurrent writer got there first. <c>ORDER BY u.ord</c> keeps the rows in the caller's identity order
+    /// (<see cref="SortByIdentity"/>), which the filter's join could otherwise change.</para>
+    /// <para><b><c>seen_count</c> is a lower bound.</b> It adds the flush's buffered count only on a write that happens
+    /// anyway. A flush whose re-sighting writes nothing drops its count. Nothing reads the column.</para>
     /// The time source is the statement's own <c>now()</c>, reached through the column default and read as <c>EXCLUDED.last_seen</c> (the insert list leaves <c>last_seen</c> out). That is the same clock as the stored value, and it keeps the comparison <c>timestamptz</c> against <c>timestamptz</c>.</para>
     /// </summary>
     internal const string UpsertSql = """
@@ -86,7 +96,19 @@ INSERT INTO collect.query_tag_sightings AS t
     (server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count)
 SELECT u.server_id, u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample, u.seen_count
 FROM unnest($1::integer[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[])
-    AS u(server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count)
+    WITH ORDINALITY AS u(server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count, ord)
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM collect.query_tag_sightings AS s
+    WHERE s.server_id = u.server_id AND s.key_kind = u.key_kind AND s.key = u.key
+      AND COALESCE(s.application_name, '') = COALESCE(u.application_name, '')
+      AND COALESCE(s.login_name, '') = COALESCE(u.login_name, '')
+      AND COALESCE(s.host_name, '') = COALESCE(u.host_name, '')
+      AND COALESCE(s.database_name, '') = COALESCE(u.database_name, '')
+      AND NOT ((s.object_name IS NULL AND u.object_name IS NOT NULL)
+            OR (s.text_sample IS NULL AND u.text_sample IS NOT NULL)
+            OR s.last_seen < now() - $11::interval - interval '1 hour'))
+ORDER BY u.ord
 ON CONFLICT (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''))
 DO UPDATE SET
     last_seen = CASE
@@ -99,6 +121,9 @@ DO UPDATE SET
     seen_count = t.seen_count + EXCLUDED.seen_count,
     object_name = COALESCE(t.object_name, EXCLUDED.object_name),
     text_sample = COALESCE(t.text_sample, EXCLUDED.text_sample)
+WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
+   OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
+   OR t.last_seen < EXCLUDED.last_seen - $11::interval - interval '1 hour'
 """;
 
     /// <summary>The store's name for a key kind: the same text the table's CHECK allows.</summary>
