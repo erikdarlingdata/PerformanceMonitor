@@ -413,6 +413,7 @@ public sealed class DailySummaryRangeCacheTests
         store.Days.Remove(D(2)); // the purge deletes these days' rows
         store.Days.Remove(D(3));
         store.Days.Remove(D(10)); // inside retention: not a purge target, so the block still holds it
+        store.Days[D(4)] = 999; // the day after the segment: read with it, never taken from that read
         store.Reads.Clear();
 
         now = now.AddMinutes(59);
@@ -426,7 +427,11 @@ public sealed class DailySummaryRangeCacheTests
 
         Assert.DoesNotContain(rows, r => r.Day == D(2) || r.Day == D(3));
         Assert.Contains(rows, r => r.Day == D(10)); // cached
-        Assert.Contains((D(1), D(4)), store.Reads); // the purge-exposed days are read, only they
+        /* The purge-exposed days are read with the one day after them (a blocking wait that crosses the segment's
+           last midnight is counted on its own day only when that day is in the read), and that day's row stays the
+           block's. */
+        Assert.Contains((D(1), D(5)), store.Reads);
+        Assert.Equal(4, rows.Single(r => r.Day == D(4)).Value);
         Assert.DoesNotContain(store.Reads, read => read.Start >= D(4) && read.Start < D(25));
 
         /* And the next tick is cached again. */
@@ -453,7 +458,7 @@ public sealed class DailySummaryRangeCacheTests
         now = now.AddMinutes(5);
         var rows = await Read(D(10)); // the floor rose to the 10th inside the hour
         Assert.DoesNotContain(rows, r => r.Day == D(8));
-        Assert.Contains((D(1), D(10)), store.Reads);
+        Assert.Contains((D(1), D(11)), store.Reads); // the newly untrusted days and the one day after them
     }
 
     [Fact]
@@ -527,5 +532,125 @@ public sealed class DailySummaryRangeCacheTests
         runs.Clear();
         await cache.GetRangeAsync("store", ServerId, D(1).AddDays(-1), toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
         Assert.Equal((D(1).AddDays(-1), toDate), Assert.Single(runs));
+    }
+
+    /// <summary>#8549: the cut of a cold range. Twenty-four closed days and four parts are four runs of six days, newest
+    /// first; the newest is read to the range's end (it owns the open day), every other one a day past its own end.</summary>
+    [Fact]
+    public void MissSubRanges_CutsTheClosedDaysIntoBalancedRuns_NewestFirst_EachOlderOneReadADayPastItsEnd()
+    {
+        var plan = DailySummaryRangeCache.MissSubRanges(D(1), D(26), D(25), 4);
+
+        Assert.Equal(
+            new[] { (D(19), D(26), D(26)), (D(13), D(19), D(20)), (D(7), D(13), D(14)), (D(1), D(7), D(8)) },
+            plan);
+
+        /* Twenty-two closed days: five each and two left over, which the two oldest runs take. */
+        Assert.Equal(
+            new[] { (D(20), D(26), D(26)), (D(15), D(20), D(21)), (D(9), D(15), D(16)), (D(3), D(9), D(10)) },
+            DailySummaryRangeCache.MissSubRanges(D(3), D(26), D(25), 4));
+
+        /* A range that is closed to its end has no open day: the newest run still ends at the range's end. */
+        Assert.Equal(
+            new[] { (D(4), D(7), D(7)), (D(1), D(4), D(5)) },
+            DailySummaryRangeCache.MissSubRanges(D(1), D(7), D(7), 4));
+    }
+
+    [Fact]
+    public void MissSubRanges_ReadsAShortOrUnalignedRangeAsOneStatement()
+    {
+        Assert.Empty(DailySummaryRangeCache.MissSubRanges(D(1), D(26), D(25), 1)); // one part is the one statement
+        Assert.Empty(DailySummaryRangeCache.MissSubRanges(D(20), D(26), D(25), 4)); // five closed days: under two runs of three
+        Assert.Empty(DailySummaryRangeCache.MissSubRanges(D(1).AddHours(6), D(26), D(25), 4)); // not a whole UTC day
+        Assert.Equal(2, DailySummaryRangeCache.MissSubRanges(D(19), D(26), D(25), 4).Count); // six closed days: two runs of three
+    }
+
+    /// <summary>A stand-in for the caller's side-by-side read: each range is read from the store, and the ranges asked
+    /// for are kept so a test can see them.</summary>
+    private static Func<IReadOnlyList<(DateTime Start, DateTime End)>, CancellationToken, Task<IReadOnlyList<List<TestRow>>>> SplitRead(
+        CountingStore store, List<(DateTime Start, DateTime End)> asked) => async (ranges, ct) =>
+        {
+            asked.AddRange(ranges);
+            var parts = new List<List<TestRow>>();
+            foreach (var (start, end) in ranges) parts.Add(await store.Run(start, end, ct));
+            return parts;
+        };
+
+    /// <summary>#8549: a miss read as sub-ranges answers and stores what the one statement does. Two caches read the same
+    /// store, one as one statement and one as four sub-ranges. The rows are equal, and so are the rows of the next call,
+    /// which each cache answers from its block after the store's closed days have changed.</summary>
+    [Fact]
+    public async Task AMissReadAsSubRanges_ReturnsAndStoresTheOneStatementsRows()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var store = Month();
+        var whole = new DailySummaryRangeCache<TestRow>(() => now);
+        var split = new DailySummaryRangeCache<TestRow>(() => now);
+        var asked = new List<(DateTime Start, DateTime End)>();
+
+        Task<List<TestRow>> ReadWhole() => whole.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            store.Run, "", CancellationToken.None);
+        Task<List<TestRow>> ReadSplit() => split.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            store.Run, "", CancellationToken.None, missParts: 4, runMissRanges: SplitRead(store, asked));
+
+        var expected = await ReadWhole();
+        store.Reads.Clear();
+        var rows = await ReadSplit();
+
+        Assert.Equal(expected, rows);
+        Assert.Equal(new[] { (D(19), D(26)), (D(13), D(20)), (D(7), D(14)), (D(1), D(8)) }, asked);
+        Assert.Equal(asked, store.Reads); // the sub-ranges are the whole read: no one statement beside them
+
+        /* The store's closed days change. Both caches hold them, so both answer the closed days as first read and
+           read only the open day. */
+        for (var d = 1; d <= 24; d++) store.Days[D(d)] = 1000 + d;
+        store.Reads.Clear();
+        now = now.AddMinutes(5);
+        var wholeAgain = await ReadWhole();
+        var splitAgain = await ReadSplit();
+
+        Assert.Equal(expected, wholeAgain);
+        Assert.Equal(wholeAgain, splitAgain);
+        Assert.Equal(new[] { (D(25), D(26)), (D(25), D(26)) }, store.Reads);
+        Assert.Equal(4, asked.Count); // the hit ran no sub-range
+    }
+
+    /// <summary>#8549: the day an older sub-range reads past its own end is only there so that sub-range counts its last
+    /// day right; its row belongs to the sub-range that owns that day. Every row here carries the start of the sub-range
+    /// that read it, so a returned or stored row read by the wrong sub-range shows.</summary>
+    [Fact]
+    public async Task TheDayReadPastASubRangesEnd_IsNeitherReturnedNorStoredFromThatSubRange()
+    {
+        var now = new DateTime(2026, 9, 25, 10, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var tailReads = 0;
+
+        static List<TestRow> Days(DateTime start, DateTime end) => Enumerable.Range(0, (int)(end - start).TotalDays)
+            .Select(i => new TestRow(start.AddDays(i), start.Day)).ToList();
+
+        Task<List<TestRow>> Read() => cache.GetRangeAsync("s", ServerId, D(1), D(26), RoutedSql, true, r => r.Day,
+            (start, end, _) =>
+            {
+                tailReads++;
+                return Task.FromResult(Days(start, end));
+            },
+            "", CancellationToken.None, missParts: 4,
+            runMissRanges: (ranges, _) => Task.FromResult<IReadOnlyList<List<TestRow>>>(ranges.Select(range => Days(range.Start, range.End)).ToList()));
+
+        /* The owner of each day under the four-part cut: 1..6, 7..12, 13..18, and 19..25 with the open day. */
+        static int OwnerStart(DateTime day) => day.Day >= 19 ? 19 : day.Day >= 13 ? 13 : day.Day >= 7 ? 7 : 1;
+
+        var rows = await Read();
+        Assert.Equal(Enumerable.Range(1, 25).Select(D), rows.Select(r => r.Day)); // every day once, oldest first
+        Assert.All(rows, row => Assert.Equal(OwnerStart(row.Day), row.Value));
+        Assert.Equal(0, tailReads);
+
+        /* The next call answers the closed days from the block: the days 7, 13 and 19 were each read twice on the
+           miss, and the block holds the owner's row for each. */
+        now = now.AddMinutes(5);
+        var again = await Read();
+        Assert.Equal(Enumerable.Range(1, 25).Select(D), again.Select(r => r.Day));
+        Assert.All(again.Where(r => r.Day < D(25)), row => Assert.Equal(OwnerStart(row.Day), row.Value));
+        Assert.Equal(1, tailReads); // the open day only
     }
 }
