@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,7 +29,7 @@ public sealed class AttentionLegacyCopyLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static PgMigrations.Migration Rung => PgMigrations.Scripts[^1];
+    private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Version == 277);
 
     private const int RetentionDays = 30;
 

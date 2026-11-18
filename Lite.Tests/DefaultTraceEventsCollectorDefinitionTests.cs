@@ -454,13 +454,15 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
 
            TWELVE since #8981. memory_pressure_events persists the raw ring-buffer position it has stored (confirmed and pending, with the
            instance start time) so the first read after a service restart skips by raw timestamp, not by a guess at the held record.
-           A MAX() over its rows cannot recover it: a raw timestamp is not a stored column. Staged with the run, generic wiring, no host code. */
+           A MAX() over its rows cannot recover it: a raw timestamp is not a stored column. Staged with the run, generic wiring, no host code.
+
+           THIRTEEN since #8865. database_protection declares its per-instance marker and its remembered CHECKDB keys. Darling-only, so Lite's runner never loads it. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "long_query_completions", "memory_pressure_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
+        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "database_protection", "deadlocks", "default_trace_events", "long_query_completions", "memory_pressure_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
     }
 
     [Fact]

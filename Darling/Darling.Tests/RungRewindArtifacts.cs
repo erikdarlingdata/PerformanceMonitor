@@ -859,6 +859,14 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // again. The swap itself (a populated plain table renamed to _legacy beside an empty one) is not undone here: V277's re-run does nothing
         // once _legacy exists, and a rewound store keeps both tables, which an older build reads as just the new one. Safe on a store that never had it.
         new(277, "hasAttentionLegacyCopy", @"DROP TABLE IF EXISTS collect.attention_events_legacy_copy;"),
+        // V278 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
+        // last one, replica_readable; the rewind drops all ten and a re-run of V278 adds them back. Safe on a store that never had them.
+        new(278, "hasDatabaseProtectionErrorLog",
+            @"ALTER TABLE IF EXISTS collect.database_protection
+    DROP COLUMN IF EXISTS errorlog_state, DROP COLUMN IF EXISTS errorlog_message, DROP COLUMN IF EXISTS errorlog_grant,
+    DROP COLUMN IF EXISTS errorlog_backfill_complete, DROP COLUMN IF EXISTS errorlog_skipped_archives, DROP COLUMN IF EXISTS errorlog_unparsed_lines,
+    DROP COLUMN IF EXISTS errorlog_checkdb_time, DROP COLUMN IF EXISTS errorlog_checkdb_options, DROP COLUMN IF EXISTS errorlog_checkdb_errors,
+    DROP COLUMN IF EXISTS replica_readable;"),
     ];
 
     /// <summary>

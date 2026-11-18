@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -26,7 +27,7 @@ public sealed class AttentionHypertableSwapLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static PgMigrations.Migration Rung => PgMigrations.Scripts[^1];
+    private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Version == 277);
 
     private const string SeedSql =
         "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) "

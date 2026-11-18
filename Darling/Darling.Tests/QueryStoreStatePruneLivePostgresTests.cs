@@ -350,6 +350,51 @@ public sealed class QueryStoreStatePruneLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #8865: the database_protection collector's checkdb:&lt;database&gt; keys go through the same prune: with no
+    /// query_store state at all, a dropped database's key is retired and a live one kept. That the database_protection
+    /// cycle calls this prune is not pinned by a test (#5833 rules out a source-text pin); the call site is in DarlingCollectorRunner.Run.cs.
+    /// </summary>
+    [Fact]
+    public async Task ADroppedDatabasesCheckDbKey_IsPruned_WithNoQueryStoreState()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live checkdb key prune test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteLiveRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var owner = DatabaseProtectionCollector.Instance.Name;
+
+        var bodySucceeded = false;
+        try
+        {
+            /* No query_store state anywhere: only the database_protection keys exist. */
+            await SnapshotAsync(connection, ct, Newest, "Live");
+            await StateAsync(connection, ct, LiveServerId, owner, DatabaseProtectionErrorLogState.CheckKeyPrefix + "Live", "kept");
+            await StateAsync(connection, ct, LiveServerId, owner, DatabaseProtectionErrorLogState.CheckKeyPrefix + "Gone", "dropped");
+
+            await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
+
+            Assert.Null(await ValueAsync(connection, ct, LiveServerId, owner, DatabaseProtectionErrorLogState.CheckKeyPrefix + "Gone"));
+            Assert.Equal("kept",
+                await ValueAsync(connection, ct, LiveServerId, owner, DatabaseProtectionErrorLogState.CheckKeyPrefix + "Live"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteLiveRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ---------------- helpers ---------------- */
 
     private static Task SnapshotAsync(

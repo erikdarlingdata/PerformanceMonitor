@@ -25,11 +25,15 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebTileTruthsTests
 {
-    private static JsonElement Run()
+    internal static JsonElement Run(string? protectionReplyFile = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-tile-truths-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        if (protectionReplyFile is not null)
+        {
+            psi.ArgumentList.Add(protectionReplyFile);
+        }
 
         Process proc;
         try
