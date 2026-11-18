@@ -554,9 +554,9 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("}::bigint)\"", darling, StringComparison.Ordinal);
         Assert.Contains("VALUES ($3, $4, $5), ($6, $7, $8)", ForcePlanTargetStateReader.BuildSql(2), StringComparison.Ordinal);
 
-        /* All three scans (plan, recommendation, enablement) are bounded by the bound $2, never now(). */
+        /* All the scans (plan, recommendation, and the enablement probe and its fallback pass, #8570) are bounded by the bound $2, never now(). */
         Assert.DoesNotContain("now()", lite, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(lite, @"collection_time > \$2").Count);
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(lite, @"collection_time > \$2").Count);
     }
 
     /* ------------------------------------------------------------------ 6. the DuckDB round trip */
