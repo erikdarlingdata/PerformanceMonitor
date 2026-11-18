@@ -580,7 +580,7 @@ public sealed class McpQueryTools
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
                 if ((execution_type != null || module_name != null)
-                    && await dataService.QueryStoreWindowHasRowsAsync(resolved.ServerId, hours_back, string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, windowEnd))
+                    && await dataService.QueryStoreWindowHasRowsAsync(resolved.ServerId, hours_back, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd))
                     return module_name is null
                         ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
                         /* The module miss hands back the window it read: "did not run" is a claim about that
