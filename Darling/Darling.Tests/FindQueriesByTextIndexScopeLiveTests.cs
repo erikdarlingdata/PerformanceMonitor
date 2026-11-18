@@ -26,8 +26,10 @@ namespace Darling.Tests;
    QueryTextTrigramIndexTracker.Shared through the tools and QueryTextTrigramIndexTrackerTests starts the real worker, which sets it. */
 [Collection("darling-config-env")]
 /// <summary>
-/// #7674 part B on a real store: the one-server scope keeps the plain path when the trigram index exists (the planner cannot use the index for
-/// it), and a search that names no server is refused unless the index is ready, in a sentence that names the option.
+/// #7674 part B on a real store: the one-server span read (<c>PlanCacheSql</c>) is not served by the trigram index when it exists (the planner
+/// cannot use the index for it; with the index ready the one-server search reads the matched digests through it first, which
+/// <see cref="FindQueriesByTextOneServerProbeLiveTests"/> covers), and a search that names no server is refused unless the index is ready, in a
+/// sentence that names the option.
 /// </summary>
 public sealed class FindQueriesByTextIndexScopeLiveTests
 {
