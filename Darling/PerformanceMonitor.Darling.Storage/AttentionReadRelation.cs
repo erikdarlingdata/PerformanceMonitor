@@ -35,6 +35,9 @@ public static class AttentionReadRelation
 
     private const string LegacyTable = "collect.attention_events_legacy";
 
+    /* The existence check is one catalog lookup. */
+    private const int LegacyCheckTimeoutSeconds = 15;
+
     private const string Columns =
         "attention_event_id, collection_time, server_id, event_time, event_kind, attention_count, database_name, client_app_name, "
         + "client_hostname, session_id, interrupt_duration_us, statement_fingerprint, statement_text";
@@ -73,7 +76,7 @@ public static class AttentionReadRelation
 
     private static async Task<bool> LegacyExistsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand("SELECT to_regclass('" + LegacyTable + "') IS NOT NULL", connection);
+        await using var command = new NpgsqlCommand("SELECT to_regclass('" + LegacyTable + "') IS NOT NULL", connection) { CommandTimeout = LegacyCheckTimeoutSeconds };
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
     }
 }
