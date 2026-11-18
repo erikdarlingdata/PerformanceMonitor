@@ -927,7 +927,7 @@ public sealed partial class DarlingWorker
     ///
     /// <para><b>Due-ness is asked of the STORE</b> (<see cref="PgStatementText.IsDueSql"/>), not remembered here.
     /// A restart therefore cannot re-fetch the fleet, and two hosts writing one store cannot disagree about when
-    /// text was last written. The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
+    /// text was last written (the store's per-server fetch marker, #8988). The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
     /// cannot drift against its own timestamps.</para>
     ///
     /// <para>Only for PostgreSQL targets: <c>aurora_stat_statements</c> does not exist elsewhere, and the
@@ -963,18 +963,11 @@ public sealed partial class DarlingWorker
                 return;
             }
 
-            var stamps = new DateTime[queryIds.Count];
-            Array.Fill(stamps, now);
-
-            await using var upsert = _postgres!.CreateCommand(PgStatementText.UpsertSql);
-            upsert.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-            upsert.Parameters.AddWithValue(Enumerable.Repeat(runtime.ServerId, queryIds.Count).ToArray());
-            upsert.Parameters.AddWithValue(queryIds.ToArray());
-            upsert.Parameters.AddWithValue(texts.ToArray());
-            upsert.Parameters.AddWithValue(stamps);
-            upsert.Parameters.AddWithValue(ownEntries.ToArray());
-            upsert.Parameters.AddWithValue(candidates.ToArray());
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            /* #8988: the upsert leaves an unchanged row's last_seen alone, so the fetch writes its own marker after it, and the due
+               check above reads that marker. */
+            await PgStatementText.WriteFetchAsync(
+                _postgres!, runtime.ServerId, queryIds, texts, ownEntries, candidates, now,
+                ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
             _logger.LogInformation(
                 "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed (#2219)",
