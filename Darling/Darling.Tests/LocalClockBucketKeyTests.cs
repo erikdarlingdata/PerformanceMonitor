@@ -373,7 +373,7 @@ public sealed class LocalClockBucketKeyTests
         Assert.DoesNotMatch(new Regex(@"(?<![\w.])collection_time::DATE"), lite);
         /* #4731: the two event arms share ONE helper (EventBaselineSql) with two source CTEs, each extracting (hour, dow,
            date) = 6 hand references, plus the scaffold's 3 = 9, in both providers. Darling has one more (#8570): the wide-window
-           scaffold applies the clock to each row once, in its local_clock CTE, and reads hour, day of week and date from that
+           scaffold writes the clock once, in its local_clock CTE, and reads hour, day of week and date from that
            value. Exact, not a floor: another is a new place that must be looked at. */
         Assert.Equal(9, Regex.Matches(lite, @"\+ LocalCollectionTime \+").Count);
         Assert.Equal(10, Regex.Matches(darlingSource, @"\+ LocalCollectionTime \+").Count);

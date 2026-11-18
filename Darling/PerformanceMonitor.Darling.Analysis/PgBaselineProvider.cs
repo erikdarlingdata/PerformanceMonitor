@@ -1358,9 +1358,10 @@ JOIN tier_mads AS m
     /// stacks the three results. The scaffold's form expands every row three times, sorts the 3.4 million rows by tier key and
     /// merge joins them, which is the largest sort and temp file of the statement. Each row belongs to exactly three tiers, so
     /// both forms feed the same values to the same <c>percentile_cont</c> per tier.</item>
-    /// <item>The local clock is applied to each row once and the hour, day of week and date are read from that one value. The
-    /// scaffold repeats the clock expression three times per row, and <c>EXTRACT</c> builds a <c>numeric</c> for each.</item>
-    /// <item>hour and day of week are <c>SMALLINT</c>, so the rows the sorts and the materialized rows carry are narrower.</item>
+    /// <item>The local clock is written once and the hour, day of week and date are read from it. PostgreSQL may still
+    /// evaluate it for each use. The saving is <c>date_part</c> in place of <c>EXTRACT</c>, which builds a <c>numeric</c>.</item>
+    /// <item>hour and day of week are <c>SMALLINT</c>, so the rows the sorts and the materialized rows carry are narrower,
+    /// and each tier joins on its own keys in the MAD pass.</item>
     /// </list>
     /// A row's hour and day of week are never NULL here (the clock expression of a non-NULL <c>collection_time</c>), so the
     /// <c>-1</c> tier keys come from GROUPING SETS exactly as in the scaffold. An arm using this ends in the same
