@@ -463,6 +463,45 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
     }
 
     [Fact]
+    public async Task SupervisorTick_WithTheWebListenerNotRunning_StillDrainsAQueuedRevoke()
+    {
+        await using var rig = await StartAsync(Settings());
+        var op = await rig.MakeTokenAsync(OwnerKeyFor("tick-no-web"), "ops", "operator");
+        rig.OwnerSource.Publish(null);
+        await rig.SignInAsync(IdTokenFor("tick-no-web", "everyone"));
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+        rig.OwnerSource.Publish(rig.Owner);
+
+        await rig.Host.RunPersonalTickAsync(Settings(), webRunning: false, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, rig.Host.PendingPersonalRevokes.Count);
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
+        Assert.False(rig.Host.PersonalStartSweepDone);
+    }
+
+    [Fact]
+    public async Task LaterSignIn_OfEqualBreadth_ReplacesTheQueuedReason_AndTheJournalCarriesIt()
+    {
+        await using var rig = await StartAsync(Settings());
+        var op = await rig.MakeTokenAsync(OwnerKeyFor("later-reason"), "ops", "operator");
+        var owner = OwnerKeyFor("later-reason");
+        rig.OwnerSource.Publish(null);
+
+        rig.Host.PendingPersonalRevokes.Add(owner, operatorOnly: true, PersonalTokenStore.SeatLoweredReason);
+        rig.Host.PendingPersonalRevokes.Add(owner, operatorOnly: true, PersonalTokenStore.OperatorsDisabledReason);
+
+        var entry = Assert.Single(rig.Host.PendingPersonalRevokes.Snapshot());
+        Assert.Equal(PersonalTokenStore.OperatorsDisabledReason, entry.Reason);
+
+        rig.OwnerSource.Publish(rig.Owner);
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
+        Assert.Equal("1", await rig.ScalarAsync(
+            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND detail->>'reason' = '{PersonalTokenStore.OperatorsDisabledReason}' AND detail::text LIKE '%{op.Id}%'"));
+    }
+
+    [Fact]
     public async Task Drain_WithTheFeatureOff_KeepsTheQueue()
     {
         await using var rig = await StartAsync(Settings());
