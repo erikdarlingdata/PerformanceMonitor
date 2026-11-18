@@ -867,6 +867,10 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
     DROP COLUMN IF EXISTS errorlog_backfill_complete, DROP COLUMN IF EXISTS errorlog_skipped_archives, DROP COLUMN IF EXISTS errorlog_unparsed_lines,
     DROP COLUMN IF EXISTS errorlog_checkdb_time, DROP COLUMN IF EXISTS errorlog_checkdb_options, DROP COLUMN IF EXISTS errorlog_checkdb_errors,
     DROP COLUMN IF EXISTS replica_readable;"),
+        // V279 (#8570): the aggregate compression order history, the probe's sentinel. The rewind drops it and the re-run of V279 makes it again
+        // and re-states the order. The order itself is not undone: an older build reads the aggregate the same way in either order. Safe on a
+        // store that never had it.
+        new(279, "hasAggregateCompressionOrderHistory", @"DROP TABLE IF EXISTS collect.aggregate_compression_order_history;"),
     ];
 
     /// <summary>

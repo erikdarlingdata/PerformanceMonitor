@@ -3,6 +3,7 @@ ag_database_replica_states,collected,yes,
 ag_replica_states,collected,yes,
 agent_alerts,collected,yes,
 agent_status,collected,yes,
+aggregate_compression_order_history,internal,no,aggregate compression order changes
 analysis_collection_caveats,internal,no,caveats noted on analysis runs
 analysis_findings,internal,no,analysis findings
 analysis_state,internal,no,analysis progress
