@@ -17,8 +17,12 @@ namespace PerformanceMonitor.Collectors;
 /// Reads one SQL Server error log line of message 8957 ("DBCC CHECKDB (db) WITH options executed by
 /// login found N errors and repaired M errors"). #8865: an Availability Group replica is judged from its own
 /// error log, and this line is the only record there of which CHECKDB options ran and how many errors it found.
-/// The parse is English only: the message text is localised by the instance, so a line in another language is
-/// reported as not parsed rather than guessed at.
+/// A line is about one database: the longest known name that the log closes, because a name may hold a shorter
+/// database's name followed by what the log writes after a name (<c>) WITH </c>, <c>) executed by </c>, <c>, noindex</c>),
+/// while the options are engine keywords and never hold <c>)</c>. Only the text after that name is parsed, and the
+/// error count is the last <c>found N errors and repaired M errors</c>, since the name and the login can hold the same
+/// words. The parse is English only: the message text is localised by the instance, and a CHECKDB line in another
+/// language (<see cref="IsUnreadableCompletion"/>) is counted as not parsed rather than guessed at.
 /// </summary>
 public static class CheckDbErrorLogLine
 {
@@ -34,40 +38,55 @@ public static class CheckDbErrorLogLine
     private const string AbnormalEnd = " terminated abnormally due to error state ";
 
     private static readonly Regex FoundErrors = new(
-        @"found (\d+) errors", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"found (\d+) errors and repaired \d+ errors",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.RightToLeft);
 
     /// <summary>
-    /// The databases among <paramref name="names"/> a line is about. #8865: the name follows <c>DBCC CHECKDB (</c> and ends at the
+    /// The database among <paramref name="names"/> a line is about, or null. #8865: the name follows <c>DBCC CHECKDB (</c> and ends at the
     /// <c>)</c> that closes it, or at <c>, </c> when the check ran with a second argument inside the parentheses (<c>NOINDEX</c> or a
     /// repair option: <c>DBCC CHECKDB (db, noindex) WITH ...</c>). A name may itself hold either, so an end counts only where the log
     /// puts one: a <c>)</c> followed by <c> WITH </c> or <c> executed by </c>, and a <c>, </c> followed by one of those options and
-    /// then such a <c>)</c>. Otherwise <c>Sales, Inc</c> would also credit <c>Sales</c> with its check and its error count. Names are
-    /// compared exactly. A line of message 5235 (the check ended abnormally) is about no database: it says nothing about the check's
-    /// result and must not shadow an earlier good line.
+    /// then such a <c>)</c>. Otherwise <c>Sales, Inc</c> would also credit <c>Sales</c> with its check and its error count. When several
+    /// known names end that way the longest is the one: <c>Sales) WITH physical_only</c> holds an end after <c>Sales</c>, and a line
+    /// about it is not about <c>Sales</c>. Names are compared exactly. A line of message 5235 (the check ended abnormally) is about no
+    /// database: it says nothing about the check's result and must not shadow an earlier good line.
     /// </summary>
-    public static IEnumerable<string> DatabaseNames(string text, IReadOnlySet<string> names)
+    public static string? DatabaseName(string text, IReadOnlySet<string> names)
     {
         ArgumentNullException.ThrowIfNull(names);
         if (string.IsNullOrEmpty(text) || !text.StartsWith(Prefix, StringComparison.Ordinal)
             || text.Contains(AbnormalEnd, StringComparison.Ordinal))
         {
-            yield break;
+            return null;
         }
 
-        var executedBy = text.IndexOf(ExecutedByMarker, StringComparison.Ordinal);
-        var end = executedBy > 0 ? executedBy : text.Length;
-        for (var i = Prefix.Length; i < end; i++)
+        string? longest = null;
+        for (var i = Prefix.Length; i < text.Length; i++)
         {
             if (ClosesTheName(text, i) || EndsBeforeASecondArgument(text, i))
             {
                 var name = text.Substring(Prefix.Length, i - Prefix.Length);
-                if (names.Contains(name))
+                if (names.Contains(name) && (longest is null || name.Length > longest.Length))
                 {
-                    yield return name;
+                    longest = name;
                 }
             }
         }
+
+        return longest;
     }
+
+    /// <summary>
+    /// #8865: a CHECKDB line that came back from the log but cannot be read here: it starts with the command (which the instance never
+    /// translates) and has neither the English <c> executed by </c> of message 8957 nor the English wording of message 5235. That is
+    /// the shape of a completion line on an instance whose error log is in another language. A line that only mentions the command
+    /// further in is not a CHECKDB record and is not counted.
+    /// </summary>
+    public static bool IsUnreadableCompletion(string text) =>
+        !string.IsNullOrEmpty(text)
+        && text.StartsWith(Prefix, StringComparison.Ordinal)
+        && !text.Contains(ExecutedByMarker, StringComparison.Ordinal)
+        && !text.Contains(AbnormalEnd, StringComparison.Ordinal);
 
     /* #8865: the arguments CHECKDB takes after the name inside the parentheses. */
     private static readonly string[] SecondArguments = { NoIndex, "repair_allow_data_loss", "repair_fast", "repair_rebuild" };
@@ -102,22 +121,45 @@ public static class CheckDbErrorLogLine
     }
 
     /// <summary>
-    /// <paramref name="options"/> is <c>physical_only</c> or <c>full</c>, then <c>,data_purity</c>, <c>,extended_logical_checks</c>
-    /// and <c>,noindex</c> in that order when present. Returns false when the error count cannot be read. #8865: NOINDEX is given
-    /// inside the parentheses, after the name (<c>DBCC CHECKDB (db, noindex)</c>), not after <c>WITH</c>, and it is reported because a
-    /// check that skipped the nonclustered indexes is a lesser check; a repair option there changes nothing about what was checked
-    /// and is not reported.
+    /// Parses the line about <paramref name="database"/> (the name <see cref="DatabaseName"/> gave). <paramref name="options"/> is
+    /// <c>physical_only</c> or <c>full</c>, then <c>,data_purity</c>, <c>,extended_logical_checks</c> and <c>,noindex</c> in that order
+    /// when present. Returns false when the line is not about that name or the error count cannot be read. #8865: only the text after
+    /// <c>DBCC CHECKDB (</c> and the name is read, so nothing in the name can pass for an option or a count. NOINDEX is given inside the
+    /// parentheses, after the name (<c>DBCC CHECKDB (db, noindex)</c>), not after <c>WITH</c>, and it is reported because a check that
+    /// skipped the nonclustered indexes is a lesser check; a repair option there changes nothing about what was checked and is not reported.
     /// </summary>
-    public static bool TryParse(string text, out string options, out int errors)
+    public static bool TryParse(string text, string database, out string options, out int errors)
     {
         options = Full;
         errors = 0;
-        if (string.IsNullOrEmpty(text))
+        if (string.IsNullOrEmpty(text) || database is null || !text.StartsWith(Prefix + database, StringComparison.Ordinal))
         {
             return false;
         }
 
-        var match = FoundErrors.Match(text);
+        var rest = text.Substring(Prefix.Length + database.Length);
+        var noIndex = false;
+        if (rest.StartsWith(", ", StringComparison.Ordinal))
+        {
+            var close = rest.IndexOf(')', StringComparison.Ordinal);
+            if (close < 0)
+            {
+                return false;
+            }
+
+            noIndex = rest.AsSpan(2, close - 2).Equals(NoIndex, StringComparison.OrdinalIgnoreCase);
+            rest = rest.Substring(close);
+        }
+
+        /* The options are engine keywords, so the first " executed by " after the closing ")" is the log's own. */
+        var executedBy = rest.IndexOf(ExecutedByMarker, StringComparison.Ordinal);
+        if (!rest.StartsWith(')') || executedBy < 0)
+        {
+            return false;
+        }
+
+        var tail = rest.Substring(executedBy);
+        var match = FoundErrors.Match(tail);
         if (!match.Success
             || !int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out errors))
         {
@@ -125,25 +167,9 @@ public static class CheckDbErrorLogLine
             return false;
         }
 
-        // The database name may itself contain ") WITH ", so the options start at the last marker before "executed by".
-        var executedBy = text.IndexOf(ExecutedByMarker, StringComparison.Ordinal);
-        var optionText = string.Empty;
-        var noIndex = false;
-        if (executedBy > 0)
-        {
-            var with = text.LastIndexOf(WithMarker, executedBy, StringComparison.Ordinal);
-            if (with >= 0)
-            {
-                var start = with + WithMarker.Length;
-                optionText = text.Substring(start, executedBy - start);
-            }
-
-            // The parenthesised part closes at the WITH marker, or right before "executed by" when there is no WITH.
-            var close = with >= 0 ? with : executedBy - 1;
-            noIndex = close >= 0 && text[close] == ')'
-                && text.AsSpan(0, close).EndsWith(", " + NoIndex, StringComparison.OrdinalIgnoreCase);
-        }
-
+        var optionText = rest.StartsWith(WithMarker, StringComparison.Ordinal) && executedBy > WithMarker.Length
+            ? rest.Substring(WithMarker.Length, executedBy - WithMarker.Length)
+            : string.Empty;
         var words = optionText.ToLowerInvariant().Split(
             new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries);
         var physicalOnly = Array.IndexOf(words, PhysicalOnly) >= 0;

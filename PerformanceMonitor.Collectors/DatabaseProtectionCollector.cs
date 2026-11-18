@@ -778,7 +778,8 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(3) ? null : reader.GetString(3));
         }
 
-        /* #8865: the newest line per database, matched here by name against the rows (the server returned the newest line per head). */
+        /* #8865: the newest line per database, matched here by name against the rows (the server returned the newest line per head). A line is
+           about one database, the longest name it can be read as. */
         var names = new HashSet<string>(rows.Select(r => r.DatabaseName), StringComparer.Ordinal);
         var newest = new Dictionary<string, (DateTime Time, string Text)>(StringComparer.Ordinal);
         if (await reader.NextResultAsync(cancellationToken))
@@ -792,12 +793,10 @@ OPTION(RECOMPILE);";
 
                 var time = reader.GetDateTime(0);
                 var text = reader.GetString(1);
-                foreach (var name in CheckDbErrorLogLine.DatabaseNames(text, names))
+                var name = CheckDbErrorLogLine.DatabaseName(text, names);
+                if (name is not null && (!newest.TryGetValue(name, out var held) || time > held.Time))
                 {
-                    if (!newest.TryGetValue(name, out var held) || time > held.Time)
-                    {
-                        newest[name] = (time, text);
-                    }
+                    newest[name] = (time, text);
                 }
             }
         }
@@ -806,7 +805,7 @@ OPTION(RECOMPILE);";
         var unparsed = 0;
         foreach (var (name, line) in newest)
         {
-            if (CheckDbErrorLogLine.TryParse(line.Text, out var options, out var errors))
+            if (CheckDbErrorLogLine.TryParse(line.Text, name, out var options, out var errors))
             {
                 seen[name] = new DatabaseProtectionErrorLogState.StoredCheck(line.Time, options, errors);
             }
