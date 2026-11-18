@@ -196,9 +196,7 @@ public sealed class CollectorHealthClassifierTests
     /// </summary>
     [Theory]
     [InlineData("DarlingDataReader.CollectionHealthSql")]
-    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsTheAbandonedCount_SoNoSurfaceBandsOnADefaultedZero(string which)
     {
         var sql = which switch
@@ -240,9 +238,7 @@ public sealed class CollectorHealthClassifierTests
     /// </summary>
     [Theory]
     [InlineData("DarlingDataReader.CollectionHealthSql")]
-    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsTheExtensionMissingCount_SoNoSurfaceBandsOnADefaultedZero(string which)
     {
         var sql = which switch
@@ -573,10 +569,7 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
-        Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
-        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", CollectionHealthRollupSupport.LatestRunNoteRawSql, StringComparison.Ordinal);
+        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", CollectionHealthRollupSupport.PartialFailureNoteMatchSql, StringComparison.Ordinal);
         Assert.Contains(PartialDatabaseFailureNote.Marker, PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
     }
 

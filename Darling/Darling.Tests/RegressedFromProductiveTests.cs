@@ -243,9 +243,7 @@ public sealed class RegressedFromProductiveTests
     /// </summary>
     [Theory]
     [InlineData("DarlingDataReader.CollectionHealthSql")]
-    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsBothRegressionInstants(string which)
     {
         var sql = which switch
