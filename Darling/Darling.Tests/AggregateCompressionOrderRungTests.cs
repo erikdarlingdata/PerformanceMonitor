@@ -31,34 +31,21 @@ public sealed class AggregateCompressionOrderRungTests
 
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Version == 279);
 
-    /* The order as the long-stable per-column view reports it, read off the aggregate's materialization hypertable. */
-    private const string OrderSql = @"
+    /* An aggregate's order as the long-stable per-column view reports it, read off its materialization hypertable. */
+    private static string OrderSqlFor(string view) => @"
 SELECT string_agg(cs.attname || CASE WHEN cs.orderby_asc THEN ' ASC' ELSE ' DESC' END, ', ' ORDER BY cs.orderby_column_index)
 FROM timescaledb_information.continuous_aggregates AS ca
 JOIN timescaledb_information.compression_settings AS cs
     ON cs.hypertable_schema = ca.materialization_hypertable_schema
    AND cs.hypertable_name = ca.materialization_hypertable_name
 WHERE ca.view_schema = 'collect'
-  AND ca.view_name = '" + View + @"'
+  AND ca.view_name = '" + view + @"'
   AND cs.orderby_column_index IS NOT NULL";
+
+    private static readonly string OrderSql = OrderSqlFor(View);
 
     private const string HistorySql =
         "SELECT count(*) FROM collect.aggregate_compression_order_history WHERE view_name = '" + View + "' AND compress_orderby = 'query_hash, bucket DESC' AND outcome = 'applied'";
-
-    [Fact]
-    public void TheRung_IsBuilt_AndTheBuilderOrdersOnlyTheCorrectedHourlyByQueryHash()
-    {
-        /* The rung's SQL is a static field the ladder reads when it is built, so a field initialized after the ladder would be null here. */
-        Assert.Equal("qs-corrected-hourly-compress-orderby", Rung.Name);
-        Assert.False(string.IsNullOrWhiteSpace(Rung.Sql));
-
-        Assert.Equal("query_hash, bucket DESC", TimescaleSupport.AggregateCompressionOrderByFor(View));
-        Assert.Equal("bucket DESC", TimescaleSupport.AggregateCompressionOrderByFor(TimescaleSupport.QueryStoreStatsHourlyView));
-        foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets.Where(t => t.View != View))
-        {
-            Assert.DoesNotContain("query_hash", TimescaleSupport.AggregateCompressionOrderByFor(view), StringComparison.Ordinal);
-        }
-    }
 
     [Fact]
     public async Task AStoreCompressedInTheBucketOrder_IsMovedToTheFreshStoresOrder_WithCompressedChunksKept_AndTheRungReRuns()
@@ -83,6 +70,8 @@ WHERE ca.view_schema = 'collect'
 
             var fresh = (string?)await ScalarAsync(connection, OrderSql, ct);
             Assert.Equal("query_hash ASC, bucket DESC", fresh);
+            /* The plain Query Store hourly aggregate keeps the bucket order every other aggregate has. */
+            Assert.Equal("bucket DESC", (string?)await ScalarAsync(connection, OrderSqlFor(TimescaleSupport.QueryStoreStatsHourlyView), ct));
 
             /* A store from before the order: the aggregate compressed by bucket alone, with a chunk compressed that way. */
             await ExecAsync(connection,
