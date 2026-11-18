@@ -127,8 +127,9 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         private readonly DarlingWebOidcClient _oidc;
 
         private Rig(WebApplication app, TestServer server, NpgsqlDataSource owner, DarlingPersonalTokenSnapshot snapshot, StoreOwnerSource ownerSource,
-            FakeIdp idp, DarlingWebOidcClient oidc, CapturingLogger logger)
+            FakeIdp idp, DarlingWebOidcClient oidc, CapturingLogger logger, DarlingWebHostService host)
         {
+            Host = host;
             _app = app;
             _server = server;
             Owner = owner;
@@ -148,6 +149,8 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         public FakeIdp Idp { get; }
 
         public CapturingLogger Logger { get; }
+
+        public DarlingWebHostService Host { get; }
 
         /// <param name="publishedOwner">The data source the host reads as the owner connection when it is not the store's own (a dead one).</param>
         public static async Task<Rig> StartAsync(string connectionString, PersonalTokenSettings? settings, NpgsqlDataSource? publishedOwner = null)
@@ -180,7 +183,7 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
                 allowedCidr: IPNetwork.Parse("10.1.2.0/24"), accessToken: Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
                 oidcClient: oidc, requireTokenWhenLoopbackOnly: false, sessionSigningKeyForTests: SessionKey, personalTokens: settings);
             await app.StartAsync(TestContext.Current.CancellationToken);
-            return new Rig(app, app.GetTestServer(), owner, snapshot, ownerSource, idp, oidc, logger);
+            return new Rig(app, app.GetTestServer(), owner, snapshot, ownerSource, idp, oidc, logger, host);
         }
 
         /// <summary>One OIDC callback carrying a valid transaction, with the identity provider answering the given ID token.</summary>
@@ -347,6 +350,129 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         Assert.False(refused.SessionCookieSet);
         Assert.Contains(rig.Logger.Lines, line => line.Level == LogLevel.Warning
             && line.Message.Contains("personal token", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task StoreWriteFails_AtSignIn_TokenStaysLive_ThenTheDrainRevokesIt()
+    {
+        await using var dead = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=nobody;Database=none;Timeout=2;Command Timeout=2;Pooling=false");
+        await using var rig = await StartAsync(Settings());
+        var key = OwnerKeyFor("drain-after-throw");
+        var op = await rig.MakeTokenAsync(key, "ops", "operator");
+        var reader = await rig.MakeTokenAsync(key, "plain", "reader");
+        rig.OwnerSource.Publish(dead);
+
+        var callback = await rig.SignInAsync(IdTokenFor("drain-after-throw", "everyone"));
+
+        Assert.Equal(200, callback.Status);
+        Assert.True(callback.SessionCookieSet);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(op.Value));
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+        Assert.Equal(1, rig.Logger.Lines.Count(line => line.Level == LogLevel.Warning && line.Message.Contains("queued", StringComparison.Ordinal)));
+
+        /* The store is still down at the next tick: the entry stays, and the tick says nothing at Warning. */
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(op.Value));
+
+        rig.OwnerSource.Publish(rig.Owner);
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, rig.Host.PendingPersonalRevokes.Count);
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
+        Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(reader.Value));
+        Assert.Equal(1, rig.Logger.Lines.Count(line => line.Level == LogLevel.Warning && line.Message.Contains("queued", StringComparison.Ordinal)));
+        Assert.Equal("1", await rig.ScalarAsync(
+            $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked' AND actor = 'sign-in' AND detail->>'reason' = '{PersonalTokenStore.SeatLoweredReason}' AND detail::text LIKE '%{op.Id}%'"));
+    }
+
+    [Fact]
+    public async Task NoOwnerSourceAtSignIn_TheDrainAfterPublishRevokes()
+    {
+        await using var rig = await StartAsync(Settings());
+        var op = await rig.MakeTokenAsync(OwnerKeyFor("drain-after-publish"), "ops", "operator");
+        rig.OwnerSource.Publish(null);
+
+        var callback = await rig.SignInAsync(IdTokenFor("drain-after-publish", "everyone"));
+
+        Assert.Equal(200, callback.Status);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(op.Value));
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+
+        /* Nothing to drain into yet. */
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+
+        rig.OwnerSource.Publish(rig.Owner);
+        await rig.Host.DrainPersonalRevokesAsync(Settings(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, rig.Host.PendingPersonalRevokes.Count);
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
+    }
+
+    [Fact]
+    public async Task Drain_WithTheFeatureOff_KeepsTheQueue()
+    {
+        await using var rig = await StartAsync(Settings());
+        var op = await rig.MakeTokenAsync(OwnerKeyFor("drain-feature-off"), "ops", "operator");
+        rig.OwnerSource.Publish(null);
+        await rig.SignInAsync(IdTokenFor("drain-feature-off", "everyone"));
+        rig.OwnerSource.Publish(rig.Owner);
+
+        await rig.Host.DrainPersonalRevokesAsync(null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, rig.Host.PendingPersonalRevokes.Count);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.StateOf(op.Value));
+    }
+
+    [Fact]
+    public void PendingRevokes_TwoEntriesForOneOwner_MergeToTheBroaderOne()
+    {
+        var pending = new PersonalTokenPendingRevokes();
+
+        Assert.Equal(PersonalTokenPendingAdd.Queued, pending.Add("k1", true, PersonalTokenStore.SeatLoweredReason));
+        Assert.Equal(PersonalTokenPendingAdd.Merged, pending.Add("k1", false, PersonalTokenStore.SignInRefusedReason));
+        var broad = Assert.Single(pending.Snapshot());
+        Assert.False(broad.OperatorOnly);
+        Assert.Equal(PersonalTokenStore.SignInRefusedReason, broad.Reason);
+
+        /* A later narrower entry does not take it back. */
+        Assert.Equal(PersonalTokenPendingAdd.Merged, pending.Add("k1", true, PersonalTokenStore.SeatLoweredReason));
+        var still = Assert.Single(pending.Snapshot());
+        Assert.False(still.OperatorOnly);
+        Assert.Equal(PersonalTokenStore.SignInRefusedReason, still.Reason);
+
+        /* A broader entry that arrives while the narrow one is being revoked survives the narrow one's completion. */
+        pending.Add("k2", true, PersonalTokenStore.SeatLoweredReason);
+        var narrow = pending.Snapshot().Single(e => e.OwnerKey == "k2");
+        pending.Add("k2", false, PersonalTokenStore.SignInRefusedReason);
+        pending.Complete(narrow);
+        var left = pending.Snapshot().Single(e => e.OwnerKey == "k2");
+        Assert.False(left.OperatorOnly);
+        pending.Complete(left);
+        Assert.DoesNotContain(pending.Snapshot(), e => e.OwnerKey == "k2");
+    }
+
+    [Fact]
+    public void PendingRevokes_TheBoundHolds_NewOwnersDropped_AMergeForAnExistingOwnerStillWorks()
+    {
+        var pending = new PersonalTokenPendingRevokes(maxOwners: 3);
+
+        Assert.Equal(PersonalTokenPendingAdd.Queued, pending.Add("a", true, "r"));
+        Assert.Equal(PersonalTokenPendingAdd.Queued, pending.Add("b", true, "r"));
+        Assert.Equal(PersonalTokenPendingAdd.Queued, pending.Add("c", true, "r"));
+        Assert.Equal(PersonalTokenPendingAdd.DroppedFirst, pending.Add("d", true, "r"));
+        Assert.Equal(PersonalTokenPendingAdd.Dropped, pending.Add("e", true, "r"));
+        Assert.Equal(3, pending.Count);
+        Assert.DoesNotContain(pending.Snapshot(), e => e.OwnerKey is "d" or "e");
+
+        Assert.Equal(PersonalTokenPendingAdd.Merged, pending.Add("a", false, "wider"));
+        Assert.False(pending.Snapshot().Single(e => e.OwnerKey == "a").OperatorOnly);
+
+        /* Room again after a drain: the next drop reports first again. */
+        pending.Complete(pending.Snapshot().Single(e => e.OwnerKey == "b"));
+        Assert.Equal(PersonalTokenPendingAdd.Queued, pending.Add("d", true, "r"));
+        Assert.Equal(PersonalTokenPendingAdd.DroppedFirst, pending.Add("f", true, "r"));
     }
 
     [Fact]

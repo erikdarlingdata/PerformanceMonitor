@@ -217,6 +217,25 @@ public sealed class DarlingWebHostService : BackgroundService
        built outside the service (a test) never runs the supervisor and keeps None. */
     private CancellationToken _hostStopping = CancellationToken.None;
 
+    /* #8737: the revokes a sign-in could not make, drained on the supervisor tick while the web host runs. */
+    private readonly PersonalTokenPendingRevokes _pendingPersonalRevokes = new();
+
+    /// <summary>The sign-in revokes waiting for the store (#8737). A test reads it.</summary>
+    internal PersonalTokenPendingRevokes PendingPersonalRevokes => _pendingPersonalRevokes;
+
+    /// <summary>
+    /// Drains the sign-in revokes that could not be made (#8737), on every supervisor tick while the web host runs; a no-op when nothing is queued.
+    /// </summary>
+    internal async Task DrainPersonalRevokesAsync(PersonalTokenSettings? settings, CancellationToken cancellationToken)
+    {
+        if (_personalSnapshot is null || _ownerSource is null)
+        {
+            return;
+        }
+
+        await DarlingPersonalTokenSignIn.DrainPendingAsync(settings, _ownerSource, _personalSnapshot, _pendingPersonalRevokes, _logger, cancellationToken);
+    }
+
     /// <summary>True once the start sweep of the personal-token settings has succeeded, or had nothing to do (#8737).</summary>
     internal bool PersonalStartSweepDone { get; private set; }
 
@@ -422,6 +441,11 @@ public sealed class DarlingWebHostService : BackgroundService
             if (_app is not null && !PersonalStartSweepDone)
             {
                 await RunPersonalStartSweepAsync(DarlingMcpHostService.PersonalTokensFor(config), stoppingToken);
+            }
+
+            if (_app is not null)
+            {
+                await DrainPersonalRevokesAsync(DarlingMcpHostService.PersonalTokensFor(config), stoppingToken);
             }
 
             lastEnabled = toggle.Enabled;
@@ -2790,7 +2814,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         try
         {
-            await DarlingPersonalTokenSignIn.OnOidcSignInAsync(personalTokens, _ownerSource, _personalSnapshot, ownerKey, role, _logger, _hostStopping);
+            await DarlingPersonalTokenSignIn.OnOidcSignInAsync(personalTokens, _ownerSource, _personalSnapshot, _pendingPersonalRevokes, ownerKey, role, _logger, _hostStopping);
         }
         catch (OperationCanceledException)
         {

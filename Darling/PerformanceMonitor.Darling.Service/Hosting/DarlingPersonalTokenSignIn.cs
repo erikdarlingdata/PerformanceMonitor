@@ -26,10 +26,12 @@ internal static class DarlingPersonalTokenSignIn
     /// <summary>
     /// Revokes the person's personal tokens the seat no longer allows, then refreshes the snapshot so the MCP gate sees it before the sign-in
     /// answers: a refused sign-in loses every live token, a read-only seat and an admin under <c>adminRole: reader</c> lose the operator ones.
-    /// Does nothing without settings or an owner key. A store failure is a warning; cancellation of <paramref name="ct"/> propagates.
+    /// Does nothing without settings or an owner key. When the revoke cannot be made (no owner connection yet, or the store write throws), it is
+    /// queued in <paramref name="pending"/> for <see cref="DrainPendingAsync"/>, with one warning per owner. Cancellation of <paramref name="ct"/>
+    /// propagates.
     /// </summary>
     internal static async Task OnOidcSignInAsync(PersonalTokenSettings? settings, StoreOwnerSource owner, DarlingPersonalTokenSnapshot snapshot,
-        string? ownerKey, WebOidcRole role, ILogger logger, CancellationToken ct)
+        PersonalTokenPendingRevokes pending, string? ownerKey, WebOidcRole role, ILogger logger, CancellationToken ct)
     {
         if (settings is null || ownerKey is null)
         {
@@ -61,7 +63,7 @@ internal static class DarlingPersonalTokenSignIn
             var source = owner.Read();
             if (source is null)
             {
-                logger.LogWarning("MCP personal tokens were not revoked at sign-in ({Reason}): the store owner connection is not available yet.", reason);
+                Queue(pending, ownerKey, operatorOnly, reason, "the store owner connection is not available yet", null, logger);
                 return;
             }
 
@@ -80,8 +82,79 @@ internal static class DarlingPersonalTokenSignIn
             }
             else
             {
-                logger.LogWarning(ex, "MCP personal tokens could not be revoked at sign-in ({Reason}); the sign-in outcome is unchanged.", reason);
+                Queue(pending, ownerKey, operatorOnly, reason, "the store write failed", ex, logger);
             }
+        }
+    }
+
+    /// <summary>Remembers a revoke the sign-in could not make. The first entry for an owner is a warning; a later one for the same owner, and a
+    /// drop on a full queue after the first, are debug lines, so a store outage does not log once per sign-in or per tick.</summary>
+    private static void Queue(PersonalTokenPendingRevokes pending, string ownerKey, bool operatorOnly, string reason, string why, Exception? ex, ILogger logger)
+    {
+        switch (pending.Add(ownerKey, operatorOnly, reason))
+        {
+            case PersonalTokenPendingAdd.Queued:
+                logger.LogWarning(ex, "MCP personal tokens were not revoked at sign-in ({Reason}): {Why}. The revoke is queued and retried on the next supervisor tick; the sign-in outcome is unchanged.", reason, why);
+                break;
+            case PersonalTokenPendingAdd.DroppedFirst:
+                logger.LogWarning("MCP personal token revoke queue is full ({Max} owners); a revoke at sign-in ({Reason}) was dropped, and so will the newest ones be until it drains.", PersonalTokenPendingRevokes.MaxOwners, reason);
+                break;
+            default:
+                logger.LogDebug(ex, "MCP personal token revoke at sign-in ({Reason}) not made ({Why}); already queued or the queue is full.", reason, why);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Makes the revokes a sign-in could not make: one store write per queued owner. An entry leaves the queue only after its revoke commits;
+    /// a store failure leaves it for the next tick (a debug line, the pending case was already warned about). A store with no personal token table
+    /// has no tokens to revoke, so its entries are dropped. The snapshot is refreshed once after a pass that revoked rows, as the sign-in does.
+    /// With the feature off (<paramref name="settings"/> null) nothing is drained and the queue is kept.
+    /// </summary>
+    internal static async Task DrainPendingAsync(PersonalTokenSettings? settings, StoreOwnerSource owner, DarlingPersonalTokenSnapshot snapshot,
+        PersonalTokenPendingRevokes pending, ILogger logger, CancellationToken ct)
+    {
+        if (settings is null || pending.Count == 0)
+        {
+            return;
+        }
+
+        var source = owner.Read();
+        if (source is null)
+        {
+            return;
+        }
+
+        var revokedAny = false;
+        foreach (var entry in pending.Snapshot())
+        {
+            try
+            {
+                var revoked = await PersonalTokenStore.RevokeForOwnerAsync(
+                    source, entry.OwnerKey, entry.OperatorOnly, SignInActor, entry.Reason, DateTimeOffset.UtcNow, ct);
+                pending.Complete(entry);
+                if (revoked > 0)
+                {
+                    revokedAny = true;
+                    logger.LogInformation("Revoked {Count} MCP personal token(s) from the queued sign-in revoke ({Reason}).", revoked, entry.Reason);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                if (PersonalTokenStore.IsMissingTable(ex))
+                {
+                    pending.Complete(entry);
+                }
+                else
+                {
+                    logger.LogDebug(ex, "A queued MCP personal token revoke ({Reason}) is still pending; the next supervisor tick retries.", entry.Reason);
+                }
+            }
+        }
+
+        if (revokedAny)
+        {
+            await snapshot.RefreshAsync(owner, logger, ct);
         }
     }
 
