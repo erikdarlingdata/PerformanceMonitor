@@ -200,6 +200,80 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         }, stamped);
     }
 
+    /// <summary>#8570: the read touches only the chunks that hold a database's newest cycle. Database X is collected every day for twelve
+    /// days and database Y left scope ten days back, so two of the twelve daily chunks hold an anchor and the other ten are excluded at run
+    /// time, every chunk between Y's last cycle and today included. The answer is still each database's newest snapshot. TimescaleDB only:
+    /// chunk exclusion is what is measured.</summary>
+    [Fact]
+    public async Task TheRead_ExcludesEveryChunkThatHoldsNoAnchor_AScopedOutDatabaseCostingOnlyItsOwnLastChunk()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the latest-snapshot live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this PostgreSQL.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await Exec(connection, "SELECT set_chunk_time_interval('collect.index_object_stats', INTERVAL '1 day')", ct);
+
+        /* Day d is T minus d days at noon, one chunk per day. X: days 0 to 11. Y: days 10 and 11. Both servers, twenty indexes each.
+           user_seeks is 1000 * d + index_id, so a row read from the wrong day shows. */
+        await Exec(connection, $"""
+            INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                schema_name, object_id, table_name, index_id, index_name, user_seeks, partition_count)
+            SELECT row_number() OVER (), timestamp '2026-01-15 12:00' - d * interval '1 day', s, 'srv', 'db' || db, db,
+                   'dbo', 100, 'T', i, 'i' || i, 1000 * d + i, 1
+            FROM generate_series(0, 11) AS d, generate_series(1, 20) AS i, (VALUES ({ServerA}), ({ServerB})) AS v(s), (VALUES ({DbX}), ({DbY})) AS w(db)
+            WHERE db = {DbX} OR d >= 10
+            """, ct);
+        var compressed = await CompressAllButNewestAsync(connection, ct);
+        Assert.Equal(11, compressed);
+        await Exec(connection, "ANALYZE collect.index_object_stats", ct);
+
+        var rows = await ReadAsync(connection, ServerA, ct);
+        Assert.Equal(40, rows.Count);
+        Assert.All(Enumerable.Range(1, 20), i => Assert.Equal((long)i, rows[(DbX, "i" + i)]));
+        Assert.All(Enumerable.Range(1, 20), i => Assert.Equal(10_000L + i, rows[(DbY, "i" + i)]));
+
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql, connection);
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerA });
+        var json = (string)(await explain.ExecuteScalarAsync(ct))!;
+        using var plan = JsonDocument.Parse(json);
+        var appends = new List<JsonElement>();
+        FindRowChunkAppends(plan.RootElement[0].GetProperty("Plan"), appends);
+        var rowScan = Assert.Single(appends);
+        Assert.True(rowScan.TryGetProperty("Chunks excluded during runtime", out var excluded), json);
+        Assert.Equal(10, excluded.GetInt32());
+        Assert.Equal(2, rowScan.GetProperty("Plans").EnumerateArray().Count(c => c.GetProperty("Actual Loops").GetInt64() > 0));
+    }
+
+    /// <summary>The ChunkAppend nodes that read index_object_stats rows, outside the anchor CTE (which reads every chunk's per-database
+    /// maximum, an aggregate over the segment metadata).</summary>
+    private static void FindRowChunkAppends(JsonElement node, List<JsonElement> found)
+    {
+        if (node.TryGetProperty("Subplan Name", out var subplan) && subplan.GetString() == "CTE anchor")
+        {
+            return;
+        }
+
+        if (node.TryGetProperty("Custom Plan Provider", out var provider) && provider.GetString() == "ChunkAppend")
+        {
+            found.Add(node);
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                FindRowChunkAppends(child, found);
+            }
+        }
+    }
+
     private static async Task<Dictionary<int, DateTime>> ReadStampsAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
     {
         var stamps = new Dictionary<int, DateTime>();

@@ -37,11 +37,12 @@ public sealed class ViewerIndexAnalysisTests
 
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
         /* Each database's newest snapshot (#5072): a per-database max(collection_time) anchor, the rows joined on
-           (database_id, anchor), lower-bounded by the oldest anchor so the join stays on the newest chunks. */
+           (database_id, anchor), filtered on the anchors' distinct instants so only the chunks holding them are read. */
         Assert.Contains("max(collection_time) AS t", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_id", sql, StringComparison.Ordinal);
         Assert.Contains("JOIN anchor AS a ON a.database_id = s.database_id AND a.t = s.collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("s.collection_time >= (SELECT min(t) FROM anchor)", sql, StringComparison.Ordinal);
+        Assert.Contains("s.collection_time = ANY (ARRAY(SELECT DISTINCT t FROM anchor))", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("min(t)", sql, StringComparison.Ordinal);
         Assert.Contains("DISTINCT ON (s.database_id, s.object_id, s.index_id)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE s.server_id = $1", sql, StringComparison.Ordinal);
