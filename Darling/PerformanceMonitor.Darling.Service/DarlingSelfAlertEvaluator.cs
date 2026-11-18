@@ -6454,8 +6454,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Edge-applies the fleet-level Store Growth condition (#9000) from one reading. Fires on entry and re-fires while it stands only when the
     /// growth is <see cref="StoreGrowthWorseningFactor"/> times what the last alert reported and the shared cooldown has run out. The first
-    /// reading with no line crossed clears the state and, when the alert had fired, writes ONE "Store Growth Resolved" row. A null reading
-    /// is a read that failed: nothing changes. Internal so it pins directly with a recording deliverer and a controllable clock.
+    /// reading with the store line judged and no line crossed clears the state and, when the alert had fired, writes ONE "Store Growth Resolved" row.
+    /// A null reading is a read that failed, and a reading whose store line cannot be judged (no sample near 24 hours back) is a missing sample: nothing changes. Internal so it pins directly with a recording deliverer and a controllable clock.
     /// </summary>
     internal async Task ApplyStoreGrowthAsync(StoreGrowthReading? reading, long? freeBytes, CancellationToken cancellationToken)
     {
@@ -6467,6 +6467,13 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var now = _utcNow();
         var verdict = StoreGrowthJudge.Judge(reading, growthSettings);
+        if (verdict.Store is null)
+        {
+            /* The store line has no growth value for the last day: no sample sits near 24 hours back (a restart, a skipped sweep).
+               That is a missing reading, not a recovery. No resolution, no alert, and the worsening marker stays. */
+            return;
+        }
+
         if (!verdict.Crossed)
         {
             _lastAlertedStoreGrowth.TryRemove(GrowthKey, out _);

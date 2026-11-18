@@ -18,7 +18,7 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>One size series of the store: the whole store or one object. <see cref="Sizes"/>[k] is the size k days before the newest
-/// hourly sample (index 0 is the newest), or null when no sample sits within 30 minutes of that point.</summary>
+/// hourly sample (index 0 is the newest), or null when no sample sits within 3 hours of that point.</summary>
 internal sealed record StoreGrowthSeries(string Name, bool IsStore, long?[] Sizes);
 
 /// <summary>What one read of <c>collect.store_metrics</c> found: the whole store and each object, sampled once per day.</summary>
@@ -120,7 +120,7 @@ internal static class StoreGrowthReader
 {
     private const int Points = StoreGrowthJudge.BaselineDays + 2;
 
-    /// <summary>Anchors are the newest whole-store sample and every 24 hours before it. Each anchor reads the samples within 30 minutes of it
+    /// <summary>Anchors are the newest whole-store sample and every 24 hours before it. Each anchor reads the samples within 3 hours of it
     /// through <c>idx_store_metrics_time</c>, and the nearest sample per object wins. The lump kinds ('other', 'system') are not objects.</summary>
     internal static readonly string Sql = $@"
 WITH latest AS (
@@ -137,7 +137,7 @@ SELECT a.k, m.object_name, m.object_kind, m.total_bytes,
        abs(extract(epoch FROM (m.metric_time - a.t)))::double precision AS distance_seconds
 FROM anchors a
 JOIN collect.store_metrics m
-  ON m.metric_time >= a.t - interval '30 minutes' AND m.metric_time < a.t + interval '30 minutes'
+  ON m.metric_time >= a.t - interval '3 hours' AND m.metric_time < a.t + interval '3 hours'
 WHERE m.object_kind IN ('{StoreSelfMetrics.StoreObjectKind}', '{StoreSelfMetrics.HypertableObjectKind}', '{StoreSelfMetrics.DimensionObjectKind}', '{StoreSelfMetrics.ContinuousAggregateObjectKind}', 'table')
   AND m.total_bytes IS NOT NULL";
 

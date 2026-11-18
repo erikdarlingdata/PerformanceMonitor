@@ -35,8 +35,9 @@ public sealed class StoreGrowthAlertLiveTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>One series: its name, kind, and the growth in GB of each day, newest day first (index 0 is the last 24 hours). A day without a
-    /// value ends the history: no hourly rows are written before it.</summary>
-    private sealed record Series(string Name, string Kind, double[] DailyGrowthGb);
+    /// value ends the history: no hourly rows are written before it. <paramref name="SkipHoursAgo"/> leaves out the hourly rows it names (a
+    /// restart, a skipped sweep).</summary>
+    private sealed record Series(string Name, string Kind, double[] DailyGrowthGb, Func<int, bool>? SkipHoursAgo = null);
 
     private static async Task<StoreGrowthReading> SeedAndReadAsync(string connectionString, CancellationToken ct, params Series[] series)
     {
@@ -62,6 +63,11 @@ public sealed class StoreGrowthAlertLiveTests
                 }
 
                 back += (hoursAgo % 24) / 24.0 * s.DailyGrowthGb[day];
+                if (s.SkipHoursAgo?.Invoke(hoursAgo) == true)
+                {
+                    continue;
+                }
+
                 times.Add(newest.AddHours(-hoursAgo));
                 sizes.Add((long)((nowSizeGb - back) * Gb));
             }
@@ -87,9 +93,10 @@ public sealed class StoreGrowthAlertLiveTests
         return days;
     }
 
-    private static Series Store(double[] days) => new("store", StoreSelfMetrics.StoreObjectKind, days);
+    private static Series Store(double[] days, Func<int, bool>? skip = null) => new("store", StoreSelfMetrics.StoreObjectKind, days, skip);
 
-    private static Series Dimension(string name, double[] days) => new(name, StoreSelfMetrics.DimensionObjectKind, days);
+    private static Series Dimension(string name, double[] days, Func<int, bool>? skip = null) =>
+        new(name, StoreSelfMetrics.DimensionObjectKind, days, skip);
 
     [Fact]
     public async Task TheFieldCase_AStoreOnTwoGbADay_ThenATwentyGbDayInOneObject_FiresAndNamesThatObject()
@@ -214,6 +221,52 @@ public sealed class StoreGrowthAlertLiveTests
         await e.ApplyStoreGrowthAsync(calm, null, ct);
         var resolution = Assert.Single(h.History.Records);
         Assert.Equal("Store Growth Resolved", resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task AMissingSampleAtTheDayAnchor_IsNotARecovery_NoResolutionAndNoSecondAlert()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        var spike = await SeedAndReadAsync(ConnectionString!, ct, Store(Days(16, 2.0, 20.0)), Dimension("query_plan_dim", Days(16, 1.2, 19.0)));
+        /* The same spike, but nothing was written from 21 to 27 hours back, so no sample sits within 3 hours of the 24-hour anchor. */
+        static bool Gap(int hoursAgo) => hoursAgo is >= 21 and <= 27;
+        var missing = await SeedAndReadAsync(ConnectionString!, ct,
+            Store(Days(16, 2.0, 20.0), Gap), Dimension("query_plan_dim", Days(16, 1.2, 19.0), Gap));
+
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        await e.ApplyStoreGrowthAsync(spike, null, ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyStoreGrowthAsync(missing, null, ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The sample is back and the same spike still stands: the alert is still the one that fired, not a new one. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyStoreGrowthAsync(spike, null, ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task ASampleTwoHoursOffTheDayAnchor_IsUsed()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        /* Nothing from 23 to 25 hours back, so the nearest rows to the 24-hour anchor sit 2 hours off it. */
+        static bool Gap(int hoursAgo) => hoursAgo is >= 23 and <= 25;
+        var reading = await SeedAndReadAsync(ConnectionString!, ct,
+            Store(Days(16, 2.0, 20.0), Gap), Dimension("query_plan_dim", Days(16, 1.2, 19.0), Gap));
+
+        var h = new DarlingSelfAlertTests.Harness();
+        await h.Build().ApplyStoreGrowthAsync(reading, null, ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Store Growth", fired.MetricName);
+        Assert.Contains("query_plan_dim", fired.DetailText);
     }
 
     [Fact]
