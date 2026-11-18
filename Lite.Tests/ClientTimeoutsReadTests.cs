@@ -105,6 +105,46 @@ public sealed class ClientTimeoutsReadTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task TheOneSecondFloor_LeavesFourMillisecondEventsOut_ButEveryEventStaysListed_AndTheJudgedCountDropsThem()
+    {
+        /* #9030, the Darling twin's plan: two 4 ms events are under the 1 s floor. A 30 s event, one at exactly 1 s and one with no recorded duration are not. */
+        var now = DateTime.UtcNow;
+        for (var i = 0; i < 6; i++)
+        {
+            await LogAsync(700 + i, StormServer, now.AddSeconds(-30).AddMinutes(-i));
+        }
+
+        for (var i = 0; i < 5; i++)
+        {
+            await RowAsync(710 + i, StormServer, now.AddSeconds(-28).AddMinutes(-i), "count", 30, null, null, null, null);
+        }
+
+        var at = now.AddSeconds(-28);
+        await RowAsync(720, StormServer, at, "sample", 0, "db1", "etl", "fp-ms", "SELECT 1", durationUs: 4_000);
+        await RowAsync(721, StormServer, at, "sample", 0, "db1", "web", "fp-ms", "SELECT 1", durationUs: 4_000);
+        await RowAsync(722, StormServer, at, "sample", 0, "db1", "etl", "fp-30s", "SELECT 2", durationUs: 30_000_000);
+        await RowAsync(723, StormServer, at, "sample", 0, "db1", "etl", "fp-1s", "SELECT 3", durationUs: 1_000_000);
+        await RowAsync(724, StormServer, at, "sample", 0, "db1", "etl", "fp-null", "SELECT 4", durationUs: null);
+
+        var (window, samples) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(StormServer, now.AddHours(-1), now, 20);
+        var (_, reading) = ClientTimeoutsRead.Classify(window, now);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ClientTimeoutsRead.Payload(reading!, window, samples, 20, 2000)));
+
+        Assert.Equal(150, doc.RootElement.GetProperty("count").GetInt64());
+        Assert.Equal(5, doc.RootElement.GetProperty("sampled_events_in_range").GetInt64());
+        var excluded = doc.RootElement.GetProperty("excluded_from_alert");
+        Assert.Equal(2, excluded.GetProperty("below_duration_floor_events").GetInt64());
+        Assert.Equal(150 * 3 / 5.0, excluded.GetProperty("count_judged").GetDouble());
+
+        var listed = doc.RootElement.GetProperty("sampled_events").EnumerateArray().ToList();
+        Assert.Equal(5, listed.Count);
+        Assert.Equal(new[] { "fp-ms", "fp-ms" }, listed.Where(e => e.GetProperty("below_duration_floor").GetBoolean())
+            .Select(e => e.GetProperty("statement_fingerprint").GetString()!).ToArray());
+        Assert.Equal(new[] { "fp-1s", "fp-30s", "fp-null" }, listed.Where(e => !e.GetProperty("below_duration_floor").GetBoolean())
+            .Select(e => e.GetProperty("statement_fingerprint").GetString()!).OrderBy(f => f, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
     public async Task AnAsOfJustAfterARun_StillCountsThatRunsRows_LikeTheAlertDoes()
     {
         /* A run is stamped when it starts; its rows carry the time the runner took a moment later. A range ending between the two
@@ -401,15 +441,15 @@ VALUES ($1, $2, 'test-server', $3, $4, 5, 'SUCCESS')";
     }
 
     private async Task RowAsync(
-        long id, int serverId, DateTime time, string kind, long count, string? db, string? app, string? fingerprint, string? text)
+        long id, int serverId, DateTime time, string kind, long count, string? db, string? app, string? fingerprint, string? text, long? durationUs = null)
     {
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         using var command = connection.CreateCommand();
         command.CommandText = @"
 INSERT INTO attention_events
-    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text)
-VALUES ($1, $2, $3, 'test-server', $4, $5, $6, $7, $8, $9)";
+    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us)
+VALUES ($1, $2, $3, 'test-server', $4, $5, $6, $7, $8, $9, $10)";
         command.Parameters.Add(new DuckDBParameter { Value = id });
         command.Parameters.Add(new DuckDBParameter { Value = time });
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -419,6 +459,7 @@ VALUES ($1, $2, $3, 'test-server', $4, $5, $6, $7, $8, $9)";
         command.Parameters.Add(new DuckDBParameter { Value = (object?)app ?? DBNull.Value });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)fingerprint ?? DBNull.Value });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)text ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = (object?)durationUs ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 }

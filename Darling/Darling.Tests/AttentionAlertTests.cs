@@ -335,9 +335,9 @@ public sealed class AttentionAlertTests
     }
 
     [Fact]
-    public void EventsUnderOneMillisecond_AreLeftOutOfTheJudgedRate_AndTheCrossingIsFiltered_NotMuted()
+    public void EventsUnderOneSecond_AreLeftOutOfTheJudgedRate_AndTheCrossingIsFiltered_NotMuted()
     {
-        /* 540 over 3 minutes = 180 per minute exact. 998 of 1000 sampled events lasted 20 to 40 us (a cancel on a command that had finished), 2 are real: 540 x 2/1000 = 1.08 judged, under the bar. */
+        /* 540 over 3 minutes = 180 per minute exact. 998 of 1000 sampled events lasted under the 1 s floor (a few ms, or 20 to 40 us), 2 are real: 540 x 2/1000 = 1.08 judged, under the bar. */
         var window = GroupsWindow(540,
             new AttentionSampleGroup(T0, "sales", "Core Microsoft SqlClient Data Provider", 998, ShortSamples: 998),
             new AttentionSampleGroup(T0, "sales", "web", 2));
@@ -349,7 +349,7 @@ public sealed class AttentionAlertTests
         Assert.Equal(180.0, finding.RatePerMinute);
         Assert.Equal(998, finding.ShortSamples);
         Assert.Equal(1.08, finding.JudgedCount, 2);
-        Assert.Contains("998 of the 1,000 sampled events lasted under 1 ms", finding.Summary, StringComparison.Ordinal);
+        Assert.Contains("998 of the 1,000 sampled events lasted under 1 s", finding.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -364,7 +364,7 @@ public sealed class AttentionAlertTests
         Assert.False(finding.Estimated);
         Assert.Equal(180.0, finding.RatePerMinute);
         Assert.Equal(0, finding.ShortSamples);
-        Assert.DoesNotContain("under 1 ms", finding.Summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("under 1 s", finding.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1096,7 +1096,7 @@ public sealed class AttentionAlertTests
         });
     }
 
-    /// <summary>A run at <paramref name="now"/> whose exact count is 540 over the 3-minute span, 998 of 1,000 samples under 1 ms.</summary>
+    /// <summary>A run at <paramref name="now"/> whose exact count is 540 over the 3-minute span, 998 of 1,000 samples under 1 s.</summary>
     private static AttentionWindow ShortCrossingWindow(DateTime now)
     {
         var runs = Runs(now.AddSeconds(-5), 8);
