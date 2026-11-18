@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -135,6 +136,109 @@ public sealed class ViewerStoreHealthTests
         var trailing = measure with { TotalPages = 3, TrailingEmptyPages = 1 };
         Assert.Contains("1 empty page sits at the end", StoreHealthRows.MeasureText("collect.store_things",
             new StoreTableMeasureResult(StoreTableMeasureOutcome.Measured, null, trailing), TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public void ATableBehindOrCancelledRepeatedly_IsFlagged_WithEachFlagThatApplies()
+    {
+        var all = StoreHealthRows.Table(TableRow(candidate: true, pastFloors: true, tailOccupied: true)
+            with { Behind = true, BehindHours = 30.4, AutovacuumCancels = 3, RelationsPastTrigger = 2 });
+        Assert.Equal("Behind on autovacuum, Autovacuum cancelled repeatedly, Rewrite candidate", all.Flag);
+        Assert.True(all.IsFlagged);
+        Assert.True(all.IsBehind);
+        Assert.True(all.IsCancelledRepeatedly);
+        Assert.Equal("3", all.AutovacuumCancels);
+        Assert.Equal(3, all.AutovacuumCancelsSort);
+        Assert.Equal("2", all.PastTrigger);
+        Assert.Equal(2, all.PastTriggerSort);
+
+        var behindUnchecked = StoreHealthRows.Table(TableRow(pastFloors: true, tailOccupied: null) with { Behind = true, BehindHours = 25 });
+        Assert.Equal("Behind on autovacuum, Mostly empty, end not checked", behindUnchecked.Flag);
+        Assert.True(behindUnchecked.IsFlagged);
+
+        var cancelled = StoreHealthRows.Table(TableRow() with { AutovacuumCancels = RepeatedCancelMinimum });
+        Assert.Equal("Autovacuum cancelled repeatedly", cancelled.Flag);
+        Assert.True(cancelled.IsFlagged);
+        Assert.False(cancelled.IsBehind);
+
+        var once = StoreHealthRows.Table(TableRow() with { AutovacuumCancels = 1, LastAutovacuumCancel = new DateTime(2026, 11, 15, 14, 0, 0, DateTimeKind.Utc) });
+        Assert.Equal("", once.Flag);
+        Assert.False(once.IsFlagged);
+        Assert.False(once.IsCancelledRepeatedly);
+        Assert.Equal("1", once.AutovacuumCancels);
+        Assert.Equal(new DateTime(2026, 11, 15, 14, 0, 0, DateTimeKind.Utc), once.LastCancelUtc);
+        Assert.NotEqual("", once.LastCancel);
+        Assert.Equal("", StoreHealthRows.Table(TableRow()).LastCancel);
+    }
+
+    [Fact]
+    public void TheBehindCell_SaysHowLongInHoursThenDays_AndSortsTheLongestFirst()
+    {
+        var notBehind = StoreHealthRows.Table(TableRow() with { RelationsPastTrigger = 1, BehindHours = 5 });
+        Assert.Equal("No", notBehind.Behind);
+        Assert.Equal(0, notBehind.BehindSort);
+
+        var hours = StoreHealthRows.Table(TableRow() with { Behind = true, BehindHours = 30.4 });
+        Assert.Equal("Behind, no vacuum in 30 h", hours.Behind);
+        Assert.Equal(31.4, hours.BehindSort, 6);
+
+        var days = StoreHealthRows.Table(TableRow() with { Behind = true, BehindHours = 100 });
+        Assert.Equal("Behind, no vacuum in 4 days", days.Behind);
+        Assert.True(days.BehindSort > hours.BehindSort);
+
+        Assert.Equal("Behind", StoreHealthRows.BehindText(TableRow() with { Behind = true }));
+        Assert.Equal("0 h", StoreHealthRows.HoursText(0.5));
+        Assert.Equal("71 h", StoreHealthRows.HoursText(71.9));
+        Assert.Equal("3 days", StoreHealthRows.HoursText(72));
+    }
+
+    [Fact]
+    public void TheHeader_CountsTablesBehindAndTablesCancelledRepeatedly()
+    {
+        var rows = new List<StoreTableHealthRow>
+        {
+            TableRow("a") with { Behind = true, BehindHours = 30 },
+            TableRow("b") with { Behind = true, BehindHours = 40, AutovacuumCancels = 2 },
+            TableRow("c") with { AutovacuumCancels = 1 },
+        };
+
+        Assert.Contains(
+            "3 store tables, " + PgDisplay.Bytes(6_000_000_000) + " in total. "
+            + "2 tables behind on autovacuum (past the start point, no vacuum in 24 hours). "
+            + "1 table with autovacuum cancelled 2 or more times in 24 hours. "
+            + "0 rewrite candidates. ",
+            StoreHealthRows.HeaderText(rows));
+        Assert.Contains(
+            "0 tables behind on autovacuum (past the start point, no vacuum in 24 hours). "
+            + "0 tables with autovacuum cancelled 2 or more times in 24 hours. ",
+            StoreHealthRows.HeaderText([TableRow("c") with { AutovacuumCancels = 1 }]));
+    }
+
+    [Fact]
+    public void TheAutovacuumSettingsLine_GivesTheBudgetTheSettingsInForceAndTheCancels()
+    {
+        static string N1(double value) => value.ToString("N1", CultureInfo.CurrentCulture);
+
+        /* PostgreSQL's defaults: three settings fall back to their plain twins, which the line names. */
+        Assert.Equal(
+            $"Autovacuum write budget {N1(39.0625)} MB/s: the most autovacuum may write per second. "
+            + "Autovacuum is on: 1 of 3 workers running, it looks for work every 1 min, cost limit 200 (from vacuum_cost_limit), "
+            + $"cost delay 2 ms, {N1(64)} MB of memory per worker (from maintenance_work_mem). "
+            + "The store log has 4 cancelled autovacuums in the last 24 hours, 1 for a relation the store no longer has or one in another database.",
+            StoreHealthRows.AutovacuumSettingsText(Settings(true, 3, 1, 60, -1, 200, 2, 0, -1, 65536, 20, 8192, 4, 1)));
+
+        /* Its own values, no cost delay, and one cancel the store has a table for. */
+        Assert.Equal(
+            "Autovacuum write budget: unthrottled, the cost delay is 0, so vacuum does not sleep. "
+            + "Autovacuum is off: 0 of 6 workers running, it looks for work every 2 h, cost limit 500, "
+            + $"cost delay 0 ms, {N1(1)} GB of memory per worker. "
+            + "The store log has 1 cancelled autovacuum in the last 24 hours.",
+            StoreHealthRows.AutovacuumSettingsText(Settings(false, 6, 0, 7200, 500, 200, 0, 20, 1_048_576, 65536, 20, 8192, 1)));
+
+        Assert.EndsWith(
+            "it looks for work every 15 s, cost limit 200 (from vacuum_cost_limit), cost delay 20 ms (from vacuum_cost_delay), "
+            + $"{N1(64)} MB of memory per worker (from maintenance_work_mem). The store log has no cancelled autovacuum in the last 24 hours.",
+            StoreHealthRows.AutovacuumSettingsText(Settings(true, 3, 0, 15, -1, 200, -1, 20, -1, 65536, 20, 8192, 0)));
     }
 
     [Fact]

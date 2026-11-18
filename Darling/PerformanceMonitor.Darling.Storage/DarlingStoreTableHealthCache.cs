@@ -17,7 +17,7 @@ using static PerformanceMonitor.Darling.Storage.DarlingStoreTableHealthReader;
 
 namespace PerformanceMonitor.Darling.Storage;
 
-/// <summary>One part of the store health read (tables, indexes or partition index coverage) with the time the store finished
+/// <summary>One part of the store health read (tables, indexes, partition index coverage or autovacuum settings) with the time the store finished
 /// answering it. Every surface shows <see cref="ReadAtUtc"/> or the age, so a held answer is never shown as a new one.</summary>
 public sealed record StoreHealthRead<T>(T Rows, DateTime ReadAtUtc)
 {
@@ -57,11 +57,13 @@ public sealed class DarlingStoreTableHealthCache
     private readonly Func<NpgsqlDataSource, CancellationToken, Task<List<StoreTableHealthRow>>> _readTables;
     private readonly Func<NpgsqlDataSource, CancellationToken, Task<List<StoreIndexHealthRow>>> _readIndexes;
     private readonly Func<NpgsqlDataSource, CancellationToken, Task<List<StoreIndexCoverageRow>>> _readCoverage;
+    private readonly Func<NpgsqlDataSource, CancellationToken, Task<StoreAutovacuumSettings>> _readAutovacuumSettings;
     private readonly object _gate = new();
 
     private SingleFlightTtlCache<StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>> _tables;
     private SingleFlightTtlCache<StoreHealthRead<IReadOnlyList<StoreIndexHealthRow>>> _indexes;
     private SingleFlightTtlCache<StoreHealthRead<IReadOnlyList<StoreIndexCoverageRow>>> _coverage;
+    private SingleFlightTtlCache<StoreHealthRead<StoreAutovacuumSettings>> _autovacuumSettings;
 
     /// <summary>A cache over the reader's own statements, on the wall clock.</summary>
     public DarlingStoreTableHealthCache()
@@ -73,13 +75,16 @@ public sealed class DarlingStoreTableHealthCache
     {
     }
 
-    /// <summary>The same cache over <paramref name="clock"/> (a UTC reading) and the three reads given. A test hands in a
-    /// clock it steps across <see cref="Lifetime"/> and reads that count their calls.</summary>
+    /// <summary>The same cache over <paramref name="clock"/> (a UTC reading) and the reads given. A test hands in a
+    /// clock it steps across <see cref="Lifetime"/> and reads that count their calls. With no
+    /// <paramref name="readAutovacuumSettings"/>, the settings come from <see cref="DarlingStoreTableHealthReader.GetAutovacuumSettingsAsync"/>
+    /// as of <paramref name="clock"/>.</summary>
     public DarlingStoreTableHealthCache(
         Func<DateTime> clock,
         Func<NpgsqlDataSource, CancellationToken, Task<List<StoreTableHealthRow>>> readTables,
         Func<NpgsqlDataSource, CancellationToken, Task<List<StoreIndexHealthRow>>> readIndexes,
-        Func<NpgsqlDataSource, CancellationToken, Task<List<StoreIndexCoverageRow>>> readCoverage)
+        Func<NpgsqlDataSource, CancellationToken, Task<List<StoreIndexCoverageRow>>> readCoverage,
+        Func<NpgsqlDataSource, CancellationToken, Task<StoreAutovacuumSettings>>? readAutovacuumSettings = null)
     {
         ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(readTables);
@@ -89,9 +94,12 @@ public sealed class DarlingStoreTableHealthCache
         _readTables = readTables;
         _readIndexes = readIndexes;
         _readCoverage = readCoverage;
+        _readAutovacuumSettings = readAutovacuumSettings
+            ?? ((store, ct) => DarlingStoreTableHealthReader.GetAutovacuumSettingsAsync(store, clock(), ct));
         _tables = new(Lifetime, clock);
         _indexes = new(Lifetime, clock);
         _coverage = new(Lifetime, clock);
+        _autovacuumSettings = new(Lifetime, clock);
     }
 
     /// <summary>The process's cache for <paramref name="postgres"/>. It lives as long as the data source does.</summary>
@@ -120,9 +128,28 @@ public sealed class DarlingStoreTableHealthCache
         NpgsqlDataSource postgres, bool fresh = false, CancellationToken cancellationToken = default) =>
         ReadAsync(ref _coverage, _readCoverage, postgres, fresh, cancellationToken);
 
+    /// <summary>The store's autovacuum settings, workers running and cancels in the window
+    /// (<see cref="DarlingStoreTableHealthReader.GetAutovacuumSettingsAsync"/>), held the same way.</summary>
+    public Task<StoreHealthRead<StoreAutovacuumSettings>> GetAutovacuumSettingsAsync(
+        NpgsqlDataSource postgres, bool fresh = false, CancellationToken cancellationToken = default) =>
+        ReadOneAsync(ref _autovacuumSettings, _readAutovacuumSettings, postgres, fresh, cancellationToken);
+
     private Task<StoreHealthRead<IReadOnlyList<TRow>>> ReadAsync<TRow>(
         ref SingleFlightTtlCache<StoreHealthRead<IReadOnlyList<TRow>>> slot,
         Func<NpgsqlDataSource, CancellationToken, Task<List<TRow>>> read,
+        NpgsqlDataSource postgres,
+        bool fresh,
+        CancellationToken cancellationToken) =>
+        ReadOneAsync(
+            ref slot,
+            async (store, ct) => (IReadOnlyList<TRow>)await read(store, ct).ConfigureAwait(false),
+            postgres,
+            fresh,
+            cancellationToken);
+
+    private Task<StoreHealthRead<T>> ReadOneAsync<T>(
+        ref SingleFlightTtlCache<StoreHealthRead<T>> slot,
+        Func<NpgsqlDataSource, CancellationToken, Task<T>> read,
         NpgsqlDataSource postgres,
         bool fresh,
         CancellationToken cancellationToken)
@@ -133,10 +160,10 @@ public sealed class DarlingStoreTableHealthCache
            The caller gets the OperationCanceledException a connection open under its token gives. */
         if (cancellationToken.IsCancellationRequested)
         {
-            return Task.FromException<StoreHealthRead<IReadOnlyList<TRow>>>(new OperationCanceledException(cancellationToken));
+            return Task.FromException<StoreHealthRead<T>>(new OperationCanceledException(cancellationToken));
         }
 
-        SingleFlightTtlCache<StoreHealthRead<IReadOnlyList<TRow>>> part;
+        SingleFlightTtlCache<StoreHealthRead<T>> part;
         lock (_gate)
         {
             if (fresh)
@@ -150,7 +177,7 @@ public sealed class DarlingStoreTableHealthCache
         }
 
         return part.GetOrStartAsync(
-            async () => new StoreHealthRead<IReadOnlyList<TRow>>(await read(postgres, CancellationToken.None).ConfigureAwait(false), _clock()),
+            async () => new StoreHealthRead<T>(await read(postgres, CancellationToken.None).ConfigureAwait(false), _clock()),
             cancellationToken);
     }
 }

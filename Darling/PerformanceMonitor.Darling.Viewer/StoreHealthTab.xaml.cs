@@ -30,6 +30,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// after a successful one is skipped, so a trigger that queued while a load ran (the refresh timer, a tab pick) does not run the same
 /// slow reads again the moment the first ends.</para>
 ///
+/// <para>#8950: beside the tables read runs the autovacuum settings read, which fills the line under the header with the write budget,
+/// the settings in force and the cancels the store log holds in the last day. A settings read past its limit leaves the line saying it was
+/// left out, and the tables still show.</para>
+///
 /// <para>#8924: the tables and indexes reads are held for <see cref="DarlingStoreTableHealthCache.Lifetime"/>, so a refresh the timer or a
 /// tab pick starts shows the held rows and sends the store only the maintenance check. The Refresh button asks for a new read of both.
 /// The strip beside it says when the tab last refreshed and, after that, when the store answered the tables and indexes on screen, so
@@ -79,6 +83,10 @@ public partial class StoreHealthTab : UserControl
     internal Func<bool, Task<StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>>>>? TablesRead { get; set; }
     internal Func<bool, Task<StoreIndexHealth>>? IndexesRead { get; set; }
     internal Func<Task<DarlingStoreMaintenanceReadinessReader.StoreMaintenanceReadiness>>? ReadinessRead { get; set; }
+
+    /// <summary>Test seam for the autovacuum settings read (#8950), which runs beside the tables read and fills the line under the header.
+    /// Null reads the store through the data service; with no data service either, the line stays hidden.</summary>
+    internal Func<bool, Task<StoreHealthRead<DarlingStoreTableHealthReader.StoreAutovacuumSettings>>>? AutovacuumSettingsRead { get; set; }
 
     /// <summary>The shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
     internal void BeginFirstOpen() => _firstOpen.Begin();
@@ -193,9 +201,36 @@ public partial class StoreHealthTab : UserControl
         return true;
     }
 
+    /// <summary>The autovacuum settings line, or why it is missing: a read past its limit is left out with the reader's note, and any other
+    /// failure says so. Never throws, so the tables read beside it is never cut short by it. Empty text with no read to run.</summary>
+    private async Task<(string Text, DateTime? ReadAtUtc)> AutovacuumSettingsOutcomeAsync(ViewerLoadTimer timer, bool fresh)
+    {
+        var read = AutovacuumSettingsRead?.Invoke(fresh) ?? _dataService?.GetStoreAutovacuumSettingsAsync(fresh);
+        if (read is null)
+        {
+            return (string.Empty, null);
+        }
+
+        try
+        {
+            var settings = await ViewerServerTab.Timed(timer, "store autovacuum settings read", read);
+            return (StoreHealthRows.AutovacuumSettingsText(settings.Rows), settings.ReadAtUtc);
+        }
+        catch (StoreTableHealthTimeoutException ex)
+        {
+            return ("The autovacuum settings were left out. " + ex.Message, null);
+        }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"failed to load the store autovacuum settings: {ex.Message}");
+            return ($"The autovacuum settings failed to load: {ex.Message}", null);
+        }
+    }
+
     private async Task LoadTablesAsync(ViewerLoadTimer timer, bool fresh)
     {
         var gen = _loads.Claim(nameof(LoadTablesAsync));
+        var settingsOutcome = AutovacuumSettingsOutcomeAsync(timer, fresh);
         /* #8819: a refresh over rows already on screen keeps them and the summary line; the loading text is for a grid with nothing in it. */
         if (TablesDataGrid.Items.Count == 0)
         {
@@ -230,6 +265,17 @@ public partial class StoreHealthTab : UserControl
             TablesMessage.Text = $"The store tables failed to load: {ex.Message}";
             TablesMessage.Visibility = Visibility.Visible;
             StatusChanged?.Invoke($"failed to load the store tables: {ex.Message}");
+        }
+
+        /* The settings are held and read beside the tables, so the strip's "tables read" time is the older of the two answers. */
+        var (settingsText, settingsReadAtUtc) = await settingsOutcome;
+        if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
+
+        AutovacuumSettingsTextBlock.Text = settingsText;
+        AutovacuumSettingsTextBlock.Visibility = settingsText.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        if (_tablesReadAtUtc is { } tablesAt && settingsReadAtUtc is { } settingsAt && settingsAt < tablesAt)
+        {
+            _tablesReadAtUtc = settingsAt;
         }
 
         UpdateMeasureButton();

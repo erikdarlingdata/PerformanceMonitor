@@ -57,6 +57,7 @@ public sealed class DarlingStoreTableHealthCacheTests
         public int Tables;
         public int Indexes;
         public int Coverage;
+        public int AutovacuumSettings;
         public Func<int, Task>? BeforeTables;
 
         public CountedStore()
@@ -82,6 +83,11 @@ public sealed class DarlingStoreTableHealthCacheTests
                 {
                     Interlocked.Increment(ref Coverage);
                     return Task.FromResult(new List<StoreIndexCoverageRow> { CoverageRow("ix_parts_1"), CoverageRow("ix_parts_2") });
+                },
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref AutovacuumSettings);
+                    return Task.FromResult(Settings(true, 3, 1, 60, -1, 200, 2, 0, -1, 65536, 20, 8192, 4, 1));
                 });
         }
 
@@ -322,6 +328,33 @@ public sealed class DarlingStoreTableHealthCacheTests
 
     private static string[] TableNames(JsonDocument reply) =>
         reply.RootElement.GetProperty("tables").EnumerateArray().Select(t => t.GetProperty("table_name").GetString()!).ToArray();
+
+    /// <summary>#8950: the tables part of the reply carries the store's autovacuum settings with the write budget, read once and held
+    /// like the other parts, and counts the tables behind and the tables repeatedly cancelled.</summary>
+    [Fact]
+    public async Task TheToolsReply_CarriesTheAutovacuumSettingsAndBudget_HeldLikeTheOtherParts()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+
+        using var first = await Tool(store, source);
+        store.Now = Start.AddMinutes(2);
+        using var second = await Tool(store, source, top: 2);
+
+        Assert.Equal(1, Volatile.Read(ref store.AutovacuumSettings));
+        var settings = second.RootElement.GetProperty("autovacuum_settings");
+        Assert.Equal(Start, settings.GetProperty("as_of").GetDateTime());
+        Assert.Equal(120, settings.GetProperty("age_seconds").GetDouble());
+        Assert.True(settings.GetProperty("autovacuum_on").GetBoolean());
+        Assert.Equal(200, settings.GetProperty("cost_limit").GetInt32());
+        Assert.Equal("vacuum_cost_limit", settings.GetProperty("cost_limit_setting").GetString());
+        Assert.Equal(39.1, settings.GetProperty("write_budget_mb_per_s").GetDouble());
+        Assert.Equal(4, settings.GetProperty("cancels_24h").GetInt64());
+        Assert.Equal(1, settings.GetProperty("cancels_unresolved").GetInt64());
+        Assert.Equal(0, second.RootElement.GetProperty("tables_behind").GetInt32());
+        Assert.Equal(0, second.RootElement.GetProperty("tables_repeatedly_cancelled").GetInt32());
+        Assert.False(second.RootElement.TryGetProperty("autovacuum_settings_left_out_note", out _));
+    }
 
     [Fact]
     public async Task TheTool_CutsTheHeldRowsToTop_SoCallsThatDifferOnlyInTopShareOneStoreRead()

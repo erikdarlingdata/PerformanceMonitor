@@ -87,7 +87,7 @@ public sealed class StoreHealthPageBehaviourTests
     public void TheTablesGrid_DrawsBeforeTheIndexesReadReturns_AndTheIndexesSectionSaysLoading()
     {
         var first = Result.Value.GetProperty("first");
-        Assert.Equal(4, Rows(first.GetProperty("tableRows")).Length);
+        Assert.Equal(6, Rows(first.GetProperty("tableRows")).Length);
         Assert.Contains("Loading indexes", first.GetProperty("indexesWhileHeld").GetString()!, StringComparison.Ordinal);
         Assert.Contains("Loading partition index coverage", first.GetProperty("coverageWhileHeld").GetString()!, StringComparison.Ordinal);
     }
@@ -97,11 +97,11 @@ public sealed class StoreHealthPageBehaviourTests
     {
         var rows = Rows(Result.Value.GetProperty("first").GetProperty("tableRows"));
         var fresh = rows.Single(r => r[0] == "collect.fresh_table");
-        Assert.Equal("Never analyzed", fresh[7]);
-        Assert.Equal("—", fresh[8]);
+        Assert.Equal("Never analyzed", fresh[8]);
+        Assert.Equal("—", fresh[9]);
         var candidate = rows.Single(r => r[0] == "collect.store_metrics");
-        Assert.Equal("Rewrite candidate", candidate[2]);
-        Assert.Equal("75%", candidate[7]);
+        Assert.Equal("Rewrite candidate", candidate[3]);
+        Assert.Equal("75%", candidate[8]);
     }
 
     /// <summary>#8924: the service holds each part of the read for a few minutes, so the page stamps an answer with the time the store
@@ -133,6 +133,66 @@ public sealed class StoreHealthPageBehaviourTests
         Assert.Contains("Never analyzed: 1", first.GetProperty("headerText").GetString()!, StringComparison.Ordinal);
         Assert.Contains("Not safe for maintenance now.", first.GetProperty("readiness").GetString()!, StringComparison.Ordinal);
         Assert.Contains("estimate", first.GetProperty("note")[0].GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>#8950: a table behind on autovacuum is flagged in its own column with how long it has gone without a vacuum, and comes
+    /// first in the read's order. A table cancelled repeatedly shows its count, flagged, and the time of the last cancel.</summary>
+    [Fact]
+    public void ATableBehindOnAutovacuum_IsFlaggedFirst_AndATableCancelledRepeatedly_ShowsItsCancels()
+    {
+        var av = Result.Value.GetProperty("autovacuum");
+        var headers = av.GetProperty("headers").EnumerateArray().Select(h => h.GetString()!).ToList();
+        var behindAt = headers.IndexOf("Autovacuum behind");
+        var cancelsAt = headers.IndexOf("Autovacuum cancels (24 h)");
+        var lastAt = headers.IndexOf("Last cancel");
+        var pastAt = headers.IndexOf("Parts past the start point");
+        Assert.True(behindAt > 0 && cancelsAt > 0 && lastAt > 0 && pastAt > 0, string.Join(", ", headers));
+        Assert.Contains("7-day growth", headers);
+
+        var rows = Rows(av.GetProperty("rows"));
+        Assert.Equal("collect.query_snapshots", rows[0][0]);
+        Assert.Equal("Behind, no vacuum in 3 days", rows[0][behindAt]);
+        Assert.Equal("3", rows[0][pastAt]);
+        var cancelled = rows.Single(r => r[0] == "collect.wait_stats");
+        Assert.Equal("No", cancelled[behindAt]);
+        Assert.Equal("5", cancelled[cancelsAt]);
+        Assert.Contains("2026", cancelled[lastAt], StringComparison.Ordinal);
+        var quiet = rows.Single(r => r[0] == "collect.store_metrics");
+        Assert.Equal("No", quiet[behindAt]);
+        Assert.Equal("0", quiet[cancelsAt]);
+        Assert.Equal("—", quiet[lastAt]);
+        Assert.Equal(new[] { "30 h", "3 days" }, av.GetProperty("hours").EnumerateArray().Select(h => h.GetString()!).ToArray());
+    }
+
+    /// <summary>#8950: beside the store size the header shows the write budget the store's autovacuum settings allow, the tables behind and
+    /// cancelled repeatedly, and one line of the settings as they apply, naming a setting that falls back to another. A cost delay of 0 reads
+    /// as unthrottled. When the settings read ran past its limit the header says they were left out.</summary>
+    [Fact]
+    public void TheHeader_ShowsTheAutovacuumSettingsAndWriteBudget_BesideTheStoreSize()
+    {
+        var av = Result.Value.GetProperty("autovacuum");
+        var tiles = av.GetProperty("tiles").EnumerateArray().Select(t => t.GetString()!).ToArray();
+        Assert.StartsWith("1,000.0 MBStore tables and indexes", tiles[0], StringComparison.Ordinal);
+        Assert.Equal("39.1 MB/sAutovacuum write budgetthe most autovacuum may write per second", tiles[1]);
+        Assert.Contains(tiles, t => t.StartsWith("1Table behind on autovacuum", StringComparison.Ordinal));
+        Assert.Contains(tiles, t => t.StartsWith("1Table with autovacuum cancelled repeatedly", StringComparison.Ordinal));
+
+        var line = Assert.Single(av.GetProperty("settingsLine").EnumerateArray().Select(t => t.GetString()!));
+        Assert.Equal(
+            "Autovacuum is on: 1 of 3 workers running, it looks for work every 1 min, cost limit 200 (from vacuum_cost_limit), cost delay 2 ms, "
+            + "64.0 MB of memory per worker (from maintenance_work_mem). The store log has 8 cancelled autovacuums in the last 24 hours, "
+            + "2 for a relation the store no longer has or one in another database.",
+            line);
+
+        Assert.StartsWith("UnthrottledAutovacuum write budget", av.GetProperty("unthrottledTiles")[1].GetString()!, StringComparison.Ordinal);
+        var unthrottled = Assert.Single(av.GetProperty("unthrottledLine").EnumerateArray().Select(t => t.GetString()!));
+        Assert.Contains("cost limit 200, cost delay 0 ms, 64.0 MB of memory per worker.", unthrottled, StringComparison.Ordinal);
+        Assert.Contains("no cancelled autovacuum in the last 24 hours", unthrottled, StringComparison.Ordinal);
+
+        Assert.Equal(0, av.GetProperty("leftOutLines").GetInt32());
+        var leftOut = av.GetProperty("leftOutHeader").GetString()!;
+        Assert.Contains("The autovacuum settings were left out.", leftOut, StringComparison.Ordinal);
+        Assert.DoesNotContain("write budget", leftOut, StringComparison.Ordinal);
     }
 
     [Fact]
