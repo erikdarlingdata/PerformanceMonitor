@@ -28,6 +28,9 @@ namespace Darling.Tests;
 /// source's stopped advice from process start, so until the option is known the answer says so, never "the option is off". In
 /// "darling-config-env" because two tests start the real worker or set <see cref="QueryStoreTextTrigramIndex.SharedTracker"/>.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The one live test creates its own scratch database through
+   ScratchPostgres and reads and writes only inside it, so it cannot race live collection. The class is in "darling-config-env" for the
+   process-wide tracker and DARLING_CONFIG, which the live test also sets. */
 [Collection("darling-config-env")]
 public sealed class QueryStoreTextTrigramIndexTrackerTests
 {

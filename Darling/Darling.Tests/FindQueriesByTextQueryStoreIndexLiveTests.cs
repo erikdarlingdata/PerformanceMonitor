@@ -43,7 +43,8 @@ public sealed class FindQueriesByTextQueryStoreIndexLiveTests
     private static readonly DateTime Now = new(2026, 11, 17, 12, 0, 0, DateTimeKind.Utc);
 
     /// <summary>8 servers of 2,500 texts of about 300 characters, each server's rows in 8 databases, inserted interleaved by server the way
-    /// collection writes them. Per server: <c>Col_12 FROM</c> matches 3 texts (one each in db_1, db_4 and db_6), <c>Customer_12</c> matches
+    /// collection writes them. The <c>ORDER BY</c> fixes that order: a cross join's row order is the planner's choice, and a server whose
+    /// rows sit together on a few pages walks its key in a handful of buffers, which is not the store the buffer test measures. Per server: <c>Col_12 FROM</c> matches 3 texts (one each in db_1, db_4 and db_6), <c>Customer_12</c> matches
     /// 111, <c>dbo.Orders_</c> matches every text, and the no-match pattern none. A full-table ANALYZE, so the plans are the same every run.</summary>
     private static async Task SeedAsync(NpgsqlConnection c, CancellationToken ct)
     {
@@ -60,7 +61,8 @@ SELECT s, 'db_' || (q % 8), q,
        || ' = @p' || (q % 50) || ' AND c.Region = N''' || md5(q::text || 'c') || ''' ORDER BY t.Created DESC /* ' || md5(s::text || q::text) || ' */',
        '0x' || upper(substr(md5(q::text), 1, 16)),
        timestamp '2026-11-01' + (q % 1000) * interval '1 minute'
-FROM generate_series(1, 2500) AS q, generate_series(1, 8) AS s");
+FROM generate_series(1, 2500) AS q, generate_series(1, 8) AS s
+ORDER BY q, s");
         await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE collect.query_store_text");
     }
 
