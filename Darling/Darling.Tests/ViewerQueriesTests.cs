@@ -382,12 +382,12 @@ public sealed class ViewerQueriesSqlTests
     /// cannot exclude chunks and an old fixed date range decompresses everything from the window through the
     /// present.
     ///
-    /// <para>Both are pinned in their SLACKENED form, which is the whole point: a bare
+    /// <para>The floor is pinned in its SLACKENED form, which is the whole point: a bare
     /// <c>collection_time &gt;= $2</c> / <c>&lt;= $3</c> pair would silently be the window filter again and
     /// re-introduce exactly the edge bug this fixed. The floor is provably implied by the COALESCE
-    /// predicate, so its slack is pure clock-skew margin, narrowed from a day to an hour (#3953); the ceiling
-    /// is unrelated to that margin and stays a month, being Query Store's 1-day maximum interval plus 29 days
-    /// of collector-outage allowance.</para>
+    /// predicate, so its slack is pure clock-skew margin, narrowed from a day to an hour (#3953). The ceiling
+    /// is <see cref="QueryStoreIntervalWide.CollectionCeiling"/> above the window end (#8570):
+    /// <c>QueryStoreCollectionCeilingTests</c> puts a row through the slicer at the longest lag and one past it.</para>
     /// </summary>
     [Fact]
     public void QueryStoreSlicerSql_KeepsSlackenedCollectionTimeBoundsForChunkExclusion()
@@ -395,7 +395,6 @@ public sealed class ViewerQueriesSqlTests
         var sql = SqlByName(nameof(ViewerDataService.QueryStoreSlicerSql));
 
         Assert.Contains("collection_time >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3 + interval '30 days'", sql, StringComparison.Ordinal);
 
         /* The tight forms, asserted absent: either one would be a window filter wearing a pruning bound's
            clothes, and the failure would look exactly like the bug #1892 fixed. */
