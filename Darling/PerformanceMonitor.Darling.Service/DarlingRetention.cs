@@ -567,9 +567,12 @@ public static class DarlingRetention
                         continue;
                     }
 
-                    /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
-                       a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
-                       away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                    /* #5640: a catalog entry that stays a plain table has no chunks to drop, so on a TimescaleDB store it takes
+                       the same time-sliced DELETE a plain-PostgreSQL store runs, straight away, instead of a drop_chunks call
+                       that fails and warns once per sweep before falling back. The attention table is not one of them since
+                       #8967: it is a hypertable on a TimescaleDB store, so it takes drop_chunks here, and it still falls back to
+                       the DELETE below while it is a plain table. The swapped-out collect.attention_events_legacy table is not in
+                       the catalog, so no sweep purges it: the copy that empties it drops it. */
                     if (timescaleAvailable && !definition.StaysPlainTable)
                     {
                         var dropped = await DropChunksOneAsync(

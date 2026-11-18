@@ -110,13 +110,20 @@ public sealed class DarlingMcpWhoDroveItTools
                         }), cancellationToken, start);
             }
 
-            var notice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
+            /* #8570: the window notice, the procedure CPU and the statement texts each need only the page, so they run together, each its own
+               command on its own pooled connection, and the call waits on the slowest of the three rather than their sum. All three are
+               awaited before any is used, so a failed read never leaves another running past the call. */
+            var noticeRead = CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
+            var proceduresRead = DarlingWhoDroveItReader.ReadProcedureCpuAsync(
+                postgres, resolved.ServerId, start, windowEnd, page.Select(r => r.DatabaseName).ToArray(), procRoute.Hourly, procRoute.Ceiling, cancellationToken);
+            var textsRead = DarlingWhoDroveItReader.ReadStatementTextAsync(
+                postgres, resolved.ServerId, start, windowEnd, page.Where(r => r.TopQueryHash != null).Select(r => r.TopQueryHash!).Distinct().ToArray(), cancellationToken);
+            await Task.WhenAll(noticeRead, proceduresRead, textsRead);
+            var notice = await noticeRead;
+            var procedures = await proceduresRead;
+            var texts = await textsRead;
 
             var serverCpuUs = page[0].ServerCpuUs;
-            var procedures = await DarlingWhoDroveItReader.ReadProcedureCpuAsync(
-                postgres, resolved.ServerId, start, windowEnd, page.Select(r => r.DatabaseName).ToArray(), procRoute.Hourly, procRoute.Ceiling, cancellationToken);
-            var texts = await DarlingWhoDroveItReader.ReadStatementTextAsync(
-                postgres, resolved.ServerId, start, windowEnd, page.Where(r => r.TopQueryHash != null).Select(r => r.TopQueryHash!).Distinct().ToArray(), cancellationToken);
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
 

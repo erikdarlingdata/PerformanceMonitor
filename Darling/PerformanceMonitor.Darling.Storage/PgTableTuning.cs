@@ -745,7 +745,8 @@ public static class PgTableTuning
            - Delete-and-rebuild rollups: query_store_compose_stamp, query_store_compose_fleet and query_store_hash_hourly
              clear an hour and insert it again, query_store_hash_daily, query_store_top_daily and plan_regression_daily do
              the same for a day, and each ages out the rows below its floor. Every rebuild leaves the previous build dead.
-           - attention_events: inserts plus the time-sliced retention DELETE that stands in for a Timescale policy.
+           - attention_events: inserts plus the time-sliced retention DELETE while it is a plain table (#8967: on a TimescaleDB store it is a
+             hypertable and retention drops chunks, and the ALTER below runs without a warning on it).
            These seven are the largest plain tables on a busy store, so they take 0.05 + 10000 rather than 0.02: a vacuum
            pass also scans every index on its table, and the autovacuum cost budget is shared by every worker, so a
            tighter trigger on a table this size would hold a worker that other tables are waiting for.

@@ -976,8 +976,7 @@ public sealed class DarlingAnalysisService
         try
         {
             var (engine, _) = await ResolveEngineAsync(serverId, comparisonContext.CancellationToken);
-            var baselineFacts = await engine.Collector.CollectFactsAsync(baselineContext);
-            var comparisonFacts = await engine.Collector.CollectFactsAsync(comparisonContext);
+            var (baselineFacts, comparisonFacts) = await CollectBothWindowsAsync(engine, baselineContext, comparisonContext);
 
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
@@ -997,6 +996,30 @@ public sealed class DarlingAnalysisService
                 serverName, ex.Message);
             return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
+    }
+
+    /// <summary>
+    /// The two windows of <see cref="ComparePeriodsAsync"/>, collected concurrently (#8570): they share nothing but the
+    /// collector, which keeps no per-call state, so each runs on its own pooled connection and the call waits on the
+    /// slower window instead of the sum of both. Both reads are awaited before either result is used, so a failed window
+    /// never leaves the other running past the call. A cancelled window ends the call as its cancellation even when the
+    /// other window faulted: <see cref="Task.WhenAll(Task[])"/> reports the fault ahead of the cancellation, and the
+    /// caller's catch must see an abandoned read as <see cref="OperationCanceledException"/>, never as a failed comparison.
+    /// </summary>
+    internal static async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts)> CollectBothWindowsAsync(
+        AnalysisEngineSet engine, AnalysisContext baselineContext, AnalysisContext comparisonContext)
+    {
+        var baselineRead = engine.Collector.CollectFactsAsync(baselineContext);
+        var comparisonRead = engine.Collector.CollectFactsAsync(comparisonContext);
+        try
+        {
+            await Task.WhenAll(baselineRead, comparisonRead);
+        }
+        catch (Exception) when (baselineRead.IsCanceled || comparisonRead.IsCanceled)
+        {
+            await (baselineRead.IsCanceled ? baselineRead : comparisonRead);
+        }
+        return (await baselineRead, await comparisonRead);
     }
 
     /// <summary>

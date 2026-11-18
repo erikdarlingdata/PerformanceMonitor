@@ -851,9 +851,17 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
             @"ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_text_trigram_index_enabled, DROP COLUMN IF EXISTS query_store_text_trigram_index_enabled;"),
         // V275 (#8737): the personal MCP token table. The rewind drops it (its triggers go with it); a re-run of V275 creates it again.
         new(275, "hasPersonalTokens", "DROP TABLE IF EXISTS config.mcp_personal_token;"),
-        // V276 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
-        // last one, replica_readable; the rewind drops all ten and a re-run of V276 adds them back. Safe on a store that never had them.
-        new(276, "hasDatabaseProtectionErrorLog",
+        // V276 (#9000): the Store Growth alert's switch and two floors on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
+        // (the probe's sentinel is the object floor one) and the re-run of V276 adds them back on their defaults. Safe on a store that never had them.
+        new(276, "hasStoreGrowthAlertSettings",
+            @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS self_store_growth_enabled, DROP COLUMN IF EXISTS self_store_growth_floor_gb, DROP COLUMN IF EXISTS self_store_growth_object_floor_gb;"),
+        // V277 (#8967): the progress table of the attention_events copy, the probe's sentinel. The rewind drops it and the re-run of V277 makes it
+        // again. The swap itself (a populated plain table renamed to _legacy beside an empty one) is not undone here: V277's re-run does nothing
+        // once _legacy exists, and a rewound store keeps both tables, which an older build reads as just the new one. Safe on a store that never had it.
+        new(277, "hasAttentionLegacyCopy", @"DROP TABLE IF EXISTS collect.attention_events_legacy_copy;"),
+        // V278 (#8865): the ten error-log columns on collect.database_protection. The probe's sentinel is the
+        // last one, replica_readable; the rewind drops all ten and a re-run of V278 adds them back. Safe on a store that never had them.
+        new(278, "hasDatabaseProtectionErrorLog",
             @"ALTER TABLE IF EXISTS collect.database_protection
     DROP COLUMN IF EXISTS errorlog_state, DROP COLUMN IF EXISTS errorlog_message, DROP COLUMN IF EXISTS errorlog_grant,
     DROP COLUMN IF EXISTS errorlog_backfill_complete, DROP COLUMN IF EXISTS errorlog_skipped_archives, DROP COLUMN IF EXISTS errorlog_unparsed_lines,
