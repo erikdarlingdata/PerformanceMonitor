@@ -81,6 +81,68 @@ public sealed class TopQueriesModuleLookupLiveTests
         )
         """;
 
+    /// <summary>The module CTE as it stood before the host and host-named-row gates (#8549), comments cut: it read the stitch for every ranked handle. The oracle for what the grid shows.</summary>
+    private const string BeforeGatesModuleCte = """
+        module AS MATERIALIZED (
+            WITH handles AS MATERIALIZED (
+                SELECT DISTINCT sql_handle
+                FROM ranked
+                WHERE sql_handle IS NOT NULL
+                AND   sql_handle <> ''
+            ),
+            recent AS MATERIALIZED (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   sql_handle IN (SELECT sql_handle FROM handles)
+                GROUP BY sql_handle
+            ),
+            missing AS MATERIALIZED (
+                SELECT h.sql_handle
+                FROM handles AS h
+                WHERE NOT EXISTS (SELECT 1 FROM recent AS r WHERE r.sql_handle = h.sql_handle)
+            ),
+            older AS MATERIALIZED (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time < $2
+                AND   sql_handle IN (SELECT sql_handle FROM missing)
+                AND   EXISTS (SELECT 1 FROM missing)
+                GROUP BY sql_handle
+            )
+            SELECT
+                w.sql_handle,
+                p.object_name,
+                p.schema_name,
+                p.database_name
+            FROM
+            (
+                SELECT sql_handle, newest FROM recent
+                UNION ALL
+                SELECT sql_handle, newest FROM older
+            ) AS w
+            CROSS JOIN LATERAL
+            (
+                SELECT
+                    ps.object_name,
+                    ps.schema_name,
+                    ps.database_name
+                FROM procedure_stats AS ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time = w.newest
+                AND   ps.sql_handle = w.sql_handle
+                ORDER BY ps.collection_id DESC
+                LIMIT 1
+            ) AS p
+        )
+        """;
+
     private sealed record Module(string? ObjectName, string? SchemaName, string? DatabaseName);
 
     [Fact]
@@ -211,23 +273,144 @@ public sealed class TopQueriesModuleLookupLiveTests
             $"with every ranked handle recent the lookup scanned {recentOnlyRows} procedure_stats rows for {retained} retained; the fallback should cost nothing when it has no handles: {recentOnlyPlan.GetRawText()}");
     }
 
+    /// <summary>
+    /// #8549: the grid shows a group's host_object_name when it has one and the stitch's module only otherwise. A query_stats row of the server with a
+    /// host_object_name in the hour before the window start proves the build collecting then fills the column, so every NULL host in the window is
+    /// ad hoc and the lookup reads nothing. Without such a row it reads the NULL-host groups' handles only. What the grid shows is the same as
+    /// the statement that read the stitch for every ranked handle.
+    /// </summary>
+    [Fact]
+    public async Task ModuleLookup_ReadsNoProcedureStatsWithAHostNamedRowBeforeTheWindow_AndTheGridShowsTheSameModule()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8549 module attribution test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const int snapshots = 200;
+        await ExecAsync(connection,
+            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+                                           sql_handle, plan_handle, delta_execution_count, delta_worker_time, delta_elapsed_time)
+              SELECT (p::bigint * 100000) + s, $1 - make_interval(mins => s), $2, 'module-gate', 'db' || (p % 3), 'dbo', 'usp_' || p, 'PROCEDURE',
+                     '0xH' || p, '0xP' || p || '_' || s, 1, 1, 1
+              FROM generate_series(1, $3) AS p, generate_series(0, $4 - 1) AS s",
+            ct, NewestRow, ServerId, Procs, snapshots);
+        /* A handle whose only row is five hours old: before the window start, so only the older-history read can name it. */
+        await ExecAsync(connection,
+            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+                                           sql_handle, plan_handle, delta_execution_count, delta_worker_time, delta_elapsed_time)
+              VALUES (1, $1, $2, 'module-gate', 'dbold', 'dbo', 'usp_old_only', 'PROCEDURE', '0xHOLDONLY', '0xPOLD', 1, 1, 1)",
+            ct, NewestRow.AddHours(-5), ServerId);
+        await ExecAsync(connection, "ANALYZE procedure_stats", ct);
+        await ExecAsync(connection, "SET max_parallel_workers_per_gather = 0", ct);
+
+        var retained = Procs * snapshots + 1;
+        var before = Standalone(BeforeGatesModuleCte);
+        var after = Standalone(ViewerDataService.TopQueriesModuleCte);
+
+        /* The query_stats rows the lookup's probe reads: one per entry, collected at the given time for the given server, with or without a host. */
+        async Task SetQueryStatsAsync(params (DateTime At, int Server, string? Host)[] rows)
+        {
+            await ExecAsync(connection, "DELETE FROM query_stats", ct);
+            var i = 0;
+            foreach (var (at, server, host) in rows)
+            {
+                await ExecAsync(connection,
+                    @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                                               last_execution_time, creation_time, sample_interval_seconds, delta_execution_count, delta_worker_time, delta_elapsed_time,
+                                               delta_logical_reads, delta_rows, delta_logical_writes, delta_physical_reads, delta_spills, total_clr_time, plan_generation_num,
+                                               query_text, host_object_name)
+                      VALUES ($1, $2, $3, 'module-gate', 'db', '0xQ' || $1::text, '0xPLANHASH', '0xHQS' || $1::text, '0xPLANHANDLE', $2, $2, 60, 5, 1, 1, 10, 0, 0, 0, 0, 0, 1, 'SELECT 1', $4)",
+                    ct, (long)++i, at, server, host!);
+            }
+
+            await ExecAsync(connection, "ANALYZE query_stats", ct);
+        }
+
+        /* What the grid shows for each ranked group: its host when it has one, else the stitch's module, else 'ad hoc' (ViewerQueryStatsRow.ModuleName). */
+        static List<string> Shown(Dictionary<string, Module> modules, (string Handle, string? Host)[] groups) =>
+            groups.Select(g => g.Host is not null
+                ? "host " + g.Host
+                : modules.TryGetValue(g.Handle, out var m) ? $"{m.DatabaseName}.{m.SchemaName}.{m.ObjectName}" : "ad hoc").ToList();
+
+        /* A host-named row of this server in the hour before the window start: ad hoc groups (handles with no procedure_stats row) and host-named
+           groups, which is every group a collector that fills host_object_name can produce. The statement before the gate read the history to
+           prove the ad hoc handles absent. */
+        await SetQueryStatsAsync((WindowStart.AddMinutes(-40), ServerId, "dbo.usp_collected"));
+        var withProof = new (string Handle, string? Host)[]
+        {
+            ("0xHADHOC1", null), ("0xHADHOC2", null), ("0xH1", "dbo.usp_1"), ("0xH2", "dbo.usp_2"), ("0xHOLDONLY", "dbo.usp_old_only"),
+        };
+        var proofHandles = withProof.Select(g => g.Handle).ToArray();
+        var proofHosts = withProof.Select(g => g.Host).ToArray();
+        var proofBeforeRows = await ReadModulesAsync(connection, before, proofHandles, ct, proofHosts);
+        var proofAfterRows = await ReadModulesAsync(connection, after, proofHandles, ct, proofHosts);
+        Assert.NotEmpty(proofBeforeRows);
+        Assert.Empty(proofAfterRows);
+        Assert.Equal(Shown(proofBeforeRows, withProof), Shown(proofAfterRows, withProof));
+        var proofBeforePlan = await ExplainAsync(connection, before, proofHandles, ct, proofHosts);
+        var proofAfterPlan = await ExplainAsync(connection, after, proofHandles, ct, proofHosts);
+        Assert.True(ProcedureStatsRowsScanned(proofBeforePlan) >= retained * 0.9,
+            $"the statement before the gate scanned {ProcedureStatsRowsScanned(proofBeforePlan)} procedure_stats rows for {retained} retained; the seed no longer makes it read the history: {proofBeforePlan.GetRawText()}");
+        Assert.True(ProcedureStatsRowsScanned(proofAfterPlan) == 0,
+            $"a window with a host-named row before it still read {ProcedureStatsRowsScanned(proofAfterPlan)} procedure_stats rows: {proofAfterPlan.GetRawText()}");
+
+        /* No host-named row in the hour before: groups with a NULL host still get their module, from the recent rows (0xH5) and from the older
+           history (0xHOLDONLY), and an ad hoc group has none. The host-named group's handle (0xH1) is no longer read. Each of these stores has
+           query_stats rows that are NOT proof: none at all, a NULL-host row in the hour, a host-named row older than the hour or inside the
+           window, and a host-named row of another server in the hour. */
+        var noProof = new (string Handle, string? Host)[]
+        {
+            ("0xH5", null), ("0xHOLDONLY", null), ("0xHADHOC1", null), ("0xH1", "dbo.usp_1"),
+        };
+        var noProofHandles = noProof.Select(g => g.Handle).ToArray();
+        var noProofHosts = noProof.Select(g => g.Host).ToArray();
+        foreach (var rows in new (DateTime At, int Server, string? Host)[][]
+        {
+            Array.Empty<(DateTime, int, string?)>(),
+            new[] { (WindowStart.AddMinutes(-40), ServerId, (string?)null) },
+            new[] { (WindowStart.AddMinutes(-61), ServerId, (string?)"dbo.usp_collected") },
+            new[] { (WindowStart.AddMinutes(1), ServerId, (string?)"dbo.usp_collected") },
+            new[] { (WindowStart.AddMinutes(-40), OtherServerId, (string?)"dbo.usp_collected") },
+        })
+        {
+            await SetQueryStatsAsync(rows);
+            var beforeRows = await ReadModulesAsync(connection, before, noProofHandles, ct, noProofHosts);
+            var afterRows = await ReadModulesAsync(connection, after, noProofHandles, ct, noProofHosts);
+            var shown = Shown(afterRows, noProof);
+            Assert.Equal(Shown(beforeRows, noProof), shown);
+            Assert.Equal(new[] { "db2.dbo.usp_5", "dbold.dbo.usp_old_only", "ad hoc", "host dbo.usp_1" }, shown);
+            var beforePlan = await ExplainAsync(connection, before, noProofHandles, ct, noProofHosts);
+            var plan = await ExplainAsync(connection, after, noProofHandles, ct, noProofHosts);
+            Assert.True(ProcedureStatsRowsScanned(plan) > 0, "a window with no host-named row before it must read procedure_stats: " + plan.GetRawText());
+            Assert.True(HandleAggregateRows(plan).Sum() < HandleAggregateRows(beforePlan).Sum(),
+                $"the host-named group's handle should no longer be aggregated: {string.Join(", ", HandleAggregateRows(plan))} groups against {string.Join(", ", HandleAggregateRows(beforePlan))} before: {plan.GetRawText()}");
+        }
+    }
+
     private static string Standalone(string moduleCte) =>
-        "WITH ranked AS MATERIALIZED (SELECT unnest($3::text[]) AS sql_handle),\n" + moduleCte
+        "WITH ranked AS MATERIALIZED (SELECT sql_handle, host_object_name FROM unnest($3::text[], $4::text[]) AS u(sql_handle, host_object_name)),\n" + moduleCte
         + "\nSELECT sql_handle, object_name, schema_name, database_name FROM module";
 
-    private static NpgsqlCommand Command(NpgsqlConnection connection, string sql, string[] ranked)
+    private static NpgsqlCommand Command(NpgsqlConnection connection, string sql, string[] ranked, string?[]? hosts = null)
     {
         var command = new NpgsqlCommand(sql, connection);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = WindowStart });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = ranked });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = hosts ?? new string?[ranked.Length] });
         return command;
     }
 
-    private static async Task<Dictionary<string, Module>> ReadModulesAsync(NpgsqlConnection connection, string sql, string[] ranked, CancellationToken ct)
+    private static async Task<Dictionary<string, Module>> ReadModulesAsync(NpgsqlConnection connection, string sql, string[] ranked, CancellationToken ct, string?[]? hosts = null)
     {
         var rows = new Dictionary<string, Module>(StringComparer.Ordinal);
-        await using var command = Command(connection, sql, ranked);
+        await using var command = Command(connection, sql, ranked, hosts);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -240,9 +423,9 @@ public sealed class TopQueriesModuleLookupLiveTests
         return rows;
     }
 
-    private static async Task<JsonElement> ExplainAsync(NpgsqlConnection connection, string sql, string[] ranked, CancellationToken ct)
+    private static async Task<JsonElement> ExplainAsync(NpgsqlConnection connection, string sql, string[] ranked, CancellationToken ct, string?[]? hosts = null)
     {
-        await using var command = Command(connection, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, ranked);
+        await using var command = Command(connection, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, ranked, hosts);
         var json = (string)(await command.ExecuteScalarAsync(ct))!;
         return JsonDocument.Parse(json).RootElement[0].GetProperty("Plan").Clone();
     }
