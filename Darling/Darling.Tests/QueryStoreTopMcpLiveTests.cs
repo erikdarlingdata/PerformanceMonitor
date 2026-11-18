@@ -261,6 +261,18 @@ public sealed class QueryStoreTopMcpLiveTests
             Assert.Equal(expected, await DarlingDataReader.QueryStoreWindowHasRowsAsync(postgres, ServerId, shortStart, boundedEnd, databases, ct));
             Assert.Equal(ReadScope.SourceIntervalTable, scope.Scope.Source);
         }
+
+        /* get_query_store_aborts takes the same tier as its probe: a short named window around day 0's aborted interval (its start is
+           WindowStart + 2 h) reads the table, and its page equals the raw page of every database cut to that database. */
+        var abortsStart = WindowStart.AddHours(1).AddMinutes(45);
+        var abortsEnd = WindowStart.AddHours(2).AddMinutes(15);
+        var abortsNamed = await DarlingQueryStoreAbortsReader.ReadAsync(postgres, ServerId, abortsStart, abortsEnd, TestTop, qsB, ct);
+        Assert.True(abortsNamed.Table is not null, "a short aborts read that names its database must read the interval table, as its probe does");
+        var failed = abortsNamed.Rows.Single(r => r.QueryId == 2);
+        Assert.Equal((4L, 1L), (failed.AbortedRuns, failed.ExceptionRuns));
+        var abortsEvery = await DarlingQueryStoreAbortsReader.ReadAsync(postgres, ServerId, abortsStart, abortsEnd, TestTop, all, ct);
+        Assert.True(abortsEvery.Table is null, "a short aborts read of every database must read raw");
+        Assert.Equal(abortsEvery.Rows.Where(r => r.DatabaseName == "qsB").ToList(), abortsNamed.Rows);
     }
 
     private static List<(string DatabaseName, long QueryId, long PlanId, string ExecutionTypeDesc, string? ReplicaRole, long TotalExecutions)> KeysOf(

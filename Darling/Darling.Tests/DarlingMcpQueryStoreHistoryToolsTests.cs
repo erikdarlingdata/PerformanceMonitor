@@ -269,7 +269,6 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
         Assert.Contains("DarlingDataReader.QueryStoreTopMinWindow", history, StringComparison.Ordinal);
         var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs");
         Assert.Contains("if (QueryStoreTopMayReadTableFor(startUtc, endUtc, databases))", reader, StringComparison.Ordinal);
-        Assert.Contains("databases.IsAll ? QueryStoreTopMayReadTable(startUtc, endUtc)", reader, StringComparison.Ordinal);
     }
 
     [Fact]
