@@ -976,8 +976,7 @@ public sealed class DarlingAnalysisService
         try
         {
             var (engine, _) = await ResolveEngineAsync(serverId, comparisonContext.CancellationToken);
-            var baselineFacts = await engine.Collector.CollectFactsAsync(baselineContext);
-            var comparisonFacts = await engine.Collector.CollectFactsAsync(comparisonContext);
+            var (baselineFacts, comparisonFacts) = await CollectBothWindowsAsync(engine, baselineContext, comparisonContext);
 
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
@@ -997,6 +996,21 @@ public sealed class DarlingAnalysisService
                 serverName, ex.Message);
             return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
+    }
+
+    /// <summary>
+    /// The two windows of <see cref="ComparePeriodsAsync"/>, collected concurrently (#8570): they share nothing but the
+    /// collector, which keeps no per-call state, so each runs on its own pooled connection and the call waits on the
+    /// slower window instead of the sum of both. Both reads are awaited before either result is used, so a failed window
+    /// never leaves the other running past the call.
+    /// </summary>
+    internal static async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts)> CollectBothWindowsAsync(
+        AnalysisEngineSet engine, AnalysisContext baselineContext, AnalysisContext comparisonContext)
+    {
+        var baselineRead = engine.Collector.CollectFactsAsync(baselineContext);
+        var comparisonRead = engine.Collector.CollectFactsAsync(comparisonContext);
+        await Task.WhenAll(baselineRead, comparisonRead);
+        return (await baselineRead, await comparisonRead);
     }
 
     /// <summary>
