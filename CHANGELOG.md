@@ -39,6 +39,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **The exporter may now export `pg_lock_stats`** ([#9010]) - the table holds only numbers and lock states, and it is small, so the optional-table registry moves it from Blocked to Candidate. It stays off by default: a store exports it only when its `optional-tables.txt` names it. `pg_session_states` stays Blocked, because it carries usernames and client addresses.
 - **The Darling store runtime moves to TimescaleDB 2.32.0, and the container and Helm store images are pinned to the exact tag** ([#8858]) - TimescaleDB 2.32.0 carries a larger set of security fixes than usual, so the bundled Windows store runtime takes it. A store updates to it before the store opens, and the 2.30.1 libraries stay in the runtime for stores that are still on that version. PostgreSQL stays at 18.6 for now. TimescaleDB 2.32.0 supports PostgreSQL only up to 18.6, and policy jobs fail on PostgreSQL 18.7 with this release (timescale/timescaledb#11038), so the runtime moves to 18.7 together with TimescaleDB 2.32.1. The Compose file, the Helm chart and both CI scripts now use `timescale/timescaledb:2.32.0-pg17` (PostgreSQL 17.11) instead of a floating or older tag. The weekly runtime check now also reads those four image tags and fails on a floating tag or a TimescaleDB older than the newest release.
 
 ## [3.13.0] - 2026-11-12
@@ -7721,3 +7722,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8798]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8798
 [#8858]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8858
 [#8880]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8880
+[#9010]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9010

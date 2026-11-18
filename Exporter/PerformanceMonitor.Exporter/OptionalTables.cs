@@ -328,8 +328,8 @@ public static class OptionalTables
             Grain = ExportGrain.Hourly,
             RollupName = "pg_io_stats_hourly",
         },
-        new("pg_lock_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
-            "Blocked(LATER): numeric/state only, small."),
+        new("pg_lock_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Numeric/state only, small. A one-hour read uses the collection_time index."),
         new("pg_log_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Text-heavy: message/detail/context from the Postgres log; keep-only column list.")
         {

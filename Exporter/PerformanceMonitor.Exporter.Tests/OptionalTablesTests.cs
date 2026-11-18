@@ -114,6 +114,21 @@ public class OptionalTablesTests
     public static IEnumerable<object[]> Group7cWindowNamesMemberData() => Group7cWindowNames.Select(n => new object[] { n });
 
     [Fact]
+    public void Pg_lock_stats_is_a_candidate_event_table_and_pg_session_states_stays_blocked()
+    {
+        // pg_lock_stats holds numbers and lock states only, so it may be exported. pg_session_states carries
+        // usernames and client addresses, so it stays out of every export.
+        var locks = OptionalTables.TryGet("pg_lock_stats");
+        Assert.NotNull(locks);
+        Assert.Equal(OptionalTableStatus.Candidate, locks!.Status);
+        Assert.Equal(ExportGrain.Event, locks.Grain);
+
+        var sessions = OptionalTables.TryGet("pg_session_states");
+        Assert.NotNull(sessions);
+        Assert.Equal(OptionalTableStatus.Blocked, sessions!.Status);
+    }
+
+    [Fact]
     public void Pg_statement_stats_is_blocked_pending_the_index_range_read_proof()
     {
         var table = OptionalTables.TryGet("pg_statement_stats");
