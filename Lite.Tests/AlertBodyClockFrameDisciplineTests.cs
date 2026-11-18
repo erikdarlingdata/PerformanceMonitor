@@ -255,7 +255,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock,
+                JobName = "nightly-export", RunDurationSeconds = 600, RunDateTime = AnchorOnServerClock,
                 UtcOffsetMinutes = FleetOffsetMinutes, StepId = 2, StepName = "extract",
                 Message = "the step failed"
             }],
@@ -360,7 +360,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock,
+                JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock,
                 UtcOffsetMinutes = FleetOffsetMinutes
             }]), "Failed At");
         Assert.Equal(expected, failed);
@@ -379,7 +379,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 330
+                JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 330
             }]), "Failed At");
         Assert.NotEqual(expected, eastOfUtc);
         Assert.Equal(AlertTimestamp.Utc(AnchorOnServerClock.AddMinutes(-330)), eastOfUtc);
@@ -392,7 +392,7 @@ public class AlertBodyClockFrameDisciplineTests
                 Server,
                 [new FailedJobInfo
                 {
-                    JobName = "nightly-export", RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 0
+                    JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock, UtcOffsetMinutes = 0
                 }]), "Failed At"));
     }
 
@@ -403,7 +403,7 @@ public class AlertBodyClockFrameDisciplineTests
            only thing the reader came for — but it is not dressed as UTC. */
         var failed = Field(AlertContextBuilders.BuildFailedJobContext(
             Server,
-            [new FailedJobInfo { JobName = "nightly-export", RunDateTime = AnchorOnServerClock }]), "Failed At");
+            [new FailedJobInfo { JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock }]), "Failed At");
 
         Assert.Equal(
             AnchorOnServerClock.ToString(AlertTimestamp.Format, System.Globalization.CultureInfo.InvariantCulture)
@@ -476,7 +476,7 @@ public class AlertBodyClockFrameDisciplineTests
             Server,
             [new FailedJobInfo
             {
-                JobName = "nightly-export", RunDateTime = AnchorOnServerClock,
+                JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock,
                 UtcOffsetMinutes = FleetOffsetMinutes
             }],
             windowEndUtc: AnchorUtc, lookbackMinutes: 60);
@@ -502,7 +502,7 @@ public class AlertBodyClockFrameDisciplineTests
         /* Omitted when the caller supplies no clock — the window is a fact about the read, so it is stated
            only when it is actually known. */
         var noWindow = AlertContextBuilders.BuildFailedJobContext(
-            Server, [new FailedJobInfo { JobName = "nightly-export", RunDateTime = AnchorOnServerClock }]);
+            Server, [new FailedJobInfo { JobName = "nightly-export", RunDurationSeconds = 0, RunDateTime = AnchorOnServerClock }]);
         Assert.DoesNotContain(noWindow!.Details, d => d.Heading == AlertContextBuilders.FailureWindowHeading);
     }
 
