@@ -98,8 +98,9 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
         }
 
         await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", durationUs: 30_000_000);
-        await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", durationUs: 999);
-        await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", durationUs: 1000);
+        await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", durationUs: 999_999);
+        await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", durationUs: 1_000_000);
+        await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-ms", "SELECT four ms", durationUs: 4_000);
         await RowAsync(id++, server, at, "sample", 0, "db1", "etl", "fp-none", "SELECT no duration", durationUs: null);
         for (var i = 0; i < 3; i++)
         {
@@ -113,19 +114,19 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
 
         var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(server, Lookback);
 
-        /* 6 + 4 + 3 + 1 + 3 = 17 samples. Short: the six SqlClient ones, the 999 us one and the azdata #SVer at 20 us = 8. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
-        Assert.Equal(17, window.SampleGroups.Sum(g => g.Samples));
-        Assert.Equal(8, window.SampleGroups.Sum(g => g.ShortSamples));
+        /* 6 + 5 + 3 + 1 + 3 = 18 samples. Short (#9030, floor 1 s): the six SqlClient ones, the 999,999 us one, the 4 ms one and the azdata #SVer at 20 us = 9. The one at exactly 1 s, the 30 s one and the one with no duration count. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
+        Assert.Equal(18, window.SampleGroups.Sum(g => g.Samples));
+        Assert.Equal(9, window.SampleGroups.Sum(g => g.ShortSamples));
         Assert.Equal(4, window.SampleGroups.Sum(g => g.AzdataMetadataSamples));
 
         var reading = AttentionEvaluator.Read(window, now)!;
-        Assert.Equal(8, reading.ShortSamples);
+        Assert.Equal(9, reading.ShortSamples);
         Assert.Equal(4, reading.AzdataMetadataSamples);
 
-        /* 100 x (17 - 8 - 4) / 17 over the covered span: the rate judged is the exact count scaled by the share that passes, and the query editor's azdata timeouts are still in it. */
+        /* 100 x (18 - 9 - 4) / 18 over the covered span: the rate judged is the exact count scaled by the share that passes, and the query editor's azdata timeouts are still in it. */
         var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
         Assert.NotNull(finding);
-        Assert.Equal(100d * 5 / 17, finding!.JudgedCount, 6);
+        Assert.Equal(100d * 5 / 18, finding!.JudgedCount, 6);
     }
 
     [Fact]
@@ -251,7 +252,7 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
 
         var rows = new (int Minute, long Count, int Short, int Passing)[]
         {
-            (0, 100, 3, 1),   /* 100 x 1/4 = 25 */
+            (0, 100, 3, 1),   /* three of 4 ms are short, the one at exactly 1 s passes: 100 x 1/4 = 25 */
             (1, 50, 0, 0),    /* no samples: the full 50 */
             (2, 80, 0, 4),    /* every sample passes: the full 80 */
             (3, 40, 2, 0),    /* every sample is short: 0 */
@@ -263,12 +264,12 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
             await RowAsync(id++, server, at, "count", count, null, null, null, null);
             for (var i = 0; i < shortOnes; i++)
             {
-                await RowAsync(id++, server, at, "sample", 0, "db1", "app", null, null, durationUs: 25);
+                await RowAsync(id++, server, at, "sample", 0, "db1", "app", null, null, durationUs: 4_000);
             }
 
             for (var i = 0; i < passing; i++)
             {
-                await RowAsync(id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", durationUs: minute == 4 ? null : 30_000_000);
+                await RowAsync(id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", durationUs: minute == 4 ? null : minute == 0 ? 1_000_000 : 30_000_000);
             }
         }
 
