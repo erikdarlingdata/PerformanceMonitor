@@ -412,6 +412,32 @@ public sealed class PersonalTokenStoreLiveTests
     });
 
     [Fact]
+    public Task ApplySettings_FullLifetimeAcrossADaylightSavingChange_IsNotCut() => WithStoreAsync(async (connection, owner, ct) =>
+    {
+        /* A session time zone with daylight saving: the 30 days from 1 March 2026 12:00 UTC to 31 March run across New York's change on 8 March, so
+           created_at + '30 days' (wall clock) is an hour short of the 30 x 24 hours the insert stored. The cut compares the two, so it must use hours. */
+        await using var newYork = NpgsqlDataSource.Create(owner.ConnectionString + ";Timezone=America/New_York");
+        await using (var show = newYork.CreateCommand("SHOW TimeZone"))
+        {
+            Assert.Equal("America/New_York", (string?)await show.ExecuteScalarAsync(ct));
+        }
+
+        var created = new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero);
+        var id = await MakeAsync(newYork, "k1", "full", "reader", created, ct, lifetimeDays: 30);
+
+        Assert.Equal((0, 0), await PersonalTokenStore.ApplySettingsAsync(newYork, 30, operatorAllowed: true, created.AddDays(1), ct));
+        var row = (await PersonalTokenStore.ListAsync(newYork, null, created.AddDays(1), ct)).Rows.Single(r => r.TokenId == id);
+        Assert.Equal(created.AddDays(30), row.ExpiresAt);
+        Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_expiry_cut'", ct));
+
+        /* A real cut across the same change still lands on exactly N x 24 hours. */
+        var longId = await MakeAsync(newYork, "k1", "long", "reader", created, ct, lifetimeDays: 90);
+        Assert.Equal((0, 1), await PersonalTokenStore.ApplySettingsAsync(newYork, 30, operatorAllowed: true, created.AddDays(1), ct));
+        var cut = (await PersonalTokenStore.ListAsync(newYork, null, created.AddDays(1), ct)).Rows.Single(r => r.TokenId == longId);
+        Assert.Equal(created.AddDays(30), cut.ExpiresAt);
+    });
+
+    [Fact]
     public Task TouchLastUsed_NeverMovesBackwards() => WithStoreAsync(async (connection, owner, ct) =>
     {
         var now = DateTimeOffset.UtcNow;

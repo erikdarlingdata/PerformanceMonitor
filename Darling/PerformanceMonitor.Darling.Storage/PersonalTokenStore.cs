@@ -103,8 +103,8 @@ RETURNING token_id, token_name, role";
 
     private const string CutExpirySql = @"
 UPDATE config.mcp_personal_token
-SET expires_at = created_at + make_interval(days => $2)
-WHERE revoked_at IS NULL AND expires_at > $1 AND expires_at > created_at + make_interval(days => $2)
+SET expires_at = created_at + make_interval(hours => 24 * $2)
+WHERE revoked_at IS NULL AND expires_at > $1 AND expires_at > created_at + make_interval(hours => 24 * $2)
 RETURNING token_id, token_name, role";
 
     private const string TouchSql = @"
