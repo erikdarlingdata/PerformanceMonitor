@@ -82,13 +82,13 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task ActiveQueryRows_WriteTheirSightings_AndTheSameKeyTwiceBumpsSeenCount()
+    public async Task ActiveQueryRows_WriteTheirSightings_AndTheSameKeyTwiceInOneFlushSumsItsCount()
     {
         Sight(Snapshot(HashA), Snapshot(HashA), Snapshot(HashB), Snapshot(null));
         Sight(Snapshot(HashA));
 
         Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings WHERE server_id = 7"));
-        Assert.Equal(3, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(2, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
         Assert.Equal(1, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashB}'"));
         Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}' AND text_sample = 'SELECT 1' AND application_name = 'Reports'"));
     }
@@ -489,7 +489,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task AReSightingWithinTheHour_AddsToTheCount_AndLeavesLastSeenAlone()
+    public async Task AReSightingWithinTheHour_WritesNothing_SoTheCountAndLastSeenStay()
     {
         Sight(Snapshot(HashA));
         await SetLastSeenAsync(HashA, DateTime.UtcNow.AddMinutes(-10));
@@ -498,7 +498,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Sight(Snapshot(HashA));
 
         Assert.Equal(before, await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'"));
-        Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(1L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
     }
 
     private async Task<DateTime> LastSeenAsync(string key)
