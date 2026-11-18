@@ -44,8 +44,8 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>Load.</b> One server at a time, each read under the read-admission gate (<see cref="ReadAdmission"/>) as the
 /// <c>7d+</c> web read it stands in for, so it takes one of <c>reads.maxHeavyReads</c> slots and queues behind a
-/// visitor's read like any other. A refusal (the store is busy) ends the pass. A server already warm costs the open
-/// day's read, the days before the retention horizon and the trend read, and a retry pass re-reads only what failed.</para>
+/// visitor's read like any other. A refusal (the store is busy) ends the pass. A server already warm costs the days before
+/// the retention horizon and the trend read (#9039: not the open day's read, whose rows the warm read throws away), and a retry pass re-reads only what failed.</para>
 ///
 /// <para><b>Refresh (#8824).</b> A pass repeats every <see cref="RefreshInterval"/>, not once a day, because a block serves the days
 /// before the retention horizon for one hour only and a visitor after the hour paid their read, with the open day's, on pages
@@ -146,7 +146,7 @@ public sealed class DailySummaryWarmer
         await DarlingHealthReader.GetDailySummaryRangeAsync(
             postgres, serverId, fromDate, toDate, referenceUtc: null, asOfNow: true,
             separatelyMonitored: separatelyMonitored, logger: logger, cancellationToken: cancellationToken,
-            refreshSubHorizon: true).ConfigureAwait(false);
+            refreshSubHorizon: true, skipOpenDayTail: true).ConfigureAwait(false);
 
         /* #8824: the Overview's wait strip reads the 24-hour total_waits trend, which has no cache of its own, so its first read
            of a server after the pages left the store's buffers paid 4 to 8 seconds against about half a second for the next.

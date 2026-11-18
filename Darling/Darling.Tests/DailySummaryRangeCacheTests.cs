@@ -653,4 +653,86 @@ public sealed class DailySummaryRangeCacheTests
         Assert.All(again.Where(r => r.Day < D(25)), row => Assert.Equal(OwnerStart(row.Day), row.Value));
         Assert.Equal(1, tailReads); // the open day only
     }
+
+    [Fact]
+    public async Task GetRangeAsync_SkipOpenDayTail_OnAHeldBlock_ReadsNoOpenDay_AndAVisitorStillGetsIt()
+    {
+        /* #9039: the warmer throws the rows away, so on a block that holds every closed day its read must not run the statement
+           over the open day. A visitor's read of the same block still returns the open day, freshly read. */
+        var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var open = 7;
+        var calls = new List<(DateTime Start, DateTime End)>();
+
+        Task<List<TestRow>> Run(DateTime start, DateTime end, CancellationToken ct)
+        {
+            calls.Add((start, end));
+            var rows = new List<TestRow>();
+            for (var day = start; day < end; day = day.AddDays(1))
+            {
+                rows.Add(new TestRow(day, day == D(25) ? open : 1));
+            }
+
+            return Task.FromResult(rows);
+        }
+
+        Task<List<TestRow>> Read(bool skipOpenDayTail) => cache.GetRangeAsync(
+            storeKey: "store", serverId: ServerId, fromDate: D(1), toDate: D(26), routedSql: RoutedSql,
+            asOfNow: true, day: r => r.Day, runRange: Run, scopeKey: "", cancellationToken: CancellationToken.None,
+            skipOpenDayTail: skipOpenDayTail);
+
+        var cold = await Read(skipOpenDayTail: true);
+        Assert.Single(calls);
+        Assert.Contains(cold, r => r.Day == D(25) && r.Value == 7); /* a cold block is built whole, open day included */
+
+        calls.Clear();
+        open = 9;
+        var warm = await Read(skipOpenDayTail: true);
+        Assert.Empty(calls);
+        Assert.DoesNotContain(warm, r => r.Day == D(25));
+        Assert.Equal(24, warm.Count);
+
+        var visitor = await Read(skipOpenDayTail: false);
+        Assert.Single(calls);
+        Assert.Equal((D(25), D(26)), calls[0]);
+        Assert.Contains(visitor, r => r.Day == D(25) && r.Value == 9);
+        Assert.Equal(25, visitor.Count);
+    }
+
+    [Fact]
+    public async Task GetRangeAsync_SkipOpenDayTail_WhenTheBlockHasNotClosedYesterday_StillGrowsTheBlock()
+    {
+        /* Inside the grace after midnight the block's closed end is the 24th: the tail read is what closes the 24th into it. */
+        var now = new DateTime(2026, 9, 25, 1, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var calls = new List<(DateTime Start, DateTime End)>();
+
+        Task<List<TestRow>> Run(DateTime start, DateTime end, CancellationToken ct)
+        {
+            calls.Add((start, end));
+            var rows = new List<TestRow>();
+            for (var day = start; day < end; day = day.AddDays(1))
+            {
+                rows.Add(new TestRow(day, 1));
+            }
+
+            return Task.FromResult(rows);
+        }
+
+        Task<List<TestRow>> Read(bool skipOpenDayTail) => cache.GetRangeAsync(
+            storeKey: "store", serverId: ServerId, fromDate: D(1), toDate: D(26), routedSql: RoutedSql,
+            asOfNow: true, day: r => r.Day, runRange: Run, scopeKey: "", cancellationToken: CancellationToken.None,
+            skipOpenDayTail: skipOpenDayTail);
+
+        await Read(skipOpenDayTail: true);
+        now = new DateTime(2026, 9, 25, 3, 0, 0, DateTimeKind.Utc); /* past the grace: the 24th is now closed */
+        calls.Clear();
+        await Read(skipOpenDayTail: true);
+        Assert.Single(calls);
+        Assert.Equal((D(24), D(26)), calls[0]);
+
+        calls.Clear();
+        await Read(skipOpenDayTail: true);
+        Assert.Empty(calls); /* the block now holds the 24th, so the next warm read has no open-day work */
+    }
 }

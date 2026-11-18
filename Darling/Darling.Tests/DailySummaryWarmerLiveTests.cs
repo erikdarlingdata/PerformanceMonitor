@@ -218,6 +218,65 @@ public sealed class DailySummaryWarmerLiveTests
         }
     }
 
+    /// <summary>#9039: a range read that throws its rows away (the warmer's) runs fewer statements on a held block than the same read
+    /// that keeps them, because the open days' statement is left out. The kept read still returns today's row.</summary>
+    [Fact]
+    public async Task RangeRead_ThatSkipsTheOpenDayTail_RunsFewerStatementsOnAHeldBlock_AndTheKeptReadStillHasToday()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+            var today = DateTime.UtcNow.Date;
+            await PlantWaitAsync(connection, ServerIdA, ServerA, DateTime.UtcNow.AddHours(-1), 1000, ct);
+            var from = today.AddDays(-(DailySummaryWarmer.DaysBack - 1));
+
+            async Task<DarlingHealthReader.DailySummaryRangeReadResult> Read(bool skipOpenDayTail) => await DarlingHealthReader.GetDailySummaryRangeAsync(
+                dataSource, ServerIdA, from, today.AddDays(1), refreshSubHorizon: true, skipOpenDayTail: skipOpenDayTail, cancellationToken: ct);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await Read(skipOpenDayTail: false); /* builds the block and warms what the first read of a store warms */
+
+            var skipped = 0;
+            var kept = 0;
+            DarlingHealthReader.DailySummaryRangeReadResult keptResult = null!;
+            skipped = await StatementsRunAsync(async () =>
+            {
+                await Read(skipOpenDayTail: true);
+                return string.Empty;
+            });
+            kept = await StatementsRunAsync(async () =>
+            {
+                keptResult = await Read(skipOpenDayTail: false);
+                return string.Empty;
+            });
+
+            SkipWhenTheDayChanged(today);
+            Assert.True(skipped < kept, $"the read that skips the open days ran {skipped} statements and the read that keeps them ran {kept}");
+            Assert.Contains(keptResult.Rows, row => row.SummaryDate == today);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>#8824: the Overview's wait strip reads the 24-hour <c>total_waits</c> trend, which has no cache of its own, so
     /// the warm pass makes the same read to keep the store's pages recent. The read is seen by what it costs the store: a warm
     /// of a server the trend read resolves runs more statements than the same warm of a name it cannot resolve.</summary>
