@@ -518,6 +518,77 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
     private sealed record FleetRow(string Server, string? Display, string Database, string Source, long Executions, long CpuUs, long ElapsedUs, DateTime First, DateTime Last);
 
+    /// <summary>
+    /// The plan-cache source: the hourly tier <paramref name="tier"/> names, with whole closed days from the daily tier when every guard
+    /// holds (<see cref="PlanDailyMid"/>, <see cref="DailyHasNoHoleAsync"/>) and the newest hours the rollup has not built from the raw rows.
+    /// </summary>
+    private static async Task<(List<FleetRow> Rows, int Pairs)> ReadPlanCacheSourceAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, RetentionTier tier, string hash, DateTime start, DateTime windowEnd, int limit,
+        CancellationToken cancellationToken)
+    {
+        string? hourlyRelation = null;
+        var ceilingClause = "";
+        DailyMidPlan? mid = null;
+        var rawFrom = start;
+        if (tier != RetentionTier.Raw)
+        {
+            hourlyRelation = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", start, RollupCoverage.StitchTier.Hourly);
+            if (coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, start) is DateTime ceiling)
+            {
+                ceilingClause = RollupCoverage.HourlyCeilingClause(4);
+                rawFrom = ceiling > start ? ceiling : start;
+
+                /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
+                   (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
+                   fails leaves the hourly read alone. The re-read guard measures against the real clock, not the as_of window end:
+                   the daily refresh policy runs on the real clock, so a day is settled by when the policy last ran. */
+                mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, TimeProvider.System.GetUtcNow().UtcDateTime);
+                if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
+                {
+                    mid = null;
+                }
+            }
+            else
+            {
+                /* No measured ceiling means no bound on the rollup, so raw adds nothing. */
+                rawFrom = windowEnd.AddHours(1);
+            }
+        }
+
+        return await ReadFleetAsync(
+            postgres, mid is null ? BuildSql(hourlyRelation, ceilingClause) : BuildMidSql(hourlyRelation!, mid.DailyRelation),
+            PlanCacheSource, hash, start, windowEnd, rawFrom, limit, cancellationToken, mid);
+    }
+
+    /// <summary>
+    /// #7609: the Query Store source, over a window already capped at seven days. It reads the corrected hourly rollup below the rollup's
+    /// boundary and the deduped raw rows from it up, the split get_query_store_duration_trend makes, and returns the route so the answer can
+    /// say what history it could not serve.
+    /// </summary>
+    private static async Task<(QueryStoreTrendRouting.QueryStoreTrendRoute Route, List<FleetRow> Rows, int Pairs)> ReadQueryStoreSourceAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, string hash, DateTime qsStart, DateTime windowEnd, int limit,
+        CancellationToken cancellationToken)
+    {
+        var qsRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
+
+        /* #8570: the Query Store source reads whole closed days from the corrected daily rollup, the way the plan-cache source does. Any
+           guard that fails (no daily ceiling, fewer than two settled whole days, a day with no daily row) leaves the corrected hourly read alone. */
+        DailyMidPlan? qsMid = null;
+        if (qsRoute.UseRollup)
+        {
+            qsMid = PlanQueryStoreDailyMid(coverage, qsStart, windowEnd, qsRoute.RawStartUtc, TimeProvider.System.GetUtcNow().UtcDateTime);
+            if (qsMid is not null && !await DailyHasNoHoleAsync(postgres, qsMid, cancellationToken))
+            {
+                qsMid = null;
+            }
+        }
+
+        var (rows, pairs) = await ReadFleetAsync(
+            postgres, qsMid is null ? BuildQueryStoreSql(qsRoute.UseRollup) : BuildQueryStoreMidSql(), QueryStoreSource, hash, qsStart, windowEnd,
+            qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken, qsMid);
+        return (qsRoute, rows, pairs);
+    }
+
     private static async Task<(List<FleetRow> Rows, int Pairs)> ReadFleetAsync(
         NpgsqlDataSource postgres, string sql, string source, string hash, DateTime start, DateTime windowEnd, DateTime rawFrom, int limit,
         CancellationToken cancellationToken, DailyMidPlan? mid = null)
@@ -604,60 +675,16 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 start, rollups.QueryGrainHourly,
                 coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-            string? hourlyRelation = null;
-            var ceilingClause = "";
-            DailyMidPlan? mid = null;
-            var rawFrom = start;
-            if (tier != RetentionTier.Raw)
-            {
-                hourlyRelation = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", start, RollupCoverage.StitchTier.Hourly);
-                if (coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, start) is DateTime ceiling)
-                {
-                    ceilingClause = RollupCoverage.HourlyCeilingClause(4);
-                    rawFrom = ceiling > start ? ceiling : start;
-
-                    /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
-                       (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
-                       fails leaves the hourly read alone. The re-read guard measures against the real clock, not the as_of window end:
-                       the daily refresh policy runs on the real clock, so a day is settled by when the policy last ran. */
-                    mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, TimeProvider.System.GetUtcNow().UtcDateTime);
-                    if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
-                    {
-                        mid = null;
-                    }
-                }
-                else
-                {
-                    /* No measured ceiling means no bound on the rollup, so raw adds nothing. */
-                    rawFrom = windowEnd.AddHours(1);
-                }
-            }
-
-            var (planRows, planPairs) = await ReadFleetAsync(
-                postgres, mid is null ? BuildSql(hourlyRelation, ceilingClause) : BuildMidSql(hourlyRelation!, mid.DailyRelation),
-                PlanCacheSource, hash, start, windowEnd, rawFrom, limit, cancellationToken, mid);
-
-            /* #7609: the Query Store source, capped at seven days. It reads the corrected hourly rollup below the rollup's boundary and the
-               deduped raw rows from it up, the split get_query_store_duration_trend makes. */
+            /* #8570: the two sources share nothing but the window, so they run together, each its own commands on its own pooled
+               connections, and the call waits on the slower of the two rather than their sum. Both are awaited before either is used, so a
+               failed read never leaves the other running past the call. */
             var qsHours = hours_back > QueryStoreMaxHours ? QueryStoreMaxHours : hours_back;
             var qsStart = windowEnd.AddHours(-qsHours);
-            var qsRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
-
-            /* #8570: the Query Store source reads whole closed days from the corrected daily rollup, the way the plan-cache source does. Any
-               guard that fails (no daily ceiling, fewer than two settled whole days, a day with no daily row) leaves the corrected hourly read alone. */
-            DailyMidPlan? qsMid = null;
-            if (qsRoute.UseRollup)
-            {
-                qsMid = PlanQueryStoreDailyMid(coverage, qsStart, windowEnd, qsRoute.RawStartUtc, TimeProvider.System.GetUtcNow().UtcDateTime);
-                if (qsMid is not null && !await DailyHasNoHoleAsync(postgres, qsMid, cancellationToken))
-                {
-                    qsMid = null;
-                }
-            }
-
-            var (qsRows, qsPairs) = await ReadFleetAsync(
-                postgres, qsMid is null ? BuildQueryStoreSql(qsRoute.UseRollup) : BuildQueryStoreMidSql(), QueryStoreSource, hash, qsStart, windowEnd,
-                qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken, qsMid);
+            var planRead = ReadPlanCacheSourceAsync(postgres, coverage, tier, hash, start, windowEnd, limit, cancellationToken);
+            var qsRead = ReadQueryStoreSourceAsync(postgres, coverage, hash, qsStart, windowEnd, limit, cancellationToken);
+            await Task.WhenAll(planRead, qsRead);
+            var (planRows, planPairs) = await planRead;
+            var (qsRoute, qsRows, qsPairs) = await qsRead;
             var qsCut = hours_back > QueryStoreMaxHours;
             var qsUnservedBefore = QueryStoreTrendRouting.UnservedBefore(qsRoute, qsStart);
 
