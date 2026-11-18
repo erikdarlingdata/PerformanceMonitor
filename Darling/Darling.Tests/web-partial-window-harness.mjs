@@ -126,6 +126,7 @@ const alertBody = [
   "  Incident Since: 2026-10-12 23:13:00Z",
   "  Blocked Query: SELECT 1 WHERE d = '2026-01-01 00:00:00Z'",
   "  Failed At: 2026-10-12 07:00:00Z",
+  "  Run Started: 2026-10-12 06:30:00Z",
   "  Started: 2026-09-27 21:32:43 (server clock, UTC offset not collected)",
   "  Window: 2026-10-12 07:00:00Z → 2026-10-12 08:00:00Z",
   "",
@@ -148,7 +149,7 @@ out.h2 = {
   bodyNoSample: localizeAlertDetail(alertBody, null),
   bodyOtherClock: localizeAlertDetail(alertBody, { ...sample, instant_utc: "2026-10-12T23:12:46Z" }),
   stripUtc: noticeStrip("until 2026-10-11 12:48:52Z").textContent,
-  here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
+  here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), runStart: here("2026-10-12T06:30:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
   bodyRaw: alertBody,
   auditBody: localizeAlertDetail(auditBody, null),
   /* a later clause that a full plainText pass would rewrite: the audit's match must stop at the end of its own sentence */
