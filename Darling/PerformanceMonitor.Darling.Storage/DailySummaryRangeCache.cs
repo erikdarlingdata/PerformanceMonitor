@@ -126,6 +126,8 @@ public sealed class DailySummaryRangeCache<TRow>
     /// #8824: the longer overload's <c>refreshSubHorizon</c> re-reads a block's sub-horizon segment on this call instead of when its
     /// hour is up. The warmer passes true on every pass, so the hour never lapses under a visitor (the first visit to a server an hour
     /// after its block was built otherwise paid the read of those days). A visitor's read leaves it false.
+    /// #9039: <c>skipOpenDayTail</c> is for a caller that throws the rows away. On a block that already holds every closed day it
+    /// skips the open days' read, and the rows it returns leave those days out.
     /// </summary>
     /// <param name="storeKey">Distinguishes stores sharing one cache instance (the service keeps ONE cache for every
     /// store it serves). Compared by value: the service passes <see cref="DailySummaryRangeCache.StoreKeyFor"/>, which
@@ -181,7 +183,8 @@ public sealed class DailySummaryRangeCache<TRow>
         DateTime? trustFromUtc = null,
         bool refreshSubHorizon = false,
         int missParts = 1,
-        Func<IReadOnlyList<(DateTime Start, DateTime End)>, CancellationToken, Task<IReadOnlyList<List<TRow>>>>? runMissRanges = null)
+        Func<IReadOnlyList<(DateTime Start, DateTime End)>, CancellationToken, Task<IReadOnlyList<List<TRow>>>>? runMissRanges = null,
+        bool skipOpenDayTail = false)
     {
         ArgumentNullException.ThrowIfNull(day);
         ArgumentNullException.ThrowIfNull(runRange);
@@ -236,7 +239,11 @@ public sealed class DailySummaryRangeCache<TRow>
             var joined = new List<TRow>(block.ClosedRows.Count + 8);
             joined.AddRange(block.ClosedRows);
 
-            if (block.ClosedEndUtc < toDate)
+            /* #9039: a caller that discards the rows (the warmer) and finds a block that already holds every day closed so far has
+               nothing to build from the open days, and their statement is the dearest one of the read (a count of the day's distinct
+               queries over every raw row since midnight), so it is not run. The rows returned then leave out the open days. When the
+               block has yet to close a day (the grace after midnight), the tail still runs because it grows the block. */
+            if (block.ClosedEndUtc < toDate && !(skipOpenDayTail && block.ClosedEndUtc >= closedEndUtc))
             {
                 var tailRows = await runRange(block.ClosedEndUtc, toDate, cancellationToken).ConfigureAwait(false);
                 joined.AddRange(tailRows);
@@ -274,7 +281,7 @@ public sealed class DailySummaryRangeCache<TRow>
                 var sliced = found.Value with { ClosedRows = found.Value.ClosedRows.Where(row => day(row) >= fromDate).ToList() };
                 if (_blocks.TryAdd(key, sliced))
                 {
-                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc, refreshSubHorizon, missParts, runMissRanges).ConfigureAwait(false);
+                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc, refreshSubHorizon, missParts, runMissRanges, skipOpenDayTail).ConfigureAwait(false);
                 }
             }
         }
