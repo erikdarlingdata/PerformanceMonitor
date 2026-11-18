@@ -386,7 +386,7 @@ WHERE t.token_id = v.token_id";
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Whether the exception says the table does not exist: a store below V274, as the store raised it (42P01) or as the catalog check of
+    /// <summary>Whether the exception says the table does not exist: a store below V275, as the store raised it (42P01) or as the catalog check of
     /// <see cref="LoadAllAsync"/> and <see cref="ApplySettingsAsync"/> found it. Callers branch on this one test.</summary>
     public static bool IsMissingTable(Exception ex) =>
         ex is PersonalTokenTableMissingException or PostgresException { SqlState: PostgresErrorCodes.UndefinedTable };

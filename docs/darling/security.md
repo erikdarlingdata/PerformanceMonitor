@@ -238,7 +238,7 @@ Each revoked token records a reason code and who revoked it. `revoked_by_owner` 
 
 **The delay.** A revoke takes effect at once for this service's own dashboard and sign-ins. Anywhere else it takes at most 5 seconds: another service on the same store, or a direct edit of the store.
 
-**When the store is down.** While the store does not answer, or has not been upgraded to V274, every personal token is refused until the store answers again. File tokens keep working and remain the break-glass credential. A file token that happens to have the exact `dpt1_` shape is refused too during such an outage.
+**When the store is down.** While the store does not answer, or has not been upgraded to V275, every personal token is refused until the store answers again. File tokens keep working and remain the break-glass credential. A file token that happens to have the exact `dpt1_` shape is refused too during such an outage.
 
 **A sign-in that cannot revoke.** A sign-in while the store is down, or before the service has opened its owner connection after a start, revokes nothing. The service logs a warning and does not try again. A person the role mapping now refuses cannot sign in again to trigger it, so their tokens live until they expire unless an admin revokes them. A person who signs in only through a front door never triggers a revoke, because the front door serves no personal tokens.
 
