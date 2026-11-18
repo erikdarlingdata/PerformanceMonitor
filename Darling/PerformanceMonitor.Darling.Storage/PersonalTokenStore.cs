@@ -64,17 +64,14 @@ WHERE owner_key = $1";
 INSERT INTO config.mcp_personal_token (token_id, secret_sha256, owner_key, subject, token_name, role, created_at, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
 
-    /* The newest $2 rows (the caller asks for one more than it answers), handed back oldest first. */
+    /* The first $2 rows (the caller asks for one more than it answers), live ones first and then newest first, in that order: a live token
+       (not revoked, not expired at $3) is never the row that is left out while dead ones are kept. The caller sorts the page. */
     private const string ListSql = @"
 SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, last_used_at, revoked_at, revoked_by, revoke_reason
-FROM (
-    SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, last_used_at, revoked_at, revoked_by, revoke_reason
-    FROM config.mcp_personal_token
-    WHERE $1::text IS NULL OR owner_key = $1
-    ORDER BY created_at DESC, token_id DESC
-    LIMIT $2
-) AS newest
-ORDER BY created_at, token_id";
+FROM config.mcp_personal_token
+WHERE $1::text IS NULL OR owner_key = $1
+ORDER BY (revoked_at IS NULL AND expires_at > $3) DESC, created_at DESC, token_id DESC
+LIMIT $2";
 
     private const string LoadAllSql = @"
 SELECT token_id, owner_key, subject, token_name, role, created_at, expires_at, last_used_at, revoked_at, revoked_by, revoke_reason, secret_sha256
@@ -201,15 +198,16 @@ WHERE t.token_id = v.token_id";
     }
 
     /// <summary>
-    /// The tokens of one owner key, or of everyone when <paramref name="ownerKey"/> is null: the newest <see cref="ListLimit"/>, oldest first, and
-    /// whether older rows were left out (read with one more row than it answers, #3699). Never selects the hash.
+    /// The tokens of one owner key, or of everyone when <paramref name="ownerKey"/> is null: <see cref="ListLimit"/> rows, live ones first and then
+    /// the newest, handed back oldest first, and whether rows were left out (read with one more row than it answers, #3699). A live token at
+    /// <paramref name="now"/> is never the one left out while a dead one is kept. Never selects the hash.
     /// </summary>
-    public static async Task<PersonalTokenPage> ListAsync(NpgsqlDataSource owner, string? ownerKey, CancellationToken ct)
+    public static async Task<PersonalTokenPage> ListAsync(NpgsqlDataSource owner, string? ownerKey, DateTimeOffset now, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(owner);
         await using var connection = await owner.OpenConnectionAsync(ct);
         await using var command = Command(connection, null, ListSql, NullableText(ownerKey),
-            new NpgsqlParameter<int> { TypedValue = ListLimit + 1, NpgsqlDbType = NpgsqlDbType.Integer });
+            new NpgsqlParameter<int> { TypedValue = ListLimit + 1, NpgsqlDbType = NpgsqlDbType.Integer }, Time(now.ToUniversalTime()));
         await using var reader = await command.ExecuteReaderAsync(ct);
         var rows = new List<PersonalTokenRow>();
         while (await reader.ReadAsync(ct))
@@ -217,13 +215,14 @@ WHERE t.token_id = v.token_id";
             rows.Add(ReadRow(reader));
         }
 
-        /* The extra row is the oldest one read; it is left out. */
+        /* The extra row is the last one read (a dead one, the oldest, unless every row is live); it is left out. */
         var truncated = rows.Count > ListLimit;
         if (truncated)
         {
-            rows.RemoveAt(0);
+            rows.RemoveAt(rows.Count - 1);
         }
 
+        rows.Sort((x, y) => x.CreatedAt != y.CreatedAt ? x.CreatedAt.CompareTo(y.CreatedAt) : string.CompareOrdinal(x.TokenId, y.TokenId));
         return new PersonalTokenPage(rows, truncated);
     }
 

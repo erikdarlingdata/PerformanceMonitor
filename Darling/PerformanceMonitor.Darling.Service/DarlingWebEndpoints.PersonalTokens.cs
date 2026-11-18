@@ -148,7 +148,7 @@ public static partial class DarlingWebEndpoints
                         return Retry();
                     }
 
-                    var page = await PersonalTokenStore.ListAsync(owner, all ? null : seat.OwnerKey, context.RequestAborted);
+                    var page = await PersonalTokenStore.ListAsync(owner, all ? null : seat.OwnerKey, clock.GetUtcNow(), context.RequestAborted);
                     rows = page.Rows;
                     truncated = page.Truncated;
                 }

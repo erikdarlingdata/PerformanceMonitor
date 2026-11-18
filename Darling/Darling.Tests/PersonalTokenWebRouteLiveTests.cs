@@ -266,7 +266,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
 
         Assert.Equal(400, reply.Status);
         Assert.Equal("role_not_allowed", reply.Error);
-        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken)).Rows);
+        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, DateTimeOffset.UtcNow, TestContext.Current.CancellationToken)).Rows);
     }
 
     [Fact]
@@ -421,7 +421,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal(429, refused.Status);
         Assert.Equal("too_many_recent", refused.Error);
         Assert.False(string.IsNullOrWhiteSpace((string?)refused.Body!["message"]));
-        Assert.DoesNotContain((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken)).Rows,
+        Assert.DoesNotContain((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, DateTimeOffset.UtcNow, TestContext.Current.CancellationToken)).Rows,
             r => r.TokenName == "one-more");
     }
 
@@ -496,7 +496,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         }
 
         Assert.False((bool?)me.Body!["personal_tokens"]);
-        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, ada.OwnerKey, TestContext.Current.CancellationToken)).Rows);
+        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, ada.OwnerKey, DateTimeOffset.UtcNow, TestContext.Current.CancellationToken)).Rows);
     }
 
     [Fact]
@@ -522,7 +522,7 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal(415, text.Status);
         Assert.Equal(415, form.Status);
         Assert.Equal(415, none.Status);
-        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, TestContext.Current.CancellationToken)).Rows);
+        Assert.Empty((await PersonalTokenStore.ListAsync(rig.Owner, vera.OwnerKey, DateTimeOffset.UtcNow, TestContext.Current.CancellationToken)).Rows);
     }
 
     [Fact]
