@@ -174,7 +174,7 @@ ORDER BY bucket";
     }
         }
 
-    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null)
+    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null, bool untilExhausted = false)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -540,9 +540,23 @@ ORDER BY p.page_ord";
         return (items, candidateRows.Count);
         }
 
-        return await TopFill.RunAsync(top, RunRoundAsync);
+        /* #8570: untilExhausted is the existence test's fill (QueryStoreWindowHasRowsAsync), which ranks until a showable
+           group is found or every candidate was seen; the grid and the MCP page take the bounded one. */
+        return untilExhausted
+            ? await TopFill.RunUntilExhaustedAsync(top, RunRoundAsync)
+            : await TopFill.RunAsync(top, RunRoundAsync);
         }
     }
+
+    /// <summary>
+    /// #8570: whether the window holds at least one group the Query Store top read would show: the same read (window,
+    /// database filter, deduplication, text resolution and WAITFOR exclusion) at top 1, with a fill that does not stop
+    /// short. The bounded fill of <see cref="GetQueryStoreTopQueriesAsync"/> ranks at most <c>top + 200</c> candidates
+    /// in three rounds, so its top-1 page is empty whenever more WAITFOR groups than its last round's limit rank above
+    /// the first showable one; this answer is false only when no showable group exists in the window.
+    /// </summary>
+    public async Task<bool> QueryStoreWindowHasRowsAsync(int serverId, int hoursBack, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        => (await GetQueryStoreTopQueriesAsync(serverId, hoursBack, 1, databaseNames: databaseNames, asOfUtc: asOfUtc, untilExhausted: true)).Count > 0;
 
     /// <summary>
     /// Gets query store comparison between a current time range and a baseline range.

@@ -125,8 +125,9 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                     history_source = read.Table is null ? "raw" : "interval_table"
                 };
 
-                /* A measured zero is an answer: the same window and scope read without the outcome filter has runs, and none ended aborted or failed. */
-                var anyRuns = (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, windowEnd, 1, databases, cancellationToken)).Count > 0;
+                /* A measured zero is an answer: the same window and scope without the outcome filter holds runs, and none ended aborted or failed.
+                   An existence probe answers that (the top read's tier, bounds and exclusions, no ranking). */
+                var anyRuns = await DarlingDataReader.QueryStoreWindowHasRowsAsync(postgres, resolved.ServerId, requestedStart, windowEnd, databases, cancellationToken);
                 if (anyRuns)
                 {
                     return McpHelpers.StatusForDatabase(
