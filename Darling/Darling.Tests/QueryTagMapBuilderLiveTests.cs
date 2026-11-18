@@ -128,7 +128,7 @@ public sealed class QueryTagMapBuilderLiveTests
     }
 
     [Fact]
-    public async Task ABatchWritesItsSightings_AndTheSameKeyTwiceBumpsSeenCountNotASecondRow()
+    public async Task ABatchWritesItsSightings_AndTheSameKeyTwiceInOneBatchSumsItsCountIntoOneRow()
     {
         await WithStoreAsync(async env =>
         {
@@ -139,19 +139,19 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
             Assert.Equal("first", await ScalarAsync(env, "SELECT text_sample FROM collect.query_tag_sightings WHERE key = '0xAA'"));
 
-            /* A later batch with the same key bumps the count and last_seen, keeps the first text. */
+            /* A later batch with the same key inside the hour writes no row (#8979): the count, last_seen and first text stay. */
             await SightAsync(env, HashSightings("0xAA", "App", "third"));
 
             Assert.Equal("2", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
-            Assert.Equal("3", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
             Assert.Equal("first", await ScalarAsync(env, "SELECT text_sample FROM collect.query_tag_sightings WHERE key = '0xAA'"));
-            /* Within the hour the later batch adds to the count but leaves last_seen where it was (#8716). */
+            /* Within the hour the later batch leaves last_seen where it was (#8716). */
             Assert.Equal("True", await ScalarAsync(env, "SELECT last_seen = first_seen FROM collect.query_tag_sightings WHERE key = '0xAA'"));
         });
     }
 
     [Fact]
-    public async Task AReSightingWithinTheHour_AddsToTheCount_AndLeavesLastSeenAlone()
+    public async Task AReSightingWithinTheHour_WritesNothing_SoTheCountAndLastSeenStay()
     {
         await WithStoreAsync(async env =>
         {
@@ -161,7 +161,7 @@ public sealed class QueryTagMapBuilderLiveTests
 
             await SightAsync(env, HashSightings("0xAA", "App"), HashSightings("0xAA", "App"));
 
-            Assert.Equal("3", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
             Assert.Equal(stored, await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'"));
         });
     }
@@ -185,7 +185,7 @@ public sealed class QueryTagMapBuilderLiveTests
             await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '61 minutes'");
             await SightAsync(env, HashSightings("0xAA", "App"));
 
-            Assert.Equal("3", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
             Assert.Equal("True", await ScalarAsync(
                 env, $"SELECT last_seen <= now() - {Backdate} AND last_seen > now() - {Backdate} - interval '1 minute' FROM collect.query_tag_sightings WHERE key = '0xAA'"));
         });
@@ -276,7 +276,7 @@ public sealed class QueryTagMapBuilderLiveTests
 
             Assert.Equal(new[] { $"hash|0xAA|{reports}|rule" }, await MapAsync(env));
             Assert.Equal(built, await ScalarAsync(env, "SELECT built_at::text FROM config.query_tag_map WHERE key = '0xAA'"));
-            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
         });
     }
 
@@ -548,7 +548,7 @@ public sealed class QueryTagMapBuilderLiveTests
             await SightAsync(env, HashSightings("0xAA", "App", database: "Sales"));
 
             Assert.Equal("2", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings WHERE key = '0xAA'"));
-            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA' AND database_name = 'Sales'"));
+            Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA' AND database_name = 'Sales'"));
             Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA' AND database_name = 'Archive01'"));
 
             var builder = new QueryTagMapBuilder(env.Source);
