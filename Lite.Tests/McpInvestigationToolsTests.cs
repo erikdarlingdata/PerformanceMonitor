@@ -241,6 +241,51 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Assert.Equal("false", Scalar($"SELECT root_cause_found::VARCHAR FROM investigation_reports WHERE request_id = '{id}'"));
     }
 
+    /* #8983: the report read keeps the newest requests that fit the response budget, each whole with its report and journal rows,
+       and says how many it left out; a window that fits is the same reply as the read without a budget. */
+    [Fact]
+    public async Task GetInvestigationReports_OverTheBudget_KeepsTheNewestRequestsWhole_AndSaysWhatItLeftOut()
+    {
+        const int total = 45;
+        var composer = Composer();
+        var ids = new List<Guid>();
+        for (var i = 0; i < total; i++)
+        {
+            var id = (await _store.OpenOrJoinAsync(
+                new InvestigationAlert(1, 100 + i, "srv-" + i.ToString(CultureInfo.InvariantCulture), "blocking", "Blocking", _now,
+                    new[] { "key-" + i.ToString(CultureInfo.InvariantCulture) }, null, 1000, 10000, LeaseMinutes: 15, ExpiryMinutes: 240), Ct)).RequestId!.Value;
+            Exec($"UPDATE investigation_requests SET opened_at = TIMESTAMP '{DateTime.UtcNow.AddMinutes(i - total).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' WHERE request_id = '{id}'");
+            var claim = Root(await McpInvestigationTools.ClaimAsync(_store, composer, id.ToString(), "agent-a", null, null, Ct));
+            var submitted = Root(await McpInvestigationTools.SubmitAsync(_store, id.ToString(), claim.GetProperty("claim_id").GetString()!, 1,
+                "real", $"case-{i:D3} " + new string('x', 1500), Evidence, "summary", null, null, Ct));
+            Assert.Equal("reported", submitted.GetProperty("status").GetString());
+            ids.Add(id);
+        }
+
+        var json = await McpInvestigationTools.GetInvestigationReports(_servers, _store, composer, null, null, 24, Ct);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
+        var root = Root(json);
+        var kept = root.GetProperty("requests_returned").GetInt32();
+        Assert.InRange(kept, 1, total - 1);
+        var newestFirst = ids.AsEnumerable().Reverse().Take(kept).ToList();
+        Assert.Equal(newestFirst, root.GetProperty("requests").EnumerateArray().Select(r => r.GetProperty("request_id").GetGuid()).ToList());
+        Assert.Equal(newestFirst.OrderBy(g => g).ToList(), root.GetProperty("reports").EnumerateArray().Select(r => r.GetProperty("request_id").GetGuid()).OrderBy(g => g).ToList());
+        var journal = root.GetProperty("journal").EnumerateArray().ToList();
+        foreach (var id in newestFirst)
+            Assert.Equal(Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{id}'"),
+                journal.Count(j => j.GetProperty("request_id").GetString() == id.ToString()).ToString(CultureInfo.InvariantCulture));
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+        var note = root.GetProperty("budget_note").GetString()!;
+        Assert.Contains($"{total - kept:#,0} were left out", note, StringComparison.Ordinal);
+        Assert.Contains("server_name or request_id, or a smaller hours_back", note, StringComparison.Ordinal);
+
+        /* A window that fits is the same reply as the read without a budget, with no budget fields. */
+        var small = await McpInvestigationTools.GetInvestigationReports(_servers, _store, composer, null, ids[total - 1].ToString(), 24, Ct);
+        Assert.Equal(await McpInvestigationTools.ReportsAsync(_servers, _store, McpDataDetail.Full, null, ids[total - 1].ToString(), 24, Ct), small);
+        Assert.False(Root(small).TryGetProperty("budget_note", out _));
+    }
+
     /* The window and the journal say when they held more than the page: 101 requests in the window is truncated, 100 is
        not; 201 journal rows on the page's requests is journal_truncated, 200 is not. */
     [Fact]
