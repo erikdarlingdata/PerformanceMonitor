@@ -553,13 +553,14 @@ public sealed partial class ViewerDataService
                 FROM ranked AS k
                 ORDER BY k.total_executions * k.avg_duration_ms DESC, k.database_name, k.query_id, k.plan_id, k.query_hash, k.execution_type_desc, k.replica_role
             ) AS r
-            /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
-               t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
-               value without either having to know where it came from.
+            /* #2150: resolve the text inside the lateral, so the projection above and the WAITFOR and self-statement
+               tests below all read one t.query_text without knowing where it came from.
                First arm: collect.query_store_text, one row per (server, database, query_id), which is where the
                collector lands text once the separate fetch is on. Second arm: the newest inline query_text on
-               the fact row, which is where text lived BEFORE the cutover — it stays because dropping it would
-               blank the text on all existing history. */
+               the fact row, which is where text lived BEFORE the cutover. It stays because dropping it would
+               blank the text on all existing history. OFFSET 0 keeps the lookup a subquery of its own, run once
+               for each candidate the LIMIT reaches. Without it the planner copies the lookup into the projection
+               and into each text test, and runs every copy. */
             LEFT JOIN LATERAL (
                 SELECT COALESCE(
                            (
@@ -590,6 +591,7 @@ public sealed partial class ViewerDataService
                                LIMIT 1
                            )
                        ) AS query_text
+                OFFSET 0
             ) AS t ON TRUE
             /* #6665: the monitor's own statement is left out here too, before the LIMIT, by the shared read-side predicate
                (QueryStoreSelfStatement): on Darling its row is stored, because the collector's drop tests an inline text column
