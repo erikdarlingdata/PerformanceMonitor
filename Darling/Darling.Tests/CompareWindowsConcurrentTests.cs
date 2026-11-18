@@ -106,4 +106,23 @@ public sealed class CompareWindowsConcurrentTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             DarlingAnalysisService.CollectBothWindowsAsync(EngineWith(collector), baselineContext, comparisonContext).WaitAsync(Bound));
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACancelledWindow_ReachesTheCallerAsCancellation_WhenTheOtherWindowFaulted(bool baselineCancelled)
+    {
+        var baselineContext = Window(DateTime.UtcNow.AddHours(-4));
+        var comparisonContext = Window(DateTime.UtcNow);
+        Task<List<Fact>> Cancelled(AnalysisContext _) => Task.FromCanceled<List<Fact>>(new CancellationToken(canceled: true));
+        Task<List<Fact>> Faulted(AnalysisContext _) => Task.FromException<List<Fact>>(new InvalidOperationException("window failed"));
+
+        var collector = new ScriptedCollector(
+            baseline: baselineCancelled ? Cancelled : Faulted,
+            comparison: baselineCancelled ? Faulted : Cancelled,
+            baselineContext);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            DarlingAnalysisService.CollectBothWindowsAsync(EngineWith(collector), baselineContext, comparisonContext).WaitAsync(Bound));
+    }
 }

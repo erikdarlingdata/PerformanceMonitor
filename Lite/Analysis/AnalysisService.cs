@@ -714,6 +714,9 @@ public class AnalysisService
 
         try
         {
+            /* The windows are read one after the other. Starting both before awaiting either would buy nothing here:
+               DuckDB.NET's async completes on the calling thread (see DuckDbInitializer's LockReleaser), and a store
+               read that never yields cannot overlap another. */
             var baselineFacts = await _collector.CollectFactsAsync(baselineContext);
             var comparisonFacts = await _collector.CollectFactsAsync(comparisonContext);
 
