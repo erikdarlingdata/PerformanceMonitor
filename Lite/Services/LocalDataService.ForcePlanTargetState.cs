@@ -121,7 +121,32 @@ apc_latest AS (
       AND p.collection_time > $2
     WHERE p.recommendation_name IS NOT NULL
 ),
-enablement AS (
+enablement_recent AS (
+    SELECT
+        td.database_name,
+        er.force_last_good_plan_actual_state,
+        er.collection_time
+    FROM (SELECT DISTINCT database_name FROM targets) AS td
+    CROSS JOIN LATERAL (
+        SELECT
+            e.force_last_good_plan_actual_state,
+            e.collection_time
+        FROM v_plan_correction AS e
+        WHERE e.server_id = $1
+        AND   e.database_name = td.database_name
+        AND   e.collection_time > $2 + INTERVAL '23 hours'
+        ORDER BY e.collection_time DESC
+        LIMIT 1
+    ) AS er
+),
+enablement_missing AS (
+    SELECT database_name FROM targets
+    EXCEPT
+    SELECT database_name FROM enablement_recent
+),
+enablement AS MATERIALIZED (
+    SELECT database_name, force_last_good_plan_actual_state, collection_time FROM enablement_recent
+    UNION ALL
     SELECT
         el.database_name,
         el.force_last_good_plan_actual_state,
@@ -135,6 +160,7 @@ enablement AS (
         FROM v_plan_correction AS e
         WHERE e.server_id = $1
         AND   e.collection_time > $2
+        AND   e.database_name IN (SELECT database_name FROM enablement_missing)
     ) AS el
     WHERE el.rn = 1
 )
