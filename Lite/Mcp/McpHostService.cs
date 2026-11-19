@@ -524,13 +524,14 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>
-    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the data-detail filter
-    /// (#5820, <c>mcp_data_detail</c>), then the statement filter (#4348). The same objects Darling's host registers, in
+    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the <c>database_name</c> resolution
+    /// (#9065), the data-detail filter (#5820, <c>mcp_data_detail</c>), then the statement filter (#4348). The same objects Darling's host registers, in
     /// its order, from <c>PerformanceMonitor.Common</c>, so the two SKUs cannot answer differently. Lite's write and
     /// investigation gates are not filters: an unserved tool is absent from the served collection. Registered through this one method so a test can start a server with the REAL list.
     /// </summary>
     internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) => filters
         .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+        .AddCallToolFilter(McpDatabaseNameFilter.Using(McpDatabaseNames.CandidatesAsync))
         .AddCallToolFilter(McpDataDetailFilter.Instance)
         .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
 

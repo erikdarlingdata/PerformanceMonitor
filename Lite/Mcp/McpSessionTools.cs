@@ -23,7 +23,7 @@ public sealed class McpSessionTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to retrieve. Default 1.")] int hours_back = 1,
-        [Description("Filter to a specific database. Applied in SQL; a head blocker in ANOTHER database is then not on the page, and its victims say blocker_not_shown = filtered.")] string? database_name = null,
+        [Description("Filter to one database, in SQL; a head blocker in ANOTHER database is then not on the page, and its victims say blocker_not_shown = filtered.")] string? database_name = null,
         [Description("Show only queries involved in blocking: rows with blocking_session_id > 0, plus the head blockers those rows name in the same capture.")] bool blocking_only = false,
         [Description("Only rows waiting on this wait type at capture, e.g. PAGEIOLATCH_SH: exact name, any case. Applied in SQL. A head blocker on another wait is then off the page (blocker_not_shown = filtered).")] string? wait_type = null,
         [Description("Maximum number of rows to return. Default 25 (down from 50, sized to fit the response budget). The page is bounded by limit, not hours_back: truncated says whether the window held more.")] int limit = DefaultLimit,

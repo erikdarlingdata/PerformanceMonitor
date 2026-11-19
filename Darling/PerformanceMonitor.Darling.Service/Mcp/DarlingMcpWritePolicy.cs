@@ -438,6 +438,9 @@ internal static class DarlingMcpWritePolicy
             annotations.ReadOnlyHint = !write && !IsInvestigation(protocol.Name);
             annotations.DestructiveHint = write;
             protocol.Annotations = annotations;
+
+            /* #9065: a tool that changes state takes database_name in its exact spelling only, and its description says so. */
+            McpDatabaseNameResolver.DescribeMatching(protocol);
         }
     }
 

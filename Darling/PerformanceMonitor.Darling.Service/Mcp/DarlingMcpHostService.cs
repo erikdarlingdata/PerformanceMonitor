@@ -2108,7 +2108,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
             .WithGeminiCompatibleTools<DarlingMcpFinOpsTools>()
             // FinOps web parity (#4843), set B ends.
-            /* Four call-tool filters, each registered ONCE and each covering every tool with no
+            /* Five call-tool filters, each registered ONCE and each covering every tool with no
                per-tool change — the seam that exists precisely so a decision about all ~147 reads
                is made in one place.
 
@@ -2136,6 +2136,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
                never larger than the JSON (see GcfCallToolFilter / GcfOutput).
 
+               The database-name filter (#9065, McpDatabaseNameFilter) sits inside GCF and outside the two masking filters, so
+               it edits the answer as the tool's JSON. Before the tool runs it looks a call's database_name up on the server's
+               database lists (DarlingMcpDatabaseNames): a read is handed the stored spelling when exactly one differs only by
+               letter case, and a tool that changes state is refused with that spelling instead. A spelling one of the
+               server's hourly lists in the look-back holds passes as given.
+
                The statement filter (#4348, SensitiveStatementOutputFilter) is registered LAST, after GCF. The SDK
                documents the first filter added as the outermost, so the last one added sits next to the tool and
                reads each result as the tool's own JSON, before GCF re-encodes it (a GCF wire escapes a line feed
@@ -2153,13 +2159,15 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithRequestFilters(filters =>
             {
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
-                   what it is sent), the latency record (no store here to record it in), and the GCF re-encode. It keeps the two masking
-                   filters, which pass full through and let the front door mask more strictly than a store. */
+                   what it is sent), the latency record (no store here to record it in), the GCF re-encode, and the database-name filter
+                   (#9065: the store it forwards to holds the database lists and resolves the name). It keeps the two masking filters,
+                   which pass full through and let the front door mask more strictly than a store. */
                 if (frontDoor is null)
                 {
                     filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance);
                     filters.AddCallToolFilter(toolLatency.AsFilter());
                     filters.AddCallToolFilter(GcfCallToolFilter.Instance);
+                    filters.AddCallToolFilter(McpDatabaseNameFilter.Using(DarlingMcpDatabaseNames.CandidatesAsync));
                 }
 
                 filters.AddCallToolFilter(McpDataDetailFilter.Instance);

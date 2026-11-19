@@ -162,7 +162,7 @@ internal static class StatementFilterCensus
     /// <see cref="CallRealToolAsync"/>'s <c>bearerToken</c>. Dispose it with the test.
     /// </summary>
     public static async Task<TestServer> BuildLiveHostAsync(
-        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken)
+        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken, bool allowWrites = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -180,9 +180,11 @@ internal static class StatementFilterCensus
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
         var writes = DarlingMcpWritePolicy.ResolveForStart(
-            new McpConfig { AllowInvestigations = true, AllowWrites = false }, bearerToken, out var tokenProblem);
+            new McpConfig { AllowInvestigations = !allowWrites, AllowWrites = allowWrites }, bearerToken, out var tokenProblem);
         Assert.Null(tokenProblem);
-        Assert.True(writes.Investigations && !writes.Writes && !writes.ServerAdmin, "The live host must serve the investigation arm only.");
+        Assert.True(
+            writes.Writes == allowWrites && writes.Investigations == !allowWrites && !writes.ServerAdmin,
+            "The live host must serve one arm only: the write tools when asked for them, else the investigation tools.");
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),
@@ -262,6 +264,15 @@ internal static class StatementFilterCensus
         bool isError = result.TryGetProperty("isError", out var flag) && flag.ValueKind == JsonValueKind.True;
         string text = result.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
         return (text, isError);
+    }
+
+    /// <summary>The tools <c>tools/list</c> advertises on <paramref name="path"/>, each with the input schema it serves.</summary>
+    public static async Task<IReadOnlyList<(string Name, JsonElement InputSchema)>> ListToolSchemasAsync(
+        TestServer server, string path = "/", string? bearerToken = null)
+    {
+        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", bearerToken);
+        return doc.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Select(t => (t.GetProperty("name").GetString()!, t.GetProperty("inputSchema").Clone())).ToList();
     }
 
     /// <summary>The names <c>tools/list</c> advertises on <paramref name="path"/>.</summary>

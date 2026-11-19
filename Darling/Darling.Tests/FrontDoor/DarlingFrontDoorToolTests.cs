@@ -76,6 +76,9 @@ public sealed class DarlingFrontDoorToolTests
         var served = provider.GetRequiredService<IOptions<McpServerOptions>>().Value.ToolCollection!.ToList();
 
         var (registered, _, _) = McpToolsListBudgetTests.BuildServedTools();
+        /* The host stamps every registered tool with the write policy before the front door wraps it, and the stamp restates a
+           state-changing tool's database_name description (#9065). */
+        DarlingMcpWritePolicy.ApplyAnnotations(registered);
         var registeredCollection = new McpServerPrimitiveCollection<McpServerTool>();
         foreach (var registeredTool in registered)
         {
