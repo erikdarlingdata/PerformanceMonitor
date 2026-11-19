@@ -184,12 +184,15 @@ public sealed class McpDatabaseNameResolverTests
         /// <summary>The spellings only earlier lists hold: a database since renamed or recreated in another letter case.</summary>
         public string[] Earlier { get; init; } = Array.Empty<string>();
 
+        /// <summary>When the newest list was taken; null for a store that does not say.</summary>
+        public DateTime? ListTakenUtc { get; init; }
+
         public bool Throw { get; init; }
 
         /// <summary>The lookup never answers: it waits on its token, so only the filter's deadline ends it.</summary>
         public bool Hang { get; init; }
 
-        public async Task<IReadOnlyList<string>?> CandidatesAsync(
+        public async Task<McpDatabaseNameLookup?> CandidatesAsync(
             IServiceProvider? services, string? serverName, string databaseName, bool changesState, CancellationToken cancellationToken)
         {
             Lookups.Enqueue((serverName, databaseName, changesState));
@@ -209,7 +212,7 @@ public sealed class McpDatabaseNameResolverTests
                 names.Add(databaseName);
             }
 
-            return names;
+            return names is null ? null : new McpDatabaseNameLookup(names, ListTakenUtc);
         }
     }
 
@@ -403,6 +406,49 @@ public sealed class McpDatabaseNameResolverTests
     }
 
     [Fact]
+    public async Task TheTimeTheNewestListWasTaken_ReachesTheCaller_WhereverTheAnswerSpeaksOfThatList()
+    {
+        var taken = new DateTime(2026, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+        const string AsOf = "2026-03-04T05:06:07.0000000Z";
+        var store = new FakeStore(new[] { "master", "SalesDB", "Reports", "REPORTS" }) { ListTakenUtc = taken };
+        var (host, _) = await StartProbeHostAsync(store);
+        await using var __ = host;
+
+        var (resolved, _, _) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "salesdb"));
+        var (unseen, _, _) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "Nowhere"));
+        var (refused, _, refusedIsError) = await CallAsync(host, "dbname_probe_write", ("server_name", "srv"), ("database_name", "salesdb"));
+        var (ambiguous, _, ambiguousIsError) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "reports"));
+        var (exact, _, _) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "SalesDB"));
+
+        Assert.Equal(AsOf, McpDatabaseNameResolver.AsOf(taken));
+        Assert.Equal(AsOf, McpDatabaseNameResolver.AsOf(DateTime.SpecifyKind(taken, DateTimeKind.Unspecified)));
+        Assert.Equal("SalesDB", resolved!.Value.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+        Assert.Equal(AsOf, resolved.Value.GetProperty(McpDatabaseNameResolver.ResolvedAsOfField).GetString());
+
+        var note = unseen!.Value.GetProperty(McpDatabaseNameResolver.NoteField).GetString()!;
+        Assert.Equal(McpDatabaseNameResolver.NotSeenMessage("Nowhere", taken), note);
+        Assert.EndsWith("This server's newest database list was taken at " + AsOf + ".", note, StringComparison.Ordinal);
+
+        Assert.True(refusedIsError);
+        var refusal = refused!.Value.GetProperty("message").GetString()!;
+        Assert.Equal(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB", taken), refusal);
+        Assert.EndsWith("This server's newest database list was taken at " + AsOf + ".", refusal, StringComparison.Ordinal);
+
+        Assert.True(ambiguousIsError);
+        Assert.EndsWith(
+            "This server's newest database list was taken at " + AsOf + ".",
+            ambiguous!.Value.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        /* An exact name says nothing about the list, so it carries no time. */
+        Assert.False(exact!.Value.TryGetProperty(McpDatabaseNameResolver.ResolvedAsOfField, out var _));
+        Assert.False(exact.Value.TryGetProperty(McpDatabaseNameResolver.NoteField, out var _));
+
+        /* A store that does not say when leaves the time out. */
+        Assert.DoesNotContain("was taken at", McpDatabaseNameResolver.NotSeenMessage("Nowhere"), StringComparison.Ordinal);
+        Assert.DoesNotContain("was taken at", McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AToolThatChangesState_IsRefusedWithTheStoredSpelling_AndNeverRewritten()
     {
         var store = new FakeStore(new[] { "master", "SalesDB" });
@@ -557,8 +603,8 @@ public sealed class McpDatabaseNameCensusTests
             builder => builder.WithRequestFilters(filters =>
             {
                 filters.AddCallToolFilter(McpDatabaseNameFilter.Using((_, _, given, _, _) =>
-                    Task.FromResult<IReadOnlyList<string>?>(
-                        string.Equals(given, "SalesDB", StringComparison.OrdinalIgnoreCase) ? new[] { "SalesDB" } : Array.Empty<string>())));
+                    Task.FromResult<McpDatabaseNameLookup?>(new McpDatabaseNameLookup(
+                        string.Equals(given, "SalesDB", StringComparison.OrdinalIgnoreCase) ? new[] { "SalesDB" } : Array.Empty<string>()))));
                 filters.AddCallToolFilter(recorder);
             }));
 

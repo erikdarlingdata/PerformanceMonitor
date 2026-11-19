@@ -240,15 +240,15 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
         await SeedAsync();
         var now = DateTime.UtcNow;
 
-        Assert.Equal(new[] { "Sales", "sales" }, Sorted(await _service.DatabaseNameCandidatesAsync(_twinId, "sales", now)));
-        Assert.Equal(new[] { "Archive", "archive" }, Sorted(await _service.DatabaseNameCandidatesAsync(_twinId, "Archive", now)));
-        Assert.Equal(new[] { "Sales" }, await _service.DatabaseNameCandidatesAsync(_twinId, "Sales", now));
-        Assert.Equal(new[] { "Sales" }, await _service.DatabaseNameCandidatesAsync(_twinId, "SALES", now));
+        Assert.Equal(new[] { "Sales", "sales" }, Sorted((await _service.DatabaseNameCandidatesAsync(_twinId, "sales", now))?.Names));
+        Assert.Equal(new[] { "Archive", "archive" }, Sorted((await _service.DatabaseNameCandidatesAsync(_twinId, "Archive", now))?.Names));
+        Assert.Equal(new[] { "Sales" }, (await _service.DatabaseNameCandidatesAsync(_twinId, "Sales", now))?.Names);
+        Assert.Equal(new[] { "Sales" }, (await _service.DatabaseNameCandidatesAsync(_twinId, "SALES", now))?.Names);
 
         /* With only the newest list inside the look-back, the earlier spelling is on no list. */
         Assert.Equal(
             new[] { "Sales" },
-            await _service.DatabaseNameCandidatesAsync(_twinId, "sales", now + LocalDataService.FindDatabaseLookBack - TimeSpan.FromMinutes(30)));
+            (await _service.DatabaseNameCandidatesAsync(_twinId, "sales", now + LocalDataService.FindDatabaseLookBack - TimeSpan.FromMinutes(30)))?.Names);
     }
 
     [Fact]
@@ -260,6 +260,46 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => _service.DatabaseNameCandidatesAsync(_twinId, "sales", DateTime.UtcNow, cancelled.Token));
+    }
+
+    [Fact]
+    public async Task AListTakenDaysAgo_SaysWhenItWasTaken_BesideTheResolvedName_InTheNote_AndInTheRefusal()
+    {
+        /* Lite serves no tool that changes state and takes a database_name, so its outcomes are the resolved name, the note and
+           the refusal of a name two databases fit. */
+        const string Old = "DbnOldSrv";
+        var oldId = AddServer(Old);
+        var taken = DateTime.UtcNow.Date.AddDays(-3).AddHours(4).AddMinutes(5).AddSeconds(6);
+        var asOf = McpDatabaseNameResolver.AsOf(taken);
+        Assert.EndsWith("T04:05:06.0000000Z", asOf, StringComparison.Ordinal);
+        foreach (var database in new[] { "master", "SalesDB", "Reports", "REPORTS" })
+        {
+            await ExecuteAsync(@"
+INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
+VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
+                _nextId++, Naive(taken), oldId, Old, database);
+        }
+
+        var host = await StartLongQueryHostAsync();
+
+        Assert.Equal(taken, (await _service.DatabaseNameCandidatesAsync(oldId, "salesdb"))!.ListTakenUtc);
+
+        var (resolved, _) = await LongQueriesAsync(host, Old, "salesdb");
+        Assert.Equal("SalesDB", resolved.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+        Assert.Equal(asOf, resolved.GetProperty(McpDatabaseNameResolver.ResolvedAsOfField).GetString());
+
+        var (unseen, _) = await LongQueriesAsync(host, Old, "Nowhere");
+        var note = unseen.GetProperty(McpDatabaseNameResolver.NoteField).GetString()!;
+        Assert.Equal(McpDatabaseNameResolver.NotSeenMessage("Nowhere", taken), note);
+        Assert.EndsWith("was taken at " + asOf + ".", note, StringComparison.Ordinal);
+
+        var (ambiguous, ambiguousError) = await LongQueriesAsync(host, Old, "reports");
+        Assert.True(ambiguousError);
+        Assert.EndsWith("was taken at " + asOf + ".", ambiguous.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        /* An exact name says nothing about the list, so it carries no time. */
+        var (exact, _) = await LongQueriesAsync(host, Old, "SalesDB");
+        Assert.False(Has(exact, McpDatabaseNameResolver.ResolvedAsOfField));
     }
 
     [Fact]
@@ -316,7 +356,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
 
         Assert.False(isError);
         Assert.Equal("empty", answer.GetProperty("status").GetString());
-        Assert.Equal(McpDatabaseNameResolver.NotSeenMessage(given), answer.GetProperty(McpDatabaseNameResolver.NoteField).GetString());
+        Assert.StartsWith(McpDatabaseNameResolver.NotSeenMessage(given), answer.GetProperty(McpDatabaseNameResolver.NoteField).GetString(), StringComparison.Ordinal);
         Assert.False(Has(answer, McpDatabaseNameResolver.ResolvedField));
 
         /* The tool's own empty answer is still there, word for word: the note is the only thing added. */
@@ -351,16 +391,16 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
         await SeedAsync();
         var now = DateTime.UtcNow;
 
-        Assert.Equal(new[] { "SalesDB" }, await _service.DatabaseNameCandidatesAsync(_listedId, "SALESDB", now));
+        Assert.Equal(new[] { "SalesDB" }, (await _service.DatabaseNameCandidatesAsync(_listedId, "SALESDB", now))?.Names);
         Assert.Equal(
             new[] { "REPORTS", "Reports" },
-            (await _service.DatabaseNameCandidatesAsync(_listedId, "reports", now))!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
-        Assert.Empty((await _service.DatabaseNameCandidatesAsync(_listedId, "salesdb_old", now))!);
-        Assert.Null(await _service.DatabaseNameCandidatesAsync(_unlistedId, "SalesDB", now));
+            ((await _service.DatabaseNameCandidatesAsync(_listedId, "reports", now))?.Names)!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Empty(((await _service.DatabaseNameCandidatesAsync(_listedId, "salesdb_old", now))?.Names)!);
+        Assert.Null((await _service.DatabaseNameCandidatesAsync(_unlistedId, "SalesDB", now))?.Names);
 
         /* A list older than the look-back is no list. */
-        Assert.Null(await _service.DatabaseNameCandidatesAsync(
-            _listedId, "SalesDB", now + LocalDataService.FindDatabaseLookBack + TimeSpan.FromHours(1)));
+        Assert.Null((await _service.DatabaseNameCandidatesAsync(
+            _listedId, "SalesDB", now + LocalDataService.FindDatabaseLookBack + TimeSpan.FromHours(1)))?.Names);
     }
 
     /// <summary>

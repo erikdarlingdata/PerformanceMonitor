@@ -94,9 +94,20 @@ public sealed class McpDatabaseNameAfterArchiveTests : IDisposable
     }
 
     private async Task<string[]> CandidatesAsync(string databaseName) =>
-        (await new LocalDataService(_duckDb).DatabaseNameCandidatesAsync(ServerId, databaseName, _now, TestContext.Current.CancellationToken))!
+        (await new LocalDataService(_duckDb).DatabaseNameCandidatesAsync(ServerId, databaseName, _now, TestContext.Current.CancellationToken))!.Names
         .OrderBy(name => name, StringComparer.Ordinal)
         .ToArray();
+
+    /// <summary>When the lookup says the newest list was taken.</summary>
+    private async Task<DateTime?> ListTakenAsync(string databaseName) =>
+        (await new LocalDataService(_duckDb).DatabaseNameCandidatesAsync(ServerId, databaseName, _now, TestContext.Current.CancellationToken))!.ListTakenUtc;
+
+    /// <summary>The time <see cref="Listed"/> stores for a list taken <paramref name="age"/> ago: whole seconds.</summary>
+    private DateTime Stamped(TimeSpan age)
+    {
+        var at = _now - age;
+        return new DateTime(at.Year, at.Month, at.Day, at.Hour, at.Minute, at.Second);
+    }
 
     [Fact]
     public async Task AfterArchiveReset_TheListAndTheEarlierSpellingComeFromTheArchive_AndANewHotListIsTheNewestOne()
@@ -116,6 +127,7 @@ public sealed class McpDatabaseNameAfterArchiveTests : IDisposable
         Assert.Equal(new[] { "Sales" }, await CandidatesAsync("Sales"));
         Assert.Equal(new[] { "Sales", "sales" }, await CandidatesAsync("sales"));
         Assert.Empty(await CandidatesAsync("Nowhere"));
+        Assert.Equal(Stamped(TimeSpan.FromHours(1)), await ListTakenAsync("SALES"));
 
         /* The next collection writes a hot list, renamed once more: it is the newest list, and both earlier spellings are still
            found in the archive. */
@@ -125,5 +137,6 @@ public sealed class McpDatabaseNameAfterArchiveTests : IDisposable
         Assert.Equal(new[] { "SALES" }, await CandidatesAsync("sAlEs"));
         Assert.Equal(new[] { "SALES", "Sales" }, await CandidatesAsync("Sales"));
         Assert.Equal(new[] { "SALES", "sales" }, await CandidatesAsync("sales"));
+        Assert.Equal(Stamped(TimeSpan.FromMinutes(10)), await ListTakenAsync("sAlEs"));
     }
 }

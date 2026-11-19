@@ -29,7 +29,7 @@ namespace PerformanceMonitorLite.Mcp;
 internal static class McpDatabaseNames
 {
     /// <summary>The <see cref="McpDatabaseNameSource"/> the host registers: the store is the request's <see cref="LocalDataService"/>.</summary>
-    public static async Task<IReadOnlyList<string>?> CandidatesAsync(
+    public static async Task<McpDatabaseNameLookup?> CandidatesAsync(
         IServiceProvider? services, string? serverName, string databaseName, bool changesState, CancellationToken cancellationToken)
     {
         if (services?.GetService<ServerManager>() is not { } serverManager

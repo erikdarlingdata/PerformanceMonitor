@@ -22,15 +22,21 @@ namespace PerformanceMonitor.Common;
 /// Reads, for one call, the stored database names of the server the call names that equal the given name ignoring letter case: the
 /// newest list's, plus the given spelling itself when the host finds it on an earlier list in its look-back. Null when there is nothing to
 /// resolve against (the server does not resolve, or the store holds no database list for it): the call then runs with the name as
-/// given and says nothing about it. An empty list means the server has a list and no such name is on it.
+/// given and says nothing about it. An empty list means the server has a list and no such name is on it. The answer carries the
+/// time the newest list was taken, so what the filter tells the caller about that list is dated.
 /// </summary>
 /// <param name="services">The request's services.</param>
 /// <param name="serverName">The call's <c>server_name</c>, or null when it sent none.</param>
 /// <param name="databaseName">The call's <c>database_name</c>, never blank.</param>
 /// <param name="changesState">True when the tool changes state, so the server is resolved the way such a tool resolves it.</param>
 /// <param name="cancellationToken">The request's token, cut off at <see cref="McpDatabaseNameFilter.LookupDeadline"/>.</param>
-public delegate Task<IReadOnlyList<string>?> McpDatabaseNameSource(
+public delegate Task<McpDatabaseNameLookup?> McpDatabaseNameSource(
     IServiceProvider? services, string? serverName, string databaseName, bool changesState, CancellationToken cancellationToken);
+
+/// <summary>What one lookup found on a server's database lists.</summary>
+/// <param name="Names">The stored names that equal the given one ignoring letter case; empty when the newest list holds none.</param>
+/// <param name="ListTakenUtc">When the newest list was taken, UTC; null when the host does not know.</param>
+public sealed record McpDatabaseNameLookup(IReadOnlyList<string> Names, DateTime? ListTakenUtc = null);
 
 /// <summary>
 /// #9065: the call-tool filter that resolves a call's <c>database_name</c> before the tool runs, by
@@ -42,7 +48,9 @@ public delegate Task<IReadOnlyList<string>?> McpDatabaseNameSource(
 /// case-insensitive match replaces the argument with the stored spelling and adds
 /// <see cref="McpDatabaseNameResolver.ResolvedField"/> to the answer, unless the tool changes state
 /// (<see cref="McpDatabaseNameResolver.ChangesState"/>): that call is refused with the stored spelling, never rewritten. Two or more
-/// refuse the call with the list. No match runs the call as given and adds <see cref="McpDatabaseNameResolver.NoteField"/>.</para>
+/// refuse the call with the list. No match runs the call as given and adds <see cref="McpDatabaseNameResolver.NoteField"/>. Each of
+/// those says when the newest list was taken (<see cref="McpDatabaseNameResolver.ResolvedAsOfField"/> beside the resolved name, a
+/// sentence in the note and in both refusals), so a list that is days old is not read as the server's present state.</para>
 ///
 /// <para>The lookup has its own deadline, <see cref="LookupDeadline"/>. A lookup that times out or fails is logged as a warning (the
 /// tool's name, never the caller's server or database name) and is "nothing to resolve against": the call runs as given.</para>
@@ -85,7 +93,7 @@ public static class McpDatabaseNameFilter
 
             var changesState = McpDatabaseNameResolver.ChangesState(tool);
 
-            IReadOnlyList<string>? known;
+            McpDatabaseNameLookup? known;
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
                 deadline.CancelAfter(lookupDeadline);
@@ -106,7 +114,8 @@ public static class McpDatabaseNameFilter
                 return await next(request, cancellationToken).ConfigureAwait(false);
             }
 
-            var resolution = McpDatabaseNameResolver.Resolve(given, known);
+            var resolution = McpDatabaseNameResolver.Resolve(given, known.Names);
+            var taken = known.ListTakenUtc;
             switch (resolution.Match)
             {
                 case McpDatabaseNameMatch.Ambiguous:
@@ -118,7 +127,7 @@ public static class McpDatabaseNameFilter
                             {
                                 Text = McpHelpers.Refusal(
                                     McpDatabaseNameResolver.Parameter,
-                                    McpDatabaseNameResolver.AmbiguousMessage(given, resolution.Candidates)),
+                                    McpDatabaseNameResolver.AmbiguousMessage(given, resolution.Candidates, taken)),
                             },
                         },
                         IsError = true,
@@ -133,7 +142,7 @@ public static class McpDatabaseNameFilter
                             {
                                 Text = McpHelpers.Refusal(
                                     McpDatabaseNameResolver.Parameter,
-                                    McpDatabaseNameResolver.ExactRequiredMessage(given, resolution.Name!)),
+                                    McpDatabaseNameResolver.ExactRequiredMessage(given, resolution.Name!, taken)),
                             },
                         },
                         IsError = true,
@@ -144,16 +153,19 @@ public static class McpDatabaseNameFilter
                     {
                         [McpDatabaseNameResolver.Parameter] = JsonSerializer.SerializeToElement(resolution.Name),
                     };
-                    return WithField(
+                    var answered = WithField(
                         await next(request, cancellationToken).ConfigureAwait(false),
                         McpDatabaseNameResolver.ResolvedField,
                         resolution.Name!);
+                    return taken is { } listTaken
+                        ? WithField(answered, McpDatabaseNameResolver.ResolvedAsOfField, McpDatabaseNameResolver.AsOf(listTaken))
+                        : answered;
 
                 case McpDatabaseNameMatch.NotSeen:
                     return WithField(
                         await next(request, cancellationToken).ConfigureAwait(false),
                         McpDatabaseNameResolver.NoteField,
-                        McpDatabaseNameResolver.NotSeenMessage(given));
+                        McpDatabaseNameResolver.NotSeenMessage(given, taken));
 
                 default:
                     return await next(request, cancellationToken).ConfigureAwait(false);

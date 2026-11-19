@@ -44,10 +44,11 @@ internal static class DarlingMcpDatabaseNames
     /// <summary>
     /// The names on a SQL Server's newest database list that equal <c>$3</c> ignoring case: no row when the server has no list newer
     /// than <c>$2</c>, one row with a NULL name when the list holds no such name. <c>$1</c> server_id. The newest stamp and the rows
-    /// at it both read <c>idx_database_states_time (server_id, collection_time)</c>; only the matching names leave the store.
+    /// at it both read <c>idx_database_states_time (server_id, collection_time)</c>; only the matching names leave the store,
+    /// each with the time the list was taken.
     /// </summary>
     public const string CandidatesSql = @"
-SELECT d.database_name
+SELECT d.database_name, n.t
 FROM (SELECT MAX(collection_time) AS t
       FROM database_states
       WHERE server_id = $1
@@ -64,7 +65,7 @@ WHERE n.t IS NOT NULL";
     /// matches nothing.
     /// </summary>
     public const string PgCandidatesSql = @"
-SELECT d.database_name
+SELECT d.database_name, n.t
 FROM (SELECT MAX(collection_time) AS t
       FROM pg_database_stats
       WHERE server_id = $1
@@ -125,7 +126,7 @@ SELECT EXISTS (
     internal static readonly int HourlyLists = (int)DarlingMcpFindDatabaseTools.LookBack.TotalHours - 1;
 
     /// <summary>The <see cref="McpDatabaseNameSource"/> the host registers: the store is the request's <see cref="NpgsqlDataSource"/>.</summary>
-    public static async Task<IReadOnlyList<string>?> CandidatesAsync(
+    public static async Task<McpDatabaseNameLookup?> CandidatesAsync(
         IServiceProvider? services, string? serverName, string databaseName, bool changesState, CancellationToken cancellationToken)
     {
         if (services?.GetService<NpgsqlDataSource>() is not { } postgres)
@@ -142,28 +143,27 @@ SELECT EXISTS (
 
     /// <summary>
     /// The read itself, for one resolved server: null for no list, empty for a list without the name, else the newest list's
-    /// spellings of it plus the given spelling when an earlier hourly list holds it.
+    /// spellings of it plus the given spelling when an earlier hourly list holds it. The time is the newest list's.
     /// </summary>
-    internal static async Task<IReadOnlyList<string>?> CandidatesAsync(
+    internal static async Task<McpDatabaseNameLookup?> CandidatesAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, DateTime nowUtc, CancellationToken cancellationToken)
     {
         var floor = nowUtc - DarlingMcpFindDatabaseTools.LookBack;
         foreach (var (candidatesSql, seenSql) in new[] { (CandidatesSql, SeenSql), (PgCandidatesSql, PgSeenSql) })
         {
-            var names = await ReadAsync(postgres, candidatesSql, serverId, floor, databaseName, cancellationToken).ConfigureAwait(false);
-            if (names is null)
+            if (await ReadAsync(postgres, candidatesSql, serverId, floor, databaseName, cancellationToken).ConfigureAwait(false) is not { } list)
             {
                 continue;
             }
 
-            if (names.Count == 0 || names.Contains(databaseName, StringComparer.Ordinal)
-                || !await SeenAsync(postgres, seenSql, serverId, floor, databaseName, cancellationToken).ConfigureAwait(false))
+            var (names, taken) = list;
+            if (names.Count > 0 && !names.Contains(databaseName, StringComparer.Ordinal)
+                && await SeenAsync(postgres, seenSql, serverId, floor, databaseName, cancellationToken).ConfigureAwait(false))
             {
-                return names;
+                names.Add(databaseName);
             }
 
-            names.Add(databaseName);
-            return names;
+            return new McpDatabaseNameLookup(names, taken);
         }
 
         return null;
@@ -179,23 +179,25 @@ SELECT EXISTS (
         return command;
     }
 
-    private static async Task<List<string>?> ReadAsync(
+    private static async Task<(List<string> Names, DateTime Taken)?> ReadAsync(
         NpgsqlDataSource postgres, string sql, int serverId, DateTime floor, string databaseName, CancellationToken cancellationToken)
     {
         await using var command = Command(postgres, sql, serverId, floor, databaseName);
 
         List<string>? names = null;
+        var taken = default(DateTime);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             names ??= new List<string>();
+            taken = reader.GetDateTime(1);
             if (!reader.IsDBNull(0))
             {
                 names.Add(reader.GetString(0));
             }
         }
 
-        return names;
+        return names is null ? null : (names, taken);
     }
 
     private static async Task<bool> SeenAsync(

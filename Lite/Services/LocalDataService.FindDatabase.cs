@@ -74,36 +74,39 @@ ORDER BY n.server_id";
     /// look-back: rows leave the hot table oldest first, so a hot list at or before that start means no later list of the server
     /// is in the archive alone.</para>
     /// </summary>
-    internal async Task<IReadOnlyList<string>?> DatabaseNameCandidatesAsync(
+    internal async Task<PerformanceMonitor.Common.McpDatabaseNameLookup?> DatabaseNameCandidatesAsync(
         int serverId, string databaseName, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
         var floor = (nowUtc ?? DateTime.UtcNow) - FindDatabaseLookBack;
         using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
 
-        var names = await DatabaseNameMatchesAsync(connection, HotDatabaseStates, serverId, floor, databaseName, cancellationToken)
-            ?? await DatabaseNameMatchesAsync(connection, ArchivedDatabaseStates, serverId, floor, databaseName, cancellationToken);
-        if (names is null || names.Count == 0 || names.Contains(databaseName))
+        if ((await DatabaseNameMatchesAsync(connection, HotDatabaseStates, serverId, floor, databaseName, cancellationToken)
+            ?? await DatabaseNameMatchesAsync(connection, ArchivedDatabaseStates, serverId, floor, databaseName, cancellationToken)) is not { } list)
         {
-            return names;
+            return null;
         }
 
-        var (seen, hotReachesTheFloor) = await DatabaseNameSeenInHotAsync(connection, serverId, floor, databaseName, cancellationToken);
-        if (seen || (!hotReachesTheFloor && await DatabaseNameSeenInArchiveAsync(connection, serverId, floor, databaseName, cancellationToken)))
+        var (names, taken) = list;
+        if (names.Count > 0 && !names.Contains(databaseName))
         {
-            names.Add(databaseName);
+            var (seen, hotReachesTheFloor) = await DatabaseNameSeenInHotAsync(connection, serverId, floor, databaseName, cancellationToken);
+            if (seen || (!hotReachesTheFloor && await DatabaseNameSeenInArchiveAsync(connection, serverId, floor, databaseName, cancellationToken)))
+            {
+                names.Add(databaseName);
+            }
         }
 
-        return names;
+        return new PerformanceMonitor.Common.McpDatabaseNameLookup(names, taken);
     }
 
-    /// <summary>The names on the newest list in <paramref name="source"/> that equal the name ignoring case; null when it has no list.</summary>
-    private static async Task<List<string>?> DatabaseNameMatchesAsync(
+    /// <summary>The names on the newest list in <paramref name="source"/> that equal the name ignoring case, and when that list was taken; null when it has no list.</summary>
+    private static async Task<(List<string> Names, DateTime Taken)?> DatabaseNameMatchesAsync(
         Database.LockedConnection connection, string source, int serverId, DateTime floor, string databaseName,
         CancellationToken cancellationToken)
     {
         using var command = connection.CreateCommand();
         command.CommandText = $@"
-SELECT d.database_name
+SELECT d.database_name, n.t
 FROM (SELECT MAX(collection_time) AS t
       FROM {source}
       WHERE server_id = $1
@@ -118,17 +121,19 @@ WHERE n.t IS NOT NULL";
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
 
         List<string>? names = null;
+        var taken = default(DateTime);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             names ??= new List<string>();
+            taken = reader.GetDateTime(1);
             if (!reader.IsDBNull(0))
             {
                 names.Add(reader.GetString(0));
             }
         }
 
-        return names;
+        return names is null ? null : (names, taken);
     }
 
     /// <summary>

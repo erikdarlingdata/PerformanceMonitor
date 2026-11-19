@@ -40,8 +40,13 @@ public sealed class McpDatabaseNameResolutionLiveTests
     private const string PgTarget = "dbn-pg";
     private const string Twin = "dbn-twin";
     private const string PgTwin = "dbn-pg-twin";
+    private const string Old = "dbn-old";
+    private const string PgOld = "dbn-pg-old";
     private const string Clash = "dbn-clash";
     private const string ClashOther = "dbn-clash-other";
+
+    /// <summary>When the only lists of <see cref="Old"/> and <see cref="PgOld"/> were taken: days ago, inside the look-back, on a whole second.</summary>
+    private static readonly DateTime OldListTaken = DateTime.UtcNow.Date.AddDays(-3).AddHours(4).AddMinutes(5).AddSeconds(6);
 
     private static async Task WithHostAsync(Func<TestServer, NpgsqlDataSource, CancellationToken, Task> body, bool allowWrites = false)
     {
@@ -174,6 +179,31 @@ public sealed class McpDatabaseNameResolutionLiveTests
                 @"INSERT INTO pg_extension_availability (collection_id, collection_time, server_id, server_name, database_name, extension_name, state, is_monitoring_relevant)
                   VALUES ($1, $2, $3, $4, $5, $6, 'installed', TRUE)",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-minutesAgo)), pgTwinId, PgTwin, database, extension);
+        }
+
+        /* A server whose only list is days old, with one long query since, and a PostgreSQL target whose only list is as old. */
+        var oldId = ServerIdHelper.GetDeterministicHashCode(Old);
+        await DarlingMcpTestData.RegisterServerAsync(connection, oldId, Old, ct);
+        foreach (var database in new[] { "master", "SalesDB", "Reports", "REPORTS" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,$4,$5,5,'ONLINE',FALSE)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(OldListTaken), oldId, Old, database);
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, duration_microseconds, statement_text)
+              VALUES ($1, $2, $3, $4, $2, 'rpc_completed', $5, $6, $7)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-30)), oldId, Old, "SalesDB", 8_000_000L, "EXEC p8");
+
+        var pgOldId = ServerIdHelper.GetDeterministicHashCode(PgOld);
+        await DarlingMcpTestData.RegisterServerAsync(connection, pgOldId, PgOld, ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", pgOldId);
+        foreach (var database in new[] { "postgres", "AppDb" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO pg_database_stats (collection_id, collection_time, server_id, server_name, database_name) VALUES ($1,$2,$3,$4,$5)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(OldListTaken), pgOldId, PgOld, database);
         }
 
         /* Two servers one name fits: it is the first one's stored name and the second one's display name. Both list SalesDB. */
@@ -318,14 +348,14 @@ public sealed class McpDatabaseNameResolutionLiveTests
                 var serverId = ServerIdHelper.GetDeterministicHashCode(server);
                 var dropped = char.ToUpperInvariant(recreated[0]) + recreated[1..];
 
-                Assert.Equal(new[] { newest, earlier }, Sorted(await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, earlier, now, ct)));
-                Assert.Equal(new[] { dropped, recreated }, Sorted(await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, dropped, now, ct)));
-                Assert.Equal(new[] { newest }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, newest, now, ct));
-                Assert.Equal(new[] { newest }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, newest.ToUpperInvariant(), now, ct));
+                Assert.Equal(new[] { newest, earlier }, Sorted((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, earlier, now, ct))?.Names));
+                Assert.Equal(new[] { dropped, recreated }, Sorted((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, dropped, now, ct))?.Names));
+                Assert.Equal(new[] { newest }, (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, newest, now, ct))?.Names);
+                Assert.Equal(new[] { newest }, (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, newest.ToUpperInvariant(), now, ct))?.Names);
 
                 /* With only the newest list inside the look-back, the earlier spelling is on no list. */
                 var onlyTheNewestList = now + DarlingMcpFindDatabaseTools.LookBack - TimeSpan.FromMinutes(30);
-                Assert.Equal(new[] { newest }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, earlier, onlyTheNewestList, ct));
+                Assert.Equal(new[] { newest }, (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, earlier, onlyTheNewestList, ct))?.Names);
             }
         });
 
@@ -342,7 +372,7 @@ public sealed class McpDatabaseNameResolutionLiveTests
             Assert.True(isError);
             Assert.Equal("invalid", refused.GetProperty("status").GetString());
             Assert.Equal("database_name", refused.GetProperty("hints").GetProperty("parameter").GetString());
-            Assert.Equal(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"), refused.GetProperty("message").GetString());
+            Assert.StartsWith(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"), refused.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Contains("pass 'SalesDB' exactly", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Empty(await ExpectedAsync());
 
@@ -409,6 +439,47 @@ public sealed class McpDatabaseNameResolutionLiveTests
             Assert.False(setError);
             Assert.Equal("set", set.GetProperty("status").GetString());
             Assert.Equal(1, await ExpectationsAsync());
+        }, allowWrites: true);
+
+    [Fact]
+    public Task AListTakenDaysAgo_SaysWhenItWasTaken_BesideTheResolvedName_InTheNote_AndInTheRefusalOfAWrite() =>
+        WithHostAsync(async (host, _, _) =>
+        {
+            var asOf = McpDatabaseNameResolver.AsOf(OldListTaken);
+            Assert.EndsWith("T04:05:06.0000000Z", asOf, StringComparison.Ordinal);
+            Assert.True(DateTime.UtcNow - OldListTaken > TimeSpan.FromDays(2));
+
+            var (resolved, _) = await LongQueriesAsync(host, Old, "salesdb");
+            Assert.Equal("SalesDB", resolved.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+            Assert.Equal(asOf, resolved.GetProperty(McpDatabaseNameResolver.ResolvedAsOfField).GetString());
+
+            var (unseen, _) = await LongQueriesAsync(host, Old, "Nowhere");
+            var note = unseen.GetProperty(McpDatabaseNameResolver.NoteField).GetString()!;
+            Assert.Equal(McpDatabaseNameResolver.NotSeenMessage("Nowhere", OldListTaken), note);
+            Assert.EndsWith("was taken at " + asOf + ".", note, StringComparison.Ordinal);
+
+            var (refused, refusedError) = await SetExpectedAsync(host, Old, "salesdb");
+            Assert.True(refusedError);
+            var refusal = refused.GetProperty("message").GetString()!;
+            Assert.Equal(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB", OldListTaken), refusal);
+            Assert.EndsWith("was taken at " + asOf + ".", refusal, StringComparison.Ordinal);
+
+            var (ambiguous, ambiguousError) = await LongQueriesAsync(host, Old, "reports");
+            Assert.True(ambiguousError);
+            Assert.EndsWith("was taken at " + asOf + ".", ambiguous.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            /* An exact name says nothing about the list, so it carries no time. */
+            var (exact, _) = await LongQueriesAsync(host, Old, "SalesDB");
+            Assert.False(Has(exact, McpDatabaseNameResolver.ResolvedAsOfField));
+            Assert.False(Has(exact, McpDatabaseNameResolver.NoteField));
+
+            /* A PostgreSQL target's list is dated the same way. */
+            var (pgText, _) = await StatementFilterCensus.CallRealToolAsync(
+                host, "get_pg_extensions", new JsonObject { ["server_name"] = PgOld, ["database_name"] = "appdb" },
+                bearerToken: StatementFilterCensus.LiveHostToken);
+            var pg = JsonDocument.Parse(pgText).RootElement;
+            Assert.Equal("AppDb", pg.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+            Assert.Equal(asOf, pg.GetProperty(McpDatabaseNameResolver.ResolvedAsOfField).GetString());
         }, allowWrites: true);
 
     [Fact]
@@ -497,7 +568,7 @@ public sealed class McpDatabaseNameResolutionLiveTests
 
             Assert.False(isError);
             Assert.Equal("empty", answer.GetProperty("status").GetString());
-            Assert.Equal(McpDatabaseNameResolver.NotSeenMessage(given), answer.GetProperty(McpDatabaseNameResolver.NoteField).GetString());
+            Assert.StartsWith(McpDatabaseNameResolver.NotSeenMessage(given), answer.GetProperty(McpDatabaseNameResolver.NoteField).GetString(), StringComparison.Ordinal);
             Assert.False(Has(answer, McpDatabaseNameResolver.ResolvedField));
 
             /* The tool's own empty answer is still there, word for word: the note is the only thing added. */
@@ -516,7 +587,7 @@ public sealed class McpDatabaseNameResolutionLiveTests
             Assert.False(isError);
             var row = Assert.Single(answer.GetProperty("completions").EnumerateArray());
             Assert.Equal(2000.0, row.GetProperty("duration_ms").GetDouble());
-            Assert.Equal(McpDatabaseNameResolver.NotSeenMessage("DroppedDb"), answer.GetProperty(McpDatabaseNameResolver.NoteField).GetString());
+            Assert.StartsWith(McpDatabaseNameResolver.NotSeenMessage("DroppedDb"), answer.GetProperty(McpDatabaseNameResolver.NoteField).GetString(), StringComparison.Ordinal);
 
             /* Another letter case of it is not resolved: the list is the only thing a name is resolved against. */
             var (folded, _) = await LongQueriesAsync(host, Listed, "droppeddb");
@@ -556,7 +627,7 @@ public sealed class McpDatabaseNameResolutionLiveTests
             Assert.Contains("'Orders', 'orders'", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             var (unseen, _) = await ExtensionsAsync(host, "appdb_old");
-            Assert.Equal(McpDatabaseNameResolver.NotSeenMessage("appdb_old"), unseen.GetProperty(McpDatabaseNameResolver.NoteField).GetString());
+            Assert.StartsWith(McpDatabaseNameResolver.NotSeenMessage("appdb_old"), unseen.GetProperty(McpDatabaseNameResolver.NoteField).GetString(), StringComparison.Ordinal);
         });
 
     [Fact]
@@ -585,24 +656,24 @@ public sealed class McpDatabaseNameResolutionLiveTests
             var listedId = ServerIdHelper.GetDeterministicHashCode(Listed);
             var now = DateTime.UtcNow;
 
-            Assert.Equal(new[] { "SalesDB" }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, listedId, "SALESDB", now, ct));
+            Assert.Equal(new[] { "SalesDB" }, (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, listedId, "SALESDB", now, ct))?.Names);
             Assert.Equal(
                 new[] { "REPORTS", "Reports" },
-                (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, listedId, "reports", now, ct))!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
-            Assert.Empty((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, listedId, "salesdb_old", now, ct))!);
-            Assert.Null(await DarlingMcpDatabaseNames.CandidatesAsync(postgres, ServerIdHelper.GetDeterministicHashCode(Unlisted), "SalesDB", now, ct));
+                ((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, listedId, "reports", now, ct))?.Names)!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+            Assert.Empty(((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, listedId, "salesdb_old", now, ct))?.Names)!);
+            Assert.Null((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, ServerIdHelper.GetDeterministicHashCode(Unlisted), "SalesDB", now, ct))?.Names);
 
             /* A PostgreSQL target's list is read when the server has no SQL Server one. */
             var pgId = ServerIdHelper.GetDeterministicHashCode(PgTarget);
-            Assert.Equal(new[] { "AppDb" }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, pgId, "appdb", now, ct));
+            Assert.Equal(new[] { "AppDb" }, (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, pgId, "appdb", now, ct))?.Names);
             Assert.Equal(
                 new[] { "Orders", "orders" },
-                (await DarlingMcpDatabaseNames.CandidatesAsync(postgres, pgId, "ORDERS", now, ct))!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
-            Assert.Empty((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, pgId, "appdb_old", now, ct))!);
+                ((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, pgId, "ORDERS", now, ct))?.Names)!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+            Assert.Empty(((await DarlingMcpDatabaseNames.CandidatesAsync(postgres, pgId, "appdb_old", now, ct))?.Names)!);
 
             /* A list older than the look-back is no list. */
-            Assert.Null(await DarlingMcpDatabaseNames.CandidatesAsync(
-                postgres, listedId, "SalesDB", now + DarlingMcpFindDatabaseTools.LookBack + TimeSpan.FromHours(1), ct));
+            Assert.Null((await DarlingMcpDatabaseNames.CandidatesAsync(
+                postgres, listedId, "SalesDB", now + DarlingMcpFindDatabaseTools.LookBack + TimeSpan.FromHours(1), ct))?.Names);
         });
 
     /// <summary>
@@ -641,7 +712,7 @@ public sealed class McpDatabaseNameResolutionLiveTests
                 if (DarlingMcpWritePolicy.IsWrite(name))
                 {
                     refused++;
-                    if (!isError || JsonDocument.Parse(text).RootElement.GetProperty("message").GetString() != McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"))
+                    if (!isError || !JsonDocument.Parse(text).RootElement.GetProperty("message").GetString()!.StartsWith(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"), StringComparison.Ordinal))
                     {
                         problems.Add($"{name}: changes state and was not refused with the stored spelling (error {isError}) in: {(text.Length > 300 ? text[..300] : text)}");
                     }

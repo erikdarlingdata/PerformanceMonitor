@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -71,6 +72,9 @@ public static class McpDatabaseNameResolver
     /// <summary>The answer field that says the server's database list holds no such name.</summary>
     public const string NoteField = "database_name_note";
 
+    /// <summary>The answer field beside <see cref="ResolvedField"/> that says when the list the name was resolved against was taken.</summary>
+    public const string ResolvedAsOfField = "resolved_database_name_as_of";
+
     /// <summary>What the served <c>database_name</c> parameter description of a resolving tool ends with.</summary>
     public const string MatchingSentence = "Exact match first, then a unique case-insensitive one.";
 
@@ -120,10 +124,10 @@ public static class McpDatabaseNameResolver
     }
 
     /// <summary>The refusal sentence for a name that two or more stored names equal ignoring case: it lists them.</summary>
-    public static string AmbiguousMessage(string given, IReadOnlyList<string> candidates) =>
+    public static string AmbiguousMessage(string given, IReadOnlyList<string> candidates, DateTime? listTakenUtc = null) =>
         $"database_name '{given}' matches {candidates.Count} databases on this server that differ only by letter case: "
         + string.Join(", ", candidates.Select(name => "'" + name + "'"))
-        + ". Pass one of them spelled exactly as listed. The call was refused before it ran.";
+        + ". Pass one of them spelled exactly as listed. The call was refused before it ran." + ListTaken(listTakenUtc);
 
     /// <summary>
     /// What an answer says when the server's database list holds no such name. It states only what the lookup compared and that the
@@ -131,15 +135,31 @@ public static class McpDatabaseNameResolver
     /// The comparison is the store's <c>lower()</c> and then ordinal-ignore-case here, so the message claims no more than a simple
     /// letter-case comparison.
     /// </summary>
-    public static string NotSeenMessage(string given) =>
+    public static string NotSeenMessage(string given, DateTime? listTakenUtc = null) =>
         $"database_name '{given}' matched no name on this server's newest database list, exactly or by a simple letter-case comparison "
         + "(no accent or language-specific casing rules), so the name was left as given. "
-        + "A database dropped before that list was taken, or created after it, is not on it.";
+        + "A database dropped before that list was taken, or created after it, is not on it." + ListTaken(listTakenUtc);
 
     /// <summary>The refusal sentence for a tool that changes state and a name that is another letter case of one stored name.</summary>
-    public static string ExactRequiredMessage(string given, string stored) =>
+    public static string ExactRequiredMessage(string given, string stored, DateTime? listTakenUtc = null) =>
         $"database_name '{given}' is not a database on this server's database list; '{stored}' is, in another letter case. "
-        + $"This tool changes state, so the name is not corrected for you: pass '{stored}' exactly. The call was refused before it ran.";
+        + $"This tool changes state, so the name is not corrected for you: pass '{stored}' exactly. The call was refused before it ran."
+        + ListTaken(listTakenUtc);
+
+    /// <summary>
+    /// A list's collection time as an answer carries it: UTC in the ISO-8601 round-trip form, the format <c>find_database</c> gives
+    /// its <c>newest_snapshot_at</c>.
+    /// </summary>
+    public static string AsOf(DateTime listTakenUtc) =>
+        (listTakenUtc.Kind == DateTimeKind.Local ? listTakenUtc.ToUniversalTime() : DateTime.SpecifyKind(listTakenUtc, DateTimeKind.Utc))
+        .ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The sentence that dates the newest list a message speaks of, so a list taken days ago is not read as the server's present
+    /// state; empty when the host gave no time.
+    /// </summary>
+    private static string ListTaken(DateTime? listTakenUtc) =>
+        listTakenUtc is { } taken ? $" This server's newest database list was taken at {AsOf(taken)}." : string.Empty;
 
     /// <summary>
     /// True when the tool changes state: the host's write policy stamped <c>destructiveHint</c> on it, the one marker both SKUs set
