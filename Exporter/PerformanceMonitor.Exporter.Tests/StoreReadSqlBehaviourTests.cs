@@ -85,7 +85,7 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
                   collection_time timestamp, sample_interval_seconds int,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint, delta_logical_reads bigint,
                   delta_logical_writes bigint, delta_physical_reads bigint, delta_rows bigint, delta_spills bigint,
-                  query_plan_digest bytea, query_text_digest bytea);
+                  query_plan_digest bytea, query_text_digest bytea, host_object_name text);
                 CREATE INDEX ON collect.query_stats (collection_time);
                 CREATE TABLE collect.procedure_stats (
                   collection_id bigint, server_id int, server_name text, database_name text, schema_name text, object_name text, object_type text,
@@ -351,7 +351,7 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
 
         Assert.Equal(QueryStatsWindow.RawColumns, result.Columns);
         Assert.Equal(["qsw", "qsw"], result.Names().Where(n => n == "qsw"));      // two rows, not one grouped row
-        Assert.Equal([1L, 2L], result.Rows.Where(r => (string?)r[0] == "qsw").Select(r => (long)r[6]!).OrderBy(v => v));
+        Assert.Equal([1L, 2L], result.Rows.Where(r => (string?)r[0] == "qsw").Select(r => (long)r[result.Columns.IndexOf("delta_execution_count")]!).OrderBy(v => v));
     }
 
     [Fact]

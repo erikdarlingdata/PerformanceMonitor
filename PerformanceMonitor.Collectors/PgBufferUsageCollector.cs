@@ -91,26 +91,49 @@ public sealed class PgBufferUsageCollector : PostgresCollectorDefinitionBase<PgB
        pg_buffercache_summary() - two scans of a moving pool would disagree, and the disagreement would land
        in the percentage a reader computes.
 
+       #9062: the buffers are grouped by (reldatabase, relfilenode) FIRST, and the window runs over those few
+       hundred grouped rows. The window used to run over every buffer row, and a 10 GB pool is 1.3 million of
+       them, which the WindowAgg stored (86 MB of temp file per read, measured on a real target) before the
+       GROUP BY reduced them to about 100. Everything below the grouping is a sum of the sums: buffers and
+       dirty buffers add, and the average usage count is the usage sum over the count of buffers that HAVE a
+       usage count, which is what avg() ignores NULLs to do (NULLIF keeps a group with none NULL, as avg() does,
+       not a division error). The pool totals are sums of the grouped counts, so unused buffers (a NULL
+       relfilenode) are in the total and out of the used count exactly as before. The remaining spill is the
+       function scan's own store of the pool, which still spilled at 64 MB of work_mem, so it is left alone.
+
        A floor of 8 buffers (64 KB) keeps the long tail of one-block catalog relations out; on a large pool
        that tail is thousands of rows that never inform anything. */
     private const string QueryText = @"
-WITH pool AS (
+WITH per_rel AS (
     SELECT
         b.reldatabase,
         b.relfilenode,
-        b.isdirty,
-        b.usagecount,
-        count(*) OVER ()                                        AS pool_total,
-        count(*) FILTER (WHERE b.relfilenode IS NOT NULL) OVER () AS pool_used
+        count(*)                                                AS buffers,
+        count(*) FILTER (WHERE b.isdirty)                       AS dirty_buffers,
+        sum(b.usagecount)                                       AS usage_sum,
+        count(b.usagecount)                                     AS usage_n
     FROM public.pg_buffercache AS b
+    GROUP BY b.reldatabase, b.relfilenode
+),
+pool AS (
+    SELECT
+        r.reldatabase,
+        r.relfilenode,
+        r.buffers,
+        r.dirty_buffers,
+        r.usage_sum,
+        r.usage_n,
+        sum(r.buffers) OVER ()                                  AS pool_total,
+        coalesce(sum(r.buffers) FILTER (WHERE r.relfilenode IS NOT NULL) OVER (), 0) AS pool_used
+    FROM per_rel AS r
 )
 SELECT
     d.datname::text                                             AS database_name,
     c.relname::text                                             AS relation_name,
     c.relkind::text                                             AS relation_kind,
-    count(*)::bigint                                            AS buffers,
-    count(*) FILTER (WHERE p.isdirty)::bigint                   AS dirty_buffers,
-    avg(p.usagecount)::double precision                         AS avg_usage_count,
+    sum(p.buffers)::bigint                                      AS buffers,
+    sum(p.dirty_buffers)::bigint                                AS dirty_buffers,
+    (sum(p.usage_sum) / nullif(sum(p.usage_n), 0))::double precision AS avg_usage_count,
     max(p.pool_total)::bigint                                   AS pool_buffers_total,
     max(p.pool_used)::bigint                                    AS pool_buffers_used
 FROM pool AS p
@@ -121,8 +144,8 @@ LEFT JOIN pg_catalog.pg_class AS c
   AND p.reldatabase = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
 WHERE p.relfilenode IS NOT NULL
 GROUP BY d.datname, c.relname, c.relkind
-HAVING count(*) >= 8
-ORDER BY count(*) DESC";
+HAVING sum(p.buffers) >= 8
+ORDER BY sum(p.buffers) DESC";
 
     public override string Name => "pg_buffer_usage";
 

@@ -2292,6 +2292,10 @@ public sealed partial class DarlingCollectorRunner
                 {
                     using var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
 
+                    /* #9062: a read of a function that returns one row per entry (pg_stat_statements) runs behind a local work_mem
+                       statement in the same command, so its tuplestore stays in memory. The first result set is that statement's. */
+                    var workMemApplied = PgReadWorkMem.ApplyTo(command, definition.ReadWorkMemBytesPerEntry);
+
                     /* Both phases stamp from finally rather than after the await (#2816). A throwing open or
                        a drain cut short by the budget must still report the time it burned; the alternative
                        is that its milliseconds land in the residual, and the residual is the one term whose
@@ -2302,6 +2306,10 @@ public sealed partial class DarlingCollectorRunner
                     try
                     {
                         opened = await command.ExecuteReaderAsync(itemToken);
+                        if (workMemApplied)
+                        {
+                            await PgReadWorkMem.SkipSettingResultAsync(opened, itemToken);
+                        }
                     }
                     finally
                     {

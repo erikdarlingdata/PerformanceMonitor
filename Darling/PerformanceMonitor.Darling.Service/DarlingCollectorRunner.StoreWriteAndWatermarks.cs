@@ -1004,7 +1004,14 @@ public sealed partial class DarlingCollectorRunner
         await ResolvePgExtensionSchemasAsync(context, definition, connection, _logger, cancellationToken);
         var plan = definition.BuildQuery(context);
         using var command = CreateCollectorCommand(provider, plan, connection, commandTimeoutSeconds);
+        /* #9062: the same local work_mem statement as the scheduled read, for a definition that asks for one. */
+        var workMemApplied = PgReadWorkMem.ApplyTo(command, definition.ReadWorkMemBytesPerEntry);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (workMemApplied)
+        {
+            await PgReadWorkMem.SkipSettingResultAsync(reader, cancellationToken);
+        }
+
         return await definition.ReadAsync(reader, context, cancellationToken);
     }
 

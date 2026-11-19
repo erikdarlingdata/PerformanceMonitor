@@ -1054,10 +1054,22 @@ public sealed partial class DarlingWorker
         };
         await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
             schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
+        /* #9062: inside a transaction that starts with a local work_mem statement (see PgReadWorkMem), so the function's tuplestore, the
+           sort and the windows stay in memory. This read runs hourly, so the BEGIN and ROLLBACK it adds to the target's statistics are
+           two entries a call; the minute read sends its setting in its own command instead. The cap is a positional parameter, and
+           Npgsql does not split a command that has one, so the setting cannot ride in the same command here. */
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var setting = new Npgsql.NpgsqlCommand(
+            PerformanceMonitor.Collectors.PgOwnStatement.Mark(PgReadWorkMem.SetSql(PgReadWorkMem.StatementTextBytesPerEntry)),
+            connection, transaction) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds })
+        {
+            await setting.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var command = new Npgsql.NpgsqlCommand(
             PerformanceMonitor.Collectors.PgOwnStatement.Mark(
                 PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas)),
-            connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
+            connection, transaction) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

@@ -74,6 +74,9 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
     /* Declared here as well as on the interface, the IsDarlingOnly pair and for the same reason. See ICollectorSchemaInfo.ReadsAuroraFunctions. */
     public virtual bool ReadsAuroraFunctions => false;
 
+    /* Declared here as well as on the interface, the ReadsAuroraFunctions pair and for the same reason. See ICollectorSchemaInfo.ReadWorkMemBytesPerEntry. */
+    public virtual int? ReadWorkMemBytesPerEntry => null;
+
     /* Declared here as well as on the interface, the ReadsAuroraFunctions pair and for the same reason. See ICollectorSchemaInfo.ReadsPgExtension. */
     public virtual bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context) => true;
 
