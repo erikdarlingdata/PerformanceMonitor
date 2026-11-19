@@ -135,7 +135,7 @@ public sealed class StatementCutSourceScanTests
             "trims the trailing UNION ALL off the dynamic script this method is building; the script is never shown as a statement"),
         new("Lite/Services/LocalDataService.FinOps.Workload.cs", "left(query_text,200)", 1,
             "QueryPreview: the desktop grid cell; the same row carries FullQueryText whole and no Lite MCP tool reads QueryPreview"),
-        new("Lite/Services/LocalDataService.FinOps.Workload.cs", "left(qs2.query_text,200)", 1,
+        new("Lite/Services/LocalDataService.FinOps.Workload.cs", "left(t.query_text,200)", 1,
             "SampleQueryText: the desktop grid cell; the same row carries FullQueryText whole and no Lite MCP tool reads SampleQueryText"),
         new("Lite/Services/LocalDataService.QueryStats.cs", "left(query_text,120)", 1,
             "the desktop heatmap hover (GetQueryHeatmapAsync); the get_query_heatmap tool reads LocalDataService.QueryHeatmap.cs, which fetches whole text and cuts after the filter"),
