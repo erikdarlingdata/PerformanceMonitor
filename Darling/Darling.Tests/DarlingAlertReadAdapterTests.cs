@@ -620,6 +620,129 @@ public sealed class DarlingAlertReadAdapterTests
         }
     }
 
+    /* ---------------- long-running read: NULL columns under the exclusions (#9081) ---------------- */
+
+    private const string LongRunningRowInsert = "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, total_elapsed_time_ms, cpu_time_ms, reads, writes, wait_type, blocking_session_id, query_hash, program_name, login_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+
+    /// <summary>One request row 15 minutes into its run. A null argument is stored as NULL.</summary>
+    private static Task InsertLongRunningRowAsync(
+        NpgsqlConnection connection, DateTime collectionTime, int sessionId, string? waitType,
+        string? queryText = "SELECT COUNT(*) FROM Posts", string? database = "StackOverflow",
+        string? program = "HammerDB", string? login = "app_user") =>
+        InsertAsync(connection, LongRunningRowInsert,
+            (long)sessionId, collectionTime, TestServerId, TestServerName, sessionId, (object?)database ?? DBNull.Value,
+            (object?)queryText ?? DBNull.Value, 900_000L + sessionId, 5L, 5L, 5L, (object?)waitType ?? DBNull.Value, 0,
+            "0x" + sessionId.ToString("X16", CultureInfo.InvariantCulture), (object?)program ?? DBNull.Value, (object?)login ?? DBNull.Value);
+
+    /// <summary>
+    /// A request that is running and not waiting is stored with a NULL wait_type. Each wait-type opt-out drops the waits it
+    /// names and keeps that request, so it is returned with every opt-out on and with each one on alone. The rows in a
+    /// named wait, and the sp_server_diagnostics statement with no wait, show each opt-out still drops what it names.
+    /// </summary>
+    [Fact]
+    public async Task LongRunningRead_KeepsARequestWithNoCurrentWait_UnderEveryWaitTypeOptOut()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified).AddMinutes(-1);
+            await InsertLongRunningRowAsync(connection, collectionTime, 91, waitType: null);
+            await InsertLongRunningRowAsync(connection, collectionTime, 92, "SP_SERVER_DIAGNOSTICS_SLEEP");
+            await InsertLongRunningRowAsync(connection, collectionTime, 93, "WAITFOR");
+            await InsertLongRunningRowAsync(connection, collectionTime, 94, "BACKUPTHREAD");
+            await InsertLongRunningRowAsync(connection, collectionTime, 95, "XE_LIVE_TARGET_TVF");
+            await InsertLongRunningRowAsync(connection, collectionTime, 96, waitType: null, queryText: "EXEC sys.sp_server_diagnostics 5");
+
+            async Task<int[]> ReadAsync(bool diagnostics, bool waitFor, bool backups, bool misc)
+            {
+                var read = await adapter.GetLongRunningQueriesAsync(
+                    TestServerKey, thresholdMinutes: 5, maxResults: 10,
+                    excludeSpServerDiagnostics: diagnostics, excludeWaitFor: waitFor, excludeBackups: backups,
+                    excludeMiscWaits: misc, excludeCdc: true,
+                    excludedDatabases: new List<string>(), LongRunningQueryExclusions.None, cancellationToken: ct);
+                return read.Sessions.Select(q => q.SessionId).OrderBy(id => id).ToArray();
+            }
+
+            Assert.Equal(new[] { 91 }, await ReadAsync(diagnostics: true, waitFor: true, backups: true, misc: true));
+            Assert.Equal(new[] { 91, 93, 94, 95 }, await ReadAsync(diagnostics: true, waitFor: false, backups: false, misc: false));
+            Assert.Equal(new[] { 91, 92, 94, 95, 96 }, await ReadAsync(diagnostics: false, waitFor: true, backups: false, misc: false));
+            Assert.Equal(new[] { 91, 92, 93, 95, 96 }, await ReadAsync(diagnostics: false, waitFor: false, backups: true, misc: false));
+            Assert.Equal(new[] { 91, 92, 93, 94, 96 }, await ReadAsync(diagnostics: false, waitFor: false, backups: false, misc: true));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The program-prefix, login and database exclusions, the CDC opt-out, the monitor-session filter and the statement-text
+    /// half of the sp_server_diagnostics opt-out each keep a row whose column is NULL: a session with no program name, login,
+    /// database or statement text is on no excluded list. The three named rows show each exclusion is on and counted.
+    /// </summary>
+    [Fact]
+    public async Task LongRunningRead_KeepsARowWithNoProgramLoginDatabaseOrText_UnderEveryExclusion()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified).AddMinutes(-1);
+            await InsertLongRunningRowAsync(connection, collectionTime, 97, "CXPACKET", queryText: null, database: null, program: null, login: null);
+            await InsertLongRunningRowAsync(connection, collectionTime, 98, "CXPACKET", database: "ExcludedDb");
+            await InsertLongRunningRowAsync(connection, collectionTime, 99, "CXPACKET", database: "Other", program: "SQLAgent - TSQL JobStep (Job 0x01 : Step 1)");
+            await InsertLongRunningRowAsync(connection, collectionTime, 100, "CXPACKET", database: "Other", login: @"NT AUTHORITY\SYSTEM");
+
+            var read = await adapter.GetLongRunningQueriesAsync(
+                TestServerKey, thresholdMinutes: 5, maxResults: 10,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
+                excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.Defaults, cancellationToken: ct);
+
+            Assert.Equal(97, Assert.Single(read.Sessions).SessionId);
+            Assert.Equal(1, read.ExcludedByProgramPrefix);
+            Assert.Equal(1, read.ExcludedByLogin);
+            Assert.Equal(1, read.ExcludedByDatabase);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task InsertAsync(NpgsqlConnection connection, string sql, params object[] values)
     {
         using var command = new NpgsqlCommand(sql, connection);
