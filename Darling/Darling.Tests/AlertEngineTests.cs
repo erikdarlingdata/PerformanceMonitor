@@ -6165,6 +6165,41 @@ public sealed class AlertEngineTests
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
+    [Theory]
+    [InlineData("archive_*", "archive_2024", 0)]
+    [InlineData("archive_*", "Sales", 1)]
+    [InlineData("*", "Sales", 1)]
+    public async Task ForcePlanFailure_ExcludedDatabasePattern_MutesOnlyTheNamesItCovers(string entry, string database, int expectedAlerts)
+    {
+        /* #9050: the list reads * as a wildcard here as in every collector; an entry made only of * is ignored. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add(entry);
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = database, QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 5, TotalFailures = 5 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(expectedAlerts, h.Deliverer.Outcomes.Count);
+    }
+
+    [Theory]
+    [InlineData("archive_*", "archive_2024", 0)]
+    [InlineData("archive_*", "Sales", 1)]
+    [InlineData("*", "Sales", 1)]
+    public async Task DatabaseState_ExcludedDatabasePattern_MutesOnlyTheNamesItCovers(string entry, string database, int expectedAlerts)
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add(entry);
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = database, StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(expectedAlerts, h.Deliverer.Outcomes.Count);
+    }
+
     [Fact]
     public async Task DatabaseState_ChosenState_AlreadyAnnounced_StaysQuiet()
     {

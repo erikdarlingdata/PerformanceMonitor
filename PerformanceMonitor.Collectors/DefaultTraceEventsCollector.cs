@@ -583,7 +583,7 @@ SELECT /* PerformanceMonitorLite */
     /// other callers filter a non-nullable name column and must keep emitting the bare form. Only its terms are
     /// reused, so a name and a #9050 pattern mean the same here as in every other collector.
     /// </summary>
-    private static (string Clause, List<CollectorParameter> Parameters) BuildNullSafeDatabaseExclusion(
+    internal static (string Clause, List<CollectorParameter> Parameters) BuildNullSafeDatabaseExclusion(
         IReadOnlyList<string> excludedDatabaseNames)
     {
         /* The shared builder's terms (exact names and #9050 patterns), wrapped in the NULL arm. A list with no

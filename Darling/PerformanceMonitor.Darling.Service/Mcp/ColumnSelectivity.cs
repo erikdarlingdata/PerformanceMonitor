@@ -383,7 +383,7 @@ LIMIT 1";
         return value is int id ? id : null;
     }
 
-    private static bool Allowed(IReadOnlyList<string> scope, IReadOnlyList<string> excluded, string database) =>
+    internal static bool Allowed(IReadOnlyList<string> scope, IReadOnlyList<string> excluded, string database) =>
         (scope.Count == 0 || scope.Contains(database, StringComparer.OrdinalIgnoreCase))
         && !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAnyTrimmed(excluded, database);
 

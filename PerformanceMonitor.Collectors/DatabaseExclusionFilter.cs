@@ -50,6 +50,12 @@ public static class DatabaseExclusionFilter
         var likeParameters = new List<CollectorParameter>();
         foreach (var name in excludedDatabaseNames)
         {
+            /* An entry made only of * is ignored (#9050), as it was before wildcards: it would drop every database. */
+            if (DatabaseNamePattern.IsMatchAll(name))
+            {
+                continue;
+            }
+
             if (DatabaseNamePattern.IsPattern(name))
             {
                 /* NVarChar260, not 128: a 128-character pattern with every character escaped is 256 characters,
@@ -103,6 +109,12 @@ public static class DatabaseExclusionFilter
         var likeTerms = new List<string>();
         foreach (var name in excludedDatabaseNames)
         {
+            /* An entry made only of * is ignored (#9050), as it was before wildcards: it would drop every database. */
+            if (DatabaseNamePattern.IsMatchAll(name))
+            {
+                continue;
+            }
+
             if (DatabaseNamePattern.IsPattern(name))
             {
                 var pattern = DatabaseNamePattern.ToLikePattern(name, escapeBracket: true);
@@ -121,6 +133,11 @@ public static class DatabaseExclusionFilter
         }
 
         terms.AddRange(likeTerms);
+        if (terms.Count == 0)
+        {
+            return string.Empty;
+        }
+
         return "AND " + string.Join(" AND ", terms);
     }
 }

@@ -52,13 +52,20 @@ public static class DatabaseNamePattern
     }
 
     /// <summary>
-    /// True when <paramref name="name"/> is covered by <paramref name="entry"/>, ignoring case. An entry without
+    /// True when <paramref name="name"/> is covered by <paramref name="entry"/>, ignoring case. A match-all entry covers nothing. An entry without
     /// <c>*</c> must equal the name; with <c>*</c>, each run of characters between stars must appear in order, the
     /// first at the start and the last at the end.
     /// </summary>
     public static bool Matches(string? entry, string? name)
     {
         if (entry is null || name is null)
+        {
+            return false;
+        }
+
+        /* A match-all entry is ignored (#9050): a list that held a bare * before wildcards existed did nothing,
+           and it must not start dropping every database now. The Viewer and the MCP tool refuse to write one. */
+        if (IsMatchAll(entry))
         {
             return false;
         }

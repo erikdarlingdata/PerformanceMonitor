@@ -337,6 +337,12 @@ public sealed record LongRunningQueryExclusions(IReadOnlyList<string> ProgramNam
         {
             foreach (var database in Normalize(excludedDatabases))
             {
+                /* An entry made only of * is ignored everywhere else (#9050); here it would be LIKE '%'. */
+                if (DatabaseNamePattern.IsMatchAll(database))
+                {
+                    continue;
+                }
+
                 databaseTerms.Add($"COALESCE({databaseNameColumn}, '') ILIKE ${ordinal++} ESCAPE '\\'");
                 operands.Add(ToDatabaseLikeOperand(database));
             }

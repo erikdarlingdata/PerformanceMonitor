@@ -17,6 +17,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -50,6 +51,8 @@ public sealed class DatabaseExclusionPatternTests
     [InlineData("ab*ba", "abba", true)]
     [InlineData("ARCHIVE_*", "archive_1", true)]
     [InlineData("Exact", "exact", true)]
+    [InlineData("*", "x", false)]
+    [InlineData("**", "anything", false)]
     public void TheMatchFollowsTheOneWildcardRule(string entry, string name, bool matches) =>
         Assert.Equal(matches, DatabaseNamePattern.Matches(entry, name));
 
@@ -60,18 +63,6 @@ public sealed class DatabaseExclusionPatternTests
         Assert.True(DatabaseNamePattern.MatchesAny(["x", "Sales"], "sales"));
         Assert.False(DatabaseNamePattern.MatchesAny(["x", "Sales"], "sales2"));
         Assert.True(DatabaseNamePattern.MatchesAnyTrimmed([" archive_* "], "archive_9"));
-    }
-
-    [Fact]
-    public void TheBuilderGivesAnExactOnlyListItsOldTextAndParameters()
-    {
-        var (clause, parameters) = DatabaseExclusionFilter.Build(["A", "B"], "d.name");
-        Assert.Equal("AND d.name NOT IN (@excl_db_0, @excl_db_1)", clause);
-        Assert.Equal(["@excl_db_0", "@excl_db_1"], parameters.Select(p => p.Name).ToArray());
-        Assert.All(parameters, p => Assert.Equal(CollectorParameterType.NVarChar128, p.Type));
-        Assert.Equal("AND d.name NOT IN (N'A', N'it''s')", DatabaseExclusionFilter.BuildLiteralClause(["A", "it's"], "d.name"));
-        Assert.Equal("AND d.name NOT IN (N''A'', N''it''''s'')", DatabaseExclusionFilter.BuildLiteralClause(["A", "it's"], "d.name", forNestedDynamicSql: true));
-        Assert.Equal(string.Empty, DatabaseExclusionFilter.Build(null, "d.name").Clause);
     }
 
     [Fact]
@@ -97,11 +88,56 @@ public sealed class DatabaseExclusionPatternTests
     }
 
     [Fact]
-    public void AllPatternsListHasNoNotInTerm()
+    public void AnEntryMadeOnlyOfStarsIsIgnoredByTheBuilders()
     {
-        var (clause, parameters) = DatabaseExclusionFilter.Build(["a*", "*b"], "d.name");
-        Assert.DoesNotContain("NOT IN", clause, StringComparison.Ordinal);
-        Assert.Equal(2, parameters.Count);
+        /* A list that held a bare * before wildcards existed did nothing; it must not start dropping every database. */
+        Assert.Equal(string.Empty, DatabaseExclusionFilter.Build(["*"], "d.name").Clause);
+        Assert.Empty(DatabaseExclusionFilter.Build(["*", "**"], "d.name").Parameters);
+        Assert.Equal(string.Empty, DatabaseExclusionFilter.BuildLiteralClause(["*"], "d.name"));
+        Assert.Equal(string.Empty, DatabaseExclusionFilter.BuildLiteralClause(["*"], "d.name", forNestedDynamicSql: true));
+
+        var (clause, parameters) = DatabaseExclusionFilter.Build(["*", "a"], "d.name");
+        var only = Assert.Single(parameters);
+        Assert.Equal("a", only.Value);
+        Assert.NotEqual(string.Empty, clause);
+        Assert.Equal(DatabaseExclusionFilter.BuildLiteralClause(["a"], "d.name"), DatabaseExclusionFilter.BuildLiteralClause(["*", "a"], "d.name"));
+        Assert.Equal(DatabaseExclusionFilter.Build(["a"], "d.name").Clause, clause);
+    }
+
+    [Fact]
+    public void AnEntryMadeOnlyOfStarsCoversNoNameInTheAlertFilters()
+    {
+        Assert.False(DatabaseNamePattern.MatchesAny(["*"], "Sales"));
+        Assert.False(DatabaseNamePattern.MatchesAnyTrimmed([" * "], "Sales"));
+        Assert.True(DatabaseNamePattern.MatchesAny(["*", "sales"], "Sales"));
+        Assert.False(DarlingMcpPlanForceTools.IsExcludedDatabase(["*"], "Sales"));
+
+        /* The Long-Running Query read's database arm builds no term for it, so no row is muted by LIKE '%'. */
+        var predicates = LongRunningQueryExclusions.From([], []).BuildSqlPredicates("NULL", "NULL", "t.n", ["*"], 1);
+        Assert.Equal("FALSE", predicates.DatabasePredicate);
+        Assert.Empty(predicates.Operands);
+    }
+
+    [Fact]
+    public void TheSharedMatchSitesSkipAPatternedNameAndKeepTheOthers()
+    {
+        string[] star = ["archive_*"];
+
+        Assert.False(ColumnSelectivity.Allowed([], star, "archive_9"));
+        Assert.True(ColumnSelectivity.Allowed([], star, "sales"));
+        Assert.True(ColumnSelectivity.Allowed([], ["*"], "sales"));
+
+        SchemaDatabaseProbe Probe(string name, int id) =>
+            new(name, id, "ONLINE", false, false, null, true, null, null, null, null);
+        var probes = new[] { Probe("archive_1", 6), Probe("sales", 7) };
+        Assert.Equal(["sales"], DarlingSchemaCapture.InScope(probes, [], star));
+        Assert.Equal(["archive_1", "sales"], DarlingSchemaCapture.InScope(probes, [], ["*"]));
+
+        /* The long-query trace: another registration of the server keeps the session in every database it does not exclude. */
+        var owner = new LongQueryTraceRegistration("other", "host", null, true, true, star, null);
+        Assert.Equal(["sales"], LongQueryTraceDatabases.KeptElsewhere("self", "host", ["archive_1", "sales"], [owner], []));
+        var matchAll = new LongQueryTraceRegistration("other", "host", null, true, true, ["*"], null);
+        Assert.Equal(["archive_1", "sales"], LongQueryTraceDatabases.KeptElsewhere("self", "host", ["archive_1", "sales"], [matchAll], []));
     }
 
     [Theory]
@@ -187,6 +223,9 @@ public sealed class DatabaseExclusionPatternLiveTests
         new[] { "a\\*", "it's*" },
         new[] { "*_old", "x*y*z", "a?c*" },
         new[] { "sales", "archive_*", "100%*", "a_b" },
+        new[] { "*" },
+        new[] { "*", "a_b" },
+        new[] { "a_b", "100%", "[x]y", "it's", "a\b" },
     };
 
     private static string[] Expected(string[] list) =>
@@ -271,6 +310,83 @@ public sealed class DatabaseExclusionPatternLiveTests
             var inner = Base("").Replace("'", "''", StringComparison.Ordinal);
             await using var nestedCommand = new SqlCommand($"DECLARE @sql nvarchar(max) = N'{inner} {nested}'; EXEC sys.sp_executesql @sql;", connection);
             Assert.Equal(Expected(list), await ReadSqlAsync(nestedCommand, ct));
+        }
+    }
+
+    /* #9050: the default-trace read's NULL-safe arm. Server-level events carry a NULL database name and must survive any
+       list, and the clause must stay one unit beside the query's other conditions (the 'hidden' row is cut by one of them). */
+    private static readonly string?[] TraceNames = { null, "archive_1", "archive_2", "sales", "keep", "sales_old", "x_old", "hidden" };
+
+    private static readonly string[][] TraceLists =
+    {
+        new[] { "sales" },
+        new[] { "sales", "archive_*" },
+        new[] { "archive_*", "*_old" },
+        new[] { "sales", "archive_*", "*_old" },
+        new[] { "*", "sales" },
+    };
+
+    private static string[] TraceExpected(string[] list) =>
+        TraceNames.Where(n => n is null || (n != "hidden" && !DatabaseNamePattern.MatchesAny(list, n))).Select(n => n ?? "<null>").OrderBy(n => n, StringComparer.Ordinal).ToArray();
+
+    [Fact]
+    public async Task PostgresDefaultTraceArmKeepsNullDatabaseRowsAndDropsTheExcludedOnes()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live pattern test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        var values = string.Join(", ", TraceNames.Select(n => n is null ? "(NULL::text)" : "('" + n + "')"));
+        foreach (var list in TraceLists)
+        {
+            var (clause, parameters) = DefaultTraceEventsCollector.BuildNullSafeDatabaseExclusion(list);
+            await using var command = new NpgsqlCommand($"SELECT coalesce(ft.DatabaseName, '<null>') FROM (VALUES {values}) AS ft(DatabaseName) WHERE coalesce(ft.DatabaseName, '') <> 'hidden' {clause}", connection);
+            foreach (var p in parameters)
+            {
+                command.Parameters.Add(new NpgsqlParameter(p.Name, NpgsqlDbType.Text) { Value = p.Value });
+            }
+
+            Assert.Equal(TraceExpected(list), await ReadAsync(command, ct));
+        }
+    }
+
+    [Fact]
+    public async Task SqlServerDefaultTraceArmKeepsNullDatabaseRowsAndDropsTheExcludedOnes()
+    {
+        var host = Environment.GetEnvironmentVariable("DARLING_TEST_SQL");
+        Assert.SkipWhen(string.IsNullOrEmpty(host), "Set DARLING_TEST_SQL to run the live pattern test.");
+        var ct = TestContext.Current.CancellationToken;
+        var user = Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER");
+        var builder = new SqlConnectionStringBuilder
+        {
+            DataSource = host,
+            InitialCatalog = "master",
+            TrustServerCertificate = true,
+            Encrypt = SqlConnectionEncryptOption.Optional,
+            IntegratedSecurity = string.IsNullOrEmpty(user),
+        };
+        if (!string.IsNullOrEmpty(user))
+        {
+            builder.UserID = user;
+            builder.Password = Environment.GetEnvironmentVariable("DARLING_TEST_SQL_PASSWORD") ?? string.Empty;
+        }
+
+        await using var connection = new SqlConnection(builder.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var values = string.Join(", ", TraceNames.Select(n => n is null ? "(CAST(NULL AS nvarchar(128)))" : "(N'" + n + "')"));
+        foreach (var list in TraceLists)
+        {
+            var (clause, parameters) = DefaultTraceEventsCollector.BuildNullSafeDatabaseExclusion(list);
+            await using var command = new SqlCommand($"SELECT ISNULL(ft.DatabaseName, N'<null>') FROM (VALUES {values}) AS ft(DatabaseName) WHERE ISNULL(ft.DatabaseName, N'') <> N'hidden' {clause}", connection);
+            foreach (var p in parameters)
+            {
+                command.Parameters.Add(new SqlParameter(p.Name, System.Data.SqlDbType.NVarChar, p.Type == CollectorParameterType.NVarChar260 ? 260 : 128) { Value = p.Value });
+            }
+
+            Assert.Equal(TraceExpected(list), await ReadSqlAsync(command, ct));
         }
     }
 
