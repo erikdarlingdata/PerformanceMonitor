@@ -152,7 +152,8 @@ public sealed class DarlingMcpDatabaseStateTools
                 return DarlingMcpAlertTools.Outcome("invalid", "expected_state is required: one of " + string.Join(", ", AllowedStates()) + ". Nothing was changed.");
             }
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+            /* A write never guesses between two servers: a name that is one server's stored name and another's display name is refused. */
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
             if (error is not null)
             {
                 return error;

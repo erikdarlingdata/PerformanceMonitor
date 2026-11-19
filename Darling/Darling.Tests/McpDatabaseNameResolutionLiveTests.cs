@@ -40,6 +40,8 @@ public sealed class McpDatabaseNameResolutionLiveTests
     private const string PgTarget = "dbn-pg";
     private const string Twin = "dbn-twin";
     private const string PgTwin = "dbn-pg-twin";
+    private const string Clash = "dbn-clash";
+    private const string ClashOther = "dbn-clash-other";
 
     private static async Task WithHostAsync(Func<TestServer, NpgsqlDataSource, CancellationToken, Task> body, bool allowWrites = false)
     {
@@ -172,6 +174,23 @@ public sealed class McpDatabaseNameResolutionLiveTests
                 @"INSERT INTO pg_extension_availability (collection_id, collection_time, server_id, server_name, database_name, extension_name, state, is_monitoring_relevant)
                   VALUES ($1, $2, $3, $4, $5, $6, 'installed', TRUE)",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-minutesAgo)), pgTwinId, PgTwin, database, extension);
+        }
+
+        /* Two servers one name fits: it is the first one's stored name and the second one's display name. Both list SalesDB. */
+        var clashId = ServerIdHelper.GetDeterministicHashCode(Clash);
+        var clashOtherId = ServerIdHelper.GetDeterministicHashCode(ClashOther);
+        await DarlingMcpTestData.RegisterServerAsync(connection, clashId, Clash, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, clashOtherId, ClashOther, ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", "dbn-first-of-two", clashId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", Clash, clashOtherId);
+        foreach (var (id, name) in new[] { (clashId, Clash), (clashOtherId, ClashOther) })
+        {
+            foreach (var database in new[] { "master", "SalesDB" })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,$4,$5,5,'ONLINE',FALSE)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-10)), id, name, database);
+            }
         }
 
         await using var postgres = NpgsqlDataSource.Create(storeString);
@@ -343,6 +362,53 @@ public sealed class McpDatabaseNameResolutionLiveTests
             /* An earlier spelling is exact too, so it reaches the tool, which answers for itself. */
             var (earlier, _) = await SetExpectedAsync(host, Twin, "sales");
             Assert.Contains("is not in the latest collected snapshot", earlier.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }, allowWrites: true);
+
+    [Fact]
+    public Task AServerNameThatFitsTwoServers_IsRefusedByAToolThatChangesState_AndNothingIsWritten() =>
+        WithHostAsync(async (host, postgres, ct) =>
+        {
+            var clashId = ServerIdHelper.GetDeterministicHashCode(Clash);
+            var clashOtherId = ServerIdHelper.GetDeterministicHashCode(ClashOther);
+
+            async Task<int> ExpectationsAsync()
+            {
+                var rows = 0;
+                foreach (var id in new[] { clashId, clashOtherId })
+                {
+                    rows += (await DatabaseStateExpectedStore.ReadAsync(postgres, id, 30, ct)).Count(row => row.ExpectedState is not null);
+                }
+
+                return rows;
+            }
+
+            Task<(string Text, bool IsError)> SetAsync(string database) => StatementFilterCensus.CallRealToolAsync(
+                host, "set_database_state_expected",
+                new JsonObject { ["server_name"] = Clash, ["database_name"] = database, ["expected_state"] = "OFFLINE" },
+                bearerToken: StatementFilterCensus.LiveHostToken);
+
+            /* The name is one server's stored name and the other's display name: a read takes the stored name, a write refuses. */
+            var (stored, readError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, Clash, ct);
+            Assert.Null(readError);
+            Assert.Equal(clashId, stored.ServerId);
+            var (_, clash) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, Clash, ct, NameClash.Refuse);
+            Assert.NotNull(clash);
+            var clashMessage = JsonDocument.Parse(clash!).RootElement.GetProperty("message").GetString();
+
+            var (refused, _) = await SetAsync("SalesDB");
+            Assert.Equal(clashMessage, JsonDocument.Parse(refused).RootElement.GetProperty("message").GetString());
+            Assert.Equal(0, await ExpectationsAsync());
+
+            /* Another case of the name is corrected against neither server's list: the lookup stands aside and the tool refuses the server. */
+            var (otherCase, _) = await SetAsync("salesdb");
+            Assert.Equal(clashMessage, JsonDocument.Parse(otherCase).RootElement.GetProperty("message").GetString());
+            Assert.Equal(0, await ExpectationsAsync());
+
+            /* A name that fits one server still writes. */
+            var (set, setError) = await SetExpectedAsync(host, ClashOther, "SalesDB");
+            Assert.False(setError);
+            Assert.Equal("set", set.GetProperty("status").GetString());
+            Assert.Equal(1, await ExpectationsAsync());
         }, allowWrites: true);
 
     [Fact]
