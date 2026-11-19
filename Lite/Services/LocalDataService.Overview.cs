@@ -437,6 +437,11 @@ public enum ServerCardStatus
     /// the first check completed, not a dead server. Its word is "Connecting": the collectors run before the first check
     /// finishes, so the card's rows are already green while this state lasts, and a verdict word would contradict them.</summary>
     Unknown,
+
+    /// <summary>Data collection is turned off for this server (#9084). Lite sends it no background query, so it has no live
+    /// connection answer, and the last one it had is not shown. Its word is "Disabled", the same word the server list uses for
+    /// the setting.</summary>
+    Disabled,
 }
 
 /// <summary>
@@ -459,13 +464,15 @@ public static class ServerCardStatusRules
     /// in Lite — which is an assertion in <c>LiteOverviewCardExplainsItselfTests</c> rather than a claim in
     /// prose, because the prose version came to overstate what was true and had to be caught by review on
     /// #2451.</summary>
-    public static ServerCardStatus Classify(bool? isOnline, bool hasCollectorErrors) => isOnline switch
-    {
-        true when hasCollectorErrors => ServerCardStatus.CollectorErrors,
-        true => ServerCardStatus.Online,
-        false => ServerCardStatus.Offline,
-        _ => ServerCardStatus.Unknown
-    };
+    public static ServerCardStatus Classify(bool? isOnline, bool hasCollectorErrors, bool isEnabled = true) => !isEnabled
+        ? ServerCardStatus.Disabled
+        : isOnline switch
+        {
+            true when hasCollectorErrors => ServerCardStatus.CollectorErrors,
+            true => ServerCardStatus.Online,
+            false => ServerCardStatus.Offline,
+            _ => ServerCardStatus.Unknown
+        };
 
     /// <summary>The four words. They are also the DataTrigger values the sidebar keys its dot colour off in
     /// <c>Lite/MainWindow.xaml</c>, so a fifth word added here would silently fall through to the muted
@@ -475,6 +482,7 @@ public static class ServerCardStatusRules
         ServerCardStatus.CollectorErrors => "Warning",
         ServerCardStatus.Online => "Online",
         ServerCardStatus.Offline => "Offline",
+        ServerCardStatus.Disabled => "Disabled",
         _ => "Connecting"
     };
 
@@ -486,6 +494,7 @@ public static class ServerCardStatusRules
         ServerCardStatus.CollectorErrors => "Warning: one or more collectors are failing on this server",
         ServerCardStatus.Online => "Online: the last connection check succeeded",
         ServerCardStatus.Offline => "Offline: the last connection check failed",
+        ServerCardStatus.Disabled => "Disabled: data collection is off for this server, so Lite sends it no queries",
         _ => "Connecting: the first connection check has not finished yet",
     };
 }
@@ -805,7 +814,11 @@ public class ServerSummaryItem
        one specific thing. Folding freshness in would make one amber word mean two unrelated failures, which
        is the conflation #2429 spent four review rounds untangling on the viewer and the reason #2422 was
        written. Freshness is a third axis: it bands its own row, and the tooltip names it there. */
-    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors);
+    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors, IsEnabled);
+
+    /// <summary>False when data collection is turned off for this server (#9084). Lite runs no connection check on it, so the
+    /// card says "Disabled" rather than the last live answer.</summary>
+    public bool IsEnabled { get; set; } = true;
 
     public string StatusDisplay => CardStatus.Word();
     public SolidColorBrush StatusBrush => MakeBrush(CardStatus switch
@@ -984,7 +997,7 @@ public class ServerSummaryItem
                 lines.Add(unreachable);
             }
 
-            if (CardStatus != ServerCardStatus.Offline)
+            if (CardStatus is not (ServerCardStatus.Offline or ServerCardStatus.Disabled))
             {
                 var reason = StatusReason;
                 lines.Add(reason.Length > 0

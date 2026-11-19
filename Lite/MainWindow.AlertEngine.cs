@@ -403,20 +403,16 @@ public partial class MainWindow : Window
         var server = _serverManager.GetAllServers().FirstOrDefault(s =>
             RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)).ToString() == serverKey);
         var connStatus = server != null ? _serverManager.GetConnectionStatus(server.Id) : null;
+        var collector = _collectorService;
 
-        if (server == null
-            || _collectorService == null
-            || connStatus == null
-            || connStatus.IsOnline != true
-            || connStatus.SqlEngineEdition == 5
-            || !connStatus.HasMsdbAccess)
-        {
-            return new List<FailedJobInfo>();
-        }
-
-        /* GetRecentlyFailedJobsAsync degrades every read failure (permissions, transient) to an
+        /* #9084: a server whose collection is off is never read, whatever its last connection check said. The gate
+           (DisabledServerGate) is the one place the whole rule lives, so a test drives it with a spy for the read.
+           GetRecentlyFailedJobsAsync degrades every read failure (permissions, transient) to an
            empty list itself, so a broken msdb read can't fail the sweep. */
-        return await _collectorService.GetRecentlyFailedJobsAsync(server, lookbackMinutes, cancellationToken);
+        return await DisabledServerGate.FetchFailedJobsAsync(
+            server,
+            connStatus,
+            collector == null ? null : target => collector.GetRecentlyFailedJobsAsync(target, lookbackMinutes, cancellationToken));
     }
 
     /// <summary>
@@ -434,12 +430,10 @@ public partial class MainWindow : Window
             RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)).ToString() == serverKey);
         var connStatus = server != null ? _serverManager.GetConnectionStatus(server.Id) : null;
 
+        /* #9084: the failed-jobs fetcher's gate, collection-off included. */
         if (server == null
             || _collectorService == null
-            || connStatus == null
-            || connStatus.IsOnline != true
-            || connStatus.SqlEngineEdition == 5
-            || !connStatus.HasMsdbAccess)
+            || !DisabledServerGate.MayReadLiveMsdb(server, connStatus))
         {
             return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
         }
