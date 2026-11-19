@@ -730,7 +730,9 @@ public static class PgTableTuning
 
            Left alone on purpose: query_store_watermarks inserts one row per collection and retention deletes the oldest rows
            in key order, so whole pages empty out and VACUUM recycles them (its upsert updates an existing row only when a
-           batch is retried). query_store_text and query_store_plan_map have had fillfactor 90 since V149 (#4250). */
+           batch is retried). query_store_text and query_store_plan_map have had fillfactor 90 since V149 (#4250).
+           query_store_text_seen is created at fillfactor 90 (V281, #9043): its last_seen is not indexed, so the guarded
+           stamp stays heap-only where the page has room, and its rows are deleted with their text row. */
         "ALTER TABLE collect.oversized_plan_backlog SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.query_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.collector_state SET (fillfactor = 80)",

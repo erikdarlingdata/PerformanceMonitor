@@ -728,29 +728,38 @@ public sealed class ViewerSchemaVersionGateTests
         var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        /* #8570: the V280 sentinel (the plan_correction recommendation index) is the last parameter, so a store that has every sentinel but
-           that one is a V279 store and maps to 279, not 280. The V279 sentinel (the aggregate compression order history) is the one before it,
+        /* #9043: the V281 sentinel (the Query Store text liveness table) is the last parameter, so a store that has every sentinel but
+           that one is a V280 store and maps to 280, not 281. #8570: the V280 sentinel (the plan_correction recommendation index) is the one
+           before it, so a store without it (and without V281's) is a V279 store. The V279 sentinel (the aggregate compression order history) is the one before it,
            so a store without it (and without V280's) is a V278 store. #8865: the V278 sentinel (the error-log facts on the database protection rows) is
            the one before it, so a store without it (and without V279's) is a V277 store. #8967: the V277 sentinel (the progress table of the attention_events
            copy) is the one before that, so a store without it (and without the two above) is a V276 store. #9000: the V276 sentinel (the Store Growth
            settings on the alert settings) is the one before that, #8737: the V275 sentinel (the personal token table) the one before that,
            and #8978: the V274 sentinel the one before that. */
+        var allButV281 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV281[^1] = false;
+        Assert.Equal("hasQueryStoreTextSeen", map.GetParameters()[^1].Name);
+        Assert.Equal(280, (int)map.Invoke(null, allButV281)!);
+
         var allButV280 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV280[^1] = false;
-        Assert.Equal("hasPlanCorrectionServerDbQueryIndex", map.GetParameters()[^1].Name);
+        allButV280[^2] = false;
+        Assert.Equal("hasPlanCorrectionServerDbQueryIndex", map.GetParameters()[^2].Name);
         Assert.Equal(279, (int)map.Invoke(null, allButV280)!);
 
         var allButV279 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV279[^1] = false;
         allButV279[^2] = false;
-        Assert.Equal("hasAggregateCompressionOrderHistory", map.GetParameters()[^2].Name);
+        allButV279[^3] = false;
+        Assert.Equal("hasAggregateCompressionOrderHistory", map.GetParameters()[^3].Name);
         Assert.Equal(278, (int)map.Invoke(null, allButV279)!);
 
         var allButV278 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV278[^1] = false;
         allButV278[^2] = false;
         allButV278[^3] = false;
-        Assert.Equal("hasDatabaseProtectionErrorLog", map.GetParameters()[^3].Name);
+        allButV278[^4] = false;
+        Assert.Equal("hasDatabaseProtectionErrorLog", map.GetParameters()[^4].Name);
         Assert.Equal(277, (int)map.Invoke(null, allButV278)!);
 
         var allButV277 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -758,7 +767,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV277[^2] = false;
         allButV277[^3] = false;
         allButV277[^4] = false;
-        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^4].Name);
+        allButV277[^5] = false;
+        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^5].Name);
         Assert.Equal(276, (int)map.Invoke(null, allButV277)!);
 
         var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -767,7 +777,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV276[^3] = false;
         allButV276[^4] = false;
         allButV276[^5] = false;
-        Assert.Equal("hasStoreGrowthAlertSettings", map.GetParameters()[^5].Name);
+        allButV276[^6] = false;
+        Assert.Equal("hasStoreGrowthAlertSettings", map.GetParameters()[^6].Name);
         Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
 
         var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -777,7 +788,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV275[^4] = false;
         allButV275[^5] = false;
         allButV275[^6] = false;
-        Assert.Equal("hasPersonalTokens", map.GetParameters()[^6].Name);
+        allButV275[^7] = false;
+        Assert.Equal("hasPersonalTokens", map.GetParameters()[^7].Name);
         Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
 
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -788,7 +800,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV274[^5] = false;
         allButV274[^6] = false;
         allButV274[^7] = false;
-        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^7].Name);
+        allButV274[^8] = false;
+        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^8].Name);
         Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
 
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes

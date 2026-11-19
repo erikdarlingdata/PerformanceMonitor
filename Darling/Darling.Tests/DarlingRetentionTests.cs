@@ -1200,11 +1200,11 @@ WHERE hypertable_name = 'wait_stats'
     [Fact]
     public void UnorderedRowCappedDelete_HasNoOrderByAndNoMinSubquery()
     {
-        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_text", "last_seen", 300_000);
+        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_plan_map", "last_seen", 300_000);
 
         Assert.Equal(
-            "DELETE FROM collect.query_store_text WHERE ctid IN ("
-            + "SELECT ctid FROM collect.query_store_text WHERE last_seen < $1 "
+            "DELETE FROM collect.query_store_plan_map WHERE ctid IN ("
+            + "SELECT ctid FROM collect.query_store_plan_map WHERE last_seen < $1 "
             + "LIMIT 300000)",
             sql);
 
@@ -1216,7 +1216,8 @@ WHERE hypertable_name = 'wait_stats'
     }
 
     /// <summary>
-    /// Both liveness-touched tables' purge calls use the unordered builder, carry the shared cap as their
+    /// Both liveness-touched tables' purge calls use an unordered row-capped delete (the map through the builder, the text
+    /// through <see cref="QueryStoreTextSeen.PruneSql"/>), carry the shared cap as their
     /// batch size (so the drain loop's "a full-cap batch means there may be more" contract applies), and
     /// leave <c>adaptiveRowCapTimeColumn</c> unset — that parameter exists only for the plan dimension's
     /// #4130 retry-at-half-cap behavior, which neither of these tables has been measured to need: both
@@ -1242,7 +1243,7 @@ WHERE hypertable_name = 'wait_stats'
         var textAt = source.IndexOf("var queryTextDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
         Assert.True(textAt >= 0, "the query text purge call moved");
         var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
-        Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreTextSeen.PruneSql(", textBody, StringComparison.Ordinal);
         Assert.Contains("livenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", textBody, StringComparison.Ordinal);
     }

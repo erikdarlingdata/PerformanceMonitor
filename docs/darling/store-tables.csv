@@ -153,6 +153,7 @@ query_store_stats_hourly,derived,derived,rollup view
 query_store_stats_interval_daily,derived,derived,rollup view
 query_store_stats_interval_hourly,derived,derived,rollup view
 query_store_text,collected,yes,Query Store statement text
+query_store_text_seen,internal,no,liveness stamp of each Query Store statement text
 query_store_top_daily,derived,derived,per-day top Query Store statements
 query_store_top_daily_built,internal,no,which days are built
 query_store_watermarks,internal,no,Query Store read progress

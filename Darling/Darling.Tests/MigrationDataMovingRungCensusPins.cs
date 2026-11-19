@@ -25,15 +25,15 @@ namespace Darling.Tests;
 ///
 /// <para><b>What the constant rests on.</b> <c>MigrateAsync</c> takes the advisory lock ONCE and holds
 /// it while <c>MigrateLockedAsync</c> applies EVERY pending rung in the same session, so the acquire's
-/// budget has to cover a whole multi-rung upgrade rather than one statement. #2888 sized it as
-/// <c>5 * MigrationCommandTimeoutSeconds</c> from a census: of the rungs in <c>PgMigrations.Scripts</c>,
+/// budget has to cover a whole multi-rung upgrade rather than one statement. It is sized as
+/// <c>6 * MigrationCommandTimeoutSeconds</c> from a census (#2888): of the rungs in <c>PgMigrations.Scripts</c>,
 /// only a handful touch data an EARLIER rung created, the applier wraps each rung's whole SQL in ONE
 /// <c>NpgsqlCommand</c> (so <c>MigrationCommandTimeoutSeconds</c> is a per-RUNG bound, not a
-/// per-statement one), and four of those rungs target objects large enough to spend it. Four multiples
-/// of floor plus one of margin is the 5.</para>
+/// per-statement one), and five of those rungs target objects large enough to spend it (V281, #9043, is
+/// the fifth). Five multiples of floor plus one of margin is the 6.</para>
 ///
 /// <para><b>Why a pin rather than a comment.</b> That derivation is a snapshot. Nothing in the build
-/// notices when a fifth data-moving rung lands, so the constant stops covering the ladder without
+/// notices when another data-moving rung lands, so the constant stops covering the ladder without
 /// anything going red — #2894's first residual, and the reason option 3 there was called worth doing
 /// regardless of which mechanism eventually wins. This scans every rung's SHIPPED SQL (the real
 /// <c>Scripts</c> strings, including the generator-built rungs, not a transcription) for data-moving
@@ -52,7 +52,9 @@ namespace Darling.Tests;
 /// ladder's 134 <c>CREATE INDEX</c> statements are that shape. An index on a table an EARLIER rung created
 /// is a btree over whatever has been collected since, which on this store is gigabytes. A pin that
 /// flagged both would be turned off, so every targeted shape resolves its table and is dropped when
-/// that table is created by the rung itself. Identity is the BARE table name, deliberately: V1 creates
+/// that table is created by the rung itself. An <c>INSERT INTO ... SELECT</c> is resolved a second time,
+/// by the tables it READS: a rung that creates a table and fills it from an earlier rung's table is free
+/// by its target and a full pass by its source (V281's backfill is that shape). Identity is the BARE table name, deliberately: V1 creates
 /// the collector tables unqualified in <c>public</c> and V8 moves them to <c>collect</c>, so
 /// <c>collect.query_stats</c> and <c>query_stats</c> are the same table and 37 bare names are created
 /// under both spellings.</para>
@@ -220,6 +222,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
             + "nowhere near the horizon in practice"),
         new(
+            167,
+            SetsTheFloor: false,
+            "INSERT ... SELECT into the new config.legacy_secret_pin_candidate (#5456) that reads config.config_monitored_servers "
+            + "twice and config.config_notification once (both created V17), and config.legacy_secret_pin_marker (created V165). "
+            + "The server registry holds one row per monitored server, and the other two hold one row each, so the read is a few "
+            + "hundred rows at most. It reads no collected data and spends none of the lock-wait budget, so the multiple does not move."),
+        new(
             169,
             SetsTheFloor: false,
             "ADD CONSTRAINT ... CHECK on config.config_monitored_servers (#5452) validates every existing row, and the "
@@ -351,14 +360,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "InvestigationRetentionDays (a year), and a report is at most one row per request. The rung's own measurement loaded a year "
             + "of requests at a production store's rate (73,000 rows) and a production store holds hundreds today, so each build "
             + "reads the table once and takes milliseconds. A different class from V104's collected hypertable. It does not move the "
-            + "lock-wait floor, so the multiple stays 5."),
+            + "lock-wait floor, so the multiple does not move."),
         new(
             216,
             SetsTheFloor: false,
             "ALTER COLUMN ... SET DEFAULT plus a narrow-predicate UPDATE on config.config_alert_settings (created V17), the one-row settings "
             + "singleton (id = 1): turns the Client Timeouts alert on by default (#5736). V147's shape on the same kind of table. The "
             + "UPDATE's WHERE client_timeouts_enabled = FALSE touches at most one row, the SET DEFAULT is catalog-only, and neither reads "
-            + "any collected data, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+            + "any collected data, so the rung spends none of the lock-wait budget and the multiple does not move."),
         new(
             227,
             SetsTheFloor: false,
@@ -368,7 +377,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "against every stored row and the partial index (WHERE scope_tag_id IS NOT NULL) indexes nothing, because the column the "
             + "same rung adds is null on every stored row, so each statement reads the table once and takes milliseconds. The ADD "
             + "COLUMN is nullable with no default and the DROP NOT NULL on server_id is catalog-only, so neither rewrites a row. It does "
-            + "not move the lock-wait floor, so the multiple stays 5."),
+            + "not move the lock-wait floor, so the multiple does not move."),
         new(
             229,
             SetsTheFloor: false,
@@ -376,14 +385,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(created V131), the notification routes registry (#6928). The ADD COLUMN with a constant default is catalog-only. The CHECK "
             + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
             + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
-            + "the multiple stays 5."),
+            + "the multiple does not move."),
         new(
             231,
             SetsTheFloor: false,
             "Four nullable ADD COLUMNs plus one ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, #7040). The columns carry "
             + "no default, so they are catalog-only. The CHECK reads the table once to validate it, and the table is a hand-edited registry "
             + "of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads no collected "
-            + "data and spends none of the lock-wait budget, so the multiple stays 5."),
+            + "data and spends none of the lock-wait budget, so the multiple does not move."),
         new(
             233,
             SetsTheFloor: false,
@@ -391,20 +400,20 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(created V131), the notification routes registry (#6979). The ADD COLUMN with a constant default is catalog-only. The CHECK "
             + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
             + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
-            + "the multiple stays 5."),
+            + "the multiple does not move."),
         new(
             235,
             SetsTheFloor: false,
             "Three SET DEFAULT statements plus one UPDATE on config.config_alert_settings (created V17), the one-row alert settings "
             + "singleton (#7083). The SET DEFAULT is catalog-only. The UPDATE touches at most that one row. It reads no collected data and "
-            + "spends none of the lock-wait budget, so the multiple stays 5."),
+            + "spends none of the lock-wait budget, so the multiple does not move."),
         new(
             236,
             SetsTheFloor: false,
             "ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'mute' plus ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, "
             + "#7083). The ADD COLUMN with a constant default is catalog-only. The CHECK reads the table once to validate it, and the table is a "
             + "hand-edited registry of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads "
-            + "no collected data and spends none of the lock-wait budget, so the multiple stays 5."),
+            + "no collected data and spends none of the lock-wait budget, so the multiple does not move."),
         new(
             238,
             SetsTheFloor: false,
@@ -412,7 +421,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "COLUMN IF NOT EXISTS approval_single_person on config.config_notification_routes (created V131, #7109). The ADD COLUMNs with a "
             + "constant default are catalog-only. The CHECK and the UPDATE each read the table once, and the table is a hand-edited registry of at "
             + "most a few hundred routes, so both take milliseconds. The new proposals table starts empty. It reads no collected data and spends "
-            + "none of the lock-wait budget, so the multiple stays 5."),
+            + "none of the lock-wait budget, so the multiple does not move."),
         new(
             248,
             SetsTheFloor: false,
@@ -420,14 +429,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "(created V219, #7730): the state row the background backfill reads, a single row. The trigger function body names a DELETE on "
             + "collect.query_store_self_keys, which is the function text and not a statement the rung runs. The rung scans no table and "
             + "rewrites no collected row (the backfill runs in the background after start), so it spends none of the lock-wait budget "
-            + "and the multiple stays 5."),
+            + "and the multiple does not move."),
         new(
             251,
             SetsTheFloor: false,
             "Replaces the compose-stamp trigger function and creates both row triggers again (#7762), with the threshold moved to the hour of the "
             + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "
             + "function text and not a statement the rung runs. The rung is a function replace and two trigger creates: catalog work on the partitioned "
-            + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple stays 5."),
+            + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple does not move."),
         new(
             254,
             SetsTheFloor: false,
@@ -435,7 +444,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "chat_thread_of, a column the same rung adds, so every existing row is NULL and the partial index holds no entry; and an index on "
             + "config.investigation_request_threads (created V252) over its two text columns, a table of one row per request thread that the Slack bot "
             + "posted, at most the request count (tens of thousands on the largest store) and empty on a store that never posted. Both scans are "
-            + "sub-second, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+            + "sub-second, so the rung spends none of the lock-wait budget and the multiple does not move."),
         new(
             257,
             SetsTheFloor: false,
@@ -484,6 +493,18 @@ public sealed class MigrationDataMovingRungCensusPins
             + "uncompressed at migration time, and a compressed chunk's index is an empty shell, so the build reads only the uncompressed chunks. "
             + "Measured on a rig of 10 servers, 31 daily chunks (28 compressed), about 3.3M rows: the build took 3.3 s and the index is 56 MB. "
             + "A store many times that size still builds in seconds, far inside a MigrationCommandTimeoutSeconds window, so it does not move the multiple."),
+        new(
+            281,
+            SetsTheFloor: true,
+            "#9043: INSERT ... SELECT that reads every row of the populated collect.query_store_text (created V74) into the new "
+            + "collect.query_store_text_seen, then builds that table's primary key and validates its foreign key against the text table. "
+            + "The rung also puts a statement trigger on the text table; its function body names an INSERT into the seen table from the "
+            + "trigger's transition table, which is the function text and not a statement the rung runs. "
+            + "Measured on PostgreSQL 18.6 against 6.9M text rows (a 4.2 GB main heap, 8.8 GB with TOAST and indexes): the backfill is one "
+            + "sequential pass of the main heap, 3.7 s and 0.6 GB of WAL; the key builds in 2.3-2.4 s (243 MB); the foreign key validates in "
+            + "4.8-4.9 s; about 11 s in all, warm and on local NVMe. The time follows the text heap, which is one of the largest plain tables "
+            + "of a store that collects Query Store and is read cold at start, so it sets the floor as V22's and V39's index builds do: the "
+            + "multiple is 6. Loading before the constraints is what keeps it there (51-55 s with the key in place first)."),
     ];
 
     /// <summary>
@@ -505,7 +526,7 @@ public sealed class MigrationDataMovingRungCensusPins
             "New data-moving migration rung(s) — the census "
             + "PgMigrations.MigrationLockWaitTimeoutSeconds is derived from no longer describes the "
             + "ladder.\n\n"
-            + "That constant (5 * MigrationCommandTimeoutSeconds = 1500 s) bounds the pg_advisory_lock "
+            + "That constant (6 * MigrationCommandTimeoutSeconds = 1800 s) bounds the pg_advisory_lock "
             + "ACQUIRE, and the lock is taken ONCE and held while every pending rung applies in the same "
             + "session — so its floor is (rungs that touch data an earlier rung created) x "
             + "MigrationCommandTimeoutSeconds, with one further multiple as margin. A rung nobody costed "
@@ -679,6 +700,8 @@ public sealed class MigrationDataMovingRungCensusPins
     [InlineData("REINDEX", "REINDEX TABLE CONCURRENTLY collect.old;")]
     [InlineData("CREATE INDEX with no index name", "CREATE INDEX ON collect.old (a);")]
     [InlineData("ALTER TABLE ONLY", "ALTER TABLE ONLY collect.old ADD PRIMARY KEY (a);")]
+    [InlineData("INSERT INTO ... SELECT reading an earlier table", "CREATE TABLE collect.fresh (a int);\nINSERT INTO collect.fresh (a) SELECT o.a FROM collect.old AS o;")]
+    [InlineData("INSERT INTO ... SELECT joining an earlier table", "CREATE TABLE collect.fresh (a int);\nINSERT INTO collect.fresh (a) SELECT g.a FROM generate_series(1, 3) AS g(a) JOIN collect.old AS o ON o.a = g.a;")]
     public void EveryDataMovingShape_FiresOnASyntheticRung(string label, string sql)
     {
         var findings = Classify(
@@ -691,6 +714,50 @@ public sealed class MigrationDataMovingRungCensusPins
             findings.Any(f => f.Version == 2),
             $"the {label} shape is not detected — a rung using it would land silently and "
             + $"MigrationLockWaitTimeoutSeconds' census would not notice. SQL:\n{sql}");
+    }
+
+    /// <summary>
+    /// The read side of an <c>INSERT INTO ... SELECT</c>, both ways. A rung that fills its own new table from an
+    /// earlier rung's table is a finding, named for the table it reads, and that is the only way the scan sees it:
+    /// its target is the rung's own. A rung that fills its own table from nothing an earlier rung created (a
+    /// function, another table of its own, a trigger's transition table inside a function body) stays free, or the
+    /// shape would flag every seed insert in the ladder.
+    /// </summary>
+    [Fact]
+    public void AnInsertSelectIntoTheRungsOwnTable_IsResolvedByWhatItReads()
+    {
+        var reads = Assert.Single(Classify(
+        [
+            new PgMigrations.Migration(1, "creates-old", "CREATE TABLE collect.old (a int);"),
+            new PgMigrations.Migration(
+                2,
+                "creates-and-fills",
+                "CREATE TABLE collect.fresh (a int);\nINSERT INTO collect.fresh (a)\nSELECT o.a\nFROM collect.old AS o;"),
+        ]));
+
+        Assert.Equal(2, reads.Version);
+        Assert.Equal(InsertSelectReadingShape, reads.Shape);
+        Assert.Equal("collect.old", reads.Table);
+        Assert.Equal("V1", reads.CreatedBy);
+
+        Assert.Empty(Classify(
+        [
+            new PgMigrations.Migration(1, "creates-old", "CREATE TABLE collect.old (a int);"),
+            new PgMigrations.Migration(
+                2,
+                "fills-from-nothing-collected",
+                "CREATE TABLE collect.fresh (a int);\n"
+                + "CREATE TABLE collect.other (a int);\n"
+                + "INSERT INTO collect.fresh (a) SELECT g FROM generate_series(1, 3) AS g;\n"
+                + "INSERT INTO collect.fresh (a) SELECT x.a FROM collect.other AS x;\n"
+                + "CREATE FUNCTION collect.track() RETURNS trigger LANGUAGE plpgsql AS $f$\n"
+                + "BEGIN INSERT INTO collect.fresh (a) SELECT n.a FROM landed AS n; RETURN NULL; END $f$;"),
+        ]));
+
+        /* The real ladder's representative, so the shape is not only proven on a synthetic rung. */
+        Assert.Contains(
+            Classify(PgMigrations.Scripts),
+            f => f.Version == 281 && f.Shape == InsertSelectReadingShape && BareName(f.Table) == "query_store_text");
     }
 
     /// <summary>
@@ -952,6 +1019,21 @@ public sealed class MigrationDataMovingRungCensusPins
         ("REINDEX", new Regex(@"(?:\A|[;\n])\s*REINDEX\b", Opts)),
     ];
 
+    /// <summary>
+    /// An <c>INSERT INTO ... SELECT</c> as a whole statement, and the tables its <c>FROM</c> and <c>JOIN</c> clauses
+    /// name. The target-resolved shape above drops the statement when the rung created the target, which is right
+    /// for the write and blind to the read: a new table filled from an earlier rung's table reads everything that
+    /// table has collected. A source counts only when an earlier rung created it, so a function in <c>FROM</c>, a
+    /// CTE and a trigger's transition table are not findings.
+    /// </summary>
+    private const string InsertSelectReadingShape = "INSERT INTO ... SELECT reading";
+
+    private static readonly Regex s_insertSelectStatement = new(
+        @"INSERT\s+INTO\s+" + Ident + @"[^;]*?\bSELECT\b[^;]*", Opts);
+
+    private static readonly Regex s_sourceTable = new(
+        @"\b(?:FROM|JOIN)\s+(?:ONLY\s+)?(?:LATERAL\s+)?(?<t>" + Ident + ")", Opts);
+
     private static string StripComments(string sql) =>
         s_lineComment.Replace(s_blockComment.Replace(sql, " "), " ");
 
@@ -1004,6 +1086,27 @@ public sealed class MigrationDataMovingRungCensusPins
                         createdBy.TryGetValue(bare, out var origin)
                             ? "V" + origin.ToString(CultureInfo.InvariantCulture)
                             : "(no rung creates it)"));
+                }
+            }
+
+            foreach (Match statement in s_insertSelectStatement.Matches(sql))
+            {
+                foreach (Match source in s_sourceTable.Matches(statement.Value))
+                {
+                    var table = source.Groups["t"].Value;
+                    var bare = BareName(table);
+
+                    if (itsOwn.Contains(bare) || !createdBy.TryGetValue(bare, out var origin))
+                    {
+                        continue;
+                    }
+
+                    findings.Add(new Finding(
+                        rung.Version,
+                        rung.Name,
+                        InsertSelectReadingShape,
+                        table,
+                        "V" + origin.ToString(CultureInfo.InvariantCulture)));
                 }
             }
 

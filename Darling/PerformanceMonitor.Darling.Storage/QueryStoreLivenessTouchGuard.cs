@@ -13,13 +13,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// The one width of the liveness-touch guard, shared by every <c>last_seen</c> touch the Query Store fetch
 /// probe issues: <see cref="QueryStorePlanMap.TouchAndProbeSql"/>'s <c>touched</c> CTE, that statement's
-/// <c>dim_touch</c>, and <see cref="QueryStoreTextStore.TouchAndProbeSql"/>'s <c>touched</c> CTE.
+/// <c>dim_touch</c>, and the two sites of <see cref="QueryStoreTextStore.TouchSeenSql"/> (its select and its
+/// conflict arm, both on <c>query_store_text_seen</c>).
 ///
 /// <para><b>One constant, because the map row and the dimension row must not be able to age out at
 /// different times.</b> <see cref="QueryStorePlanMap.TouchAndProbeSql"/> calls that structurally impossible
 /// rather than carefully avoided, and separate literals per site make it neither — they are copies that
 /// happen to agree, and moving some of them is precisely the divergence that claim rules out. The width is
-/// spelled once here and interpolated into all three sites, so a partial migration cannot be expressed.
+/// spelled once here and interpolated into every site, so a partial migration cannot be expressed.
 /// <c>QueryStoreTouchGuardSingleSourceTests</c> pins the single-sourcing rather than the value: it fails on
 /// a hard-coded interval anywhere in either statement's source, on a guard site appearing or disappearing,
 /// and on a width that stops following the margin it is derived from.</para>
@@ -61,8 +62,9 @@ public static class QueryStoreLivenessTouchGuard
     /// <para><b>The INCLUSION CRITERION, because a <c>min</c> over an unstated enumeration is the next
     /// defect.</b> A table contributes a term exactly when this guard's touch writes its <c>last_seen</c>.
     /// That is three tables — <c>query_store_plan_map</c> and <c>query_plan_dim</c> from
-    /// <see cref="QueryStorePlanMap.TouchAndProbeSql"/>, and <c>query_store_text</c> from
-    /// <see cref="QueryStoreTextStore.TouchAndProbeSql"/> — and it is emphatically NOT "every table with a
+    /// <see cref="QueryStorePlanMap.TouchAndProbeSql"/>, and <c>query_store_text_seen</c> from
+    /// <see cref="QueryStoreTextStore.TouchSeenSql"/>, whose stamp is the one the text prune reads, so its term is
+    /// <see cref="QueryStoreTextStore.PruneMarginDays"/> — and it is emphatically NOT "every table with a
     /// <c>PruneMarginDays</c>". Membership is enforced rather than asserted:
     /// <c>QueryStoreTouchGuardSingleSourceTests</c> derives the guarded store types by scanning the whole
     /// project for guard sites and requires the set of <c>PruneMarginDays</c> terms in this initializer to
@@ -150,7 +152,7 @@ public static class QueryStoreLivenessTouchGuard
     public const int GuardHours = StampSkewMarginHours / MarginShareDivisor;
 
     /// <summary>
-    /// The SQL fragment the three guard sites interpolate. Plural unconditionally — PostgreSQL accepts
+    /// The SQL fragment every guard site interpolates. Plural unconditionally — PostgreSQL accepts
     /// <c>interval '1 hours'</c>, so the rendering needs no singular arm that only one value would ever
     /// exercise.
     /// </summary>
