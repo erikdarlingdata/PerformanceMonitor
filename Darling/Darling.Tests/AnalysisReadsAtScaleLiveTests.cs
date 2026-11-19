@@ -31,7 +31,9 @@ namespace Darling.Tests;
 /// seconds at 4,000 files), and the sp_configure trace read walked every default-trace event the server had kept. Each
 /// test runs the shipped statement and its pre-#8570 form over the same rows: the answer must be equal, and the plan
 /// must have the new shape (no pairwise join, a fraction of the blocks). #8980 added the probe's chunk test: its
-/// dropped_out arm had no time bound and read every file_io_stats chunk of the server.
+/// dropped_out arm had no time bound and read every file_io_stats chunk of the server. #9049 covers both database-size
+/// statements over a lookback that lies in compressed chunks: each returns the rows of the snapshots it names, not the
+/// rows of the lookback, and plans no chunk outside the lookback.
 /// </summary>
 public sealed class AnalysisReadsAtScaleLiveTests
 {
@@ -143,6 +145,65 @@ SELECT
         SELECT f.database_name, f.file_name
         FROM file_io_stats AS f
         WHERE f.server_id = $1
+        AND   f.collection_time IN (SELECT collection_time FROM edge)
+        AND   f.size_mb > 0
+        EXCEPT
+        SELECT c.database_name, c.file_name
+        FROM cur AS c
+    ) AS dropped_out";
+
+    /// <summary>The database-size probe as shipped before #9049 (cur with no time bound of its own, and the dropped_out arm matching the edge
+    /// times through a join to a CTE of them). An oracle, never run by the product.</summary>
+    private const string EdgeJoinDatabaseSizeNewestSql = @"
+WITH newest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+cur AS (
+    SELECT DISTINCT ON (database_name, file_name) database_name, file_name, size_mb
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time = (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY database_name, file_name
+),
+edge AS (
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time DESC
+        LIMIT 1
+    )
+    UNION
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time ASC
+        LIMIT 1
+    )
+)
+SELECT
+    (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
+    EXISTS (
+        SELECT f.database_name, f.file_name
+        FROM file_io_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
         AND   f.collection_time IN (SELECT collection_time FROM edge)
         AND   f.size_mb > 0
         EXCEPT
@@ -379,6 +440,160 @@ VALUES (857_390_000_001, $2, $1, 'scale', 'GoneDb', 'GoneFile', 'ROWS', 5)", ct,
                     yield return nested;
                 }
             }
+        }
+    }
+
+    /// <summary>Every relation the plan names, the chunks the executor never ran among them: a chunk the planner could not exclude is
+    /// planned, and costs planning time, whether or not a run-time test then skips it.</summary>
+    private static IEnumerable<string> PlannedRelationNames(JsonElement node)
+    {
+        if (node.TryGetProperty("Relation Name", out var name) && name.GetString() is { } relation)
+        {
+            yield return relation;
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                foreach (var nested in PlannedRelationNames(child))
+                {
+                    yield return nested;
+                }
+            }
+        }
+    }
+
+    private static async Task<HashSet<string>> ChunkNamesAsync(NpgsqlConnection c, string showChunks, CancellationToken ct, params DateTime[] parameters)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        await using var cmd = new NpgsqlCommand("SELECT cl.relname FROM " + showChunks + " AS ch JOIN pg_class AS cl ON cl.oid = ch", c);
+        foreach (var p in parameters)
+        {
+            cmd.Parameters.AddWithValue(Naive(p));
+        }
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names;
+    }
+
+    private static async Task<double?> RunSizeAsync(NpgsqlConnection c, string sql, object[] parameters, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(sql, c);
+        foreach (var p in parameters)
+        {
+            cmd.Parameters.AddWithValue(p is DateTime dt ? Naive(dt) : p);
+        }
+
+        var value = await cmd.ExecuteScalarAsync(ct);
+        return value is null or DBNull ? null : Convert.ToDouble(value);
+    }
+
+    /// <summary>
+    /// #9049: both database-size statements return the rows of the snapshots they name, not the rows of the lookback, and
+    /// plan no chunk outside it. The lookback here lies in compressed chunks, as it does for any window that ends more
+    /// than a day in the past. There a join to a CTE of the edge times is a hash join over every row of the lookback,
+    /// and a read that numbers every row of the lookback to keep the newest per file sorts them all: 6.4 million rows
+    /// for a server with 4,471 files sampled each minute. Each shipped statement runs beside that form over the same
+    /// rows, for a server that kept every file and for one that lost a file after the lookback's oldest snapshot.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSizeStatements_ReadTheSnapshotsTheyName_NotTheLookback_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live database-size snapshot test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await ExecAsync(c, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
+        await ExecAsync(c, TimescaleSupport.EnableCompressionSql(FileIoStatsCollector.Instance), ct);
+
+        const int steadyServer = -904_911;
+        const int droppedServer = -904_912;
+        const int files = 40;
+        var newestPlanted = LiveClock.AnchoredEnd();
+        var end = newestPlanted.AddDays(-4);
+        var lookbackStart = end.AddHours(-24);
+
+        /* Ten days of snapshots of two servers, every 15 minutes, 40 files each. The window ends four days before the
+           newest snapshot, so the servers have chunks on both sides of its lookback, and 96 snapshots inside it. The
+           second server has one more file, in the lookback's oldest snapshot only. Every chunk is compressed, as the
+           store's policy leaves the chunks of a window that old. */
+        await ExecAsync(c, @"
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
+SELECT 904_900_000_000 + sv.n * 1_000_000 + s.k * 100 + f, $1::timestamp - interval '1 minute' - s.k * interval '15 minutes', sv.server_id, 'scale',
+       'Db' || (f / 2), 'File' || f, 'ROWS', 10 + f
+FROM (VALUES (1, $2::int), (2, $3::int)) AS sv (n, server_id)
+CROSS JOIN generate_series(0, 959) AS s (k)
+CROSS JOIN generate_series(0, $4 - 1) AS f", ct, newestPlanted, steadyServer, droppedServer, files);
+        await ExecAsync(c, @"
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
+VALUES (904_990_000_001, $2, $1, 'scale', 'GoneDb', 'GoneFile', 'ROWS', 5)", ct, droppedServer, end.AddMinutes(-1 - (95 * 15)));
+        await ExecAsync(c, "SELECT compress_chunk(ch, if_not_compressed => true) FROM show_chunks('file_io_stats') AS ch", ct);
+        await ExecAsync(c, "ANALYZE file_io_stats", ct);
+
+        var chunks = await ChunkNamesAsync(c, "show_chunks('file_io_stats')", ct);
+        var outside = await ChunkNamesAsync(c, "show_chunks('file_io_stats', older_than => $1::timestamp)", ct, lookbackStart);
+        var after = await ChunkNamesAsync(c, "show_chunks('file_io_stats', newer_than => $1::timestamp)", ct, end);
+        Assert.True(outside.Count >= 3 && after.Count >= 3,
+            $"the plant should leave several chunks wholly before the lookback and several wholly after the window, found {outside.Count} and {after.Count}");
+        outside.UnionWith(after);
+
+        /* The lookback holds 96 snapshots of the server's files. A statement that reads the snapshots it names returns three
+           snapshots' rows at most (the newest, the one before it, the oldest; one of them with the extra file) and the three
+           one-row reads that find their times. */
+        const long lookbackRows = 96L * files;
+        const long snapshotRows = (3L * (files + 1)) + 3;
+
+        foreach (var serverId in new[] { steadyServer, droppedServer })
+        {
+            var dropped = serverId == droppedServer;
+            object[] parameters = [serverId, lookbackStart, end];
+
+            var probe = await RunProbeAsync(c, PgFactCollector.DatabaseSizeNewestSql, parameters, ct);
+            Assert.Equal(await RunProbeAsync(c, EdgeJoinDatabaseSizeNewestSql, parameters, ct), probe);
+            Assert.Equal((1180d, dropped), probe);
+
+            var size = await RunSizeAsync(c, PgFactCollector.DatabaseSizeSql, parameters, ct);
+            Assert.Equal(await RunSizeAsync(c, NewestSnapshotReadsLiveTests.FullLookbackDatabaseSizeSql, parameters, ct), size);
+            Assert.Equal(dropped ? 1185d : 1180d, size);
+
+            using var probePlan = await ExplainAsync(c, PgFactCollector.DatabaseSizeNewestSql, parameters, ct);
+            using var joinPlan = await ExplainAsync(c, EdgeJoinDatabaseSizeNewestSql, parameters, ct);
+            using var sizePlan = await ExplainAsync(c, PgFactCollector.DatabaseSizeSql, parameters, ct);
+            using var lookbackPlan = await ExplainAsync(c, NewestSnapshotReadsLiveTests.FullLookbackDatabaseSizeSql, parameters, ct);
+
+            var joinRows = ExplainBuffers.RowsRead(joinPlan.RootElement.GetRawText(), chunks);
+            var probeRows = ExplainBuffers.RowsRead(probePlan.RootElement.GetRawText(), chunks);
+            Assert.True(joinRows >= lookbackRows,
+                $"the pre-#9049 probe is expected to return every row of the lookback from its chunk scans ({lookbackRows}); if it no longer does, the plant has stopped showing the defect: {joinRows} rows, {joinPlan.RootElement}");
+            Assert.True(probeRows <= snapshotRows,
+                $"the probe returns more rows from its chunk scans than the snapshots it names hold ({snapshotRows}): {probeRows} rows, {probePlan.RootElement}");
+
+            var lookbackReadRows = ExplainBuffers.RowsRead(lookbackPlan.RootElement.GetRawText(), chunks);
+            var sizeRows = ExplainBuffers.RowsRead(sizePlan.RootElement.GetRawText(), chunks);
+            Assert.True(lookbackReadRows >= lookbackRows,
+                $"the read of every row in the lookback is expected to return them all from its chunk scans ({lookbackRows}): {lookbackReadRows} rows, {lookbackPlan.RootElement}");
+            Assert.True(sizeRows <= snapshotRows,
+                $"the full read returns more rows from its chunk scans than the snapshots it names hold ({snapshotRows}): {sizeRows} rows, {sizePlan.RootElement}");
+
+            var joinPlanned = PlannedRelationNames(joinPlan.RootElement[0].GetProperty("Plan")).Where(outside.Contains).Distinct().ToList();
+            var probePlanned = PlannedRelationNames(probePlan.RootElement[0].GetProperty("Plan")).Where(outside.Contains).Distinct().ToList();
+            var sizePlanned = PlannedRelationNames(sizePlan.RootElement[0].GetProperty("Plan")).Where(outside.Contains).Distinct().ToList();
+            Assert.True(joinPlanned.Count > 0,
+                "the pre-#9049 probe is expected to plan chunks outside the lookback; if it no longer does, the plant has stopped showing the defect: " + joinPlan.RootElement);
+            Assert.True(probePlanned.Count == 0,
+                "the probe plans chunks outside the lookback: " + string.Join(", ", probePlanned));
+            Assert.True(sizePlanned.Count == 0,
+                "the full read plans chunks outside the lookback: " + string.Join(", ", sizePlanned));
         }
     }
 
