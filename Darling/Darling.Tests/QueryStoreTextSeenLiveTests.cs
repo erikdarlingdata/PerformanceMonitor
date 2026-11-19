@@ -285,9 +285,13 @@ public sealed class QueryStoreTextSeenLiveTests
     /// A touch revives a text while the prune waits to delete it. Both stamps of text 1 are behind the cutoff, so the prune's
     /// scan picks it. The touch, in a transaction that is still open, restamps the text row (a text behind the smallest
     /// cutoff is also behind <see cref="QueryStoreTextSeen.TextRowRefreshHours"/>) and its seen row, and the prune's
-    /// <c>DELETE</c> then waits for the text row. When the touch commits, the delete reads the row's new version and tests
-    /// the text row's stamp again, so the text and its seen row are kept. Text 2 has the same stamps and nothing touches
-    /// it: the same statement retires it.
+    /// <c>DELETE</c> then waits for the text row. When the touch commits, the delete re-checks the row's new version, which
+    /// has another <c>ctid</c> and a stamp inside the cutoff, so the text and its seen row are kept. Text 2 has the same
+    /// stamps and nothing touches it: the same statement retires it.
+    ///
+    /// <para>What this can fail on is the touch not rewriting the text row: with the refresh interval outside the cutoff
+    /// the prune retires text 1. It cannot tell the two conditions of the re-check apart on a server that tests a
+    /// <c>ctid</c> condition again (<see cref="QueryStoreTextSeen.PruneSql"/>), where either one alone keeps the row.</para>
     ///
     /// <para>The order is set by the test, never by a timing: the prune starts after the touch has run, and the touch
     /// commits only once <c>pg_stat_activity</c> shows the prune's backend waiting on a lock the touch's backend holds.</para>

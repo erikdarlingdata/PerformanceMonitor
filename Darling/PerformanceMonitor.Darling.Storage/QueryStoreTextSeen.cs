@@ -258,7 +258,11 @@ $$;";
     /// row is fresh (a store back from an older build, which stamped the text row only) takes no place under the cap. And on
     /// the <c>DELETE</c> itself, which is what a concurrent touch is re-checked against: every text behind the cutoff is also
     /// behind <see cref="TextRowRefreshHours"/>, so a touch that references it rewrites the text row first, and the delete
-    /// then skips the new row version.</para>
+    /// then skips the new row version. The new version also has another <c>ctid</c>, and a hash join on <c>ctid</c>
+    /// compares it again on that re-check, as a Tid Scan does on PostgreSQL 18 (measured on 18.6 under both plans: the row
+    /// is skipped without the stamp test). A Tid Scan before PostgreSQL 17.7, and before the minor of each older branch
+    /// released with it, does not test its <c>ctid</c> condition again, and there the stamp test is the only thing that
+    /// keeps the text.</para>
     ///
     /// <para>The <c>LATERAL ... OFFSET 0</c> keeps the text side a primary-key probe per stale seen row. Joined plainly, the
     /// planner is free to hash the whole text heap, which is the scan this table exists to avoid. No <c>ORDER BY</c>, for
