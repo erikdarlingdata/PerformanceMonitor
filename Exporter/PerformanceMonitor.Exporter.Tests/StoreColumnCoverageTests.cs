@@ -69,12 +69,10 @@ public sealed class StoreColumnCoverageTests : IClassFixture<StoreColumnCoverage
             {
                 ["query_text"] = "carried by the query_text dimension through query_text_digest, which is read",
                 ["query_plan_xml"] = "carried by the plan_shape dimension and plan_features through query_plan_digest, which is read",
-                ["query_plan_xml_bytes"] = "the plan's size; plan_features reports it from the plan content, and an oversized plan is reported there as status 'oversized'",
             },
             ["procedure_stats"] = new Dictionary<string, string>
             {
                 ["query_plan_xml"] = "carried by the procedure_plan dimension through query_plan_digest, which is read; the window reads only its nullness (plan_xml_is_null)",
-                ["query_plan_xml_bytes"] = "the plan's size; the window reads only its nullness (has_plan_xml_bytes) for the oversized-plan count",
             },
             ["query_store_stats"] = new Dictionary<string, string>
             {

@@ -32,7 +32,7 @@ public static class QueryStatsWindow
         "max_elapsed_time", "min_physical_reads", "max_physical_reads", "min_rows", "max_rows", "min_dop", "max_dop",
         "min_grant_kb", "max_grant_kb", "min_used_grant_kb", "max_used_grant_kb", "min_ideal_grant_kb",
         "max_ideal_grant_kb", "min_reserved_threads", "max_reserved_threads", "min_used_threads", "max_used_threads",
-        "min_spills", "max_spills",
+        "min_spills", "max_spills", "query_plan_xml_bytes",
     ];
 
     private static readonly Dictionary<string, string> RawColumnTypes = new()
@@ -92,6 +92,7 @@ public static class QueryStatsWindow
         ["max_used_threads"] = "BIGINT",
         ["min_spills"] = "BIGINT",
         ["max_spills"] = "BIGINT",
+        ["query_plan_xml_bytes"] = "BIGINT",
     };
 
     internal static string DuckDbTypeFor(string column) => RawColumnTypes[column];

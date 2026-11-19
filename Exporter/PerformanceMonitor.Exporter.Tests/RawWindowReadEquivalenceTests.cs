@@ -101,7 +101,7 @@ public sealed class RawWindowReadEquivalenceTests : IClassFixture<RawWindowReadE
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint,
                   delta_logical_reads bigint, delta_logical_writes bigint, delta_physical_reads bigint,
                   delta_spills bigint, sample_interval_seconds int,
-                  {{ExtraColumns(ProcedureStatsWindow.RawColumns, ProcedureStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "schema_name", "object_name", "object_type", "collection_time", "sample_interval_seconds", "query_plan_digest", "plan_handle", "cached_time", "plan_xml_is_null", "has_plan_xml_bytes"])}});
+                  {{ExtraColumns(ProcedureStatsWindow.RawColumns, ProcedureStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "schema_name", "object_name", "object_type", "collection_time", "sample_interval_seconds", "query_plan_digest", "plan_handle", "cached_time", "query_plan_xml_bytes", "plan_xml_is_null", "has_plan_xml_bytes"])}});
                 CREATE INDEX ON collect.procedure_stats (collection_time);
                 CREATE TABLE collect.query_store_stats (
                   collection_id bigint, server_id int, server_name text, database_name text,

@@ -31,7 +31,7 @@ public static class ProcedureStatsWindow
         "total_elapsed_time", "total_logical_reads", "total_physical_reads", "total_logical_writes", "total_spills",
         "min_worker_time", "max_worker_time", "min_elapsed_time", "max_elapsed_time", "min_logical_reads",
         "max_logical_reads", "min_physical_reads", "max_physical_reads", "min_logical_writes", "max_logical_writes",
-        "min_spills", "max_spills",
+        "min_spills", "max_spills", "query_plan_xml_bytes",
         "plan_xml_is_null", "has_plan_xml_bytes",
     ];
 
@@ -76,6 +76,7 @@ public static class ProcedureStatsWindow
         ["max_logical_writes"] = "BIGINT",
         ["min_spills"] = "BIGINT",
         ["max_spills"] = "BIGINT",
+        ["query_plan_xml_bytes"] = "BIGINT",
         ["plan_xml_is_null"] = "BOOLEAN",
         ["has_plan_xml_bytes"] = "BOOLEAN",
     };

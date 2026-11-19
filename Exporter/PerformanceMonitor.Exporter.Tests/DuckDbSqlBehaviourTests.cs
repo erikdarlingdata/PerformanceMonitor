@@ -211,7 +211,7 @@ public sealed class DuckDbSqlBehaviourTests
             ("statement_start_offset", "10"), ("statement_end_offset", "-1"),
             ("execution_count", "40"), ("total_worker_time", "4000"), ("total_clr_time", "7"),
             ("min_worker_time", "5"), ("max_worker_time", "900"), ("min_dop", "1"), ("max_dop", "8"),
-            ("min_grant_kb", "64"), ("max_grant_kb", "2048"), ("min_spills", "0"), ("max_spills", "12")));
+            ("min_grant_kb", "64"), ("max_grant_kb", "2048"), ("min_spills", "0"), ("max_spills", "12"), ("query_plan_xml_bytes", "123456")));
 
         using var command = connection.CreateCommand();
         command.CommandText = SqlBuilder.QueryStatsHourlyDuckDbSql;
@@ -238,6 +238,7 @@ public sealed class DuckDbSqlBehaviourTests
         Assert.Equal(8L, Value("max_dop"));
         Assert.Equal(2048L, Value("max_grant_kb"));
         Assert.Equal(12L, Value("max_spills"));
+        Assert.Equal(123456L, Value("query_plan_xml_bytes"));      // the plan's size, the only record of one the collector's cap left out
         // The per-sample delta columns keep their names: worker_time_max is not max_worker_time.
         Assert.Contains("worker_time_max", types.Keys);
     }
@@ -297,7 +298,7 @@ public sealed class DuckDbSqlBehaviourTests
             ("collection_time", $"TIMESTAMP '{time}'"), ("sample_interval_seconds", interval),
             ("object_type", $"'{type}'"), ("plan_handle", $"'{handle}'"), ("sql_handle", $"'0xS{handle}'"),
             ("cached_time", $"TIMESTAMP '{modified}'"), ("module_modify_date", $"TIMESTAMP '{modified}'"),
-            ("max_worker_time", maxWorker.ToString()), ("max_logical_reads", maxReads.ToString()), ("min_spills", "0"), ("execution_count", "5"),
+            ("max_worker_time", maxWorker.ToString()), ("max_logical_reads", maxReads.ToString()), ("min_spills", "0"), ("execution_count", "5"), ("query_plan_xml_bytes", (maxReads * 1000).ToString()),
         ];
         Exec(connection, RawRow("procedure_stats_raw", Sample("2026-10-22 10:30:00", "60", "P", "0xNEW", "2026-10-22 10:00:00", maxWorker: 3, maxReads: 7)));
         Exec(connection, RawRow("procedure_stats_raw", Sample("2026-10-22 10:05:00", "60", "PC", "0xOLD", "2026-10-01 00:00:00", maxWorker: 99, maxReads: 99)));
@@ -321,6 +322,7 @@ public sealed class DuckDbSqlBehaviourTests
         Assert.Equal(new DateTime(2026, 10, 22, 10, 0, 0), Value("module_modify_date"));
         Assert.Equal(3L, Value("max_worker_time"));
         Assert.Equal(7L, Value("max_logical_reads"));
+        Assert.Equal(7000L, Value("query_plan_xml_bytes"));
         Assert.False(reader.Read());      // one row for the key and hour, however many plans the samples saw
     }
 
