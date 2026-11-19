@@ -80,12 +80,14 @@ public sealed class QueryStoreTextSeenLiveTests
 
         await using (var transaction = await connection.BeginTransactionAsync(ct))
         {
+            var textWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text", ct);
+            var seenWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct);
             var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
                 connection, ServerId, Db, new[] { (1L, (string?)"0xA1") }, now, TimeoutSeconds, ct);
 
             Assert.Equal(new FetchProbeVerdict(1, Resolved: true, HashStale: false), verdicts.Single());
-            Assert.Equal(new Writes(0, 0, 0), await WritesInThisTransactionAsync(connection, "query_store_text", ct));
-            Assert.Equal(new Writes(0, 1, 0), await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct));
+            Assert.Equal(new Writes(0, 0, 0), (await WritesInThisTransactionAsync(connection, "query_store_text", ct)).Since(textWritesBefore));
+            Assert.Equal(new Writes(0, 1, 0), (await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct)).Since(seenWritesBefore));
             await transaction.CommitAsync(ct);
         }
 
@@ -95,12 +97,14 @@ public sealed class QueryStoreTextSeenLiveTests
         /* Five minutes later the seen row is inside the guard: the touch writes nothing anywhere and still answers. */
         await using (var transaction = await connection.BeginTransactionAsync(ct))
         {
+            var textWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text", ct);
+            var seenWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct);
             var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
                 connection, ServerId, Db, new[] { (1L, (string?)"0xA1") }, now.AddMinutes(5), TimeoutSeconds, ct);
 
             Assert.Equal(new FetchProbeVerdict(1, Resolved: true, HashStale: false), verdicts.Single());
-            Assert.Equal(new Writes(0, 0, 0), await WritesInThisTransactionAsync(connection, "query_store_text", ct));
-            Assert.Equal(new Writes(0, 0, 0), await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct));
+            Assert.Equal(new Writes(0, 0, 0), (await WritesInThisTransactionAsync(connection, "query_store_text", ct)).Since(textWritesBefore));
+            Assert.Equal(new Writes(0, 0, 0), (await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct)).Since(seenWritesBefore));
             await transaction.CommitAsync(ct);
         }
 
@@ -136,6 +140,8 @@ public sealed class QueryStoreTextSeenLiveTests
 
         await using (var transaction = await connection.BeginTransactionAsync(ct))
         {
+            var textWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text", ct);
+            var seenWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct);
             var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
                 connection, ServerId, Db,
                 new[] { (1L, (string?)"0xA1"), (2L, (string?)"0xA2"), (3L, (string?)"0xA3") }, now, TimeoutSeconds, ct);
@@ -150,8 +156,8 @@ public sealed class QueryStoreTextSeenLiveTests
                 verdicts);
 
             /* Text rows 1 (restamped) and 3 (hash adopted). Seen rows 1 and 2 (past the guard); 3's is an hour old. */
-            Assert.Equal(new Writes(0, 2, 0), await WritesInThisTransactionAsync(connection, "query_store_text", ct));
-            Assert.Equal(new Writes(0, 2, 0), await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct));
+            Assert.Equal(new Writes(0, 2, 0), (await WritesInThisTransactionAsync(connection, "query_store_text", ct)).Since(textWritesBefore));
+            Assert.Equal(new Writes(0, 2, 0), (await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct)).Since(seenWritesBefore));
             await transaction.CommitAsync(ct);
         }
 
@@ -184,6 +190,8 @@ public sealed class QueryStoreTextSeenLiveTests
 
         await using (var transaction = await connection.BeginTransactionAsync(ct))
         {
+            var textWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text", ct);
+            var seenWritesBefore = await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct);
             var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
                 connection, ServerId, Db, new[] { (1L, (string?)"0xA1"), (2L, (string?)"0xA2") }, now, TimeoutSeconds, ct);
 
@@ -194,8 +202,8 @@ public sealed class QueryStoreTextSeenLiveTests
                     new FetchProbeVerdict(2, Resolved: false, HashStale: false),
                 },
                 verdicts);
-            Assert.Equal(new Writes(0, 0, 0), await WritesInThisTransactionAsync(connection, "query_store_text", ct));
-            Assert.Equal(new Writes(1, 0, 0), await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct));
+            Assert.Equal(new Writes(0, 0, 0), (await WritesInThisTransactionAsync(connection, "query_store_text", ct)).Since(textWritesBefore));
+            Assert.Equal(new Writes(1, 0, 0), (await WritesInThisTransactionAsync(connection, "query_store_text_seen", ct)).Since(seenWritesBefore));
             await transaction.CommitAsync(ct);
         }
 
@@ -431,7 +439,12 @@ LIMIT $4";
 
     private sealed record Found(string Database, long QueryId, string? QueryHash, DateTime LastSeen, string Text);
 
-    private readonly record struct Writes(long Inserted, long Updated, long Deleted);
+    private readonly record struct Writes(long Inserted, long Updated, long Deleted)
+    {
+        /// <summary>The writes made after <paramref name="earlier"/> was read in the same transaction. The view also counts
+        /// writes of earlier transactions on this session that the statistics collector has not taken yet.</summary>
+        public Writes Since(Writes earlier) => new(Inserted - earlier.Inserted, Updated - earlier.Updated, Deleted - earlier.Deleted);
+    }
 
     private readonly record struct TextVersion(string Ctid, string Xmin, DateTime LastSeen, string? QueryHash);
 
