@@ -385,7 +385,7 @@ LIMIT 1";
 
     private static bool Allowed(IReadOnlyList<string> scope, IReadOnlyList<string> excluded, string database) =>
         (scope.Count == 0 || scope.Contains(database, StringComparer.OrdinalIgnoreCase))
-        && !excluded.Any(e => string.Equals(e.Trim(), database, StringComparison.OrdinalIgnoreCase));
+        && !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAnyTrimmed(excluded, database);
 
     private static async Task<IReadOnlyList<string>> ReadExcludedAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
     {

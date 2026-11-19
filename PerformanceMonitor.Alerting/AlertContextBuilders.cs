@@ -538,8 +538,7 @@ public static class AlertContextBuilders
 
         return events
             .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
-                !excludedDatabases.Any(ex =>
-                    string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAny(excludedDatabases, e.DatabaseName))
             .ToList();
     }
 
@@ -658,7 +657,7 @@ public static class AlertContextBuilders
     /// </summary>
     public static bool IsDeadlockExcluded(DeadlockAlertRow row, IReadOnlyList<string> excludedDatabases)
     {
-        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(row.DeadlockGraphXml, excludedDatabases);
+        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllInExcluded(row.DeadlockGraphXml, excludedDatabases);
     }
     public static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
     {

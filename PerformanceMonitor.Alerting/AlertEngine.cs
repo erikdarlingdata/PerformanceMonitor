@@ -4742,7 +4742,7 @@ public sealed class AlertEngine
                 continue;
             }
 
-            if (excluded.Count > 0 && excluded.Any(e => string.Equals(e, db.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            if (excluded.Count > 0 && PerformanceMonitor.Common.DatabaseNamePattern.MatchesAny(excluded, db.DatabaseName))
             {
                 continue;
             }
@@ -5199,7 +5199,7 @@ public sealed class AlertEngine
                 continue;
             }
 
-            if (excluded.Count > 0 && excluded.Any(e => string.Equals(e, failure.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            if (excluded.Count > 0 && PerformanceMonitor.Common.DatabaseNamePattern.MatchesAny(excluded, failure.DatabaseName))
             {
                 continue;
             }

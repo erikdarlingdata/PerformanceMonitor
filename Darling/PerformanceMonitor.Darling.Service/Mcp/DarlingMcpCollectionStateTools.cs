@@ -79,11 +79,11 @@ public sealed class DarlingMcpCollectionStateTools
         ApplyEnabledAsync(postgres, "enable_server", server_name, enable: true, logger, cancellationToken);
 
     [McpServerTool(Name = "set_server_excluded_databases"), Description(
-        "Replaces ONE server's excluded-databases list: the databases the collectors skip on that server. The list you send is the whole new list; an empty list clears it. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. Data already collected stays. The service applies it on its next config poll. Served only with mcp.allowWrites or a named operator token. The answer gives the previous list and the exact call that restores it; get_collection_state lists each server's excluded databases.")]
+        "Replaces ONE server's excluded-databases list: the databases the collectors skip on that server. The list you send is the whole new list; an empty list clears it. At most 256 entries of at most 128 characters each, no control characters; repeats (any casing) are kept once. An entry may hold * as a wildcard: * matches any run of characters, so archive_* skips every database whose name starts with archive_. No other wildcard exists (?, % and _ are plain characters), and an entry made only of * is refused. Data already collected stays. The service applies it on its next config poll. Served only with mcp.allowWrites or a named operator token. The answer gives the previous list and the exact call that restores it; get_collection_state lists each server's excluded databases.")]
     public static async Task<string> SetServerExcludedDatabases(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("The complete new list of database names to exclude. Empty clears the list.")] string[] databases,
+        [Description("The complete new list of database names or patterns to exclude. Empty clears the list.")] string[] databases,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {

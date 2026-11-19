@@ -1211,9 +1211,9 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
         new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run."
             + (string.IsNullOrEmpty(guidance) ? "" : " " + guidance));
 
-    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
+    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632). An entry holding <c>*</c> is a pattern (#9050).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
-        excluded is not null && excluded.Any(e => string.Equals(e?.Trim(), database, StringComparison.OrdinalIgnoreCase));
+        PerformanceMonitor.Common.DatabaseNamePattern.MatchesAnyTrimmed(excluded, database);
 
     internal const string AzureDatabaseRequiredMessage =
         "This server is an Azure SQL Database, where a session is reached only from inside its own database: pass database_name, the database_name of the get_blocking row you read (never master). Nothing was run.";

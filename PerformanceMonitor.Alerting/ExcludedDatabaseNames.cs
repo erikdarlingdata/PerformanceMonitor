@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -17,6 +18,8 @@ namespace PerformanceMonitor.Alerting;
 /// most <see cref="MaxNameLength"/> characters (the SQL Server limit for a database name), none holding a control character.
 /// A comma IS allowed, since SQL Server database names may contain one. Names are otherwise kept exactly as written:
 /// the list has always been stored raw, and this adds bounds only.
+/// An entry may hold <c>*</c> as a wildcard (#9050, <see cref="PerformanceMonitor.Common.DatabaseNamePattern"/>). One made
+/// only of <c>*</c> would skip every database, master included, so the excluded-databases lists refuse it.
 /// </summary>
 public static class ExcludedDatabaseNames
 {
@@ -31,8 +34,11 @@ public static class ExcludedDatabaseNames
         name is not null && name.Length <= MaxNameLength && !name.Any(char.IsControl);
 
     /// <summary>The refusal text for a write that arrives as a whole (the MCP write), or null when the list is
-    /// acceptable. The caller learns instead of the list being truncated or a name silently lost.</summary>
-    public static string? Refusal(IEnumerable<string>? raw, string field)
+    /// acceptable. The caller learns instead of the list being truncated or a name silently lost.
+    /// <paramref name="patterns"/> is true for a list whose entries may be patterns (the excluded-databases lists):
+    /// an entry of only <c>*</c> is then refused. A list of literal names (the Extended Events session databases)
+    /// passes false and keeps a <c>*</c> as a character.</summary>
+    public static string? Refusal(IEnumerable<string>? raw, string field, bool patterns = true)
     {
         if (raw is null)
         {
@@ -51,13 +57,18 @@ public static class ExcludedDatabaseNames
             {
                 return $"'{field}' entries must not contain a control character and must be at most {MaxNameLength} characters.";
             }
+
+            if (patterns && DatabaseNamePattern.IsMatchAll(name))
+            {
+                return $"'{field}' entries must not be only * characters, because that would skip every database. Use a pattern such as archive_*.";
+            }
         }
 
         return null;
     }
 
-    /// <summary>The list with every name <see cref="IsAcceptableName"/> rejects dropped, cut off at
-    /// <see cref="MaxEntries"/> names. Order and spelling are untouched.</summary>
+    /// <summary>The list with every name <see cref="IsAcceptableName"/> rejects dropped, and every entry made only of
+    /// <c>*</c>, cut off at <see cref="MaxEntries"/> names. Order and spelling are untouched.</summary>
     public static IReadOnlyList<string> Normalize(IEnumerable<string>? raw)
     {
         if (raw is null)
@@ -65,6 +76,6 @@ public static class ExcludedDatabaseNames
             return Array.Empty<string>();
         }
 
-        return raw.Where(IsAcceptableName).Take(MaxEntries).ToList();
+        return raw.Where(n => IsAcceptableName(n) && !DatabaseNamePattern.IsMatchAll(n)).Take(MaxEntries).ToList();
     }
 }

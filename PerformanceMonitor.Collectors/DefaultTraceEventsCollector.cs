@@ -579,27 +579,23 @@ SELECT /* PerformanceMonitorLite */
     /// Server-level curated events carry a NULL DatabaseName; a bare <c>NOT IN (...)</c> evaluates NULL to
     /// UNKNOWN and would silently drop the WHOLE category whenever any database is excluded, so this keeps
     /// NULL rows (<c>ft.DatabaseName IS NULL OR ...</c>) — matching the Dashboard's id-based, NULL-safe
-    /// exclusion. The shared <see cref="DatabaseExclusionFilter"/> is deliberately NOT reused here: its
-    /// other callers filter a non-nullable name column and must keep emitting the bare form.
+    /// exclusion. The shared <see cref="DatabaseExclusionFilter"/> clause is deliberately NOT used as is: its
+    /// other callers filter a non-nullable name column and must keep emitting the bare form. Only its terms are
+    /// reused, so a name and a #9050 pattern mean the same here as in every other collector.
     /// </summary>
     private static (string Clause, List<CollectorParameter> Parameters) BuildNullSafeDatabaseExclusion(
         IReadOnlyList<string> excludedDatabaseNames)
     {
-        if (excludedDatabaseNames.Count == 0)
+        /* The shared builder's terms (exact names and #9050 patterns), wrapped in the NULL arm. A list with no
+           pattern is one term, so its text is what it was before patterns existed. */
+        var (terms, parameters) = DatabaseExclusionFilter.BuildTerms(excludedDatabaseNames, "ft.DatabaseName");
+        if (terms.Count == 0)
         {
-            return (string.Empty, new List<CollectorParameter>());
+            return (string.Empty, parameters);
         }
 
-        var paramNames = new List<string>(excludedDatabaseNames.Count);
-        var parameters = new List<CollectorParameter>(excludedDatabaseNames.Count);
-        for (int i = 0; i < excludedDatabaseNames.Count; i++)
-        {
-            var p = $"@excl_db_{i}";
-            paramNames.Add(p);
-            parameters.Add(new CollectorParameter(p, excludedDatabaseNames[i], CollectorParameterType.NVarChar128));
-        }
-
-        return ($"AND (ft.DatabaseName IS NULL OR ft.DatabaseName NOT IN ({string.Join(", ", paramNames)}))", parameters);
+        var kept = terms.Count == 1 ? terms[0] : "(" + string.Join(" AND ", terms) + ")";
+        return ($"AND (ft.DatabaseName IS NULL OR {kept})", parameters);
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
