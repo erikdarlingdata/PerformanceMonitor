@@ -735,4 +735,43 @@ public sealed class DailySummaryRangeCacheTests
         await Read(skipOpenDayTail: true);
         Assert.Empty(calls); /* the block now holds the 24th, so the next warm read has no open-day work */
     }
+
+    [Fact]
+    public async Task GetRangeAsync_SkipOpenDayTail_InsideTheGrace_OnABlockClosedThroughYesterday_SkipsTheTail_AndAVisitorStillGetsToday()
+    {
+        /* #9047: within two hours after midnight the closed end is the 24th, so the 24th and the 25th are both open. A block built in
+           that window already holds every day closed so far, so the warmer's read skips the tail and a visitor's read still runs it. */
+        var now = new DateTime(2026, 9, 25, 0, 30, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var calls = new List<(DateTime Start, DateTime End)>();
+
+        Task<List<TestRow>> Run(DateTime start, DateTime end, CancellationToken ct)
+        {
+            calls.Add((start, end));
+            var rows = new List<TestRow>();
+            for (var day = start; day < end; day = day.AddDays(1))
+            {
+                rows.Add(new TestRow(day, 1));
+            }
+
+            return Task.FromResult(rows);
+        }
+
+        Task<List<TestRow>> Read(bool skipOpenDayTail) => cache.GetRangeAsync(
+            storeKey: "store", serverId: ServerId, fromDate: D(1), toDate: D(26), routedSql: RoutedSql,
+            asOfNow: true, day: r => r.Day, runRange: Run, scopeKey: "", cancellationToken: CancellationToken.None,
+            skipOpenDayTail: skipOpenDayTail);
+
+        await Read(skipOpenDayTail: false); /* builds the block, closed through the 23rd */
+
+        calls.Clear();
+        var skipped = await Read(skipOpenDayTail: true);
+        Assert.Empty(calls);
+        Assert.DoesNotContain(skipped, r => r.Day == D(25));
+
+        var visitor = await Read(skipOpenDayTail: false);
+        Assert.Single(calls);
+        Assert.Equal((D(24), D(26)), calls[0]);
+        Assert.Contains(visitor, r => r.Day == D(25));
+    }
 }
