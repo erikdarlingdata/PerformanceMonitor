@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -128,7 +129,7 @@ public sealed class FinOpsDayLabelsDisplayZoneTests : IDisposable
             try
             {
                 ClippedTextProbe.Settle(window);
-                await (Task)typeof(FinOpsTab).GetMethod(loader, Instance)!.Invoke(tab, [ServerId])!;
+                await (Task)typeof(FinOpsTab).GetMethod(loader, Instance)!.Invoke(tab, [ServerId, CancellationToken.None])!;
                 ClippedTextProbe.Settle(window);
                 rows.AddRange(((DataGrid)tab.FindName(gridName)).Items.Cast<object>());
             }

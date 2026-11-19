@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -221,7 +222,7 @@ public sealed class FinOpsPagesReadabilityTests
                     var grid = (DataGrid)tab.FindName("HighImpactDataGrid");
                     Reveal(grid);
                     Settle(window);
-                    await (Task)typeof(FinOpsTab).GetMethod("LoadHighImpactQueriesAsync", Instance)!.Invoke(tab, [12345])!;
+                    await (Task)typeof(FinOpsTab).GetMethod("LoadHighImpactQueriesAsync", Instance)!.Invoke(tab, [12345, CancellationToken.None])!;
                     Settle(window);
                     problems.AddRange(EmptySentences(grid, "High Impact"));
                 }

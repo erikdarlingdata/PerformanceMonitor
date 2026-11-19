@@ -214,7 +214,7 @@ public sealed class FinOpsSupersededLoadTests : IClassFixture<SharedDuckDbFixtur
             }
         }
 
-        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+        Assert.True(failures.Count == 0, string.Concat(failures.Select(f => f + "; ")));
     }
 
     [Fact]
@@ -230,12 +230,12 @@ public sealed class FinOpsSupersededLoadTests : IClassFixture<SharedDuckDbFixtur
         {
             using var write = _duckDb.AcquireWriteLock();
             writerHasIt.Set();
-            releaseWriter.Wait(TimeSpan.FromSeconds(60));
+            releaseWriter.Wait(TimeSpan.FromSeconds(20));
         });
 
         try
         {
-            Assert.True(writerHasIt.Wait(TimeSpan.FromSeconds(60)), "the writer never took the lock");
+            Assert.True(writerHasIt.Wait(TimeSpan.FromSeconds(20)), "the writer never took the lock");
 
             using var older = scope.Begin();
             /* The older load's read queues behind the writer, as one does behind a collection write. */
