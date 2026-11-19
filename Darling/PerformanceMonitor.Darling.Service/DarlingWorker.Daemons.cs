@@ -1054,12 +1054,19 @@ public sealed partial class DarlingWorker
         };
         await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
             schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
-        await using var command = new Npgsql.NpgsqlCommand(
+        /* #9062: behind a local work_mem statement in the same round trip (see PgReadWorkMem), so the function's tuplestore, the sort
+           and the windows stay in memory. A batch, not one command with two statements: the cap is a positional parameter, and Npgsql
+           does not split a command that has one. The setting is the first result set. */
+        await using var batch = new Npgsql.NpgsqlBatch(connection) { Timeout = PgStatementText.FetchCommandTimeoutSeconds };
+        batch.BatchCommands.Add(new Npgsql.NpgsqlBatchCommand(
+            PerformanceMonitor.Collectors.PgOwnStatement.Mark(PgReadWorkMem.SetSql(PgReadWorkMem.StatementTextBytesPerEntry))));
+        var fetch = new Npgsql.NpgsqlBatchCommand(
             PerformanceMonitor.Collectors.PgOwnStatement.Mark(
-                PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas)),
-            connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(PgStatementTextRowCap);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas)));
+        fetch.Parameters.AddWithValue(PgStatementTextRowCap);
+        batch.BatchCommands.Add(fetch);
+        await using var reader = await batch.ExecuteReaderAsync(cancellationToken);
+        await PgReadWorkMem.SkipSettingResultAsync(reader, cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.IsDBNull(0) || reader.IsDBNull(1))
