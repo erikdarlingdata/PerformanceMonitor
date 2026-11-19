@@ -611,15 +611,16 @@ kept AS
 sample_text AS
 (
     -- The sample text for the kept hashes only (#6803), from each hash's busiest row in the window. #9058: one pass for
-    -- the whole set. The two per-hash lookups this replaces each scanned the window again. A NULL count ranks last, and
-    -- the newest row breaks a tie so the pick is the same on every read.
+    -- the whole set. The two per-hash lookups this replaces each scanned the window again. A NULL count ranks last. A tie
+    -- on the count goes to the newest collection, then the newest plan creation, then the text itself, so the pick is
+    -- the same on every read even for rows of one collection (several plans or databases).
     SELECT qs2.query_hash, qs2.query_text
     FROM v_query_stats AS qs2
     JOIN kept AS kk ON kk.query_hash = qs2.query_hash
     WHERE qs2.server_id = $1
     AND   qs2.collection_time >= $2
     AND   qs2.query_text IS NOT NULL AND qs2.query_text != ''
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY qs2.query_hash ORDER BY qs2.delta_execution_count DESC NULLS LAST, qs2.collection_time DESC) = 1
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY qs2.query_hash ORDER BY qs2.delta_execution_count DESC NULLS LAST, qs2.collection_time DESC, qs2.creation_time DESC NULLS LAST, qs2.query_text) = 1
 )
 SELECT
     k.query_hash,

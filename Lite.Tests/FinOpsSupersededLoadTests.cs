@@ -36,7 +36,7 @@ public sealed class FinOpsHighImpactSampleTextTests : IClassFixture<SharedDuckDb
     private const int ServerId = -9058;
     private const int OtherServerId = -9059;
 
-    private async Task PlantAsync(DuckDBConnection connection, long id, int serverId, DateTime at, string hash, string? text, long? exec)
+    private async Task PlantAsync(DuckDBConnection connection, long id, int serverId, DateTime at, string hash, string? text, long? exec, DateTime? creationTime = null)
     {
         using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -44,7 +44,7 @@ INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text, creation_time,
      delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes, max_grant_kb)
 VALUES ($1, $2, $3, 'lite-finops-sample-text', 'Db0', $4, $5, $6, $7, 1000, 1000, 10, 0, 1024)";
-        foreach (var value in new object?[] { id, at, serverId, hash, text, at.AddDays(-1), exec })
+        foreach (var value in new object?[] { id, at, serverId, hash, text, creationTime ?? at.AddDays(-1), exec })
         {
             command.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
         }
@@ -97,12 +97,22 @@ VALUES ($1, $2, $3, 'lite-finops-sample-text', 'Db0', $4, $5, $6, $7, 1000, 1000
             await PlantAsync(connection, id--, ServerId, at, "0xG", "G older tie", 8);
             await PlantAsync(connection, id--, ServerId, at.AddMinutes(30), "0xG", "G newer tie", 8);
             await PlantAsync(connection, id--, ServerId, at.AddMinutes(15), "0xG", "G middle tie", 8);
+
+            /* Rows of one collection (several plans or databases) share the collection time. A tie on the count then goes to
+               the newest plan creation, even though that text sorts last. */
+            await PlantAsync(connection, id--, ServerId, at, "0xH", "H a older plan", 8, at.AddDays(-2));
+            await PlantAsync(connection, id--, ServerId, at, "0xH", "H z newer plan", 8, at.AddDays(-1));
+
+            /* Same collection, same count, same creation: the text is the last key, whatever order the rows were written in. */
+            await PlantAsync(connection, id--, ServerId, at, "0xI", "I b second", 8);
+            await PlantAsync(connection, id--, ServerId, at, "0xI", "I a first", 8);
+            await PlantAsync(connection, id--, ServerId, at, "0xI", "I c third", 8);
         }
 
         var rows = await new LocalDataService(_duckDb).GetHighImpactQueriesAsync(ServerId, 24);
         var byHash = rows.ToDictionary(r => r.QueryHash);
 
-        Assert.Equal(7, byHash.Count);
+        Assert.Equal(9, byHash.Count);
         void Check(string hash, string sample, string full)
         {
             Assert.Equal(sample, byHash[hash].SampleQueryText);
@@ -116,6 +126,8 @@ VALUES ($1, $2, $3, 'lite-finops-sample-text', 'Db0', $4, $5, $6, $7, 1000, 1000
         Check("0xE", longText[..200], longText);
         Check("0xF", "", "");
         Check("0xG", "G newer tie", "G newer tie");
+        Check("0xH", "H z newer plan", "H z newer plan");
+        Check("0xI", "I a first", "I a first");
     }
 }
 
@@ -261,5 +273,37 @@ public sealed class FinOpsSupersededLoadTests : IClassFixture<SharedDuckDbFixtur
             releaseWriter.Set();
             await writer;
         }
+    }
+
+    /* About 5 s uncancelled on the laptop this was calibrated on. DuckDB.NET's ExecuteReaderAsync(token) wires the token to
+       the command's cancel, which interrupts the running statement and surfaces as OperationCanceledException. This pins that
+       for the version Lite references: an upgrade that stopped doing it would fail here. */
+    private const string LongStatement =
+        "SELECT sum(hash(a.range * 1000003 + b.range)) FROM range(20000) AS a, range(20000) AS b";
+
+    [Fact]
+    public async Task ARunningStatement_IsInterruptedWhenItsTokenFires_AndTheReadLockIsFreeAgain()
+    {
+        var data = new LocalDataService(_duckDb);
+        using var cts = new CancellationTokenSource();
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        var read = Task.Run(async () =>
+        {
+            using var connection = await data.OpenConnectionAsync(null, cts.Token);
+            using var command = connection.CreateCommand();
+            command.CommandText = LongStatement;
+            using var reader = await command.ExecuteReaderAsync(cts.Token);
+            return await reader.ReadAsync(cts.Token);
+        });
+
+        cts.CancelAfter(TimeSpan.FromMilliseconds(200));
+        var finished = await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(20)));
+        Assert.Same(read, finished);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"the cancelled statement took {started.Elapsed.TotalSeconds:0.0} s to stop");
+
+        /* Its connection and read lock are back: an exclusive writer gets in at once. */
+        using var writeLock = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(10));
     }
 }
