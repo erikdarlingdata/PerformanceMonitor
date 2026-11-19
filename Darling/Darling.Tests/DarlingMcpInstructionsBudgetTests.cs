@@ -34,7 +34,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
        headroom, not a number set a few bytes above today's length: the tests below fail only when the text really
        crosses it. A change that needs more room either shortens something else or raises this number on purpose, in
        the same PR, with the reason. Never trim to land a few bytes under, and never raise it just to merge. */
-    private const int InstructionsBudget = 8_000;
+    internal const int InstructionsBudget = 8_000;
 
     [Fact]
     public void Instructions_AreWithinTheD2Budget()
@@ -165,6 +165,31 @@ public sealed class DarlingMcpInstructionsBudgetTests
         Assert.StartsWith($"This server exposes {catalog.Count} tools. ", census, StringComparison.Ordinal);
         Assert.Contains(census, DarlingMcpInstructions.Text, StringComparison.Ordinal);
         Assert.Equal(DarlingMcpInstructions.Text, DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served));
+    }
+
+    /// <summary>The whole catalog served, no peers: the census equals <see cref="DarlingMcpInstructions.Text"/>'s whatever
+    /// <c>mcp.allowAgentMuteRules</c> says (every tool is served, so the census has no agent action sentence to vary), so the
+    /// rendering reaches the fixed-text path with the setting on and must leave it with the setting off: the instructions then
+    /// carry no mention of the mute rule tools writing without an <c>agent_action</c>.</summary>
+    [Fact]
+    public void Build_OverTheWholeCatalog_WithAgentMuteRulesOff_SaysNothingOfTheMuteRuleToolsWritingWithoutAnAgentAction()
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: true, Investigations: true));
+        Assert.Equal(catalog.Count, served.Count);
+        Assert.Equal(DarlingMcpInstructions.ToolCensus(catalog, served, null, agentMuteRules: true),
+            DarlingMcpInstructions.ToolCensus(catalog, served, null, agentMuteRules: false));
+
+        var on = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served, agentMuteRules: true);
+        Assert.Equal(DarlingMcpInstructions.Text, on);
+        Assert.Contains(DarlingMcpAgentMuteDirect.SettingName, on, StringComparison.Ordinal);
+
+        var off = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served, agentMuteRules: false);
+        Assert.NotEqual(DarlingMcpInstructions.Text, off);
+        Assert.DoesNotContain(DarlingMcpAgentMuteDirect.SettingName, off, StringComparison.Ordinal);
+        Assert.DoesNotContain("mute and digest rules", off, StringComparison.Ordinal);
+        Assert.DoesNotContain("without an agent_action", off, StringComparison.Ordinal);
+        Assert.True(off.Length <= InstructionsBudget, $"the instructions are {off.Length} characters; D2's budget is {InstructionsBudget}");
     }
 
     /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server

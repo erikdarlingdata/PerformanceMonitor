@@ -63,7 +63,7 @@ public sealed class DarlingMcpNamedTokenTests
 
     /// <summary>The <c>instructions</c> an <c>initialize</c> request returns to the token presented; the transport may frame the
     /// reply as an SSE <c>data:</c> line or as bare JSON.</summary>
-    private static async Task<string> InstructionsAsync(Microsoft.AspNetCore.TestHost.TestServer server, string bearer)
+    internal static async Task<string> InstructionsAsync(Microsoft.AspNetCore.TestHost.TestServer server, string bearer)
     {
         var ctx = await server.SendAsync(c =>
         {

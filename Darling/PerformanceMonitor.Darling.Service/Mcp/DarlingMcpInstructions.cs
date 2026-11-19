@@ -49,10 +49,14 @@ internal static class DarlingMcpInstructions
     /// after the write switches, the same collection <c>tools/list</c> lists), and when that is fewer than
     /// <paramref name="catalog"/> (every registered tool) it says which switch is off. The host calls this once,
     /// right after <see cref="DarlingMcpWritePolicy.Apply"/> narrows the collection, so the two cannot disagree.
+    /// The paragraph that says which tools that change state are served follows the same set: the settings paragraph
+    /// (<see cref="DarlingMcpWritePolicy.InstructionsLine"/>), or the arm's own
+    /// (<see cref="DarlingMcpWritePolicy.InvestigationsArmInstructionsLine"/>) when <paramref name="served"/> is the investigations arm.
+    /// <paramref name="agentMuteRules"/> is the served <c>mcp.allowAgentMuteRules</c>.
     /// </summary>
     internal static string Build(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, bool agentMuteRules = true)
-        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool));
+        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool), null, agentMuteRules, InvestigationsArmServed(served));
 
     /// <summary>
     /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
@@ -63,7 +67,7 @@ internal static class DarlingMcpInstructions
     internal static string BuildForNamedToken(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
         DarlingMcpWritePolicy.Effective policy, bool agentMuteRules = true)
-        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy);
+        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy, agentMuteRules);
 
     /// <summary>What a claim-free mute may do, from the limits the path enforces (<see cref="DarlingMcpAgentMuteDirect"/>), so a change to one moves the text (#8610).</summary>
     internal static readonly string DirectMuteLimits =
@@ -71,32 +75,45 @@ internal static class DarlingMcpInstructions
         $"({DarlingMcpAgentMuteDirect.MaxWritesPerHour} writes an hour, no repeat within {DarlingMcpAgentMuteDirect.RepeatLookbackDays} days)";
 
     private static string Compose(
-        DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
+        DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null,
+        bool agentMuteRules = true, bool investigationsArm = false)
     {
         var section = DarlingPeerDirectory.InstructionsSection(peers);
         // The fast path returns the fixed text when the served census equals the catalog census, the mute tool is
-        // served, and there are no peers. The census is compared by value: ToolCensus builds a new string on each call.
-        if (named is null && section.Length == 0 && census == CatalogCensus && muteServed)
+        // served, mcp.allowAgentMuteRules is on (the value Text is rendered with), and there are no peers. The census is
+        // compared by value: ToolCensus builds a new string on each call.
+        if (named is null && section.Length == 0 && census == CatalogCensus && muteServed && agentMuteRules)
             return Text;
 
         /* #5789 correction: the Workflow line names the mute write as its last step. With the writes off that tool
            is not served, so the step is dropped rather than pointing a client at a tool tools/list lacks. */
         var tail = muteServed ? BodyTail : BodyTail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
-        /* A named token's preamble swaps the settings paragraph for its role's, and says nothing of purge_now unless the role is served it. */
-        var basePreamble = Preamble;
-        if (named is { } role)
-        {
-            basePreamble = basePreamble.Replace(
-                DarlingMcpWritePolicy.InstructionsLine, DarlingMcpWritePolicy.NamedInstructionsLine(role), StringComparison.Ordinal);
-            if (!role.Writes)
-                basePreamble = basePreamble.Replace(PurgeSentence, "", StringComparison.Ordinal);
-        }
+        /* The preamble ends with the paragraph that says which tools that change state are served, for the served
+           mcp.allowAgentMuteRules: the settings paragraph, or the arm's own where the legacy token is served the investigations arm.
+           A named token's preamble carries its role's paragraph instead, and says nothing of purge_now unless the role is served it. */
+        var basePreamble = PreambleHead + (named is { } role
+            ? DarlingMcpWritePolicy.NamedInstructionsLine(role, agentMuteRules)
+            : investigationsArm
+                ? DarlingMcpWritePolicy.InvestigationsArmInstructionsLine(agentMuteRules)
+                : DarlingMcpWritePolicy.InstructionsLine(agentMuteRules));
+        if (named is { Writes: false })
+            basePreamble = basePreamble.Replace(PurgeSentence, "", StringComparison.Ordinal);
 
         var preamble = section.Length == 0 ? basePreamble : basePreamble + "\n\n" + section;
         return preamble + "\n\n" + BodyHead + "\n\n" + census + "\n\n" + tail;
     }
 
     private const string MuteTool = "mute_analysis_finding";
+
+    /// <summary>True when <paramref name="served"/> holds a write tool outside the server admin and agent action sets: the writes arm.
+    /// The agent action tools are writes an agent may call under the investigations arm (#5915), so they do not make the writes arm "on".</summary>
+    private static bool WritesArmServed(IReadOnlyCollection<string> served) =>
+        served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
+            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n));
+
+    /// <summary>True when <paramref name="served"/> is what the investigations arm serves: an investigation tool, and not the writes arm.</summary>
+    private static bool InvestigationsArmServed(IReadOnlyCollection<string> served) =>
+        served.Any(DarlingMcpWritePolicy.IsInvestigation) && !WritesArmServed(served);
 
     /// <summary>The preamble sentence that names <c>purge_now</c>, a write an agent token is never served (#6542).</summary>
     private const string PurgeSentence = " With writes on, purge_now deletes history older than the retention given.";
@@ -124,10 +141,7 @@ internal static class DarlingMcpInstructions
         var count = served.Count;
         var total = catalog.Count;
         var shared = served.Count(LiteToolNames.Contains);
-        /* #5915: the Level 2 action tools are writes an agent may call under the investigations arm; they do not make the
-           writes arm "on". */
-        var writesServed = served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
-            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n));
+        var writesServed = WritesArmServed(served);
         var agentActionServed = writesServed ? 0 : served.Count(n => DarlingMcpWritePolicy.IsWrite(n)
             && DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
         var adminServed = served.Any(DarlingMcpWritePolicy.IsServerAdmin);
@@ -243,15 +257,18 @@ internal static class DarlingMcpInstructions
     };
 
     /* A property, not a field: Text above is initialized first in textual order, and the settings paragraph it carries
-       is built from DarlingMcpWritePolicy.InvestigationTools at run time. */
-    private static string Preamble => """
+       is built from DarlingMcpWritePolicy's tool sets at run time. */
+    private static string Preamble => PreambleHead + DarlingMcpWritePolicy.InstructionsLine();
+
+    /// <summary>The preamble up to the settings paragraph, which <see cref="Compose"/> appends for the policy it renders.</summary>
+    private const string PreambleHead = """
         You are connected to a SQL Server performance monitoring tool via PerformanceMonitor Darling, the headless collector service.
 
         ## What this server can and cannot do
 
         This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the server action tools act on one. With writes on, purge_now deletes history older than the retention given.
 
-        """ + DarlingMcpWritePolicy.InstructionsLine;
+        """;
 
     private const string BodyHead = """
         ## How Data Is Collected
