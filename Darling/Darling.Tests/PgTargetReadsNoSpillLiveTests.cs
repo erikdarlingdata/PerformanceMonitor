@@ -115,6 +115,13 @@ public sealed class PgTargetReadsNoSpillLiveTests
         Assert.Equal(LowWorkMem, await ShowWorkMemAsync(connection, ct));
     }
 
+    /// <summary>
+    /// #9074: runs as a login role of its own, with no superuser and no <c>pg_read_all_stats</c>. <c>pg_stat_statements(true)</c>
+    /// gives a text only for the caller's own entries, so every other session's entry in the cluster comes back as a short
+    /// placeholder and the volume the fetch reads is the filler's alone. As the cluster's superuser the same call loads the full
+    /// text of every entry, the long statements other classes run in parallel included, and a fetch sized for 4 KB an entry
+    /// wrote thousands of temp blocks in a busy CI cluster.
+    /// </summary>
     [Fact]
     public async Task TheStatementTextFetch_StaysInMemory_WhereTheStockFetchSpills_AndStillReturnsTheTexts()
     {
@@ -127,58 +134,78 @@ public sealed class PgTargetReadsNoSpillLiveTests
         await ExecAsync(target.ConnectionString, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
 
         /* The fetch opens its own connection, so the low setting is the database's: every new session of it starts at 64 kB. */
-        var admin = new NpgsqlConnectionStringBuilder(target.ConnectionString) { Pooling = false };
-        await ExecAsync(admin.ConnectionString, $"ALTER DATABASE \"{admin.Database}\" SET work_mem = '{LowWorkMem}'", ct);
+        var owner = new NpgsqlConnectionStringBuilder(target.ConnectionString) { Pooling = false };
+        await ExecAsync(owner.ConnectionString, $"ALTER DATABASE \"{owner.Database}\" SET work_mem = '{LowWorkMem}'", ct);
 
-        var runtime = await RuntimeAsync(admin, ct);
-        await using var connection = new NpgsqlConnection(admin.ConnectionString);
-        await connection.OpenAsync(ct);
-        Assert.Equal(LowWorkMem, await ShowWorkMemAsync(connection, ct));
-
-        var targetOid = await ScalarAsync<long>(connection, "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = current_database()", ct);
-        var schemas = new CollectorContext
+        var roleName = "pm9074_" + Guid.NewGuid().ToString("N")[..12];
+        var rolePassword = "Pm9074-" + Guid.NewGuid().ToString("N");
+        var bodySucceeded = false;
+        try
         {
-            ServerId = ServerId,
-            ServerName = "pm9062-target",
-            CollectionTime = LiveClock.Now(),
-            Deltas = new CollectorDeltaCalculator(),
-            Target = runtime.Target,
-        };
-        Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
-            schemas, PgStatementStatsCollector.Instance, connection, null, ct));
-        var schema = schemas.PgExtensionSchema("pg_stat_statements");
-        var fetchSql = PgOwnStatement.Mark(PgStatementText.FetchSqlFor(false, runtime.Target.PostgresMajorVersion, schemas));
+            await ExecAsync(owner.ConnectionString, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'", ct);
+            await ExecAsync(owner.ConnectionString, $"GRANT CONNECT ON DATABASE \"{owner.Database}\" TO {roleName}", ct);
+            var reader = new NpgsqlConnectionStringBuilder(owner.ConnectionString) { Username = roleName, Password = rolePassword };
 
-        long stockTemp = 0;
-        long fetchTemp = 0;
-        List<long> queryIds = [];
-        var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
-        {
-            await FillAsync(connection, ct);
-            await pass.BeforeReadAsync(ct);
+            var runtime = await RuntimeAsync(reader, ct);
+            await using var connection = new NpgsqlConnection(reader.ConnectionString);
+            await connection.OpenAsync(ct);
+            Assert.Equal(LowWorkMem, await ShowWorkMemAsync(connection, ct));
 
-            var before = await TempWrittenAsync(connection, schema, targetOid, "%AS candidate_entries%", ct);
-
-            await using (var stock = new NpgsqlCommand(fetchSql, connection) { CommandTimeout = 60 })
+            var targetOid = await ScalarAsync<long>(connection, "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = current_database()", ct);
+            var schemas = new CollectorContext
             {
-                stock.Parameters.AddWithValue(10_000);
-                await using var stockReader = await stock.ExecuteReaderAsync(ct);
-                while (await stockReader.ReadAsync(ct))
+                ServerId = ServerId,
+                ServerName = "pm9062-target",
+                CollectionTime = LiveClock.Now(),
+                Deltas = new CollectorDeltaCalculator(),
+                Target = runtime.Target,
+            };
+            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                schemas, PgStatementStatsCollector.Instance, connection, null, ct));
+            var schema = schemas.PgExtensionSchema("pg_stat_statements");
+            var fetchSql = PgOwnStatement.Mark(PgStatementText.FetchSqlFor(false, runtime.Target.PostgresMajorVersion, schemas));
+
+            long stockTemp = 0;
+            long fetchTemp = 0;
+            List<long> queryIds = [];
+            var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
+            {
+                await FillAsync(connection, ct);
+                await pass.BeforeReadAsync(ct);
+
+                var before = await TempWrittenAsync(connection, schema, targetOid, "%AS candidate_entries%", ct);
+
+                await using (var stock = new NpgsqlCommand(fetchSql, connection) { CommandTimeout = 60 })
                 {
+                    stock.Parameters.AddWithValue(10_000);
+                    await using var stockReader = await stock.ExecuteReaderAsync(ct);
+                    while (await stockReader.ReadAsync(ct))
+                    {
+                    }
                 }
-            }
 
-            stockTemp = await TempWrittenAsync(connection, schema, targetOid, "%AS candidate_entries%", ct) - before;
+                stockTemp = await TempWrittenAsync(connection, schema, targetOid, "%AS candidate_entries%", ct) - before;
 
-            (queryIds, _, _, _) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
+                (queryIds, _, _, _) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
 
-            fetchTemp = await TempWrittenAsync(connection, schema, targetOid, "%AS candidate_entries%", ct) - before - stockTemp;
-        });
-        PgStatementTable.AssertNoPassInside(bracket);
+                fetchTemp = await TempWrittenAsync(connection, schema, targetOid, "%AS candidate_entries%", ct) - before - stockTemp;
+            });
+            PgStatementTable.AssertNoPassInside(bracket);
 
-        Assert.True(stockTemp > 0, $"the stock fetch wrote {stockTemp} temp blocks: the fixture does not spill, so this fact proves nothing");
-        Assert.Equal(0, fetchTemp);
-        Assert.NotEmpty(queryIds);
+            Assert.True(stockTemp > 0, $"the stock fetch wrote {stockTemp} temp blocks: the fixture does not spill, so this fact proves nothing");
+            Assert.Equal(0, fetchTemp);
+            Assert.NotEmpty(queryIds);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* A role belongs to the cluster, not to the scratch database that is dropped next, so it is dropped here. */
+            await LiveStoreCleanup.RunAsync(target.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", cleanup);
+                await drop.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
     }
 
     /// <summary>
