@@ -324,6 +324,7 @@ public static class PgTableTuning
         LegacyRowIndexName,
         QueryStatsRestartRowIndexName,
         ProcedureStatsRestartRowIndexName,
+        ProcedureStatsNameIndex.IndexName,
         WaitStatsDailyCoverIndexName,
     };
 
@@ -677,6 +678,56 @@ public static class PgTableTuning
            start; the hourly pass never builds it. RestartRowIndexLiveTests holds the plan and the definitions. */
         "CREATE INDEX IF NOT EXISTS " + QueryStatsRestartRowIndexName + " ON collect.query_stats (collection_time) WHERE sample_interval_seconds = 0",
         "CREATE INDEX IF NOT EXISTS " + ProcedureStatsRestartRowIndexName + " ON collect.procedure_stats (collection_time) WHERE sample_interval_seconds = 0",
+        /* #8570: the one-procedure duration trend (DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql) fetches its
+           procedure's rows WHERE server_id = $1, the database and the procedure's full name, inside its collection_time window.
+           Every other index on the table leads on the server and the time, or on the time alone, so without this one that read
+           fetches every row the server stored in the window and keeps a few. The third key is the expression the read compares
+           (DurationTrendRouting.ProcedureFullNameSql), so the planner matches the predicate to the key. The reader runs that
+           statement only on a store where the index exists and is valid (ProcedureStatsNameIndex.IsPresentAsync); on any other
+           store it runs the FILTER statement, which needs no index and returns the same rows.
+
+           WHAT IT HOLDS: every row of the uncompressed chunks, so unlike the partial indexes above every procedure_stats insert
+           writes it. On the rig below it is 2.9 GB over 51.8 M rows and 25 GB of heap, 11% of the heap. Measured there with
+           810-row batches (full_page_writes on, wal_compression off): 2.5 -> 4.2 ms a batch, and 461 -> 918 KB of WAL a batch
+           averaged over 20 checkpoint cycles of 15 batches. Between checkpoints a batch is 664 KB; the first batch after a
+           checkpoint is 4.5 MB, because each procedure's newest entry lands on its own leaf page and logs a full page image.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root, which is safe before collectors
+           start and not while they write: an insert waits for the whole build. CONCURRENTLY is refused on hypertables, so the
+           build runs only here, under SetupTimeoutSeconds, and the hourly pass never builds it (as for LegacyRowIndexName). A
+           build that runs out of time here is rolled back, logged and retried at the next start, and the store keeps working
+           without it: the read keeps the FILTER statement. A ladder rung that ran out of time would fail the start instead.
+
+           COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own heap, so each
+           compressed chunk gets an empty 8 KB index and the compressed relations get none. Those chunks are still read by the
+           columnar scan; the index serves the uncompressed chunks. Compressing a chunk empties its index, decompressing one
+           refills it and a new chunk inherits it (each measured on TimescaleDB 2.30.1).
+
+           THE BUILD'S COST: one read of every uncompressed chunk's heap and a sort of its rows. Measured on a local
+           TimescaleDB 2.30.1 rig with the real schema (73 hypertables, 21,900 chunks; procedure_stats with 300 daily chunks,
+           298 of them compressed, and 51.8 M uncompressed rows in 25 GB of heap, three times the server's memory):
+           the pass built it in 43.6 s and 59.5 s with the default 2 parallel maintenance workers and in 89.4 s with none,
+           and the statement on its own took 35.1 s and 72.8 s; a pass over the converged store took 0.09 s. An insert from
+           a second session waited once, for the length of the build. With the server cancelling the build at 10 s in place
+           of SetupTimeoutSeconds, each start ran 10.5 s, logged the build's warning, left no index and no chunk index
+           behind and applied every other statement, and the start after it tried again. A store whose build cannot fit
+           the budget pauses for it at every start and keeps the FILTER statement.
+
+           ONE BUILD PER START: the index shares the one-build budget (s_oneBuildPerStart) and is the last of those a
+           hypertable store builds. On a store where an earlier one is also missing from a table that has rows, this start
+           builds that one and this index waits for the next start; until then the read keeps the FILTER statement. On a
+           plain-table store the wait_stats daily cover (WaitStatsDailyCoverIndexName) is later in this list and can wait
+           a start behind this index.
+
+           THE READ, on a rig of one server with 8.0 M rows in 7 daily chunks, 5 of them compressed, warm, one procedure in
+           one database:
+             24 h:  355 ms (356,099 buffers) -> 8.2 ms (3,620 buffers)
+             72 h:  651 ms (172,271 buffers) -> 59 ms (36,949 buffers)
+             168 h: 1,217 ms (268,296 buffers) -> 189 ms (113,391 buffers)
+           Without the index the by-name statement is slower than the FILTER statement in 11 of 48 cases and reads 3.4-12x
+           the buffers, which is why the reader asks for the index first. ProcedureTrendNameIndexLiveTests holds the plan and
+           the equality of the two statements. */
+        ProcedureStatsNameIndex.CreateSql,
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",
