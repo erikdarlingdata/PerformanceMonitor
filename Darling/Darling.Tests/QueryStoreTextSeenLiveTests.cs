@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// <item>the touch gives a text with no seen row one, and none to a statement the store holds no text for;</item>
 /// <item>the prune keeps a text either stamp says is live, retires the rest, and judges a text with no seen row by the
 /// text row's own stamp;</item>
+/// <item>a touch that commits while the prune waits for its text keeps the text and its seen row;</item>
 /// <item>a deleted text takes its seen row with it, whatever deleted it;</item>
 /// <item>the rung fills the table from the text rows it finds, arms the trigger, and can run again;</item>
 /// <item><c>find_queries_by_text</c> returns the same rows, with the liveness stamp as <c>last_seen</c>.</item>
@@ -280,6 +281,64 @@ public sealed class QueryStoreTextSeenLiveTests
         Assert.Equal(stale, await SeenAsync(connection, ServerId, 3, ct));
     }
 
+    /// <summary>
+    /// A touch revives a text while the prune waits to delete it. Both stamps of text 1 are behind the cutoff, so the prune's
+    /// scan picks it. The touch, in a transaction that is still open, restamps the text row (a text behind the smallest
+    /// cutoff is also behind <see cref="QueryStoreTextSeen.TextRowRefreshHours"/>) and its seen row, and the prune's
+    /// <c>DELETE</c> then waits for the text row. When the touch commits, the delete reads the row's new version and tests
+    /// the text row's stamp again, so the text and its seen row are kept. Text 2 has the same stamps and nothing touches
+    /// it: the same statement retires it.
+    ///
+    /// <para>The order is set by the test, never by a timing: the prune starts after the touch has run, and the touch
+    /// commits only once <c>pg_stat_activity</c> shows the prune's backend waiting on a lock the touch's backend holds.</para>
+    /// </summary>
+    [Fact]
+    public async Task ATouchThatCommitsWhileThePruneWaitsForItsText_KeepsTheTextAndItsSeenRow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var toucher = await OpenAsync(scratch, ct);
+        await using var pruner = new NpgsqlConnection(scratch.ConnectionString);
+        await pruner.OpenAsync(ct);
+        await using var watcher = new NpgsqlConnection(scratch.ConnectionString);
+        await watcher.OpenAsync(ct);
+
+        /* The smallest cutoff a prune can be given (the one-day retention floor plus the prune margin), and stamps one hour
+           behind it: the youngest text a prune may retire, which is the one nearest the text row's refresh interval. */
+        var now = WholeSecondUtcNow();
+        var cutoff = QueryStorePlanMap.Naive(now).AddHours(-QueryStoreTextSeen.OlderBuildCutoffHours);
+        var behindTheCutoff = cutoff.AddHours(-1);
+        await PlantAsync(toucher, ServerId, 1, "0xA1", behindTheCutoff, behindTheCutoff, ct);
+        await PlantAsync(toucher, ServerId, 2, "0xA2", behindTheCutoff, behindTheCutoff, ct);
+
+        /* A prune that still waits after the touch has committed fails with an error instead of holding the test host. */
+        await ExecuteAsync(pruner, "SET lock_timeout = '120s'", ct);
+
+        bool waited;
+        int retired;
+        await using (var transaction = await toucher.BeginTransactionAsync(ct))
+        {
+            var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
+                toucher, ServerId, Db, new[] { (1L, (string?)"0xA1") }, now, TimeoutSeconds, ct);
+            Assert.Equal(new[] { new FetchProbeVerdict(1, Resolved: true, HashStale: false) }, verdicts);
+
+            var prune = PruneAsync(pruner, cutoff, ct);
+            waited = await WaitsOnALockHeldByAsync(watcher, pruner.ProcessID, toucher.ProcessID, prune, ct);
+            await transaction.CommitAsync(ct);
+            retired = await prune;
+        }
+
+        Assert.True(waited, "the prune finished, or ran for a minute, without waiting on a lock the touch's transaction held");
+
+        /* Text 2 only. Text 1 and its seen row carry the touch's stamp. */
+        Assert.Equal(1, retired);
+        Assert.Equal(new long[] { 1 }, await IdsAsync(toucher, "collect.query_store_text", ServerId, ct));
+        Assert.Equal(new long[] { 1 }, await IdsAsync(toucher, "collect.query_store_text_seen", ServerId, ct));
+        Assert.Equal(QueryStorePlanMap.Naive(now), (await TextVersionAsync(toucher, 1, ct)).LastSeen);
+        Assert.Equal(QueryStorePlanMap.Naive(now), await SeenAsync(toucher, ServerId, 1, ct));
+    }
+
     [Fact]
     public async Task DeletingATextRow_RemovesItsSeenRow()
     {
@@ -509,6 +568,42 @@ LIMIT $4";
             update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
             Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
         }
+    }
+
+    /// <summary>One statement of the text prune as the retention pass runs it: the shipped statement at the shipped cap,
+    /// bound with the cutoff. Returns the text rows it deleted.</summary>
+    private static async Task<int> PruneAsync(NpgsqlConnection connection, DateTime cutoff, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            QueryStoreTextSeen.PruneSql(DarlingRetention.LivenessTouchedTablePruneRowCap), connection) { CommandTimeout = 180 };
+        command.Parameters.AddWithValue(cutoff);
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Polls <c>pg_stat_activity</c> until the backend <paramref name="waiterPid"/> waits on a lock that the backend
+    /// <paramref name="holderPid"/> holds. False when <paramref name="statement"/> finishes first or about a minute passes:
+    /// either way the statement did not wait on that backend, and the caller fails on it.
+    /// </summary>
+    private static async Task<bool> WaitsOnALockHeldByAsync(
+        NpgsqlConnection watcher, int waiterPid, int holderPid, Task statement, CancellationToken ct)
+    {
+        for (var i = 0; i < 600 && !statement.IsCompleted; i++)
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND $2 = ANY (pg_blocking_pids(pid))",
+                watcher);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = waiterPid });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = holderPid });
+            if ((long)(await command.ExecuteScalarAsync(ct))! > 0)
+            {
+                return true;
+            }
+
+            await Task.Delay(100, ct);
+        }
+
+        return false;
     }
 
     private static async Task<TextVersion> TextVersionAsync(NpgsqlConnection connection, long queryId, CancellationToken ct)
