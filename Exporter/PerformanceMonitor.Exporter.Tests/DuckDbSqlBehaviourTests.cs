@@ -287,6 +287,104 @@ public sealed class DuckDbSqlBehaviourTests
         Assert.Equal("0xD", rows[1]["plan_handle"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void QueryStatsHourly_takes_every_attribute_from_one_row_when_several_plans_share_the_last_collection_time(bool insertBFirst)
+    {
+        using var connection = Open();
+        CreateQueryStatsRaw(connection);
+        // Two plans (SET-option variants) of one statement collected at the same instant: the grain does not tell them apart.
+        // B sorts after A on plan_handle, so B is the hour's row, whatever order the rows arrived in.
+        (string, string)[] Plan(string planHandle, string sqlHandle, int maxDop, long totalWorker, string creation) =>
+        [
+            ("server_name", "'srv-a'"), ("database_name", "'db1'"), ("query_hash", "'h1'"), ("query_plan_hash", "'p1'"),
+            ("collection_time", "TIMESTAMP '2026-10-22 10:40:00'"), ("sample_interval_seconds", "60"),
+            ("plan_handle", $"'{planHandle}'"), ("sql_handle", $"'{sqlHandle}'"), ("max_dop", maxDop.ToString()),
+            ("total_worker_time", totalWorker.ToString()), ("creation_time", $"TIMESTAMP '{creation}'"),
+            ("statement_start_offset", "0"), ("statement_end_offset", "-1"),
+        ];
+        var a = RawRow("query_stats_raw", Plan("0xA", "0xSQL1", 1, 100, "2026-10-01 00:00:00"));
+        var b = RawRow("query_stats_raw", Plan("0xB", "0xSQL2", 16, 9000, "2026-10-20 00:00:00"));
+        Exec(connection, insertBFirst ? b : a);
+        Exec(connection, insertBFirst ? a : b);
+
+        var row = Assert.Single(Rows(connection, SqlBuilder.QueryStatsHourlyDuckDbSql));
+
+        Assert.Equal(2L, Convert.ToInt64(row["sample_count"]));
+        Assert.Equal("0xB", row["plan_handle"]);
+        Assert.Equal("0xSQL2", row["sql_handle"]);
+        Assert.Equal(16L, row["max_dop"]);
+        Assert.Equal(9000L, row["total_worker_time"]);
+        Assert.Equal(new DateTime(2026, 10, 20, 0, 0, 0), row["creation_time"]);
+    }
+
+    [Fact]
+    public void QueryStatsHourly_breaks_a_tie_on_handles_and_offsets_with_null_sorting_before_a_value()
+    {
+        using var connection = Open();
+        CreateQueryStatsRaw(connection);
+        (string, string)[] Statement(string? planHandle, string? sqlHandle, int start, int maxDop) =>
+        [
+            ("server_name", "'srv-a'"), ("database_name", "'db1'"), ("query_hash", "'h1'"), ("query_plan_hash", "'p1'"),
+            ("collection_time", "TIMESTAMP '2026-10-22 10:40:00'"), ("sample_interval_seconds", "60"),
+            ("plan_handle", planHandle is null ? "NULL" : $"'{planHandle}'"), ("sql_handle", sqlHandle is null ? "NULL" : $"'{sqlHandle}'"),
+            ("statement_start_offset", start.ToString()), ("statement_end_offset", "-1"), ("max_dop", maxDop.ToString()),
+        ];
+        // Same plan_handle and sql_handle, different statement offsets inside one batch; and a row with no handles at all.
+        Exec(connection, RawRow("query_stats_raw", Statement("0xP", "0xS", 40, 4)));
+        Exec(connection, RawRow("query_stats_raw", Statement("0xP", "0xS", 120, 8)));
+        Exec(connection, RawRow("query_stats_raw", Statement(null, null, 500, 99)));
+
+        var row = Assert.Single(Rows(connection, SqlBuilder.QueryStatsHourlyDuckDbSql));
+
+        Assert.Equal(8L, row["max_dop"]);                 // offset 120 beats 40, and the handle-less row sorts first
+        Assert.Equal(120, row["statement_start_offset"]);
+    }
+
+    [Fact]
+    public void QueryStatsHourly_reports_a_null_attribute_of_the_last_sample_as_null_not_an_older_samples_value()
+    {
+        using var connection = Open();
+        CreateQueryStatsRaw(connection);
+        (string, string)[] Sample(string time, string? planBytes) =>
+        [
+            ("server_name", "'srv-a'"), ("database_name", "'db1'"), ("query_hash", "'h1'"), ("query_plan_hash", "'p1'"),
+            ("collection_time", $"TIMESTAMP '{time}'"), ("sample_interval_seconds", "60"),
+            ("query_plan_xml_bytes", planBytes ?? "NULL"), ("max_dop", planBytes is null ? "NULL" : "4"),
+        ];
+        Exec(connection, RawRow("query_stats_raw", Sample("2026-10-22 10:10:00", "5000")));
+        Exec(connection, RawRow("query_stats_raw", Sample("2026-10-22 10:50:00", null)));
+
+        var row = Assert.Single(Rows(connection, SqlBuilder.QueryStatsHourlyDuckDbSql));
+
+        Assert.Null(row["query_plan_xml_bytes"]);
+        Assert.Null(row["max_dop"]);
+    }
+
+    [Fact]
+    public void ProcedureStatsHourly_takes_every_attribute_from_one_row_when_several_cached_plans_share_the_last_collection_time()
+    {
+        using var connection = Open();
+        CreateProcedureStatsRaw(connection);
+        (string, string)[] Plan(string planHandle, string sqlHandle, long maxWorker, string cached) =>
+        [
+            ("server_name", "'srv-a'"), ("database_name", "'db1'"), ("schema_name", "'dbo'"), ("object_name", "'proc1'"),
+            ("collection_time", "TIMESTAMP '2026-10-22 10:40:00'"), ("sample_interval_seconds", "60"),
+            ("plan_handle", $"'{planHandle}'"), ("sql_handle", $"'{sqlHandle}'"), ("max_worker_time", maxWorker.ToString()),
+            ("cached_time", $"TIMESTAMP '{cached}'"),
+        ];
+        Exec(connection, RawRow("procedure_stats_raw", Plan("0xB", "0xSQL2", 900, "2026-10-20 00:00:00")));
+        Exec(connection, RawRow("procedure_stats_raw", Plan("0xA", "0xSQL1", 10, "2026-10-01 00:00:00")));
+
+        var row = Assert.Single(Rows(connection, SqlBuilder.ProcedureStatsHourlyDuckDbSql));
+
+        Assert.Equal("0xB", row["plan_handle"]);
+        Assert.Equal("0xSQL2", row["sql_handle"]);
+        Assert.Equal(900L, row["max_worker_time"]);
+        Assert.Equal(new DateTime(2026, 10, 20, 0, 0, 0), row["cached_time"]);
+    }
+
     [Fact]
     public void ProcedureStatsHourly_carries_the_dmv_attributes_of_the_last_counted_sample_and_keeps_one_row_per_hour()
     {

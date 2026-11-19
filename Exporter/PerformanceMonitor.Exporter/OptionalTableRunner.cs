@@ -600,23 +600,7 @@ public static class OptionalTableRunner
 
             using (var appender = writeDb.CreateAppender(table.Name))
             {
-                foreach (var row in textRows)
-                {
-                    if (!nameByServerId.TryGetValue(row.ServerId, out var serverName))
-                    {
-                        continue;
-                    }
-
-                    var appenderRow = appender.CreateRow();
-                    appenderRow.AppendValue(options.Store);
-                    appenderRow.AppendValue(serverName);
-                    appenderRow.AppendValue(row.QueryId);
-                    appenderRow.AppendValue(row.QueryText);
-                    appenderRow.AppendValue(row.FirstSeen);
-                    appenderRow.AppendValue(row.LastSeen);
-                    appenderRow.AppendValue(row.OwnEntries);
-                    appenderRow.EndRow();
-                }
+                AppendPgStatementTextRows(appender, options.Store, textRows, nameByServerId);
             }
 
             using (var copyCommand = writeDb.CreateCommand())
@@ -666,6 +650,33 @@ public static class OptionalTableRunner
         {
             failed.Add(new FailedOptionalTable { Table = table.Name, Error = ex.Message });
             output.WriteLine($"  FAILED: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Appends the fetched `pg_statement_text` rows in the column order of the output table (source_store, server_name, queryid,
+    /// query_text, first_seen, last_seen, own_entries). A row whose server did not resolve is skipped. A NULL `own_entries` (no entry
+    /// of the queryid is known to be the service's) is appended as NULL, not as an empty or "null" string.
+    /// </summary>
+    internal static void AppendPgStatementTextRows(
+        DuckDBAppender appender, string store, IEnumerable<PgStatementTextExporter.TextRow> rows, IReadOnlyDictionary<int, string?> nameByServerId)
+    {
+        foreach (var row in rows)
+        {
+            if (!nameByServerId.TryGetValue(row.ServerId, out var serverName))
+            {
+                continue;
+            }
+
+            var appenderRow = appender.CreateRow();
+            appenderRow.AppendValue(store);
+            appenderRow.AppendValue(serverName);
+            appenderRow.AppendValue(row.QueryId);
+            appenderRow.AppendValue(row.QueryText);
+            appenderRow.AppendValue(row.FirstSeen);
+            appenderRow.AppendValue(row.LastSeen);
+            if (row.OwnEntries is null) { appenderRow.AppendNullValue(); } else { appenderRow.AppendValue(row.OwnEntries); }
+            appenderRow.EndRow();
         }
     }
 

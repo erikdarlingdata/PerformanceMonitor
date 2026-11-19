@@ -314,6 +314,12 @@ public sealed class StoreColumnCoverageTests : IClassFixture<StoreColumnCoverage
             (2, 0, "2026-10-22 11:20:00", 60),
             (4, 0, "2026-10-22 12:10:00", 60),
             (6, 0, "2026-10-22 11:50:00", 30),
+            // Two plans of one group at the same instant (the grain does not tell them apart), in the opposite order of their handles ...
+            (8, 0, "2026-10-22 13:30:00", 60),
+            (7, 0, "2026-10-22 13:30:00", 60),
+            // ... and an hour whose last sample leaves query_plan_xml_bytes NULL, after an older one that has it.
+            (9, 0, "2026-10-22 14:45:00", 60),
+            (10, 0, "2026-10-22 14:05:00", 60),
         ];
         await using (var connection = new NpgsqlConnection(_store.Builder.ConnectionString))
         {
@@ -339,6 +345,7 @@ public sealed class StoreColumnCoverageTests : IClassFixture<StoreColumnCoverage
                 var index = 0;
                 foreach (var column in writable.Where(c => !named.Contains(c) && !c.StartsWith("delta_", StringComparison.Ordinal)))
                 {
+                    if (n == 9 && column == "query_plan_xml_bytes") { continue; }
                     index++;
                     values.Add((column, typeFor(column) switch
                     {
@@ -361,7 +368,7 @@ public sealed class StoreColumnCoverageTests : IClassFixture<StoreColumnCoverage
         {
             await connection.OpenAsync();
             await using var command = new NpgsqlCommand(oracleSql, connection);
-            command.Parameters.AddRange(SqlBuilder.WindowParameters(From, To));
+            command.Parameters.AddRange(SqlBuilder.WindowParameters(From, From.AddHours(4)));
             await using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
@@ -370,7 +377,7 @@ public sealed class StoreColumnCoverageTests : IClassFixture<StoreColumnCoverage
         }
 
         // The DuckDB rollup, over the window the real read loads.
-        var options = new ExportOptions { Store = "parity", FromUtc = From, ToUtc = To, OutDir = "x", Tables = [] };
+        var options = new ExportOptions { Store = "parity", FromUtc = From, ToUtc = From.AddHours(4), OutDir = "x", Tables = [] };
         var path = isQueryStats
             ? await QueryStatsWindow.BuildRawWindowFileAsync(_store.Builder, options, default)
             : await ProcedureStatsWindow.BuildRawWindowFileAsync(_store.Builder, options, default);
@@ -407,6 +414,18 @@ public sealed class StoreColumnCoverageTests : IClassFixture<StoreColumnCoverage
         var lastOfHour = duck.Single(d => (DateTime)d["hour"]! == new DateTime(2026, 10, 22, 11, 0, 0) && (isQueryStats ? d["host_object_name"] is null : (string?)d["object_name"] == "proc0"));
         Assert.Equal(6L, (long)lastOfHour["execution_count"]! / 1000);   // the sample number is the thousands of the planted value
         Assert.Equal(3L, lastOfHour["sample_count"]);
+
+        // Two rows at one instant: every attribute is from the one whose handles sort last (n = 8), not a mix with n = 7.
+        var tied = duck.Single(d => (DateTime)d["hour"]! == new DateTime(2026, 10, 22, 13, 0, 0) && (isQueryStats ? d["host_object_name"] is null : (string?)d["object_name"] == "proc0"));
+        Assert.Equal(2L, tied["sample_count"]);
+        Assert.Equal(8L, (long)tied["execution_count"]! / 1000);
+        Assert.Equal("plan_handle-8", tied["plan_handle"]);
+        Assert.Equal("sql_handle-8", tied["sql_handle"]);
+
+        // The last sample's NULL is the hour's value, not the older sample's.
+        var nulled = duck.Single(d => (DateTime)d["hour"]! == new DateTime(2026, 10, 22, 14, 0, 0) && (isQueryStats ? d["host_object_name"] is null : (string?)d["object_name"] == "proc0"));
+        Assert.Null(nulled["query_plan_xml_bytes"]);
+        Assert.Equal(9L, (long)nulled["execution_count"]! / 1000);
     }
 
     [Fact]
