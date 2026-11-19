@@ -21,25 +21,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// #9055: what a page latch wait in get_active_queries is on, answered from the store alone. The request's own stored plan names the
 /// indexes it touches, and the newest daily index snapshot (<c>v_index_object_stats</c>) ranks them by their page latch waits.
 /// The page kind, the plan pick and the fallback are <see cref="PageLatchResource"/>, which Lite shares. The extra reads run only
-/// for a page of rows that holds a page latch wait: one statement for the plans, one for the index snapshot rows, plus the
+/// for a page of rows that holds a page latch wait: one statement for the plans (read through <see cref="DarlingStoredPlanReader"/>, so the statement filter applies), one for the index snapshot rows, plus the
 /// snapshot time probe <c>get_object_locking</c> uses.
 /// </summary>
 internal static class DarlingPageLatchReader
 {
-    /// <summary>The stored plan of each (capture, session, request) key given, in one statement. The key is the active-query row's own
-    /// natural key; a NULL request_id matches 0, as <c>get_active_query_plan_xml</c> reads it. $1 server_id, $2 collection times,
-    /// $3 session ids, $4 request ids (three parallel arrays).</summary>
-    public const string PlansSql = """
-        SELECT q.collection_time, q.session_id, COALESCE(q.request_id, 0), q.query_plan
-        FROM unnest($2::timestamp[], $3::int[], $4::int[]) AS k(collection_time, session_id, request_id)
-        JOIN query_snapshots q
-          ON  q.server_id = $1
-          AND q.collection_time = k.collection_time
-          AND q.session_id = k.session_id
-          AND COALESCE(q.request_id, 0) = k.request_id
-        WHERE q.query_plan IS NOT NULL
-        """;
-
     /// <summary>The newest index snapshot's rows for the given databases: every row with a page latch or page I/O latch wait, plus the
     /// highest-waiting row of each database so its id can be named even when nothing in it waited. $1 server_id,
     /// $2 snapshot time (the instant <see cref="DarlingObjectStatsReader.GetLatestIndexObjectStatsSnapshotTimeAsync"/> resolved),
@@ -84,7 +70,7 @@ internal static class DarlingPageLatchReader
         if (pageRows.Count == 0) return answers;
 
         var keys = pageRows.Select(Key).Distinct().ToList();
-        var plans = await ReadPlansAsync(postgres, serverId, keys, cancellationToken);
+        var plans = await DarlingStoredPlanReader.GetQuerySnapshotPlansAsync(postgres, serverId, keys, cancellationToken: cancellationToken);
 
         var databaseIds = pageRows
             .Select(r => PageLatchResource.TryParse(r.WaitResource, out var db, out _, out _) ? db : -1)
@@ -128,29 +114,6 @@ internal static class DarlingPageLatchReader
     /// <summary>The key a row's answer is stored under.</summary>
     public static (DateTime CollectionTime, int SessionId, int RequestId) Key(DarlingSessionReader.ActiveQueryRow row) =>
         (row.CollectionTime, row.SessionId, row.RequestId ?? 0);
-
-    private static async Task<Dictionary<(DateTime, int, int), string>> ReadPlansAsync(
-        NpgsqlDataSource postgres, int serverId, List<(DateTime CollectionTime, int SessionId, int RequestId)> keys, CancellationToken cancellationToken)
-    {
-        var plans = new Dictionary<(DateTime, int, int), string>();
-        await using var command = postgres.CreateCommand(PlansSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
-            Value = keys.Select(k => DateTime.SpecifyKind(k.CollectionTime, DateTimeKind.Unspecified)).ToArray(),
-        });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.SessionId).ToArray() });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.RequestId).ToArray() });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            plans[(reader.GetDateTime(0), reader.GetInt32(1), reader.GetInt32(2))] = reader.GetString(3);
-        }
-
-        return plans;
-    }
 
     private static async Task<List<PageLatchIndexStat>> ReadIndexStatsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime snapshotTime, int[] databaseIds, CancellationToken cancellationToken)
