@@ -167,6 +167,31 @@ public sealed class DarlingMcpInstructionsBudgetTests
         Assert.Equal(DarlingMcpInstructions.Text, DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served));
     }
 
+    /// <summary>The whole catalog served, no peers: the census equals <see cref="DarlingMcpInstructions.Text"/>'s whatever
+    /// <c>mcp.allowAgentMuteRules</c> says (every tool is served, so the census has no agent action sentence to vary), so the
+    /// rendering reaches the fixed-text path with the setting on and must leave it with the setting off: the instructions then
+    /// carry no mention of the mute rule tools writing without an <c>agent_action</c>.</summary>
+    [Fact]
+    public void Build_OverTheWholeCatalog_WithAgentMuteRulesOff_SaysNothingOfTheMuteRuleToolsWritingWithoutAnAgentAction()
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: true, Investigations: true));
+        Assert.Equal(catalog.Count, served.Count);
+        Assert.Equal(DarlingMcpInstructions.ToolCensus(catalog, served, null, agentMuteRules: true),
+            DarlingMcpInstructions.ToolCensus(catalog, served, null, agentMuteRules: false));
+
+        var on = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served, agentMuteRules: true);
+        Assert.Equal(DarlingMcpInstructions.Text, on);
+        Assert.Contains(DarlingMcpAgentMuteDirect.SettingName, on, StringComparison.Ordinal);
+
+        var off = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served, agentMuteRules: false);
+        Assert.NotEqual(DarlingMcpInstructions.Text, off);
+        Assert.DoesNotContain(DarlingMcpAgentMuteDirect.SettingName, off, StringComparison.Ordinal);
+        Assert.DoesNotContain("mute and digest rules", off, StringComparison.Ordinal);
+        Assert.DoesNotContain("without an agent_action", off, StringComparison.Ordinal);
+        Assert.True(off.Length <= InstructionsBudget, $"the instructions are {off.Length} characters; D2's budget is {InstructionsBudget}");
+    }
+
     /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
     /// does not serve. Every backticked name that is a Darling tool must be in the served set, for each switch state.</summary>
     [Theory]

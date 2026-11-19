@@ -135,6 +135,25 @@ public sealed class DarlingMcpInstructionsServedGroupsTests
         }
     }
 
+    /// <summary>The legacy token's settings paragraph says the mute rule tools write with no <c>agent_action</c> inside the sentence
+    /// that names <c>mcp.allowInvestigations</c>, tied to it with the setting, never as a sentence of its own that a client holding
+    /// the writes arm could read as describing its session. While <c>mcp.allowAgentMuteRules</c> is off no sentence names it.</summary>
+    private static void AssertTheMuteClaimIsTiedToTheInvestigationsSentence(Served served, bool agentMuteRules)
+    {
+        var naming = Sentences(served.Paragraph).Where(s => s.Contains(DarlingMcpAgentMuteDirect.SettingName, StringComparison.Ordinal)).ToArray();
+        if (!agentMuteRules)
+        {
+            Assert.Empty(naming);
+            Assert.DoesNotContain("without an agent_action", served.Paragraph, StringComparison.Ordinal);
+            return;
+        }
+
+        var sentence = Assert.Single(naming);
+        Assert.Contains(DarlingMcpWritePolicy.InvestigationsSetting, sentence, StringComparison.Ordinal);
+        Assert.Contains("while " + DarlingMcpAgentMuteDirect.SettingName + " is on, the mute rule tools among them also write mute and digest rules without an agent_action", sentence, StringComparison.Ordinal);
+        Assert.Single(Sentences(served.Paragraph), s => s.Contains("without an agent_action", StringComparison.Ordinal));
+    }
+
     /// <summary>Both settings off: no tool that changes state is served, so the paragraph names each setting and what it serves,
     /// for a refused client to ask for. What it says <c>mcp.allowInvestigations</c> serves is the whole arm: the investigation
     /// tools by name, the agent action tools counted from the policy's set, and the mute rule tools with no <c>agent_action</c>
@@ -162,6 +181,7 @@ public sealed class DarlingMcpInstructionsServedGroupsTests
         Assert.Contains(CountedActions(ArmActionTools.Length), served.Paragraph, StringComparison.Ordinal);
         Assert.Contains("agent_action", served.Paragraph, StringComparison.Ordinal);
         Assert.Equal(agentMuteRules, served.Instructions.Contains(DarlingMcpAgentMuteDirect.SettingName, StringComparison.Ordinal));
+        AssertTheMuteClaimIsTiedToTheInvestigationsSentence(served, agentMuteRules);
     }
 
     /// <summary>The investigations arm serves three groups that change state, and the paragraph names all three: the investigation
@@ -212,14 +232,17 @@ public sealed class DarlingMcpInstructionsServedGroupsTests
         Assert.Contains("mute", sentence, StringComparison.Ordinal);
     }
 
-    /// <summary>The writes arm serves the write tools, the server admin tools with their own setting, and no investigation tool.</summary>
+    /// <summary>The writes arm serves the write tools, the server admin tools with their own setting, and no investigation tool. Its
+    /// paragraph says nothing of the mute rule tools outside the sentence that describes the investigations arm it does not hold.</summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TheWritesArm_NamesTheWriteSetting_AndEveryServerAdminToolItServes(bool serverAdmin)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    public async Task TheWritesArm_NamesTheWriteSetting_AndEveryServerAdminToolItServes(bool serverAdmin, bool agentMuteRules)
     {
         using var server = await DarlingMcpWritePolicyTests.BuildServer(
-            new McpConfig { AllowWrites = true, AllowServerAdmin = serverAdmin }, LegacyToken);
+            new McpConfig { AllowWrites = true, AllowServerAdmin = serverAdmin, AllowAgentMuteRules = agentMuteRules }, LegacyToken);
         var served = await ServedAsync(server, LegacyToken);
 
         Assert.True(served.WritesArm);
@@ -228,6 +251,7 @@ public sealed class DarlingMcpInstructionsServedGroupsTests
         Assert.Equal(serverAdmin ? DarlingMcpWritePolicy.ServerAdminTools.Count : 0, served.ServerAdmin.Length);
 
         AssertTheLegacyParagraphNamesEveryGroupServed(served);
+        AssertTheMuteClaimIsTiedToTheInvestigationsSentence(served, agentMuteRules);
     }
 
     /// <summary>Each named token's paragraph is its role's own: it names every group that role is served and no tool that

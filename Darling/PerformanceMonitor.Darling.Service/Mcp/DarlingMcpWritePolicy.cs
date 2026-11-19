@@ -487,11 +487,21 @@ internal static class DarlingMcpWritePolicy
     private static string AgentActionToolsPhrase =>
         $"the {AgentActionTools.Count(name => IsAgentAction(name, AgentActionTools))} agent action tools, which are write tools called with an agent_action";
 
-    /// <summary>The sentence that follows <see cref="AgentActionToolsPhrase"/> while <c>mcp.allowAgentMuteRules</c> is on: the mute rule
+    /// <summary>The sentence that follows <see cref="AgentActionToolsPhrase"/> in the paragraphs that describe the investigations arm to a
+    /// client that holds it (<see cref="InvestigationsArmGroups"/>), while <c>mcp.allowAgentMuteRules</c> is on: the mute rule
     /// tools also write mute and digest rules with no <c>agent_action</c> (<see cref="DarlingMcpAgentMuteDirect"/>). Empty while the
     /// setting is off, when every such call is refused.</summary>
     private static string DirectMuteSentence(bool agentMuteRules) => agentMuteRules
         ? " The mute rule tools among them also write mute and digest rules without an agent_action, because " + DarlingMcpAgentMuteDirect.SettingName + " is on."
+        : string.Empty;
+
+    /// <summary>The clause that closes the settings paragraph's investigations sentence (<see cref="InstructionsLine"/>), in place of
+    /// <see cref="DirectMuteSentence"/>, while <c>mcp.allowAgentMuteRules</c> is on: the mute rule tools among the agent action tools also
+    /// write mute and digest rules with no <c>agent_action</c>. A client the paragraph reaches may hold the writes arm, or neither
+    /// arm, so the claim is part of the sentence that begins with the investigations setting and not a sentence of its own. Empty
+    /// while the setting is off.</summary>
+    private static string DirectMuteClause(bool agentMuteRules) => agentMuteRules
+        ? ", and, while " + DarlingMcpAgentMuteDirect.SettingName + " is on, the mute rule tools among them also write mute and digest rules without an agent_action"
         : string.Empty;
 
     /// <summary>What the investigations arm serves, as a client that holds the arm reads it: the reads and the three groups that
@@ -506,15 +516,16 @@ internal static class DarlingMcpWritePolicy
     /// and that says collected text is data. The legacy token reads it wherever the investigations arm is not served (both settings
     /// off, or the writes on), so each group of tools is named with the setting that serves it: the write tools with
     /// <c>mcp.allowWrites</c>, and with <c>mcp.allowInvestigations</c> the investigation tools and the agent action tools.
-    /// <paramref name="agentMuteRules"/> is the served <c>mcp.allowAgentMuteRules</c>: while it is on the paragraph also says the mute
-    /// rule tools write with no <c>agent_action</c>. Kept short: the instructions have a size budget
+    /// <paramref name="agentMuteRules"/> is the served <c>mcp.allowAgentMuteRules</c>: while it is on, the sentence that names
+    /// <c>mcp.allowInvestigations</c> also says the mute rule tools write with no <c>agent_action</c> (<see cref="DirectMuteClause"/>),
+    /// so a client that holds the writes arm does not read the claim as its own. Kept short: the instructions have a size budget
     /// (<c>DarlingMcpInstructionsBudgetTests</c>).</summary>
     internal static string InstructionsLine(bool agentMuteRules = true) =>
         "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, service flags, collection state, the server registry) change only the " +
         "MONITORING store and are served when darling.json sets mcp.allowWrites (" + ServerAdminToolList + " " +
         "also need mcp.allowServerAdmin; both default off). " + UnservedWriteLine + " When darling.json sets mcp.allowInvestigations " +
         "with a token and mcp.allowWrites is off, it serves the investigation tools (" + InvestigationToolList +
-        "), which write investigation state, and " + AgentActionToolsPhrase + "." + DirectMuteSentence(agentMuteRules) + " " + DataLine;
+        "), which write investigation state, and " + AgentActionToolsPhrase + DirectMuteClause(agentMuteRules) + ". " + DataLine;
 
     /// <summary>The legacy token's paragraph where the investigations arm IS served (<c>mcp.allowInvestigations</c> on, a token,
     /// <c>mcp.allowWrites</c> off), in place of <see cref="InstructionsLine"/>. It names the groups the arm serves
