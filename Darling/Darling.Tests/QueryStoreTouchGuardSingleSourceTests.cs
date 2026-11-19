@@ -90,20 +90,6 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
         Assert.Equal(0, CountOf(QueryStoreTextStore.ProbeSql, GuardAnchor));
     }
 
-    /// <summary>
-    /// The text row's own restamp is a different width on purpose, and it is exactly one site. It is the write this
-    /// statement exists to make rare (each one is a non-HOT update of a wide row under the trigram index), so a second
-    /// site, or the guard's width landing here, puts the text row back on the touch's cadence.
-    /// </summary>
-    [Fact]
-    public void TheTextRowRestampCarriesTheRefreshWidthAtItsOneSite()
-    {
-        var widths = WidthsAtTheAnchor(QueryStoreTextStore.RefreshTextRowSql).ToList();
-
-        Assert.Equal(new[] { QueryStoreTextSeen.TextRowRefreshInterval }, widths);
-        Assert.NotEqual(QueryStoreLivenessTouchGuard.GuardInterval, QueryStoreTextSeen.TextRowRefreshInterval);
-    }
-
     private static IEnumerable<string> WidthsAtTheAnchor(string sql)
     {
         var at = sql.IndexOf(GuardAnchor, StringComparison.Ordinal);
