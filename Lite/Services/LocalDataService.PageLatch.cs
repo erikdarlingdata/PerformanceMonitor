@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitorLite.Services;
@@ -60,7 +61,9 @@ public partial class LocalDataService
                     if (plan == null) return [];
                     if (!parsed.TryGetValue(plan, out var references))
                     {
-                        references = PageLatchResource.IndexesInPlan(plan, cancellationToken);
+                        /* #4348: the plan is judged before it is parsed, the same as every other Lite plan reader and as Darling's batch read. A plan
+                           the judge withholds is not readable, so the row falls back to the inferred ranking like a row with no plan. */
+                        references = PageLatchResource.IndexesInPlan(SensitiveStatements.Xml(plan), cancellationToken);
                         parsed[plan] = references;
                     }
 

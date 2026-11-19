@@ -16,11 +16,14 @@ public sealed record PageLatchIndexStat(
 /// <summary>One object the statement's plan names. <see cref="IndexName"/> is null for a heap.</summary>
 public sealed record PlanIndexReference(string DatabaseName, string? SchemaName, string TableName, string? IndexName);
 
-/// <summary>One index named in a page latch answer, with the wait totals of the kind the row waited on.</summary>
-public sealed record PageLatchIndex(string? SchemaName, string? TableName, string? IndexName, long WaitMs, long WaitCount);
+/// <summary>One index named in a page latch answer, with the wait totals of the kind the row waited on. A null total means the
+/// index snapshot has no row for the index (a Microsoft-shipped object, an excluded database, or an index created after the snapshot),
+/// which is not the same as no waits.</summary>
+public sealed record PageLatchIndex(string? SchemaName, string? TableName, string? IndexName, long? WaitMs, long? WaitCount);
 
 /// <summary>What a page latch wait is on (#9055): the page kind, and for a data or index page the indexes that
-/// may own it. <see cref="Match"/> is <c>exact</c>, <c>plan</c> or <c>inferred</c> when <see cref="Indexes"/> is set.</summary>
+/// may own it. <see cref="Match"/> is <c>exact</c> (the plan names one index in that database), <c>plan</c> (it names several) or
+/// <c>inferred</c> (no plan names one, so the snapshot's top waiters are listed) when <see cref="Indexes"/> is set.</summary>
 public sealed record PageLatchAnswer(
     int DatabaseId, int FileId, long PageId, string PageKind, bool IsIoLatch,
     string? Match, IReadOnlyList<PageLatchIndex>? Indexes, string? Note, DateTime? IndexSnapshotTime)
@@ -71,6 +74,9 @@ public static class PageLatchResource
     public const string Pfs = "PFS";
     public const string Gam = "GAM";
     public const string Sgam = "SGAM";
+    public const string Dcm = "DCM";
+    public const string Bcm = "BCM";
+    public const string BootPage = "boot page";
     public const string DataOrIndexPage = "data or index page";
     public const string FileHeader = "file header";
 
@@ -84,7 +90,9 @@ public static class PageLatchResource
     public const int InferredIndexCount = 3;
 
     /// <summary>PFS repeats every 8,088 pages from page 1; GAM and SGAM start at pages 2 and 3 and repeat every GAM interval
-    /// (63,904 extents, 511,232 pages). Page ids 1, 8088 and 16176 are PFS pages in the Page and Extent Architecture Guide.</summary>
+    /// (63,904 extents, 511,232 pages). Page ids 1, 8088 and 16176 are PFS pages in the Page and Extent Architecture Guide. DCM
+    /// (differential changed map) and BCM (bulk changed map, also called the ML map) are the other two per-interval bitmaps: pages 6
+    /// and 7 of the file, then 6 and 7 again in every later GAM interval (511,238 and 511,239, ...). The boot page is page 9 of file 1.</summary>
     private const long PfsInterval = 8088;
 
     private const long GamInterval = 511232;
@@ -117,13 +125,20 @@ public static class PageLatchResource
             && long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out pageId);
     }
 
-    /// <summary>The kind of a page, exact by arithmetic. Page 0 is the file header.</summary>
-    public static string PageKind(long pageId)
+    /// <summary>
+    /// Names the fixed allocation and header pages by their page number: the file header (page 0), PFS, GAM, SGAM, DCM and BCM, and the
+    /// boot page (page 9 of file 1). Every other page comes back as <see cref="DataOrIndexPage"/>, and that is a catch-all, not a proof:
+    /// an IAM page or a system table page can sit anywhere in a file, so page arithmetic cannot rule them out.
+    /// </summary>
+    public static string PageKind(int fileId, long pageId)
     {
         if (pageId == 0) return FileHeader;
         if (pageId == 1 || pageId % PfsInterval == 0) return Pfs;
         if (pageId == 2 || pageId % GamInterval == 0) return Gam;
         if (pageId == 3 || (pageId - 1) % GamInterval == 0) return Sgam;
+        if (pageId >= 6 && (pageId - 6) % GamInterval == 0) return Dcm;
+        if (pageId >= 7 && (pageId - 7) % GamInterval == 0) return Bcm;
+        if (fileId == 1 && pageId == 9) return BootPage;
         return DataOrIndexPage;
     }
 
@@ -194,7 +209,7 @@ public static class PageLatchResource
     {
         if (!IsPageLatchWait(waitType) || !TryParse(waitResource, out var databaseId, out var fileId, out var pageId)) return null;
         var io = IsIoLatchWait(waitType);
-        var kind = PageKind(pageId);
+        var kind = PageKind(fileId, pageId);
         PageLatchAnswer Answer(string? match, IReadOnlyList<PageLatchIndex>? indexes, string? note) =>
             new(databaseId, fileId, pageId, kind, io, match, indexes, note, match != null ? indexSnapshotTime : null);
 
@@ -221,8 +236,8 @@ public static class PageLatchResource
                     && string.Equals(s.SchemaName ?? "", r.SchemaName ?? "", StringComparison.OrdinalIgnoreCase)
                     && string.Equals(s.TableName ?? "", r.TableName, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(s.IndexName ?? "", r.IndexName ?? "", StringComparison.OrdinalIgnoreCase));
-                return new PageLatchIndex(r.SchemaName, r.TableName, r.IndexName, stat == null ? 0 : Ms(stat), stat == null ? 0 : Count(stat));
-            }).OrderByDescending(i => i.WaitMs).ThenBy(i => i.SchemaName, StringComparer.OrdinalIgnoreCase)
+                return new PageLatchIndex(r.SchemaName, r.TableName, r.IndexName, stat == null ? null : Ms(stat), stat == null ? null : Count(stat));
+            }).OrderByDescending(i => i.WaitMs ?? -1).ThenBy(i => i.SchemaName, StringComparer.OrdinalIgnoreCase)
               .ThenBy(i => i.TableName, StringComparer.OrdinalIgnoreCase).ThenBy(i => i.IndexName, StringComparer.OrdinalIgnoreCase).ToList();
             return Answer(listed.Count == 1 ? MatchExact : MatchPlan, listed, null);
         }

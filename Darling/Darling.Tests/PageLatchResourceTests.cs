@@ -20,19 +20,82 @@ namespace Darling.Tests;
 public sealed class PageLatchResourceTests
 {
     [Theory]
-    [InlineData(1L, "PFS")]
-    [InlineData(8088L, "PFS")]
-    [InlineData(16176L, "PFS")]
-    [InlineData(2L, "GAM")]
-    [InlineData(511232L, "GAM")]
-    [InlineData(3L, "SGAM")]
-    [InlineData(511233L, "SGAM")]
-    [InlineData(4L, "data or index page")]
-    [InlineData(8089L, "data or index page")]
-    [InlineData(511234L, "data or index page")]
-    [InlineData(0L, "file header")]
-    public void PageKind_IsExactByArithmetic(long pageId, string expected) =>
-        Assert.Equal(expected, PageLatchResource.PageKind(pageId));
+    [InlineData(1, 1L, "PFS")]
+    [InlineData(1, 8088L, "PFS")]
+    [InlineData(1, 16176L, "PFS")]
+    [InlineData(1, 2L, "GAM")]
+    [InlineData(1, 511232L, "GAM")]
+    [InlineData(1, 3L, "SGAM")]
+    [InlineData(1, 511233L, "SGAM")]
+    [InlineData(1, 6L, "DCM")]
+    [InlineData(1, 511238L, "DCM")]
+    [InlineData(3, 1022470L, "DCM")]
+    [InlineData(1, 7L, "BCM")]
+    [InlineData(1, 511239L, "BCM")]
+    [InlineData(3, 1022471L, "BCM")]
+    [InlineData(1, 9L, "boot page")]
+    [InlineData(2, 9L, "data or index page")]
+    [InlineData(1, 4L, "data or index page")]
+    [InlineData(1, 8L, "data or index page")]
+    [InlineData(1, 8089L, "data or index page")]
+    [InlineData(1, 511234L, "data or index page")]
+    [InlineData(1, 511240L, "data or index page")]
+    [InlineData(1, 0L, "file header")]
+    public void PageKind_NamesTheFixedAllocationAndHeaderPagesByPageNumber(int fileId, long pageId, string expected) =>
+        Assert.Equal(expected, PageLatchResource.PageKind(fileId, pageId));
+
+    [Theory]
+    [InlineData("PAGELATCH_EX", "5:1:6", "DCM")]
+    [InlineData("PAGELATCH_UP", "5:2:511239", "BCM")]
+    [InlineData("PAGELATCH_SH", "5:1:9", "boot page")]
+    public void Describe_DcmBcmAndBootPage_NameTheKind_AndNoIndexesEvenWhenThePlanNamesOne(string waitType, string resource, string kind)
+    {
+        var answer = PageLatchResource.Describe(waitType, resource, SeekPlan, Stats(), Snapshot)!;
+
+        Assert.Equal(kind, answer.PageKind);
+        Assert.Null(answer.Indexes);
+        Assert.Null(answer.Match);
+    }
+
+    [Fact]
+    public void Describe_PageNineOfAnotherFile_IsAnOrdinaryPage_SoThePlanStillNamesItsIndex()
+    {
+        var answer = PageLatchResource.Describe("PAGELATCH_SH", "5:2:9", SeekPlan, Stats(), Snapshot)!;
+
+        Assert.Equal("data or index page", answer.PageKind);
+        Assert.Equal("exact", answer.Match);
+    }
+
+    [Fact]
+    public void Describe_IndexTheSnapshotHasNoRowFor_HasNullWaits_NotZero()
+    {
+        var plan = Plan(
+            $"<RelOp NodeId=\"0\" PhysicalOp=\"Clustered Index Insert\" LogicalOp=\"Insert\" {RelOpAttributes}><OutputList/>"
+            + "<Update DMLRequestSort=\"0\">"
+            + "<Object Database=\"[Shop]\" Schema=\"[dbo]\" Table=\"[Orders]\" Index=\"[PK_Orders]\" IndexKind=\"Clustered\" Storage=\"RowStore\"/>"
+            + "<Object Database=\"[Shop]\" Schema=\"[dbo]\" Table=\"[Orders]\" Index=\"[IX_New]\" IndexKind=\"NonClustered\" Storage=\"RowStore\"/>"
+            + "</Update></RelOp>");
+        var answer = PageLatchResource.Describe("PAGELATCH_EX", "5:1:4096", plan, Stats(), Snapshot)!;
+
+        Assert.Equal("plan", answer.Match);
+        Assert.Equal(["PK_Orders", "IX_New"], answer.Indexes!.Select(i => i.IndexName).ToArray());
+        var missing = answer.Indexes![1];
+        Assert.Null(missing.WaitMs);
+        Assert.Null(missing.WaitCount);
+        var json = answer.ToJson()["indexes"]!.AsArray()[1]!.AsObject();
+        Assert.Null(json["latch_wait_ms"]);
+        Assert.Null(json["latch_wait_count"]);
+        Assert.Equal(100L, answer.Indexes![0].WaitMs);
+    }
+
+    [Fact]
+    public void Describe_IndexWithNoWaitsInTheSnapshot_StaysZero()
+    {
+        var answer = PageLatchResource.Describe("PAGELATCH_EX", "5:1:4096", Plan(Seek("Shop", "Quiet", "PK_Quiet", "Clustered")), Stats(), Snapshot)!;
+
+        var index = Assert.Single(answer.Indexes!);
+        Assert.Equal((0L, 0L), (index.WaitMs, index.WaitCount));
+    }
 
     [Theory]
     [InlineData("5:1:4096", 5, 1, 4096L)]
@@ -81,7 +144,7 @@ public sealed class PageLatchResourceTests
 
         Assert.Equal("exact", answer.Match);
         var index = Assert.Single(answer.Indexes!);
-        Assert.Equal(("dbo", "Orders", "IX_Orders_Date", 400L, 40L), (index.SchemaName, index.TableName, index.IndexName, index.WaitMs, index.WaitCount));
+        Assert.Equal(("dbo", "Orders", "IX_Orders_Date", (long?)400L, (long?)40L), (index.SchemaName, index.TableName, index.IndexName, index.WaitMs, index.WaitCount));
         Assert.Equal(Snapshot, answer.IndexSnapshotTime);
     }
 
@@ -92,7 +155,7 @@ public sealed class PageLatchResourceTests
 
         Assert.Equal("plan", answer.Match);
         Assert.Equal(["IX_Orders_Date", "PK_Orders"], answer.Indexes!.Select(i => i.IndexName).ToArray());
-        Assert.Equal([400L, 100L], answer.Indexes!.Select(i => i.WaitMs).ToArray());
+        Assert.Equal<long?>([400L, 100L], answer.Indexes!.Select(i => i.WaitMs).ToArray());
     }
 
     [Fact]
@@ -101,7 +164,7 @@ public sealed class PageLatchResourceTests
         var answer = PageLatchResource.Describe("PAGEIOLATCH_SH", "5:1:4096", SeekPlan, Stats(), Snapshot)!;
 
         var index = Assert.Single(answer.Indexes!);
-        Assert.Equal((70L, 7L), (index.WaitMs, index.WaitCount));
+        Assert.Equal(((long?)70L, (long?)7L), (index.WaitMs, index.WaitCount));
         Assert.Equal("page_io_latch", answer.ToJson()["latch_kind"]!.GetValue<string>());
     }
 
@@ -134,7 +197,7 @@ public sealed class PageLatchResourceTests
 
         Assert.Equal("inferred", answer.Match);
         Assert.Equal(["Customers.PK_Customers", "Orders.IX_Orders_Date", "Orders.PK_Orders"], answer.Indexes!.Select(i => $"{i.TableName}.{i.IndexName}").ToArray());
-        Assert.Equal([900L, 400L, 100L], answer.Indexes!.Select(i => i.WaitMs).ToArray());
+        Assert.Equal<long?>([900L, 400L, 100L], answer.Indexes!.Select(i => i.WaitMs).ToArray());
         Assert.Equal(PageLatchResource.InferredIndexCount, answer.Indexes!.Count);
     }
 
@@ -145,7 +208,7 @@ public sealed class PageLatchResourceTests
 
         Assert.Equal("exact", answer.Match);
         var heap = Assert.Single(answer.Indexes!);
-        Assert.Equal(("Audit", null, 30L), (heap.TableName, heap.IndexName, heap.WaitMs));
+        Assert.Equal(("Audit", (string?)null, (long?)30L), (heap.TableName, heap.IndexName, heap.WaitMs));
     }
 
     [Fact]
@@ -188,6 +251,7 @@ public sealed class PageLatchResourceTests
         new(5, "Shop", "dbo", "Customers", "PK_Customers", 900, 90, 0, 0),
         new(5, "Shop", "dbo", "Items", "PK_Items", 20, 2, 0, 0),
         new(5, "Shop", "dbo", "Audit", null, 30, 3, 0, 0),
+        new(5, "Shop", "dbo", "Quiet", "PK_Quiet", 0, 0, 0, 0),
         new(6, "Other", "dbo", "OtherTable", "PK_OtherTable", 5000, 500, 0, 0),
     ];
 

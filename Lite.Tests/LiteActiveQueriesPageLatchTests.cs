@@ -60,9 +60,9 @@ public sealed class LiteActiveQueriesPageLatchTests : IDisposable
         catch (UnauthorizedAccessException) { /* best-effort cleanup */ }
     }
 
-    private static string Plan(string relOps) =>
+    private static string Plan(string relOps, string statementText = "x") =>
         "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.5\" Build=\"16.0.1000.6\"><BatchSequence><Batch><Statements>"
-        + "<StmtSimple StatementText=\"x\" StatementId=\"1\" StatementType=\"SELECT\"><QueryPlan CachedPlanSize=\"16\">" + relOps + "</QueryPlan></StmtSimple>"
+        + "<StmtSimple StatementText=\"" + statementText + "\" StatementId=\"1\" StatementType=\"SELECT\"><QueryPlan CachedPlanSize=\"16\">" + relOps + "</QueryPlan></StmtSimple>"
         + "</Statements></Batch></BatchSequence></ShowPlanXML>";
 
     private static string Seek(string database, string table, string index, string kind) =>
@@ -100,9 +100,9 @@ public sealed class LiteActiveQueriesPageLatchTests : IDisposable
         "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, wait_type, wait_time_ms, wait_resource, query_plan, request_id) VALUES ($1, $2, $3, 'x', $4, 'Shop', 'SELECT 1', 'suspended', $5, $6, $7, $8, $9)",
         _nextId++, at, _serverId, session, waitType, waitType == null ? 0L : 250L, waitResource, plan, requestId);
 
-    private Task IndexAsync(DateTime at, string index, string table, long pageLatchMs, long pageLatchCount, long ioMs, long ioCount) => ExecAsync(
-        "INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, page_latch_wait_count, page_latch_wait_in_ms, page_io_latch_wait_count, page_io_latch_wait_in_ms) VALUES ($1, $2, $3, 'x', $4, 'Shop', 5, 'dbo', $5, $6, $7, $8, 'CLUSTERED', 10, 9, 1000, $9, $10, $11, $12)",
-        _nextId++, at, _serverId, at.AddDays(-30), 100 + table.Length, table, index.Length, index, pageLatchCount, pageLatchMs, ioCount, ioMs);
+    private Task IndexAsync(DateTime at, string index, string table, long pageLatchMs, long pageLatchCount, long ioMs, long ioCount, string database = "Shop") => ExecAsync(
+        "INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, page_latch_wait_count, page_latch_wait_in_ms, page_io_latch_wait_count, page_io_latch_wait_in_ms) VALUES ($1, $2, $3, 'x', $4, $13, 5, 'dbo', $5, $6, $7, $8, 'CLUSTERED', 10, 9, 1000, $9, $10, $11, $12)",
+        _nextId++, at, _serverId, at.AddDays(-30), 100 + table.Length, table, index.Length, index, pageLatchCount, pageLatchMs, ioCount, ioMs, database);
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
 
@@ -206,5 +206,27 @@ public sealed class LiteActiveQueriesPageLatchTests : IDisposable
         var latch = root.GetProperty("queries")[0].GetProperty("page_latch");
         Assert.Equal("data or index page", latch.GetProperty("page_kind").GetString());
         Assert.False(latch.TryGetProperty("indexes", out _));
+    }
+
+    [Fact]
+    public async Task PageLatchRow_PlanIsJudgedBeforeItIsParsed_SoAValueTheFilterWithholdsNamesNoIndex()
+    {
+        /* The only way the judge can change which index a plan names is a value it withholds: the plan's database attribute here is a
+           statement the filter names, and so is the snapshot's database name, so an UNJUDGED plan would match it and be exact. The judged
+           plan names a placeholder instead, matches nothing, and the row gets the snapshot's ranking like a row with no plan. */
+        var named = "CREATE LOGIN leaker WITH PASSWORD = 'Hunter2Secret9055';";
+        Assert.True(PerformanceMonitor.Common.SensitiveStatements.Names(named));
+        var captured = _now.AddMinutes(-5);
+        var snapshot = _now.AddHours(-6);
+        await IndexAsync(snapshot, "PK_Customers", "Customers", 900, 90, 0, 0, named);
+        await IndexAsync(snapshot, "IX_Orders_Date", "Orders", 400, 40, 0, 0, named);
+        var plan = Plan(Seek(System.Security.SecurityElement.Escape(named), "Orders", "IX_Orders_Date", "NonClustered"));
+        await RowAsync(captured, 81, "PAGELATCH_SH", "5:1:4096", plan, 0);
+
+        var root = Parse(await McpSessionTools.GetActiveQueries(_service, _serverManager, ServerName, 1, limit: 50));
+
+        var latch = root.GetProperty("queries")[0].GetProperty("page_latch");
+        Assert.Equal("inferred", latch.GetProperty("match").GetString());
+        Assert.Equal(["PK_Customers", "IX_Orders_Date"], latch.GetProperty("indexes").EnumerateArray().Select(i => i.GetProperty("index_name").GetString()).ToArray());
     }
 }
