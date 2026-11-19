@@ -2162,6 +2162,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                     filters.AddCallToolFilter(GcfCallToolFilter.Instance);
                 }
 
+                /* #9065: a store resolves a call's database_name to its stored spelling before the tool reads (McpDatabaseNameFilter).
+                   It sits inside GCF and outside the two masking filters, so it edits the answer as the tool's JSON. A front door
+                   leaves it to the store it forwards to, which holds the database lists. */
+                if (frontDoor is null)
+                {
+                    filters.AddCallToolFilter(McpDatabaseNameFilter.Using(DarlingMcpDatabaseNames.CandidatesAsync));
+                }
+
                 filters.AddCallToolFilter(McpDataDetailFilter.Instance);
                 filters.AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
             });

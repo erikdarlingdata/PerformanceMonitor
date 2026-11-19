@@ -175,6 +175,10 @@ public static class McpSchemaCompat
                         Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
                     });
 
+                /* #9065: a tool whose database_name the host's filter resolves says so in that parameter's served
+                   description. The one predicate (McpDatabaseNameResolver.Resolves) decides both, for every tool on both SKUs. */
+                McpDatabaseNameResolver.DescribeMatching(tool.ProtocolTool);
+
                 /* The CLR type and nullability of each parameter the caller supplies, for the call-tool guard
                    (McpUnknownArgumentGuard), which refuses a value the SDK's binder cannot read into that type. The
                    served schema cannot say it: "integer" covers int, long, short and byte alike, and nullability is

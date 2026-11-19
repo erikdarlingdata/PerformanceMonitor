@@ -264,6 +264,15 @@ internal static class StatementFilterCensus
         return (text, isError);
     }
 
+    /// <summary>The tools <c>tools/list</c> advertises on <paramref name="path"/>, each with the input schema it serves.</summary>
+    public static async Task<IReadOnlyList<(string Name, JsonElement InputSchema)>> ListToolSchemasAsync(
+        TestServer server, string path = "/", string? bearerToken = null)
+    {
+        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", bearerToken);
+        return doc.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Select(t => (t.GetProperty("name").GetString()!, t.GetProperty("inputSchema").Clone())).ToList();
+    }
+
     /// <summary>The names <c>tools/list</c> advertises on <paramref name="path"/>.</summary>
     public static async Task<IReadOnlyList<string>> ListToolNamesAsync(TestServer server, string path = "/", string? bearerToken = null)
     {
