@@ -582,6 +582,7 @@ public static class OptionalTableRunner
                 new("query_text", "VARCHAR"),
                 new("first_seen", "TIMESTAMP"),
                 new("last_seen", "TIMESTAMP"),
+                new("own_entries", "VARCHAR"),
             };
 
             var tableDir = Path.Combine(options.OutDir, options.Store, table.Name);
@@ -613,6 +614,7 @@ public static class OptionalTableRunner
                     appenderRow.AppendValue(row.QueryText);
                     appenderRow.AppendValue(row.FirstSeen);
                     appenderRow.AppendValue(row.LastSeen);
+                    appenderRow.AppendValue(row.OwnEntries);
                     appenderRow.EndRow();
                 }
             }

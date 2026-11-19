@@ -79,24 +79,26 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
             sql.AppendLine("CREATE INDEX ON collect.system_health_events (collection_time);");
             sql.AppendLine(Seed("collect.system_health_events", "collection_time"));
 
-            sql.AppendLine("""
+            sql.AppendLine($$"""
                 CREATE TABLE collect.query_stats (
                   collection_id bigint, server_id int, server_name text, database_name text, query_hash text, query_plan_hash text,
                   collection_time timestamp, sample_interval_seconds int,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint, delta_logical_reads bigint,
                   delta_logical_writes bigint, delta_physical_reads bigint, delta_rows bigint, delta_spills bigint,
-                  query_plan_digest bytea, query_text_digest bytea, host_object_name text);
+                  query_plan_digest bytea, query_text_digest bytea, host_object_name text,
+                  {{ExtraColumns(QueryStatsWindow.RawColumns, QueryStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "query_hash", "query_plan_hash", "host_object_name", "collection_time", "sample_interval_seconds", "query_plan_digest", "query_text_digest"])}});
                 CREATE INDEX ON collect.query_stats (collection_time);
                 CREATE TABLE collect.procedure_stats (
                   collection_id bigint, server_id int, server_name text, database_name text, schema_name text, object_name text, object_type text,
                   collection_time timestamp, sample_interval_seconds int,
                   delta_execution_count bigint, delta_worker_time bigint, delta_elapsed_time bigint, delta_logical_reads bigint,
                   delta_logical_writes bigint, delta_physical_reads bigint, delta_spills bigint,
-                  query_plan_digest bytea, plan_handle text, cached_time timestamp, query_plan_xml text, query_plan_xml_bytes int);
+                  query_plan_digest bytea, plan_handle text, cached_time timestamp, query_plan_xml text, query_plan_xml_bytes int,
+                  {{ExtraColumns(ProcedureStatsWindow.RawColumns, ProcedureStatsWindow.DuckDbTypeFor, ["server_name", "database_name", "schema_name", "object_name", "object_type", "collection_time", "sample_interval_seconds", "query_plan_digest", "plan_handle", "cached_time", "plan_xml_is_null", "has_plan_xml_bytes"])}});
                 CREATE INDEX ON collect.procedure_stats (collection_time);
                 INSERT INTO collect.query_stats (server_name, collection_time) SELECT 'bulk', timestamp '2026-09-01' + i * interval '7 minutes' FROM generate_series(1, 5000) i;
                 INSERT INTO collect.procedure_stats (server_name, collection_time) SELECT 'bulk', timestamp '2026-09-01' + i * interval '7 minutes' FROM generate_series(1, 5000) i;
-                CREATE TABLE collect.pg_statement_text (server_id int, queryid bigint, query_text text, first_seen timestamp, last_seen timestamp, PRIMARY KEY (server_id, queryid));
+                CREATE TABLE collect.pg_statement_text (server_id int, queryid bigint, query_text text, first_seen timestamp, last_seen timestamp, own_entries jsonb, PRIMARY KEY (server_id, queryid));
                 INSERT INTO collect.pg_statement_text SELECT 1 + i % 2, i, 'q' || i, now(), now() FROM generate_series(1, 20000) i;
                 CREATE TABLE config.config_collector_schedules (server_id int, collector_name text, frequency_minutes int, enabled boolean);
                 INSERT INTO config.config_collector_schedules VALUES (1, 'memory_grant_stats', 5, true), (NULL, 'memory_grant_stats', 10, true);
@@ -137,6 +139,14 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
                    $"('last_in', '2026-10-22 11:59:59.999999'{vals}), ('at_to', '2026-10-22 12:00:00'{vals});\n" +
                    $"INSERT INTO {table} (server_name, {timeColumn}{cols}) SELECT 'bulk', timestamp '2026-09-01' + i * interval '7 minutes'{vals} " +
                    "FROM generate_series(1, 5000) i;";
+        }
+
+        /// <summary>The window read's columns the base DDL does not name (the DMV attributes), typed like the DuckDB side.</summary>
+        private static string ExtraColumns(string[] rawColumns, Func<string, string> duckDbType, string[] inBase)
+        {
+            return string.Join(", ", rawColumns
+                .Where(c => !inBase.Contains(c) && !c.StartsWith("delta_", StringComparison.Ordinal))
+                .Select(c => $"{c} {duckDbType(c) switch { "INTEGER" => "int", "VARCHAR" => "text", "TIMESTAMP" => "timestamp", _ => "bigint" }}"));
         }
 
         private static string PgTypeFor(string column) => column switch

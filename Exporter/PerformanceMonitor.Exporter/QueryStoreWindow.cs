@@ -31,7 +31,7 @@ public static class QueryStoreWindow
         "avg_tempdb_space_used", "min_tempdb_space_used", "max_tempdb_space_used",
         "plan_type", "plan_forcing_type", "is_forced_plan", "force_failure_count", "last_force_failure_reason",
         "compatibility_level", "query_plan_hash", "replica_role", "runtime_stats_interval_id",
-        "interval_start_time_utc", "collection_time",
+        "interval_start_time_utc", "interval_end_time_utc", "collection_time",
     ];
 
     private static readonly Dictionary<string, string> RawColumnTypes = new()
@@ -57,6 +57,7 @@ public static class QueryStoreWindow
         ["replica_role"] = "VARCHAR",
         ["runtime_stats_interval_id"] = "BIGINT",
         ["interval_start_time_utc"] = "TIMESTAMP",
+        ["interval_end_time_utc"] = "TIMESTAMP",
         ["collection_time"] = "TIMESTAMP",
     };
 
