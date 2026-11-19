@@ -94,6 +94,24 @@ public sealed class DarlingMetricsHostTests : IDisposable
         new(new CollectorRuntimeState(), new ReadAdmission(), new MonitoredServerRegistryState(), logger, loadConfig,
             inContainer: inContainer, disposeApp: disposeApp, dataSourceOverride: _ => Task.FromResult<NpgsqlDataSource?>(null));
 
+    private static bool PortIsFree(int port)
+    {
+        var probe = new TcpListener(IPAddress.Loopback, port);
+        try
+        {
+            probe.Start();
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+        finally
+        {
+            probe.Stop();
+        }
+    }
+
     private static async Task AssertNothingStarted(string json, int port)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -103,7 +121,15 @@ public sealed class DarlingMetricsHostTests : IDisposable
         await host.StartAsync(ct);
 
         Assert.False(host.IsListening);
+        Assert.Null(host.Services);
         Assert.DoesNotContain(logger.Lines, l => l.Level > LogLevel.Debug);
+
+        /* The refused connect proves nothing when something else already holds the port, so check that first. */
+        if (!PortIsFree(port))
+        {
+            Assert.Skip($"Port {port} is in use on this machine, so a refused connect cannot be checked.");
+        }
+
         using var tcp = new TcpClient();
         await Assert.ThrowsAnyAsync<SocketException>(async () => await tcp.ConnectAsync(IPAddress.Loopback, port, ct));
     }
@@ -194,6 +220,36 @@ public sealed class DarlingMetricsHostTests : IDisposable
         Assert.True(metrics >= 0, "the metrics host is registered");
         Assert.True(worker >= 0, "the worker is registered");
         Assert.True(metrics > worker, "the metrics host must start after the worker");
+    }
+
+    /// <summary>#9013: the store login resolves again on every refresh while it is missing. Its refusal line names the metrics port,
+    /// not the web dashboard, and is logged once for the streak, not once a minute. The login here is an unmanaged store whose
+    /// postgres.webConnectionString names an unset variable, which the resolver refuses before it reads anything else.</summary>
+    [Fact]
+    public async Task MissingStoreLogin_LogsOneLineNamingTheMetricsPort()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var unset = $"DARLING_9013_UNSET_{Guid.NewGuid():N}";
+        Assert.Null(Environment.GetEnvironmentVariable(unset));
+        var config = new DarlingConfig
+        {
+            Postgres = new PostgresConfig { Managed = false, ConnectionString = "Host=127.0.0.1;Username=darling;Database=darling", WebConnectionString = "env:" + unset },
+            Metrics = new MetricsConfig { Enabled = true, Port = DarlingHealthHostTests.FreePort(), Listen = "127.0.0.1", Token = FileToken },
+        };
+        var logger = new CapturingLogger();
+        await using var host = new DarlingMetricsHostService(
+            new CollectorRuntimeState(), new ReadAdmission(), new MonitoredServerRegistryState(), logger, () => config, inContainer: false);
+        await host.StartAsync(ct);
+        Assert.True(host.IsListening);
+
+        Assert.Null(await host.StoreDataSourceAsync(ct));
+        Assert.Null(await host.StoreDataSourceAsync(ct));
+
+        var line = Assert.Single(logger.Lines, l => l.Level >= LogLevel.Warning);
+        Assert.Equal(LogLevel.Error, line.Level);
+        Assert.Contains("metrics port", line.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("web dashboard", line.Text, StringComparison.Ordinal);
+        await host.StopAsync(ct);
     }
 
     [Fact]

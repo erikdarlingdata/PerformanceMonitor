@@ -18,6 +18,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Metrics;
@@ -51,6 +52,8 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
     private NpgsqlDataSource? _dataSource;
     private volatile bool _dataSourceClosed;
     private bool _reportedUnusableLogin;
+    private bool _loginResolveFailing;
+    private volatile DarlingConfig? _config;
     private int _disposed;
 
     public DarlingMetricsHostService(
@@ -131,8 +134,9 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             }
 
             port = metrics.Port;
+            _config = config;
             var refresher = new DarlingMetricsRefresher(
-                _dataSourceOverride ?? (ct => GetDataSourceAsync(config, ct)), _admission, _registry, _collector, _time, _logger);
+                _dataSourceOverride ?? StoreDataSourceAsync, _admission, _registry, _collector, _time, _logger);
             var cache = new DarlingMetricsSnapshotCache(refresher.RefreshAsync, refresher.CanRefresh, _time, _logger, _stopping.Token);
 
             /* #9013: the health host's pins (#4281, #5288): Production, so an ambient ASPNETCORE_ENVIRONMENT=Development cannot put the
@@ -199,10 +203,16 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
     /// <summary>
     /// #9013: the store data source, built at most once, on the first refresh that needs it. A login that is not there yet (the
     /// worker has not provisioned it, or a managed credential is not stored) gives null, which fails that refresh; the next
-    /// refresh, a minute later, tries again.
+    /// refresh, a minute later, tries again. Null before a start that read an enabled block.
     /// </summary>
-    private async Task<NpgsqlDataSource?> GetDataSourceAsync(DarlingConfig config, CancellationToken ct)
+    internal async Task<NpgsqlDataSource?> StoreDataSourceAsync(CancellationToken ct)
     {
+        var config = _config;
+        if (config is null)
+        {
+            return null;
+        }
+
         var existing = Volatile.Read(ref _dataSource);
         if (existing is not null)
         {
@@ -231,8 +241,13 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             }
             else
             {
+                /* #9013: a null login is not cached, so the resolver runs again on every refresh, about once a minute, and its
+                   refusal lines (an unresolvable webConnectionString, a store that refuses the role) would repeat for as long as the
+                   cause lasts. After the first null it gets a silent logger; the first login that resolves lets it speak again. */
+                var resolverLogger = _loginResolveFailing ? NullLogger.Instance : (ILogger)_logger;
                 connectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                    DarlingStoreLogins.Surface.Web, config.Postgres, _logger, ct).ConfigureAwait(false);
+                    DarlingStoreLogins.Surface.Metrics, config.Postgres, resolverLogger, ct).ConfigureAwait(false);
+                _loginResolveFailing = connectionString is null;
             }
 
             if (connectionString is null)
@@ -256,7 +271,7 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             }
 
             var created = DarlingWorker.CreateHostStoreDataSource(connectionString, ApplicationName);
-            Volatile.Write(ref _dataSource, created);
+            Interlocked.Exchange(ref _dataSource, created);
 
             /* #9013: a stop that ran while the login resolved has already closed the source it saw; close this one too. */
             if (_dataSourceClosed)
@@ -311,7 +326,16 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
         if (app is not null)
         {
             IsListening = false;
-            await app.StopAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await app.StopAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                await CloseDataSourceAsync().ConfigureAwait(false);
+            }
+
+            return;
         }
 
         await CloseDataSourceAsync().ConfigureAwait(false);
@@ -319,11 +343,12 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
 
     public async ValueTask DisposeAsync()
     {
-        CancelRefresh();
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
+
+        _stopping.Cancel();
 
         var app = Interlocked.Exchange(ref _app, null);
         IsListening = false;
