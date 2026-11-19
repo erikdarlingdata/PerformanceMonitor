@@ -24,23 +24,34 @@ internal static class DarlingMetricsFleetMapper
         IEnumerable<(int ServerId, string DisplayName)> servers,
         out IReadOnlyList<IReadOnlyList<int>> collisions)
     {
-        var list = servers.ToList();
-        var labels = new Dictionary<int, string>(list.Count);
-        var sets = new List<IReadOnlyList<int>>();
-
-        foreach (var group in list.GroupBy(s => s.DisplayName, StringComparer.Ordinal))
+        var labels = new Dictionary<int, string>();
+        foreach (var (serverId, displayName) in servers)
         {
-            var ids = group.Select(s => s.ServerId).Distinct().OrderBy(id => id).ToList();
-            if (ids.Count == 1)
+            labels[serverId] = displayName;
+        }
+
+        /* A suffix can itself meet another server's real name ("prod #7" next to two "prod"), so repeat until no value is
+           shared. It ends because ids are unique: each round makes every member of a shared value longer by its own id. */
+        var sets = new List<IReadOnlyList<int>>();
+        while (true)
+        {
+            var shared = labels
+                .GroupBy(kv => kv.Value, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Select(kv => kv.Key).OrderBy(id => id).ToList())
+                .ToList();
+            if (shared.Count == 0)
             {
-                labels[ids[0]] = group.Key;
-                continue;
+                break;
             }
 
-            sets.Add(ids);
-            foreach (var id in ids)
+            foreach (var ids in shared)
             {
-                labels[id] = group.Key + " #" + id.ToString(CultureInfo.InvariantCulture);
+                sets.Add(ids);
+                foreach (var id in ids)
+                {
+                    labels[id] = labels[id] + " #" + id.ToString(CultureInfo.InvariantCulture);
+                }
             }
         }
 

@@ -127,6 +127,28 @@ public sealed class DarlingMetricsFleetMapperTests
     }
 
     [Fact]
+    public void SuffixedLabel_CollidingWithARealName_IsStillUnique()
+    {
+        var labels = DarlingMetricsFleetMapper.AssignServerLabels(
+            new[] { (7, "prod"), (9, "prod"), (3, "prod #7") }, out var collisions);
+
+        Assert.Equal(3, labels.Values.Distinct(StringComparer.Ordinal).Count());
+        Assert.NotEmpty(collisions);
+        Assert.Contains(collisions, set => set.Contains(7) && set.Contains(9));
+    }
+
+    [Fact]
+    public void CaseDistinctNames_StaySeparate()
+    {
+        var labels = DarlingMetricsFleetMapper.AssignServerLabels(
+            new[] { (1, "Prod"), (2, "prod") }, out var collisions);
+
+        Assert.Equal("Prod", labels[1]);
+        Assert.Equal("prod", labels[2]);
+        Assert.Empty(collisions);
+    }
+
+    [Fact]
     public void EverySample_HasOnlyTheServerLabel()
     {
         var card = new FleetServerCard
