@@ -240,7 +240,14 @@ public sealed class DailySummaryWarmerLiveTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
             var today = DateTime.UtcNow.Date;
-            await PlantWaitAsync(connection, ServerIdA, ServerA, DateTime.UtcNow.AddHours(-1), 1000, ct);
+            /* #9047: the wait goes inside today, so the kept read has a row for today whatever the hour. One hour back is yesterday before 01:00 UTC. */
+            var plantedAt = DateTime.UtcNow.AddMinutes(-1);
+            if (plantedAt < today)
+            {
+                plantedAt = today;
+            }
+
+            await PlantWaitAsync(connection, ServerIdA, ServerA, plantedAt, 1000, ct);
             var from = today.AddDays(-(DailySummaryWarmer.DaysBack - 1));
 
             async Task<DarlingHealthReader.DailySummaryRangeReadResult> Read(bool skipOpenDayTail) => await DarlingHealthReader.GetDailySummaryRangeAsync(
