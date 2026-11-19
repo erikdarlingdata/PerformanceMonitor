@@ -147,8 +147,12 @@ wait_started() { # wait_started <pod>: the container runs and its startup probe 
 
 wait_log() { # wait_log <pod> <fixed text> [seconds]
   local p="$1" text="$2" limit="${3:-240}" i=0
+  # Read the log into a file, then grep the file. grep -q exits at the first match; piped, the cut-off
+  # kubectl writer gets SIGPIPE once the log is bigger than the pipe buffer, and under pipefail a found
+  # line then counted as a miss (#9060). A failed kubectl logs is a miss, not an exit.
   while [ "${i}" -lt "${limit}" ]; do
-    if k -n "${NS}" logs "${p}" -c darling 2>/dev/null | grep -qF -- "${text}"; then
+    k -n "${NS}" logs "${p}" -c darling >"${WORK}/wait-log.out" 2>/dev/null || true
+    if grep -qF -- "${text}" "${WORK}/wait-log.out"; then
       return 0
     fi
     sleep 5
