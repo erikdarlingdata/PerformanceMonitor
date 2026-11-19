@@ -414,16 +414,19 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// index, so while a long search holds the index it queues, and every insert into the table queues behind it.</summary>
     internal const string LockTimeout = "2s";
 
-    /// <summary>One row, when the index exists: whether it is valid, and whether it already carries <see cref="PendingListLimitKb"/>.</summary>
-    internal static readonly string PendingListStateSql =
+    /// <summary>One row, when <paramref name="indexName"/> exists: whether it is valid, and whether it already carries
+    /// <see cref="PendingListLimitKb"/>. The name is one of this assembly's own index names (this index, and the two the Query Store text
+    /// index manages), never outside input.</summary>
+    internal static string PendingListStateSql(string indexName) =>
         "SELECT i.indisvalid, coalesce('gin_pending_list_limit=" + PendingListLimitKb + "' = ANY (c.reloptions), false) "
-        + "FROM pg_index AS i JOIN pg_class AS c ON c.oid = i.indexrelid WHERE i.indexrelid = to_regclass('" + IndexName + "')";
+        + "FROM pg_index AS i JOIN pg_class AS c ON c.oid = i.indexrelid WHERE i.indexrelid = to_regclass('" + indexName + "')";
 
-    /// <summary>Sets the limit on an index built before the option existed. Run in its own transaction under <see cref="LockTimeout"/>.</summary>
-    internal static readonly string SetPendingListLimitSql = "ALTER INDEX IF EXISTS " + IndexName + " SET (gin_pending_list_limit = " + PendingListLimitKb + ")";
+    /// <summary>Sets the limit on an index that does not carry it. Run in its own transaction under <see cref="LockTimeout"/>.</summary>
+    internal static string SetPendingListLimitSql(string indexName) =>
+        "ALTER INDEX IF EXISTS " + indexName + " SET (gin_pending_list_limit = " + PendingListLimitKb + ")";
 
     /// <summary>Empties the pending list, so no insert has to.</summary>
-    internal const string CleanPendingListSql = "SELECT gin_clean_pending_list(to_regclass('" + IndexName + "'))";
+    internal static string CleanPendingListSql(string indexName) => "SELECT gin_clean_pending_list(to_regclass('" + indexName + "'))";
 
     internal static string QuoteIdentifier(string name) => "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
@@ -738,37 +741,44 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
                 (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
                 static (wait, ct) => Task.Delay(wait, ct),
                 cancellationToken),
-            RunCleanLoopAsync(postgres, enabled, logger, firstDelay, CleanInterval, cancellationToken));
+            RunCleanLoopAsync(
+                ct => CleanPendingListAsync(postgres, enabled, logger, ct), logger, "Trigram index", firstDelay, CleanInterval, cancellationToken));
 
     /// <summary>
-    /// #9044: cleans the index's pending list every <paramref name="interval"/> (<see cref="CleanInterval"/>) until shutdown, after
-    /// <paramref name="firstDelay"/>, apart from the build pass, whose retries and backoff stay on <see cref="PassInterval"/>. Never throws.
+    /// #9044: the clean loop under both indexes' <c>RunAsync</c>. Runs <paramref name="clean"/> every <paramref name="interval"/> (each index's
+    /// own <c>CleanInterval</c>) until shutdown, after <paramref name="firstDelay"/>, apart from the build pass, whose retries and backoff stay
+    /// on <see cref="PassInterval"/>. Never throws: <paramref name="clean"/> throws only on cancellation.
     /// </summary>
     internal static async Task RunCleanLoopAsync(
-        NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
+        Func<CancellationToken, Task> clean, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
     {
         try
         {
             await Task.Delay(firstDelay, cancellationToken).ConfigureAwait(false);
             while (true)
             {
-                await CleanPendingListAsync(postgres, enabled, logger, cancellationToken).ConfigureAwait(false);
+                await clean(cancellationToken).ConfigureAwait(false);
                 await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            logger.LogDebug("Trigram index clean loop was cancelled at shutdown.");
+            logger.LogDebug("{Index} clean loop was cancelled at shutdown.", indexLabel);
         }
     }
 
+    /// <summary>#9044: one clean of this index (see the overload that names the index).</summary>
+    internal static Task CleanPendingListAsync(NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, CancellationToken cancellationToken) =>
+        CleanPendingListAsync(postgres, enabled, IndexName, logger, cancellationToken);
+
     /// <summary>
-    /// #9044: one clean, when the option is on and the index exists and is valid. An index that does not carry <see cref="PendingListLimitKb"/>
-    /// first gets it, once, in its own transaction under <see cref="LockTimeout"/>: a lock that is not free in time is a quiet skip that the next
-    /// clean retries (the clean itself takes no lock an insert or a search waits on). Best effort: the index works the same without either, so any
-    /// other failure is a Warning and the next clean tries again. Throws only on cancellation.
+    /// #9044: one clean of <paramref name="indexName"/>, when the option is on and the index exists and is valid. An index that does not carry
+    /// <see cref="PendingListLimitKb"/> first gets it, once, in its own transaction under <see cref="LockTimeout"/>: a lock that is not free in
+    /// time is a quiet skip that the next clean retries (the clean itself takes no lock an insert or a search waits on). Best effort: the index
+    /// works the same without either, so any other failure is a Warning and the next clean tries again. Throws only on cancellation.
     /// </summary>
-    internal static async Task CleanPendingListAsync(NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task CleanPendingListAsync(
+        NpgsqlDataSource postgres, Func<bool> enabled, string indexName, ILogger logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -779,7 +789,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             bool limitSet;
-            await using (var read = new NpgsqlCommand(PendingListStateSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            await using (var read = new NpgsqlCommand(PendingListStateSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
             await using (var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
                 if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || !reader.GetBoolean(0))
@@ -792,10 +802,10 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
 
             if (!limitSet)
             {
-                await SetPendingListLimitAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+                await SetPendingListLimitAsync(connection, indexName, logger, cancellationToken).ConfigureAwait(false);
             }
 
-            await using var clean = new NpgsqlCommand(CleanPendingListSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            await using var clean = new NpgsqlCommand(CleanPendingListSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await clean.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -804,11 +814,11 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         }
         catch (Exception ex)
         {
-            logger.LogWarning("Could not clean the pending list of trigram index {Index}: {Message}", IndexName, ErrorText(ex));
+            logger.LogWarning("Could not clean the pending list of trigram index {Index}: {Message}", indexName, ErrorText(ex));
         }
     }
 
-    private static async Task SetPendingListLimitAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    private static async Task SetPendingListLimitAsync(NpgsqlConnection connection, string indexName, ILogger logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -818,7 +828,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
                 await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            await using (var set = new NpgsqlCommand(SetPendingListLimitSql, connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            await using (var set = new NpgsqlCommand(SetPendingListLimitSql(indexName), connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
             {
                 await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -827,7 +837,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
         {
-            logger.LogDebug("Setting the pending list limit on trigram index {Index} waited {Timeout} for its lock and is skipped; the next clean tries again.", IndexName, LockTimeout);
+            logger.LogDebug("Setting the pending list limit on trigram index {Index} waited {Timeout} for its lock and is skipped; the next clean tries again.", indexName, LockTimeout);
         }
     }
 
