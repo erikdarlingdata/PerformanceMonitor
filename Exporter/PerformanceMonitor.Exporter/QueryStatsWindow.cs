@@ -18,7 +18,7 @@ public static class QueryStatsWindow
     /// <summary>Column names of the raw `collect.query_stats` select, in the same order <see cref="SqlBuilder.QueryStatsWindowSql"/> lists them.</summary>
     public static readonly string[] RawColumns =
     [
-        "server_name", "database_name", "query_hash", "query_plan_hash", "collection_time",
+        "server_name", "database_name", "query_hash", "query_plan_hash", "host_object_name", "collection_time",
         "sample_interval_seconds",
         "delta_execution_count", "delta_worker_time", "delta_elapsed_time",
         "delta_logical_reads", "delta_logical_writes", "delta_physical_reads",
@@ -32,6 +32,7 @@ public static class QueryStatsWindow
         ["database_name"] = "VARCHAR",
         ["query_hash"] = "VARCHAR",
         ["query_plan_hash"] = "VARCHAR",
+        ["host_object_name"] = "VARCHAR",
         ["collection_time"] = "TIMESTAMP",
         ["sample_interval_seconds"] = "INTEGER",
         ["delta_execution_count"] = "BIGINT",

@@ -64,10 +64,10 @@ public sealed class DuckDbSqlBehaviourTests
         CreateRaw(connection, "procedure_stats_raw", ProcedureStatsWindow.RawColumns, ProcedureStatsWindow.DuckDbTypeFor);
 
     private static string QueryStatsRow(string server, string db, string hash, string planHash, string time, string? interval,
-        long exec = 0, long worker = 0, long spills = 0, string planDigest = "NULL", string textDigest = "NULL") =>
+        long exec = 0, long worker = 0, long spills = 0, string planDigest = "NULL", string textDigest = "NULL", string? host = null) =>
         $"INSERT INTO query_stats_raw (server_name, database_name, query_hash, query_plan_hash, collection_time, sample_interval_seconds, " +
-        $"delta_execution_count, delta_worker_time, delta_spills, query_plan_digest, query_text_digest) VALUES " +
-        $"('{server}', '{db}', '{hash}', '{planHash}', TIMESTAMP '{time}', {interval ?? "NULL"}, {exec}, {worker}, {spills}, {planDigest}, {textDigest})";
+        $"delta_execution_count, delta_worker_time, delta_spills, query_plan_digest, query_text_digest, host_object_name) VALUES " +
+        $"('{server}', '{db}', '{hash}', '{planHash}', TIMESTAMP '{time}', {interval ?? "NULL"}, {exec}, {worker}, {spills}, {planDigest}, {textDigest}, {(host is null ? "NULL" : $"'{host}'")})";
 
     private static string ProcRow(string server, string time, string? interval, long exec, long spills) =>
         $"INSERT INTO procedure_stats_raw (server_name, database_name, schema_name, object_name, collection_time, sample_interval_seconds, " +
@@ -118,6 +118,51 @@ public sealed class DuckDbSqlBehaviourTests
         Assert.Contains(rows, r => (string)r["query_plan_hash"]! == "p2" && (long)r["execution_count_sum"]! == 8L);
         var hours = rows.Take(3).Select(r => (DateTime)r["hour"]!).ToList();
         Assert.Equal(hours.OrderBy(h => h), hours);   // within a server, hours ascend
+    }
+
+    [Fact]
+    public void QueryStatsHourly_has_a_host_object_name_column_after_query_plan_hash()
+    {
+        using var connection = Open();
+        CreateQueryStatsRaw(connection);
+        Exec(connection, QueryStatsRow("srv-a", "db1", "h1", "p1", "2026-10-22 10:00:00", "60", exec: 1, host: "dbo.usp_orders"));
+
+        using var command = connection.CreateCommand();
+        command.CommandText = SqlBuilder.QueryStatsHourlyDuckDbSql;
+        using var reader = command.ExecuteReader();
+        var names = Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToList();
+        Assert.Equal(names.IndexOf("query_plan_hash") + 1, names.IndexOf("host_object_name"));
+        Assert.True(reader.Read());
+        Assert.Equal("dbo.usp_orders", reader.GetString(names.IndexOf("host_object_name")));
+    }
+
+    [Fact]
+    public void QueryStatsHourly_gives_one_row_per_host_object_for_the_same_query_and_plan_hash()
+    {
+        using var connection = Open();
+        CreateQueryStatsRaw(connection);
+        Exec(connection, QueryStatsRow("srv-a", "db1", "h1", "p1", "2026-10-22 10:00:00", "60", exec: 3, host: "dbo.usp_a"));
+        Exec(connection, QueryStatsRow("srv-a", "db1", "h1", "p1", "2026-10-22 10:05:00", "60", exec: 4, host: "dbo.usp_b"));
+
+        var rows = Rows(connection, SqlBuilder.QueryStatsHourlyDuckDbSql);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(3L, rows.Single(r => (string?)r["host_object_name"] == "dbo.usp_a")["execution_count_sum"]);
+        Assert.Equal(4L, rows.Single(r => (string?)r["host_object_name"] == "dbo.usp_b")["execution_count_sum"]);
+    }
+
+    [Fact]
+    public void QueryStatsHourly_groups_null_host_object_rows_into_one_row()
+    {
+        using var connection = Open();
+        CreateQueryStatsRaw(connection);
+        Exec(connection, QueryStatsRow("srv-a", "db1", "h1", "p1", "2026-10-22 10:00:00", "60", exec: 3));
+        Exec(connection, QueryStatsRow("srv-a", "db1", "h1", "p1", "2026-10-22 10:05:00", "60", exec: 4));
+
+        var row = Assert.Single(Rows(connection, SqlBuilder.QueryStatsHourlyDuckDbSql));
+
+        Assert.Null(row["host_object_name"]);
+        Assert.Equal(7L, row["execution_count_sum"]);
     }
 
     [Fact]

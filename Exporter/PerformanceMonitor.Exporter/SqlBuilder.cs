@@ -61,7 +61,7 @@ public static class SqlBuilder
     /// </summary>
     public const string QueryStatsHourlySql = """
         /* darling-export:query_stats_hourly */
-        SELECT server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time) AS hour,
+        SELECT server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time) AS hour,
                sum(delta_execution_count)::bigint AS execution_count_sum,
                sum(delta_worker_time)::bigint AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
                sum(delta_elapsed_time)::bigint AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
@@ -70,7 +70,7 @@ public static class SqlBuilder
                sum(sample_interval_seconds)::bigint AS sample_interval_seconds_sum, count(*) AS sample_count
         FROM collect.query_stats
         WHERE collection_time >= @from AND collection_time < @to AND sample_interval_seconds IS DISTINCT FROM 0
-        GROUP BY server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time)
+        GROUP BY server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time)
         """;
 
     /// <summary>
@@ -84,7 +84,7 @@ public static class SqlBuilder
     /// </summary>
     public const string QueryStatsWindowSql = """
         /* darling-export:query_stats.window */
-        SELECT server_name, database_name, query_hash, query_plan_hash, collection_time,
+        SELECT server_name, database_name, query_hash, query_plan_hash, host_object_name, collection_time,
                sample_interval_seconds,
                delta_execution_count, delta_worker_time, delta_elapsed_time,
                delta_logical_reads, delta_logical_writes, delta_physical_reads,
@@ -103,7 +103,7 @@ public static class SqlBuilder
     /// casts raise on overflow rather than silently wrapping.
     /// </summary>
     public const string QueryStatsHourlyDuckDbSql = """
-        SELECT server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time) AS hour,
+        SELECT server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time) AS hour,
                CAST(sum(delta_execution_count) AS BIGINT) AS execution_count_sum,
                CAST(sum(delta_worker_time) AS BIGINT) AS worker_time_sum, min(delta_worker_time) AS worker_time_min, max(delta_worker_time) AS worker_time_max,
                CAST(sum(delta_elapsed_time) AS BIGINT) AS elapsed_time_sum, min(delta_elapsed_time) AS elapsed_time_min, max(delta_elapsed_time) AS elapsed_time_max,
@@ -112,7 +112,7 @@ public static class SqlBuilder
                CAST(sum(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds_sum, count(*) AS sample_count
         FROM query_stats_raw
         WHERE sample_interval_seconds IS DISTINCT FROM 0
-        GROUP BY server_name, database_name, query_hash, query_plan_hash, date_trunc('hour', collection_time)
+        GROUP BY server_name, database_name, query_hash, query_plan_hash, host_object_name, date_trunc('hour', collection_time)
         ORDER BY server_name, hour
         """;
 
