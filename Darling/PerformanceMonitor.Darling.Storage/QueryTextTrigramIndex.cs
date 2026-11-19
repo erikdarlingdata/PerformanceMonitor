@@ -813,7 +813,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-            await using (var timeout = new NpgsqlCommand("SET LOCAL lock_timeout = '" + LockTimeout + "'", connection, transaction))
+            await using (var timeout = new NpgsqlCommand("SET LOCAL lock_timeout = '" + LockTimeout + "'", connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
             {
                 await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
