@@ -144,9 +144,9 @@ public sealed class QueryTextTrigramIndexLiveTests
 
     /* Every collector batch adds its texts' trigrams to the index's pending list, and the insert that takes the list past the limit
        flushes it inside its own call. A new build carries the 64 MB limit, and an index an earlier build made without it gets the limit
-       and an empty list from the next pass, so the insert rarely reaches the limit. */
+       and an empty list from the next clean, so the insert rarely reaches the limit. */
     [Fact]
-    public async Task APassSetsThePendingListLimitOnAnOlderIndex_AndEmptiesTheList_AndANewBuildCarriesTheLimit()
+    public async Task ACleanSetsThePendingListLimitOnAnOlderIndex_AndEmptiesTheList_AndANewBuildCarriesTheLimit()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -171,15 +171,126 @@ public sealed class QueryTextTrigramIndexLiveTests
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
         var tracker = new QueryTextTrigramIndexTracker();
         tracker.Configure(true);
-        await PassAsync(data, true, tracker, Now, ct);
+        await QueryTextTrigramIndex.CleanPendingListAsync(data, () => true, NullLogger.Instance, ct);
 
         Assert.Equal(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
         Assert.Equal(0L, await PendingTuplesAsync(admin, ct));
-        Assert.Equal(0, tracker.BuildsStarted);
 
         await ExecAsync(admin, $"DROP INDEX {QueryTextTrigramIndex.IndexName}", ct);
         await PassAsync(data, true, tracker, Now.AddHours(1), ct);
         Assert.Equal(1, tracker.BuildsStarted);
+        Assert.Equal(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
+    }
+
+    private static async Task<NpgsqlDataSource> OlderIndexWithPendingRowsAsync(ScratchPostgres scratch, NpgsqlConnection admin, CancellationToken ct)
+    {
+        await SeedAsync(admin, ct);
+        await ExecAsync(admin, "CREATE EXTENSION IF NOT EXISTS pg_trgm", ct);
+        await ExecAsync(admin, "CREATE EXTENSION IF NOT EXISTS pgstattuple", ct);
+        var schema = (string)(await ScalarAsync(
+            admin, "SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'", ct))!;
+        await ExecAsync(admin, $"CREATE INDEX ix_query_text_dim_trgm ON collect.query_text_dim USING gin (query_text \"{schema}\".gin_trgm_ops)", ct);
+        await ExecAsync(admin,
+            @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+              SELECT sha256(('new' || i)::bytea), 'SELECT * FROM dbo.Lines_' || i || ' WHERE LineId = @p', timezone('UTC', now())
+              FROM generate_series(1, 200) AS i", ct);
+        Assert.True(await PendingTuplesAsync(admin, ct) > 0);
+        return NpgsqlDataSource.Create(scratch.ConnectionString);
+    }
+
+    /* The limit change takes ACCESS EXCLUSIVE on the index, so with a long search holding the index it queues, and every insert queues
+       behind it. The change runs under a 2 second lock timeout, a timeout is a quiet skip, and the clean still empties the list. With the
+       lock timeout removed the clean waits for the search and the insert waits behind it, so neither finishes inside the window. */
+    [Fact]
+    public async Task ACleanWithASearchHoldingTheIndex_SkipsTheLimitChangeAtTheLockTimeout_AndNeverBlocksAnInsertPastIt()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+        await admin.OpenAsync(ct);
+        await using var data = await OlderIndexWithPendingRowsAsync(scratch, admin, ct);
+
+        await using var reader = new NpgsqlConnection(scratch.ConnectionString);
+        await reader.OpenAsync(ct);
+        await using var inserter = new NpgsqlConnection(scratch.ConnectionString);
+        await inserter.OpenAsync(ct);
+        await ExecAsync(reader, "BEGIN", ct);
+        await ExecAsync(reader, "SET enable_seqscan = off", ct);
+        await ExecAsync(reader, "SELECT count(*) FROM collect.query_text_dim WHERE query_text LIKE '%Lines_5%'", ct);
+
+        var clean = QueryTextTrigramIndex.CleanPendingListAsync(data, () => true, NullLogger.Instance, ct);
+        var queued = false;
+        for (var i = 0; i < 50 && !queued; i++)
+        {
+            queued = (bool)(await ScalarAsync(admin,
+                $"SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = '{QueryTextTrigramIndex.IndexName}'::regclass AND mode = 'AccessExclusiveLock' AND NOT granted)", ct))!;
+            if (!queued)
+            {
+                await Task.Delay(100, ct);
+            }
+        }
+
+        var insert = ExecAsync(inserter,
+            "INSERT INTO collect.query_text_dim (digest, query_text, last_seen) VALUES (sha256('blocked'::bytea), 'SELECT 1', timezone('UTC', now()))", ct);
+        var window = Task.Delay(TimeSpan.FromSeconds(8), ct);
+        var insertDone = await Task.WhenAny(insert, window) == insert;
+        var cleanDone = await Task.WhenAny(clean, window) == clean;
+        if (!insertDone || !cleanDone)
+        {
+            /* Release the search so a regression fails here instead of hanging on the queued change. */
+            await ExecAsync(reader, "ROLLBACK", ct);
+            await Task.WhenAll(insert, clean);
+        }
+
+        Assert.True(queued, "the limit change should be waiting for the index");
+        Assert.True(insertDone, "an insert should not wait past the lock timeout");
+        Assert.True(cleanDone, "the clean should not wait past the lock timeout");
+        await insert;
+        await clean;
+
+        Assert.NotEqual(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
+        Assert.Equal(0L, await PendingTuplesAsync(admin, ct));
+
+        await ExecAsync(reader, "COMMIT", ct);
+        await QueryTextTrigramIndex.CleanPendingListAsync(data, () => true, NullLogger.Instance, ct);
+        Assert.Equal(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
+    }
+
+    /* The service's background task makes its first clean at once when its first delay is zero, and with the option off cleans nothing. */
+    [Fact]
+    public async Task TheBackgroundTask_CleansAnOlderIndexWhenTheOptionIsOn_AndLeavesItWhenOff()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+        await admin.OpenAsync(ct);
+        await using var data = await OlderIndexWithPendingRowsAsync(scratch, admin, ct);
+
+        await QueryTextTrigramIndex.CleanPendingListAsync(data, () => false, NullLogger.Instance, ct);
+        Assert.True(await PendingTuplesAsync(admin, ct) > 0);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var run = QueryTextTrigramIndex.RunAsync(
+            data, () => true, new QueryTextTrigramIndexTracker(), NullLogger.Instance, TimeSpan.Zero, QueryTextTrigramIndex.PassInterval, cts.Token);
+        var emptied = false;
+        for (var i = 0; i < 100 && !emptied; i++)
+        {
+            emptied = await PendingTuplesAsync(admin, ct) == 0L;
+            if (!emptied)
+            {
+                await Task.Delay(200, ct);
+            }
+        }
+
+        await cts.CancelAsync();
+        await run;
+        Assert.True(emptied, "the background task should have emptied the list");
         Assert.Equal(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
     }
 
