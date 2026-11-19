@@ -78,7 +78,9 @@ public sealed class McpDatabaseNameResolverTests
         Assert.Equal(McpDatabaseNameMatch.NotSeen, resolution.Match);
         Assert.Equal("Nowhere", resolution.Name);
         Assert.Equal(McpDatabaseNameMatch.NotSeen, McpDatabaseNameResolver.Resolve("Nowhere", null).Match);
-        Assert.Contains("database_name 'Nowhere' is not on this server's newest database list", McpDatabaseNameResolver.NotSeenMessage("Nowhere"), StringComparison.Ordinal);
+        var note = McpDatabaseNameResolver.NotSeenMessage("Nowhere");
+        Assert.Contains("database_name 'Nowhere' matched no name on this server's newest database list", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("any letter case", note, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -154,6 +156,16 @@ public sealed class McpDatabaseNameResolverTests
             return plain ? "plain words" : JsonSerializer.Serialize(new { status = "empty", received = database_name });
         }
 
+        [McpServerTool(Name = "dbname_probe_write", Destructive = true), Description("Test-only: a tool that changes state and takes a database_name.")]
+        public static string ProbeWrite(
+            IServiceProvider services,
+            [Description("The server.")] string? server_name = null,
+            [Description("One database.")] string? database_name = null)
+        {
+            services.GetRequiredService<ProbeLog>().Calls.Enqueue(("dbname_probe_write", server_name, database_name));
+            return JsonSerializer.Serialize(new { status = "empty", received = database_name });
+        }
+
         [McpServerTool(Name = "dbname_probe_no_server"), Description("Test-only: takes a database_name and no server_name.")]
         public static string ProbeWithoutServer(IServiceProvider services, [Description("One database.")] string? database_name = null)
         {
@@ -162,28 +174,70 @@ public sealed class McpDatabaseNameResolverTests
         }
     }
 
-    /// <summary>A server whose newest database list is <paramref name="list"/>, read the way the stores read it: only the names that
-    /// equal the given one ignoring case come back. A null list is a server with no list.</summary>
+    /// <summary>A server whose newest database list is <paramref name="list"/>, read the way the stores read it: the names that equal
+    /// the given one ignoring case come back, plus the given spelling itself when the newest list holds it only in another case and
+    /// an earlier list (<see cref="Earlier"/>) holds it exactly. A null list is a server with no list.</summary>
     private sealed class FakeStore(string[]? list)
     {
-        public List<(string? Server, string Database)> Lookups { get; } = new();
+        public ConcurrentQueue<(string? Server, string Database, bool ChangesState)> Lookups { get; } = new();
 
-        public bool Throw { get; set; }
+        /// <summary>The spellings only earlier lists hold: a database since renamed or recreated in another letter case.</summary>
+        public string[] Earlier { get; init; } = Array.Empty<string>();
 
-        public Task<IReadOnlyList<string>?> CandidatesAsync(IServiceProvider? services, string? serverName, string databaseName, CancellationToken cancellationToken)
+        public bool Throw { get; init; }
+
+        /// <summary>The lookup never answers: it waits on its token, so only the filter's deadline ends it.</summary>
+        public bool Hang { get; init; }
+
+        public async Task<IReadOnlyList<string>?> CandidatesAsync(
+            IServiceProvider? services, string? serverName, string databaseName, bool changesState, CancellationToken cancellationToken)
         {
-            Lookups.Add((serverName, databaseName));
+            Lookups.Enqueue((serverName, databaseName, changesState));
             if (Throw)
             {
                 throw new InvalidOperationException("the store is away");
             }
 
-            return Task.FromResult<IReadOnlyList<string>?>(
-                list?.Where(name => string.Equals(name, databaseName, StringComparison.OrdinalIgnoreCase)).ToList());
+            if (Hang)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            var names = list?.Where(name => string.Equals(name, databaseName, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (names is { Count: > 0 } && !names.Contains(databaseName, StringComparer.Ordinal) && Earlier.Contains(databaseName, StringComparer.Ordinal))
+            {
+                names.Add(databaseName);
+            }
+
+            return names;
         }
     }
 
-    private static async Task<(McpInProcessHost Host, ProbeLog Log)> StartProbeHostAsync(FakeStore store)
+    /// <summary>Every log line the host writes, so a test reads what the filter logged and at which level.</summary>
+    private sealed class CapturedLog : ILoggerProvider
+    {
+        public ConcurrentQueue<(LogLevel Level, string Category, string Message, Exception? Exception)> Entries { get; } = new();
+
+        public ILogger CreateLogger(string categoryName) => new Line(this, categoryName);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class Line(CapturedLog owner, string category) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+                owner.Entries.Enqueue((logLevel, category, formatter(state, exception), exception));
+        }
+    }
+
+    private static async Task<(McpInProcessHost Host, ProbeLog Log)> StartProbeHostAsync(
+        FakeStore store, TimeSpan? lookupDeadline = null, CapturedLog? captured = null)
     {
         var log = new ProbeLog();
         var host = await McpInProcessHost.StartAsync(
@@ -195,7 +249,15 @@ public sealed class McpDatabaseNameResolverTests
             builder =>
             {
                 builder.Services.AddSingleton(log);
-                builder.WithRequestFilters(filters => filters.AddCallToolFilter(McpDatabaseNameFilter.Using(store.CandidatesAsync)));
+                if (captured is not null)
+                {
+                    builder.Services.AddLogging(logging => logging.AddProvider(captured));
+                }
+
+                builder.WithRequestFilters(filters => filters.AddCallToolFilter(
+                    lookupDeadline is { } deadline
+                        ? McpDatabaseNameFilter.Using(store.CandidatesAsync, deadline)
+                        : McpDatabaseNameFilter.Using(store.CandidatesAsync)));
             });
         return (host, log);
     }
@@ -223,7 +285,7 @@ public sealed class McpDatabaseNameResolverTests
         Assert.Equal("SalesDB", json!.Value.GetProperty("received").GetString());
         Assert.Equal("SalesDB", json.Value.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
         Assert.False(json.Value.TryGetProperty(McpDatabaseNameResolver.NoteField, out var _));
-        Assert.Equal(("srv", "salesdb"), Assert.Single(store.Lookups));
+        Assert.Equal(("srv", "salesdb", false), Assert.Single(store.Lookups));
     }
 
     [Fact]
@@ -324,6 +386,91 @@ public sealed class McpDatabaseNameResolverTests
     }
 
     [Fact]
+    public async Task ASpellingAnEarlierListHolds_IsExact_AndPassesUntouched()
+    {
+        /* Renamed sales to Sales: the newest list holds Sales, an earlier one holds sales. */
+        var (host, log) = await StartProbeHostAsync(new FakeStore(new[] { "master", "Sales" }) { Earlier = new[] { "sales" } });
+        await using var _ = host;
+
+        var (_, earlier, _) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "sales"));
+        var (newest, _, _) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "Sales"));
+        var (neither, _, _) = await CallAsync(host, "dbname_probe", ("server_name", "srv"), ("database_name", "SALES"));
+
+        Assert.Equal("{\"status\":\"empty\",\"received\":\"sales\"}", earlier);
+        Assert.False(newest!.Value.TryGetProperty(McpDatabaseNameResolver.ResolvedField, out var _));
+        Assert.Equal("Sales", neither!.Value.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+        Assert.Equal(new string?[] { "sales", "Sales", "Sales" }, log.Calls.Select(c => c.Database).ToArray());
+    }
+
+    [Fact]
+    public async Task AToolThatChangesState_IsRefusedWithTheStoredSpelling_AndNeverRewritten()
+    {
+        var store = new FakeStore(new[] { "master", "SalesDB" });
+        var (host, log) = await StartProbeHostAsync(store);
+        await using var _ = host;
+
+        var (json, text, isError) = await CallAsync(host, "dbname_probe_write", ("server_name", "srv"), ("database_name", "salesdb"));
+
+        Assert.True(isError);
+        Assert.Empty(log.Calls);
+        Assert.True(McpHelpers.IsRefusalEnvelope(text), text);
+        Assert.Equal("database_name", json!.Value.GetProperty("hints").GetProperty("parameter").GetString());
+        var message = json.Value.GetProperty("message").GetString()!;
+        Assert.Equal(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"), message);
+        Assert.Contains("pass 'SalesDB' exactly", message, StringComparison.Ordinal);
+        Assert.Contains("refused before it ran", message, StringComparison.Ordinal);
+        Assert.Equal(("srv", "salesdb", true), Assert.Single(store.Lookups));
+    }
+
+    [Fact]
+    public async Task AToolThatChangesState_RunsWithAnExactSpelling_NewestOrEarlier_AndWithANameNoListHolds()
+    {
+        var (host, log) = await StartProbeHostAsync(new FakeStore(new[] { "master", "SalesDB" }) { Earlier = new[] { "salesdb" } });
+        await using var _ = host;
+
+        var (_, newest, newestError) = await CallAsync(host, "dbname_probe_write", ("server_name", "srv"), ("database_name", "SalesDB"));
+        var (_, earlier, earlierError) = await CallAsync(host, "dbname_probe_write", ("server_name", "srv"), ("database_name", "salesdb"));
+        var (unseen, _, unseenError) = await CallAsync(host, "dbname_probe_write", ("server_name", "srv"), ("database_name", "Nowhere"));
+
+        Assert.False(newestError || earlierError || unseenError);
+        Assert.Equal("{\"status\":\"empty\",\"received\":\"SalesDB\"}", newest);
+        Assert.Equal("{\"status\":\"empty\",\"received\":\"salesdb\"}", earlier);
+        Assert.Equal(McpDatabaseNameResolver.NotSeenMessage("Nowhere"), unseen!.Value.GetProperty(McpDatabaseNameResolver.NoteField).GetString());
+        Assert.Equal(new string?[] { "SalesDB", "salesdb", "Nowhere" }, log.Calls.Select(c => c.Database).ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ALookupThatTimesOutOrFails_RunsTheCallAsGiven_AndLogsAWarningWithoutTheCallersNames(bool hangs)
+    {
+        var captured = new CapturedLog();
+        var store = new FakeStore(new[] { "SalesDB" }) { Hang = hangs, Throw = !hangs };
+        var (host, log) = await StartProbeHostAsync(store, TimeSpan.FromMilliseconds(50), captured);
+        await using var _ = host;
+
+        var (_, text, isError) = await CallAsync(host, "dbname_probe", ("server_name", "srv-of-the-caller"), ("database_name", "salesdb"));
+
+        Assert.False(isError);
+        Assert.Equal("salesdb", Assert.Single(log.Calls).Database);
+        Assert.Equal("{\"status\":\"empty\",\"received\":\"salesdb\"}", text);
+
+        var line = Assert.Single(captured.Entries, entry => entry.Category == typeof(McpDatabaseNameFilter).FullName);
+        Assert.Equal(LogLevel.Warning, line.Level);
+        Assert.Contains("dbname_probe", line.Message, StringComparison.Ordinal);
+        Assert.Contains(hangs ? "did not answer within 0.05 s" : "failed", line.Message, StringComparison.Ordinal);
+        Assert.Equal(!hangs, line.Exception is InvalidOperationException);
+        Assert.DoesNotContain("salesdb", line.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("srv-of-the-caller", line.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheLookupDeadline_IsShort()
+    {
+        Assert.InRange(McpDatabaseNameFilter.LookupDeadline, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task TheServedDescription_SaysHowTheNameIsMatched_OnlyWhereItIsResolved()
     {
         var (host, _) = await StartProbeHostAsync(new FakeStore(null));
@@ -333,17 +480,39 @@ public sealed class McpDatabaseNameResolverTests
             .GetProperty("properties").GetProperty("database_name").GetProperty("description").GetString()!;
 
         Assert.Equal("One database. " + McpDatabaseNameResolver.MatchingSentence, Described("dbname_probe"));
+        Assert.Equal("One database. " + McpDatabaseNameResolver.ExactOnlySentence, Described("dbname_probe_write"));
         Assert.Equal("One database.", Described("dbname_probe_no_server"));
+    }
+
+    [Fact]
+    public async Task TheSentence_FollowsTheToolsWriteMarker_AndIsNeverDoubled()
+    {
+        var (host, _) = await StartProbeHostAsync(new FakeStore(null));
+        await using var __ = host;
+        var tool = host.RegisteredTools.Single(t => t.ProtocolTool.Name == "dbname_probe").ProtocolTool;
+
+        string Described() => tool.InputSchema.GetProperty("properties").GetProperty("database_name").GetProperty("description").GetString()!;
+
+        tool.Annotations = new ToolAnnotations { DestructiveHint = true };
+        McpDatabaseNameResolver.DescribeMatching(tool);
+        McpDatabaseNameResolver.DescribeMatching(tool);
+        Assert.True(McpDatabaseNameResolver.ChangesState(tool));
+        Assert.Equal("One database. " + McpDatabaseNameResolver.ExactOnlySentence, Described());
+
+        tool.Annotations = new ToolAnnotations { DestructiveHint = false, ReadOnlyHint = true };
+        McpDatabaseNameResolver.DescribeMatching(tool);
+        Assert.False(McpDatabaseNameResolver.ChangesState(tool));
+        Assert.Equal("One database. " + McpDatabaseNameResolver.MatchingSentence, Described());
     }
 }
 
 /// <summary>
 /// #9065, the census: every tool the Darling host registers that takes <c>database_name</c> is called through a real in-process
-/// server with a differently cased name, and the name the tool is handed is read just before the tool would run. A tool the filter
-/// did not cover would be handed the name as the caller spelled it. The tools are the host's registration list, so a tool added
-/// tomorrow is covered or fails here.
+/// server with a differently cased name, and the name the tool is handed is read just before the tool would run. A read the filter
+/// did not cover would be handed the name as the caller spelled it; a tool that changes state must never be handed a rewritten
+/// name at all. The tools are the host's registration list and the write marker is the host's own
+/// (<c>DarlingMcpWritePolicy.ApplyAnnotations</c>), so a tool added tomorrow is covered or fails here.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class McpDatabaseNameCensusTests
 {
     /// <summary>The tools that take a <c>database_name</c> and no <c>server_name</c>, so there is no one server to resolve it
@@ -358,7 +527,7 @@ public sealed class McpDatabaseNameCensusTests
         : null;
 
     [Fact]
-    public async Task EveryToolThatTakesADatabaseName_IsHandedTheStoredSpelling_AndSaysHowItMatches()
+    public async Task EveryToolThatTakesADatabaseName_IsHandedTheStoredSpelling_OrRefusedWhenItChangesState_AndSaysHowItMatches()
     {
         var handed = new ConcurrentDictionary<string, string?>(StringComparer.Ordinal);
 
@@ -382,11 +551,14 @@ public sealed class McpDatabaseNameCensusTests
             TestContext.Current.CancellationToken,
             builder => builder.WithRequestFilters(filters =>
             {
-                filters.AddCallToolFilter(McpDatabaseNameFilter.Using((_, _, given, _) =>
+                filters.AddCallToolFilter(McpDatabaseNameFilter.Using((_, _, given, _, _) =>
                     Task.FromResult<IReadOnlyList<string>?>(
                         string.Equals(given, "SalesDB", StringComparison.OrdinalIgnoreCase) ? new[] { "SalesDB" } : Array.Empty<string>())));
                 filters.AddCallToolFilter(recorder);
             }));
+
+        /* The host's own stamp: it marks each write and restates its database_name description. */
+        PerformanceMonitor.Darling.Service.Mcp.DarlingMcpWritePolicy.ApplyAnnotations(host.RegisteredTools);
 
         var taking = host.RegisteredTools
             .Select(tool => tool.ProtocolTool)
@@ -394,39 +566,73 @@ public sealed class McpDatabaseNameCensusTests
             .OrderBy(tool => tool.Name, StringComparer.Ordinal)
             .ToList();
 
-        var problems = new List<string>();
-        var passedOver = new List<string>();
-        foreach (var tool in taking)
+        async Task<(JsonElement Answer, bool IsError)> CallAsync(string tool, string databaseName)
         {
             var result = await host.Client.CallToolAsync(
-                tool.Name,
-                new Dictionary<string, object?> { ["server_name"] = "srv", ["database_name"] = "salesdb" },
+                tool,
+                new Dictionary<string, object?> { ["server_name"] = "srv", ["database_name"] = databaseName },
                 cancellationToken: TestContext.Current.CancellationToken);
-            var answer = JsonDocument.Parse(McpInProcessHost.TextOf(result)).RootElement;
+            return (JsonDocument.Parse(McpInProcessHost.TextOf(result)).RootElement, result.IsError == true);
+        }
+
+        var problems = new List<string>();
+        var passedOver = new List<string>();
+        var rewritten = 0;
+        var refused = 0;
+        foreach (var tool in taking)
+        {
+            var changesState = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpWritePolicy.IsWrite(tool.Name);
+            var (answer, isError) = await CallAsync(tool.Name, "salesdb");
             var resolved = answer.TryGetProperty(McpDatabaseNameResolver.ResolvedField, out var field) ? field.GetString() : null;
             var described = tool.InputSchema.GetProperty("properties").GetProperty("database_name").TryGetProperty("description", out var d)
                 ? d.GetString() ?? string.Empty
                 : string.Empty;
-            var saysHow = described.EndsWith(McpDatabaseNameResolver.MatchingSentence, StringComparison.Ordinal);
+            var saysFolds = described.EndsWith(McpDatabaseNameResolver.MatchingSentence, StringComparison.Ordinal);
+            var saysExact = described.EndsWith(McpDatabaseNameResolver.ExactOnlySentence, StringComparison.Ordinal);
+            var reached = handed.TryRemove(tool.Name, out var name);
 
-            Assert.True(handed.TryGetValue(tool.Name, out var name), tool.Name + " never reached the tool's slot.");
-            if (name == "salesdb" && resolved is null)
+            if (reached && name == "salesdb" && resolved is null)
             {
                 passedOver.Add(tool.Name);
-                if (saysHow)
+                if (saysFolds || saysExact)
                 {
-                    problems.Add($"{tool.Name}: its description says the name is matched ignoring case, and the name was not resolved.");
+                    problems.Add($"{tool.Name}: its description says how the name is matched, and the name was not looked up.");
                 }
 
                 continue;
             }
 
-            if (name != "SalesDB" || resolved != "SalesDB")
+            if (changesState)
+            {
+                refused++;
+                if (reached || !isError
+                    || answer.GetProperty("message").GetString() != McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"))
+                {
+                    problems.Add($"{tool.Name}: changes state and was not refused with the stored spelling (handed '{name}', error {isError}).");
+                }
+
+                var (exactAnswer, exactError) = await CallAsync(tool.Name, "SalesDB");
+                if (exactError || !handed.TryRemove(tool.Name, out var exact) || exact != "SalesDB"
+                    || exactAnswer.TryGetProperty(McpDatabaseNameResolver.ResolvedField, out var _))
+                {
+                    problems.Add($"{tool.Name}: changes state and its exact spelling did not reach the tool untouched.");
+                }
+
+                if (!saysExact)
+                {
+                    problems.Add($"{tool.Name}: the database_name description does not end with \"{McpDatabaseNameResolver.ExactOnlySentence}\": {described}");
+                }
+
+                continue;
+            }
+
+            rewritten++;
+            if (!reached || name != "SalesDB" || resolved != "SalesDB")
             {
                 problems.Add($"{tool.Name}: handed '{name}', {McpDatabaseNameResolver.ResolvedField} '{resolved}'.");
             }
 
-            if (!saysHow)
+            if (!saysFolds)
             {
                 problems.Add($"{tool.Name}: the database_name description does not end with \"{McpDatabaseNameResolver.MatchingSentence}\": {described}");
             }
@@ -434,6 +640,10 @@ public sealed class McpDatabaseNameCensusTests
 
         Assert.True(problems.Count == 0, string.Join("\n", problems));
         Assert.Equal(NotResolved, passedOver);
-        Assert.True(taking.Count - passedOver.Count >= 60, $"only {taking.Count - passedOver.Count} tools resolved a database_name; the host registers more than 60 that take one.");
+        Assert.True(rewritten >= RewrittenFloor, $"only {rewritten} reads were handed the stored spelling; the host registers at least {RewrittenFloor} that take a database_name.");
+        Assert.True(refused >= RefusedFloor, $"only {refused} state-changing tools were refused; the host registers at least {RefusedFloor} that take a database_name.");
     }
+
+    private const int RewrittenFloor = 52;
+    private const int RefusedFloor = 8;
 }

@@ -11,22 +11,26 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace PerformanceMonitor.Common;
 
 /// <summary>
-/// Reads, for one call, the stored database names of the server the call names that equal the given name ignoring letter case.
-/// Null when there is nothing to resolve against (the server does not resolve, or the store holds no database list for it): the call
-/// then runs with the name as given and says nothing about it. An empty list means the server has a list and no such name is on it.
+/// Reads, for one call, the stored database names of the server the call names that equal the given name ignoring letter case: the
+/// newest list's, plus the given spelling itself when the host finds it on an earlier list in its look-back. Null when there is nothing to
+/// resolve against (the server does not resolve, or the store holds no database list for it): the call then runs with the name as
+/// given and says nothing about it. An empty list means the server has a list and no such name is on it.
 /// </summary>
 /// <param name="services">The request's services.</param>
 /// <param name="serverName">The call's <c>server_name</c>, or null when it sent none.</param>
 /// <param name="databaseName">The call's <c>database_name</c>, never blank.</param>
-/// <param name="cancellationToken">The request's token.</param>
+/// <param name="changesState">True when the tool changes state, so the server is resolved the way such a tool resolves it.</param>
+/// <param name="cancellationToken">The request's token, cut off at <see cref="McpDatabaseNameFilter.LookupDeadline"/>.</param>
 public delegate Task<IReadOnlyList<string>?> McpDatabaseNameSource(
-    IServiceProvider? services, string? serverName, string databaseName, CancellationToken cancellationToken);
+    IServiceProvider? services, string? serverName, string databaseName, bool changesState, CancellationToken cancellationToken);
 
 /// <summary>
 /// #9065: the call-tool filter that resolves a call's <c>database_name</c> before the tool runs, by
@@ -36,17 +40,31 @@ public delegate Task<IReadOnlyList<string>?> McpDatabaseNameSource(
 ///
 /// <para>An exact match, a blank name and a server with no database list all pass the call through untouched. A single
 /// case-insensitive match replaces the argument with the stored spelling and adds
-/// <see cref="McpDatabaseNameResolver.ResolvedField"/> to the answer. Two or more refuse the call with the list. No match runs the
-/// call as given and adds <see cref="McpDatabaseNameResolver.NoteField"/>. A lookup that fails is "nothing to resolve against": a read
-/// never fails on it.</para>
+/// <see cref="McpDatabaseNameResolver.ResolvedField"/> to the answer, unless the tool changes state
+/// (<see cref="McpDatabaseNameResolver.ChangesState"/>): that call is refused with the stored spelling, never rewritten. Two or more
+/// refuse the call with the list. No match runs the call as given and adds <see cref="McpDatabaseNameResolver.NoteField"/>.</para>
+///
+/// <para>The lookup has its own deadline, <see cref="LookupDeadline"/>. A lookup that times out or fails is logged as a warning (the
+/// tool's name, never the caller's server or database name) and is "nothing to resolve against": the call runs as given.</para>
 ///
 /// <para>The answer is edited as the tool's own JSON, so a host registers this outside its masking filters and inside any
 /// re-encoding one.</para>
 /// </summary>
 public static class McpDatabaseNameFilter
 {
+    /// <summary>
+    /// How long one call waits for its name lookup. The lookup is one to three small index reads that measure in single
+    /// milliseconds, so three seconds is hundreds of times its cost and still well under the five seconds at which an MCP read is
+    /// slow; past it the store is stalled and the call is better run as given than held.
+    /// </summary>
+    public static readonly TimeSpan LookupDeadline = TimeSpan.FromSeconds(3);
+
     /// <summary>The filter over <paramref name="source"/>, the host's read of a server's database names.</summary>
-    public static McpRequestFilter<CallToolRequestParams, CallToolResult> Using(McpDatabaseNameSource source)
+    public static McpRequestFilter<CallToolRequestParams, CallToolResult> Using(McpDatabaseNameSource source) =>
+        Using(source, LookupDeadline);
+
+    /// <summary>The filter over <paramref name="source"/>, giving each lookup <paramref name="lookupDeadline"/> before the call runs as given.</summary>
+    public static McpRequestFilter<CallToolRequestParams, CallToolResult> Using(McpDatabaseNameSource source, TimeSpan lookupDeadline)
     {
         ArgumentNullException.ThrowIfNull(source);
         return next => async (request, cancellationToken) =>
@@ -56,7 +74,8 @@ public static class McpDatabaseNameFilter
                 || sent.ValueKind != JsonValueKind.String
                 || sent.GetString() is not { } given
                 || string.IsNullOrWhiteSpace(given)
-                || !McpDatabaseNameResolver.Resolves(ToolOf(request)))
+                || ToolOf(request) is not { } tool
+                || !McpDatabaseNameResolver.Resolves(tool))
             {
                 return await next(request, cancellationToken).ConfigureAwait(false);
             }
@@ -64,14 +83,22 @@ public static class McpDatabaseNameFilter
             var serverName = arguments.TryGetValue(McpDatabaseNameResolver.ServerParameter, out var server)
                 && server.ValueKind == JsonValueKind.String ? server.GetString() : null;
 
+            var changesState = McpDatabaseNameResolver.ChangesState(tool);
+
             IReadOnlyList<string>? known;
-            try
+            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                known = await source(request.Services, serverName, given, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                known = null;
+                deadline.CancelAfter(lookupDeadline);
+                try
+                {
+                    known = await source(request.Services, serverName, given, changesState, deadline.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    /* The request itself is not cancelled, so this is the lookup's own deadline or its own failure. */
+                    Warn(request.Services, tool.Name, ex, deadline.IsCancellationRequested ? lookupDeadline : null);
+                    known = null;
+                }
             }
 
             if (known is null)
@@ -92,6 +119,21 @@ public static class McpDatabaseNameFilter
                                 Text = McpHelpers.Refusal(
                                     McpDatabaseNameResolver.Parameter,
                                     McpDatabaseNameResolver.AmbiguousMessage(given, resolution.Candidates)),
+                            },
+                        },
+                        IsError = true,
+                    };
+
+                case McpDatabaseNameMatch.Resolved when changesState:
+                    return new CallToolResult
+                    {
+                        Content = new List<ContentBlock>
+                        {
+                            new TextContentBlock
+                            {
+                                Text = McpHelpers.Refusal(
+                                    McpDatabaseNameResolver.Parameter,
+                                    McpDatabaseNameResolver.ExactRequiredMessage(given, resolution.Name!)),
                             },
                         },
                         IsError = true,
@@ -139,6 +181,26 @@ public static class McpDatabaseNameFilter
             IsError = result.IsError,
             Meta = result.Meta,
         };
+    }
+
+    private static void Warn(IServiceProvider? services, string? toolName, Exception ex, TimeSpan? timedOutAfter)
+    {
+        if (services?.GetService<ILoggerFactory>() is not { } loggerFactory)
+        {
+            return;
+        }
+
+        var logger = loggerFactory.CreateLogger(typeof(McpDatabaseNameFilter).FullName!);
+        if (timedOutAfter is { } waited)
+        {
+            logger.LogWarning(
+                "The database_name lookup for {Tool} did not answer within {Seconds} s, so the call ran with the name as given.",
+                toolName, waited.TotalSeconds);
+        }
+        else
+        {
+            logger.LogWarning(ex, "The database_name lookup for {Tool} failed, so the call ran with the name as given.", toolName);
+        }
     }
 
     private static Tool? ToolOf(RequestContext<CallToolRequestParams> request)

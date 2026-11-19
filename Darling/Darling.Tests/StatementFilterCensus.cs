@@ -162,7 +162,7 @@ internal static class StatementFilterCensus
     /// <see cref="CallRealToolAsync"/>'s <c>bearerToken</c>. Dispose it with the test.
     /// </summary>
     public static async Task<TestServer> BuildLiveHostAsync(
-        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken)
+        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken, bool allowWrites = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -180,9 +180,11 @@ internal static class StatementFilterCensus
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
         var writes = DarlingMcpWritePolicy.ResolveForStart(
-            new McpConfig { AllowInvestigations = true, AllowWrites = false }, bearerToken, out var tokenProblem);
+            new McpConfig { AllowInvestigations = !allowWrites, AllowWrites = allowWrites }, bearerToken, out var tokenProblem);
         Assert.Null(tokenProblem);
-        Assert.True(writes.Investigations && !writes.Writes && !writes.ServerAdmin, "The live host must serve the investigation arm only.");
+        Assert.True(
+            writes.Writes == allowWrites && writes.Investigations == !allowWrites && !writes.ServerAdmin,
+            "The live host must serve one arm only: the write tools when asked for them, else the investigation tools.");
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),

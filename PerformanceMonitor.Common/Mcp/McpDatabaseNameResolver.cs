@@ -51,6 +51,11 @@ public readonly record struct McpDatabaseNameResolution(McpDatabaseNameMatch Mat
 /// <para>An exact match wins, so two names that differ only by case stay two databases to a caller who spells either one as stored. A
 /// name is never trimmed: a leading or trailing space is part of it. Only when nothing matches exactly is letter case ignored, and
 /// then only a single match is used; two or more are refused with the list, never guessed between.</para>
+///
+/// <para>The names a host hands in are the newest list's, plus the given spelling itself when the host finds it on an earlier list
+/// in its look-back (Darling reads the hourly lists, Lite every list): a database renamed or recreated in another letter case keeps
+/// its history reachable under the spelling that history was stored with. A tool that changes state (<see cref="ChangesState"/>) is never handed another spelling: a case-only mismatch is refused
+/// with the stored one.</para>
 /// </summary>
 public static class McpDatabaseNameResolver
 {
@@ -68,6 +73,9 @@ public static class McpDatabaseNameResolver
 
     /// <summary>What the served <c>database_name</c> parameter description of a resolving tool ends with.</summary>
     public const string MatchingSentence = "Exact match first, then a unique case-insensitive one.";
+
+    /// <summary>What the served <c>database_name</c> parameter description of a resolving tool that changes state ends with.</summary>
+    public const string ExactOnlySentence = "Exact spelling; another case of a listed name is refused.";
 
     /// <summary>
     /// Resolves <paramref name="given"/> against <paramref name="known"/>, the names the server is known to have (the whole list, or
@@ -116,12 +124,26 @@ public static class McpDatabaseNameResolver
         + ". Pass one of them spelled exactly as listed. The call was refused before it ran.";
 
     /// <summary>
-    /// What an answer says when the server's database list holds no such name. It states only what the list holds and that the name
-    /// was not changed, so it is true beside rows too (a dropped database's history) and for a tool that trims the name itself.
+    /// What an answer says when the server's database list holds no such name. It states only what the lookup compared and that the
+    /// name was not changed, so it is true beside rows too (a dropped database's history) and for a tool that trims the name itself.
+    /// The comparison is the store's <c>lower()</c> and then ordinal-ignore-case here, so the message claims no more than a simple
+    /// letter-case comparison.
     /// </summary>
     public static string NotSeenMessage(string given) =>
-        $"database_name '{given}' is not on this server's newest database list, in any letter case, so the name was left as given. "
+        $"database_name '{given}' matched no name on this server's newest database list, exactly or by a simple letter-case comparison "
+        + "(no accent or language-specific casing rules), so the name was left as given. "
         + "A database dropped before that list was taken, or created after it, is not on it.";
+
+    /// <summary>The refusal sentence for a tool that changes state and a name that is another letter case of one stored name.</summary>
+    public static string ExactRequiredMessage(string given, string stored) =>
+        $"database_name '{given}' is not a database on this server's database list; '{stored}' is, in another letter case. "
+        + $"This tool changes state, so the name is not corrected for you: pass '{stored}' exactly. The call was refused before it ran.";
+
+    /// <summary>
+    /// True when the tool changes state: the host's write policy stamped <c>destructiveHint</c> on it, the one marker both SKUs set
+    /// for every tool behind their write gate.
+    /// </summary>
+    public static bool ChangesState(Tool? tool) => tool?.Annotations?.DestructiveHint == true;
 
     /// <summary>
     /// True when the tool takes a <c>database_name</c> that is resolved: its served schema declares both <c>database_name</c> and
@@ -139,9 +161,11 @@ public static class McpDatabaseNameResolver
     }
 
     /// <summary>
-    /// Ends the served <c>database_name</c> description of a resolving tool with <see cref="MatchingSentence"/>, so the description a
-    /// caller reads and the tools the filter resolves are decided by the one predicate, <see cref="Resolves"/>. Any other tool is left
-    /// as it is.
+    /// Ends the served <c>database_name</c> description of a resolving tool with <see cref="MatchingSentence"/>, or with
+    /// <see cref="ExactOnlySentence"/> when the tool changes state, so the description a caller reads and what the filter does are
+    /// decided by the same two predicates, <see cref="Resolves"/> and <see cref="ChangesState"/>. Any other tool is left as it is.
+    /// Called where a tool is registered and again where a host's write policy stamps its annotations: the second call swaps the
+    /// sentence of a tool the stamp marked.
     /// </summary>
     public static void DescribeMatching(Tool tool)
     {
@@ -153,12 +177,21 @@ public static class McpDatabaseNameResolver
         }
 
         var described = parameter["description"] is JsonValue value && value.TryGetValue<string>(out var text) ? text.TrimEnd() : string.Empty;
-        if (described.EndsWith(MatchingSentence, StringComparison.Ordinal))
+        var sentence = ChangesState(tool) ? ExactOnlySentence : MatchingSentence;
+        if (described.EndsWith(sentence, StringComparison.Ordinal))
         {
             return;
         }
 
-        parameter["description"] = described.Length == 0 ? MatchingSentence : described + " " + MatchingSentence;
+        foreach (var other in new[] { MatchingSentence, ExactOnlySentence })
+        {
+            if (described.EndsWith(other, StringComparison.Ordinal))
+            {
+                described = described[..^other.Length].TrimEnd();
+            }
+        }
+
+        parameter["description"] = described.Length == 0 ? sentence : described + " " + sentence;
         tool.InputSchema = JsonSerializer.SerializeToElement(schema);
     }
 

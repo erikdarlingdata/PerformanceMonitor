@@ -57,7 +57,7 @@ public sealed class DarlingMcpDatabaseStateTools
     public static async Task<string> GetDatabaseStateExpectations(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("Optional: only this database (exact name).")] string? database_name = null,
+        [Description("Optional: only this database.")] string? database_name = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -135,7 +135,7 @@ public sealed class DarlingMcpDatabaseStateTools
     public static async Task<string> SetDatabaseStateExpected(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("The database's exact name, as get_database_state_expectations shows it.")] string database_name,
+        [Description("The database, as get_database_state_expectations shows it.")] string database_name,
         [Description("ONLINE, OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, STANDBY, IGNORE, or CLEAR.")] string expected_state,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)

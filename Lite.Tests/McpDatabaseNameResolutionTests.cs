@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Darling.Tests;
 using DuckDB.NET.Data;
@@ -38,6 +39,7 @@ public sealed class McpDatabaseNameResolutionTests : IClassFixture<SharedDuckDbF
 {
     private const string Listed = "DbnListedSrv";
     private const string Unlisted = "DbnUnlistedSrv";
+    private const string Twin = "DbnTwinSrv";
 
     /// <summary>The Lite tools that take a <c>database_name</c> and no <c>server_name</c>: <c>find_database</c> searches every
     /// server and already ignores case, and the two query-tag writes compare object names ignoring case.</summary>
@@ -49,6 +51,7 @@ public sealed class McpDatabaseNameResolutionTests : IClassFixture<SharedDuckDbF
     private readonly LocalDataService _service;
     private readonly int _listedId;
     private readonly int _unlistedId;
+    private readonly int _twinId;
     private DuckDBConnection? _seedConn;
     private long _nextId = 990000;
     private McpInProcessHost? _host;
@@ -63,6 +66,7 @@ public sealed class McpDatabaseNameResolutionTests : IClassFixture<SharedDuckDbF
         _serverManager = new ServerManager(_configDir);
         _listedId = AddServer(Listed);
         _unlistedId = AddServer(Unlisted);
+        _twinId = AddServer(Twin);
     }
 
     private int AddServer(string name)
@@ -135,6 +139,34 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
                     _nextId++, Naive(now - age), _listedId, Listed, database);
             }
         }
+
+        /* A server with case twins over time. Three hours ago it had sales and Archive. Since then sales was renamed to Sales (the
+           list an hour ago), and Archive was dropped (absent an hour ago) and recreated as archive (the newest list). Rows stored
+           under each spelling date from when that spelling was the name. */
+        foreach (var (age, databases) in new[]
+                 {
+                     (TimeSpan.FromHours(3), new[] { "master", "sales", "Archive" }),
+                     (TimeSpan.FromHours(1), new[] { "master", "Sales" }),
+                     (TimeSpan.FromMinutes(10), new[] { "master", "Sales", "archive" }),
+                 })
+        {
+            foreach (var database in databases)
+            {
+                await ExecuteAsync(@"
+INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
+VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
+                    _nextId++, Naive(now - age), _twinId, Twin, database);
+            }
+        }
+
+        foreach (var (database, seconds, minutesAgo) in new[] { ("sales", 11, 150), ("Sales", 4, 20), ("Archive", 6, 150), ("archive", 1, 5) })
+        {
+            var when = Naive(now.AddMinutes(-minutesAgo));
+            await ExecuteAsync(@"
+INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, statement_text, duration_microseconds)
+VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
+                _nextId++, when, _twinId, Twin, when, database, seconds * 1_000_000L);
+        }
     }
 
     /// <summary>A server with the long-query tool and the host's real filter list, over the seeded store.</summary>
@@ -170,6 +202,65 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
     }
 
     private static bool Has(JsonElement answer, string field) => answer.TryGetProperty(field, out _);
+
+    private static string[] Sorted(IReadOnlyList<string>? names) => names!.OrderBy(n => n, StringComparer.Ordinal).ToArray();
+
+    /// <summary>The database names of the long queries an answer lists.</summary>
+    private static string[] DatabasesOf(JsonElement answer) =>
+        answer.GetProperty("completions").EnumerateArray().Select(row => row.GetProperty("database_name").GetString()!).ToArray();
+
+    [Fact]
+    public async Task ADatabaseRenamedOrRecreatedInAnotherCase_KeepsItsEarlierRowsReachableUnderTheEarlierSpelling()
+    {
+        var host = await StartLongQueryHostAsync();
+
+        /* Each spelling the server has had, given exactly, reads its own rows and is never rewritten. */
+        foreach (var spelling in new[] { "sales", "Sales", "Archive", "archive" })
+        {
+            var (answer, isError) = await LongQueriesAsync(host, Twin, spelling);
+            Assert.False(isError);
+            Assert.Equal(new[] { spelling }, DatabasesOf(answer));
+            Assert.False(Has(answer, McpDatabaseNameResolver.ResolvedField), spelling);
+            Assert.False(Has(answer, McpDatabaseNameResolver.NoteField), spelling);
+        }
+
+        /* A spelling no list has ever held resolves to the newest list's. */
+        foreach (var (given, stored) in new[] { ("SALES", "Sales"), ("ARCHIVE", "archive") })
+        {
+            var (answer, isError) = await LongQueriesAsync(host, Twin, given);
+            Assert.False(isError);
+            Assert.Equal(new[] { stored }, DatabasesOf(answer));
+            Assert.Equal(stored, answer.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+        }
+    }
+
+    [Fact]
+    public async Task TheCandidatesRead_AddsTheGivenSpelling_OnlyWhenAnEarlierListInTheLookBackHoldsIt()
+    {
+        await SeedAsync();
+        var now = DateTime.UtcNow;
+
+        Assert.Equal(new[] { "Sales", "sales" }, Sorted(await _service.DatabaseNameCandidatesAsync(_twinId, "sales", now)));
+        Assert.Equal(new[] { "Archive", "archive" }, Sorted(await _service.DatabaseNameCandidatesAsync(_twinId, "Archive", now)));
+        Assert.Equal(new[] { "Sales" }, await _service.DatabaseNameCandidatesAsync(_twinId, "Sales", now));
+        Assert.Equal(new[] { "Sales" }, await _service.DatabaseNameCandidatesAsync(_twinId, "SALES", now));
+
+        /* With only the newest list inside the look-back, the earlier spelling is on no list. */
+        Assert.Equal(
+            new[] { "Sales" },
+            await _service.DatabaseNameCandidatesAsync(_twinId, "sales", now + LocalDataService.FindDatabaseLookBack - TimeSpan.FromMinutes(30)));
+    }
+
+    [Fact]
+    public async Task TheCandidatesRead_StopsWhenItsTokenIsCancelled()
+    {
+        await SeedAsync();
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => _service.DatabaseNameCandidatesAsync(_twinId, "sales", DateTime.UtcNow, cancelled.Token));
+    }
 
     [Fact]
     public async Task ADifferentlyCasedName_ReadsTheSameRowsAsTheStoredSpelling_AndNamesTheSpellingItUsed()
@@ -311,6 +402,9 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
                 builder.WithRequestFilters(filters => filters.AddCallToolFilter(recorder));
             });
 
+        /* The host's own stamp: it marks each write and restates its database_name description. */
+        McpWritePolicy.ApplyAnnotations(_host.RegisteredTools);
+
         var taking = _host.RegisteredTools
             .Select(tool => tool.ProtocolTool)
             .Where(tool => tool.InputSchema.TryGetProperty("properties", out var properties) && properties.TryGetProperty("database_name", out var _))
@@ -342,6 +436,18 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
             var resolved = answer.TryGetProperty(McpDatabaseNameResolver.ResolvedField, out var field) ? field.GetString() : null;
             var described = properties.GetProperty("database_name").TryGetProperty("description", out var d) ? d.GetString() ?? string.Empty : string.Empty;
             var saysHow = described.EndsWith(McpDatabaseNameResolver.MatchingSentence, StringComparison.Ordinal);
+
+            /* A tool that changes state is refused with the stored spelling and never handed a rewritten name. */
+            if (McpWritePolicy.IsWrite(tool.Name) && properties.TryGetProperty("server_name", out var _))
+            {
+                if (handed.ContainsKey(tool.Name) || result.IsError != true
+                    || !described.EndsWith(McpDatabaseNameResolver.ExactOnlySentence, StringComparison.Ordinal))
+                {
+                    problems.Add($"{tool.Name}: changes state and was not refused with the stored spelling, or does not say so: {described}");
+                }
+
+                continue;
+            }
 
             if (!handed.TryGetValue(tool.Name, out var name))
             {

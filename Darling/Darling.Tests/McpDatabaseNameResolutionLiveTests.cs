@@ -38,8 +38,10 @@ public sealed class McpDatabaseNameResolutionLiveTests
     private const string Listed = "dbn-listed";
     private const string Unlisted = "dbn-unlisted";
     private const string PgTarget = "dbn-pg";
+    private const string Twin = "dbn-twin";
+    private const string PgTwin = "dbn-pg-twin";
 
-    private static async Task WithHostAsync(Func<TestServer, NpgsqlDataSource, CancellationToken, Task> body)
+    private static async Task WithHostAsync(Func<TestServer, NpgsqlDataSource, CancellationToken, Task> body, bool allowWrites = false)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
@@ -113,8 +115,67 @@ public sealed class McpDatabaseNameResolutionLiveTests
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-30)), pgId, PgTarget, database, extension);
         }
 
+        /* Two servers with case twins over time. Three hours ago each had one database in lower case and one in mixed case. Since
+           then the first was renamed to mixed case (the list an hour ago), and the second was dropped (absent an hour ago) and
+           recreated in lower case (the newest list). Rows stored under each spelling date from when that spelling was the name. */
+        var twinId = ServerIdHelper.GetDeterministicHashCode(Twin);
+        await DarlingMcpTestData.RegisterServerAsync(connection, twinId, Twin, ct);
+        foreach (var (age, databases) in new[]
+                 {
+                     (TimeSpan.FromHours(3), new[] { "master", "sales", "Archive" }),
+                     (TimeSpan.FromHours(1), new[] { "master", "Sales" }),
+                     (TimeSpan.FromMinutes(10), new[] { "master", "Sales", "archive" }),
+                 })
+        {
+            foreach (var database in databases)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,$4,$5,5,'ONLINE',FALSE)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now - age), twinId, Twin, database);
+            }
+        }
+
+        foreach (var (database, seconds, minutesAgo) in new[] { ("sales", 11, 150), ("Sales", 4, 20), ("Archive", 6, 150), ("archive", 1, 5) })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, duration_microseconds, statement_text)
+                  VALUES ($1, $2, $3, $4, $2, 'rpc_completed', $5, $6, $7)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-minutesAgo)), twinId, Twin, database, seconds * 1_000_000L, "EXEC p" + seconds);
+        }
+
+        var pgTwinId = ServerIdHelper.GetDeterministicHashCode(PgTwin);
+        await DarlingMcpTestData.RegisterServerAsync(connection, pgTwinId, PgTwin, ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", pgTwinId);
+        foreach (var (age, databases) in new[]
+                 {
+                     (TimeSpan.FromHours(3), new[] { "postgres", "appsales", "Ledger" }),
+                     (TimeSpan.FromHours(1), new[] { "postgres", "AppSales" }),
+                     (TimeSpan.FromMinutes(10), new[] { "postgres", "AppSales", "ledger" }),
+                 })
+        {
+            foreach (var database in databases)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO pg_database_stats (collection_id, collection_time, server_id, server_name, database_name) VALUES ($1,$2,$3,$4,$5)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now - age), pgTwinId, PgTwin, database);
+            }
+        }
+
+        /* The extension inventory is a snapshot: the one from before the rename and the drop, and the newest one. */
+        foreach (var (database, extension, minutesAgo) in new[]
+                 {
+                     ("appsales", "plpgsql", 150), ("Ledger", "pg_trgm", 150),
+                     ("AppSales", "pg_stat_statements", 5), ("ledger", "plpgsql", 5),
+                 })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO pg_extension_availability (collection_id, collection_time, server_id, server_name, database_name, extension_name, state, is_monitoring_relevant)
+                  VALUES ($1, $2, $3, $4, $5, $6, 'installed', TRUE)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-minutesAgo)), pgTwinId, PgTwin, database, extension);
+        }
+
         await using var postgres = NpgsqlDataSource.Create(storeString);
-        using var host = await StatementFilterCensus.BuildLiveHostAsync(storeString, McpDataDetail.Full);
+        using var host = await StatementFilterCensus.BuildLiveHostAsync(storeString, McpDataDetail.Full, allowWrites: allowWrites);
         try
         {
             await body(host, postgres, ct);
@@ -146,7 +207,178 @@ public sealed class McpDatabaseNameResolutionLiveTests
         return (JsonDocument.Parse(text).RootElement.Clone(), isError);
     }
 
+    /// <summary>The PostgreSQL twin's extension inventory for one database, as of now or as of <paramref name="asOf"/>.</summary>
+    private static async Task<(JsonElement Json, bool IsError)> TwinExtensionsAsync(TestServer host, string database, DateTime? asOf = null)
+    {
+        var arguments = new JsonObject { ["server_name"] = PgTwin, ["database_name"] = database };
+        if (asOf is { } end)
+        {
+            arguments["as_of"] = end.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        var (text, isError) = await StatementFilterCensus.CallRealToolAsync(host, "get_pg_extensions", arguments, bearerToken: StatementFilterCensus.LiveHostToken);
+        return (JsonDocument.Parse(text).RootElement.Clone(), isError);
+    }
+
+    private static async Task<(JsonElement Json, bool IsError)> SetExpectedAsync(TestServer host, string server, string database)
+    {
+        var (text, isError) = await StatementFilterCensus.CallRealToolAsync(
+            host, "set_database_state_expected",
+            new JsonObject { ["server_name"] = server, ["database_name"] = database, ["expected_state"] = "OFFLINE" },
+            bearerToken: StatementFilterCensus.LiveHostToken);
+        return (JsonDocument.Parse(text).RootElement.Clone(), isError);
+    }
+
     private static bool Has(JsonElement answer, string field) => answer.TryGetProperty(field, out _);
+
+    private static string[] Sorted(IReadOnlyList<string>? names) => names!.OrderBy(n => n, StringComparer.Ordinal).ToArray();
+
+    /// <summary>The database names of the long queries an answer lists.</summary>
+    private static string[] DatabasesOf(JsonElement answer) =>
+        answer.GetProperty("completions").EnumerateArray().Select(row => row.GetProperty("database_name").GetString()!).ToArray();
+
+    [Fact]
+    public Task ASqlServerDatabaseRenamedOrRecreatedInAnotherCase_KeepsItsEarlierRowsReachableUnderTheEarlierSpelling() =>
+        WithHostAsync(async (host, _, _) =>
+        {
+            /* Each spelling the server has had, given exactly, reads its own rows and is never rewritten. */
+            foreach (var spelling in new[] { "sales", "Sales", "Archive", "archive" })
+            {
+                var (answer, isError) = await LongQueriesAsync(host, Twin, spelling);
+                Assert.False(isError);
+                Assert.Equal(new[] { spelling }, DatabasesOf(answer));
+                Assert.False(Has(answer, McpDatabaseNameResolver.ResolvedField), spelling);
+                Assert.False(Has(answer, McpDatabaseNameResolver.NoteField), spelling);
+            }
+
+            /* A spelling no list has ever held resolves to the newest list's. */
+            foreach (var (given, stored) in new[] { ("SALES", "Sales"), ("ARCHIVE", "archive") })
+            {
+                var (answer, isError) = await LongQueriesAsync(host, Twin, given);
+                Assert.False(isError);
+                Assert.Equal(new[] { stored }, DatabasesOf(answer));
+                Assert.Equal(stored, answer.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+            }
+        });
+
+    [Fact]
+    public Task APostgreSqlDatabaseRenamedOrRecreatedInAnotherCase_KeepsItsEarlierRowsReachableUnderTheEarlierSpelling() =>
+        WithHostAsync(async (host, _, _) =>
+        {
+            var beforeTheChange = DateTime.UtcNow.AddHours(-2);
+            foreach (var (spelling, extension, asOf) in new (string, string, DateTime?)[]
+                     {
+                         ("appsales", "plpgsql", beforeTheChange), ("Ledger", "pg_trgm", beforeTheChange),
+                         ("AppSales", "pg_stat_statements", null), ("ledger", "plpgsql", null),
+                     })
+            {
+                var (answer, isError) = await TwinExtensionsAsync(host, spelling, asOf);
+                Assert.False(isError);
+                var row = Assert.Single(answer.GetProperty("extensions").EnumerateArray());
+                Assert.Equal((spelling, extension), (row.GetProperty("database_name").GetString(), row.GetProperty("extension_name").GetString()));
+                Assert.False(Has(answer, McpDatabaseNameResolver.ResolvedField), spelling);
+                Assert.False(Has(answer, McpDatabaseNameResolver.NoteField), spelling);
+            }
+
+            foreach (var (given, stored) in new[] { ("APPSALES", "AppSales"), ("LEDGER", "ledger") })
+            {
+                var (answer, isError) = await TwinExtensionsAsync(host, given);
+                Assert.False(isError);
+                Assert.Equal(stored, Assert.Single(answer.GetProperty("extensions").EnumerateArray()).GetProperty("database_name").GetString());
+                Assert.Equal(stored, answer.GetProperty(McpDatabaseNameResolver.ResolvedField).GetString());
+            }
+        });
+
+    [Fact]
+    public Task TheCandidatesRead_AddsTheGivenSpelling_OnlyWhenAnEarlierListInTheLookBackHoldsIt() =>
+        WithHostAsync(async (_, postgres, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            foreach (var (server, earlier, newest, recreated) in new[] { (Twin, "sales", "Sales", "archive"), (PgTwin, "appsales", "AppSales", "ledger") })
+            {
+                var serverId = ServerIdHelper.GetDeterministicHashCode(server);
+                var dropped = char.ToUpperInvariant(recreated[0]) + recreated[1..];
+
+                Assert.Equal(new[] { newest, earlier }, Sorted(await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, earlier, now, ct)));
+                Assert.Equal(new[] { dropped, recreated }, Sorted(await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, dropped, now, ct)));
+                Assert.Equal(new[] { newest }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, newest, now, ct));
+                Assert.Equal(new[] { newest }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, newest.ToUpperInvariant(), now, ct));
+
+                /* With only the newest list inside the look-back, the earlier spelling is on no list. */
+                var onlyTheNewestList = now + DarlingMcpFindDatabaseTools.LookBack - TimeSpan.FromMinutes(30);
+                Assert.Equal(new[] { newest }, await DarlingMcpDatabaseNames.CandidatesAsync(postgres, serverId, earlier, onlyTheNewestList, ct));
+            }
+        });
+
+    [Fact]
+    public Task AToolThatChangesState_IsRefusedForACaseOnlyMismatch_AndRunsWithTheExactSpelling() =>
+        WithHostAsync(async (host, postgres, ct) =>
+        {
+            var listedId = ServerIdHelper.GetDeterministicHashCode(Listed);
+
+            async Task<List<DatabaseStateExpectedStore.Row>> ExpectedAsync() =>
+                (await DatabaseStateExpectedStore.ReadAsync(postgres, listedId, 30, ct)).Where(row => row.ExpectedState is not null).ToList();
+
+            var (refused, isError) = await SetExpectedAsync(host, Listed, "salesdb");
+            Assert.True(isError);
+            Assert.Equal("invalid", refused.GetProperty("status").GetString());
+            Assert.Equal("database_name", refused.GetProperty("hints").GetProperty("parameter").GetString());
+            Assert.Equal(McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"), refused.GetProperty("message").GetString());
+            Assert.Contains("pass 'SalesDB' exactly", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Empty(await ExpectedAsync());
+
+            /* Two names differ only by case: still the list, as for a read. */
+            var (ambiguous, ambiguousError) = await SetExpectedAsync(host, Listed, "reports");
+            Assert.True(ambiguousError);
+            Assert.Contains("'REPORTS', 'Reports'", ambiguous.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Empty(await ExpectedAsync());
+
+            var (set, setError) = await SetExpectedAsync(host, Listed, "SalesDB");
+            Assert.False(setError);
+            Assert.Equal("set", set.GetProperty("status").GetString());
+            Assert.False(Has(set, McpDatabaseNameResolver.ResolvedField));
+            var row = Assert.Single(await ExpectedAsync());
+            Assert.Equal(("SalesDB", "OFFLINE", true), (row.DatabaseName, row.ExpectedState, row.IsUserOverride));
+
+            /* An earlier spelling is exact too, so it reaches the tool, which answers for itself. */
+            var (earlier, _) = await SetExpectedAsync(host, Twin, "sales");
+            Assert.Contains("is not in the latest collected snapshot", earlier.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }, allowWrites: true);
+
+    [Fact]
+    public Task TheServedDescriptions_SayExactOnlyOnEveryToolThatChangesState_AndCaseFoldingOnEveryRead() =>
+        WithHostAsync(async (host, _, _) =>
+        {
+            var tools = (await StatementFilterCensus.ListToolSchemasAsync(host, bearerToken: StatementFilterCensus.LiveHostToken))
+                .Where(tool => tool.InputSchema.TryGetProperty("properties", out var properties)
+                               && properties.TryGetProperty("database_name", out _)
+                               && properties.TryGetProperty("server_name", out _))
+                .ToList();
+
+            var problems = new List<string>();
+            var changingState = new List<string>();
+            foreach (var (name, schema) in tools)
+            {
+                var described = schema.GetProperty("properties").GetProperty("database_name").GetProperty("description").GetString()!;
+                var write = DarlingMcpWritePolicy.IsWrite(name);
+                if (write)
+                {
+                    changingState.Add(name);
+                }
+
+                if (!described.EndsWith(write ? McpDatabaseNameResolver.ExactOnlySentence : McpDatabaseNameResolver.MatchingSentence, StringComparison.Ordinal)
+                    || described.Contains(write ? McpDatabaseNameResolver.MatchingSentence : McpDatabaseNameResolver.ExactOnlySentence, StringComparison.Ordinal))
+                {
+                    problems.Add($"{name} (changes state: {write}): {described}");
+                }
+            }
+
+            Assert.True(problems.Count == 0, string.Join("\n", problems));
+            Assert.Contains("kill_session", changingState);
+            Assert.Contains("set_database_state_expected", changingState);
+            Assert.True(changingState.Count >= 8, $"only {changingState.Count} served tools that change state take database_name and server_name.");
+            Assert.True(tools.Count - changingState.Count >= 40, $"only {tools.Count - changingState.Count} served reads take database_name and server_name.");
+        }, allowWrites: true);
 
     [Fact]
     public Task ADifferentlyCasedName_ReadsTheSameRowsAsTheStoredSpelling_AndNamesTheSpellingItUsed() =>
@@ -309,11 +541,13 @@ public sealed class McpDatabaseNameResolutionLiveTests
 
     /// <summary>
     /// Every tool the live host serves that takes <c>database_name</c> and <c>server_name</c>, called with a differently cased name:
-    /// each answer names the stored spelling. The required arguments a tool has beyond those two are filled from its own schema, so
-    /// the call reaches the tool; what the tool then answers (rows, empty, a refusal of the filler) does not matter here.
+    /// each read's answer names the stored spelling, and each tool that changes state (the server-action tools are served on
+    /// every host and gate themselves) is refused with it. The required arguments a tool has beyond those two are filled from its
+    /// own schema, so the call reaches the tool; what a read then answers (rows, empty, a refusal of the filler) does not matter
+    /// here.
     /// </summary>
     [Fact]
-    public Task EveryServedToolThatTakesADatabaseName_NamesTheStoredSpellingItResolved() =>
+    public Task EveryServedToolThatTakesADatabaseName_NamesTheStoredSpellingItResolved_OrIsRefusedWithItWhenItChangesState() =>
         WithHostAsync(async (host, _, _) =>
         {
             var tools = (await StatementFilterCensus.ListToolSchemasAsync(host, bearerToken: StatementFilterCensus.LiveHostToken))
@@ -324,6 +558,7 @@ public sealed class McpDatabaseNameResolutionLiveTests
                 .ToList();
 
             var problems = new List<string>();
+            var refused = 0;
             foreach (var (name, schema) in tools)
             {
                 var arguments = new JsonObject { ["server_name"] = Listed, ["database_name"] = "salesdb" };
@@ -337,6 +572,17 @@ public sealed class McpDatabaseNameResolutionLiveTests
 
                 var (text, isError) = await StatementFilterCensus.CallRealToolAsync(
                     host, name, arguments, bearerToken: StatementFilterCensus.LiveHostToken);
+                if (DarlingMcpWritePolicy.IsWrite(name))
+                {
+                    refused++;
+                    if (!isError || JsonDocument.Parse(text).RootElement.GetProperty("message").GetString() != McpDatabaseNameResolver.ExactRequiredMessage("salesdb", "SalesDB"))
+                    {
+                        problems.Add($"{name}: changes state and was not refused with the stored spelling (error {isError}) in: {(text.Length > 300 ? text[..300] : text)}");
+                    }
+
+                    continue;
+                }
+
                 var resolved = !isError && text.TrimStart().StartsWith('{')
                                && JsonDocument.Parse(text).RootElement.TryGetProperty(McpDatabaseNameResolver.ResolvedField, out var field)
                     ? field.GetString()
@@ -348,7 +594,8 @@ public sealed class McpDatabaseNameResolutionLiveTests
             }
 
             Assert.True(problems.Count == 0, string.Join("\n", problems));
-            Assert.True(tools.Count >= 40, $"only {tools.Count} served tools take database_name and server_name.");
+            Assert.True(tools.Count - refused >= 40, $"only {tools.Count - refused} served reads take database_name and server_name.");
+            Assert.True(refused >= 7, $"only {refused} served tools that change state take database_name and server_name.");
         });
 
     /// <summary>A value the binder reads into a required parameter of the schema's type.</summary>

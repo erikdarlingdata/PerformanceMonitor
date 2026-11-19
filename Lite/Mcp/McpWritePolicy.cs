@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -132,6 +133,9 @@ internal static class McpWritePolicy
             annotations.ReadOnlyHint = !write && !stateOnly;
             annotations.DestructiveHint = write;
             protocol.Annotations = annotations;
+
+            /* #9065: a tool that changes state takes database_name in its exact spelling only, and its description says so. */
+            McpDatabaseNameResolver.DescribeMatching(protocol);
         }
     }
 
