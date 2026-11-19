@@ -527,7 +527,7 @@
                                 <TextBlock x:Name="AlertExcludedDatabasesLabel" Text="Exclude databases from alerts (one name per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedDatabasesLabel}" x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
-                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma. It applies to blocking, deadlock, and long-running query alerts"
+                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma. * matches any run of characters, so archive_* skips every database whose name starts with archive_. It applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <TextBlock x:Name="AlertExcludedVolumesLabel" Text="Exclude volumes from the Volume Free Space alert (one per line):"

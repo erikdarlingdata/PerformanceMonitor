@@ -1503,6 +1503,7 @@ public sealed partial class DarlingMcpAlertTools
         "shipped values are DEFAULTS from a 7-day production read, the SQL Agent job-step prefix and the two NT AUTHORITY service " +
         "logins; the application's admin login is deliberately not one, because it also runs real ad-hoc long-runners). The fired " +
         "card's Excluded Count item, split by arm, shows the knob working. " +
+        "excluded_databases is the shared list of databases the alerts skip, a name or a pattern (* matches any run of characters, so archive_* skips every database whose name starts with archive_.) with no other wildcard. " +
         "excluded_volumes is the Volume Free Space alert's fleet-wide list of mount points to ignore (for example [\"S:\\\\\", \"/mnt/scratch\"]): " +
         "the whole mount point, any case, a trailing \\ or / on either side ignored, never a prefix match. Excluded volumes are dropped before " +
         "the breach test, so the worst volume, the severity and the card come from the volumes that remain, and a server whose only low volumes " +

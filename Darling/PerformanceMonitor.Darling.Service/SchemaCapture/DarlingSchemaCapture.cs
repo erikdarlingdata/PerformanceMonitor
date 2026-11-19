@@ -131,9 +131,9 @@ public static class DarlingSchemaCapture
     {
         var skipped = new HashSet<string>(IdentityCapacityCollector.SkippedDatabaseNames, StringComparer.OrdinalIgnoreCase);
         var allowed = scope.Count == 0 ? null : new HashSet<string>(scope.Select(s => s.Trim()), StringComparer.OrdinalIgnoreCase);
-        var excludedNames = new HashSet<string>((excluded ?? []).Select(s => s.Trim()), StringComparer.OrdinalIgnoreCase);
+        var excludedNames = (excluded ?? []).Select(s => s.Trim()).ToList();
         return probes
-            .Where(p => p.DatabaseId > 4 && !skipped.Contains(p.Name) && (allowed is null || allowed.Contains(p.Name)) && !excludedNames.Contains(p.Name))
+            .Where(p => p.DatabaseId > 4 && !skipped.Contains(p.Name) && (allowed is null || allowed.Contains(p.Name)) && !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAny(excludedNames, p.Name))
             .Select(p => p.Name)
             .ToList();
     }

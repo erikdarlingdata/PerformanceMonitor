@@ -1610,15 +1610,17 @@ public partial class RemoteCollectorService
         if (excludedDatabaseNames is null || excludedDatabaseNames.Count == 0)
             return (string.Empty, new List<SqlParameter>());
 
-        var paramNames = new List<string>(excludedDatabaseNames.Count);
-        var sqlParams = new List<SqlParameter>(excludedDatabaseNames.Count);
-        for (int i = 0; i < excludedDatabaseNames.Count; i++)
+        /* #9050: one rule for what an entry means (a name, or a pattern holding *), so this copy delegates to the
+           shared builder rather than keeping a second spelling. A list with no * produces the text and parameters
+           this method always did. */
+        var (clause, parameters) = DatabaseExclusionFilter.Build(excludedDatabaseNames.ToList(), columnExpression);
+        var sqlParams = new List<SqlParameter>(parameters.Count);
+        foreach (var parameter in parameters)
         {
-            string p = $"@excl_db_{i}";
-            paramNames.Add(p);
-            sqlParams.Add(new SqlParameter(p, System.Data.SqlDbType.NVarChar, 128) { Value = excludedDatabaseNames[i] });
+            int size = parameter.Type == CollectorParameterType.NVarChar260 ? 260 : 128;
+            sqlParams.Add(new SqlParameter(parameter.Name, System.Data.SqlDbType.NVarChar, size) { Value = parameter.Value });
         }
-        return ($"AND {columnExpression} NOT IN ({string.Join(", ", paramNames)})", sqlParams);
+        return (clause, sqlParams);
     }
 
     /// <summary>
@@ -1635,13 +1637,8 @@ public partial class RemoteCollectorService
         if (excludedDatabaseNames is null || excludedDatabaseNames.Count == 0)
             return string.Empty;
 
-        string escapedQuote = forNestedDynamicSql ? "''" : "'";
-        string Escape(string s) => forNestedDynamicSql
-            ? s.Replace("'", "''''")
-            : s.Replace("'", "''");
-
-        var quoted = excludedDatabaseNames.Select(n => $"N{escapedQuote}{Escape(n)}{escapedQuote}");
-        return $"AND {columnExpression} NOT IN ({string.Join(", ", quoted)})";
+        /* #9050: delegates to the shared builder, so a pattern (an entry holding *) means the same here. */
+        return DatabaseExclusionFilter.BuildLiteralClause(excludedDatabaseNames.ToList(), columnExpression, forNestedDynamicSql);
     }
 
     /* #2220: delegates to the shared rule — see AzureSweepScope for why this is not duplicated per host. */
