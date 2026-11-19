@@ -39,6 +39,8 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **The threshold override store parses the global threshold row with `JsonElement.Parse`** ([#9076]) - The old form built a `JsonDocument` and never disposed it, and analyzer rule CA2026 failed a downstream Linux build of the exporter tests on that line. Behaviour does not change.
+
 - **The exporter now exports store columns its hand-written reads used to drop, and a test fails when a new store column is left out** ([#9069]) - `query_stats_hourly` and `procedure_stats_hourly` carry each plan's DMV attributes as of the hour's last sample (the per-execution `min_`/`max_` pairs, creation or cached time, handles, statement offsets, lifetime totals, plan size; these are lifetime values since the plan was cached, not the per-sample `worker_time_max` deltas), `pg_statement_stats_hourly` has `database_name`, `query_store_stats` has `interval_end_time_utc`, `pg_statement_text` has `own_entries`, and five other hourly tables gained the columns their rollups left out. Row counts are unchanged.
 - **The exporter's `query_stats_hourly` now has a `host_object_name` column** ([#9066]) - it holds the stored procedure or other module a plan-cache statement ran under, so an exported `query_hash` maps to its module without matching plan hashes. It is NULL for ad-hoc statements, and rows with different host objects stay separate even when the query and plan hash match.
 - **The exporter may now export `attention_events` and `column_stats_runs`** ([#9057]) - the optional-table registry adds both as Candidates, and they stay off until a store's `optional-tables.txt` names them. `attention_events` exports every column, including `statement_text` and `client_hostname`, in clear, as ruled for the deadlock and blocked-process reports. `column_stats` is registered as Blocked, because its `text[]` column has no Parquet type mapping yet.
@@ -7729,3 +7731,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9057]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9057
 [#9066]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9066
 [#9069]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9069
+[#9076]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9076

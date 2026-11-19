@@ -120,7 +120,7 @@ public static partial class ThresholdOverrideStore
             await using var globalCommand = postgres.CreateCommand(GlobalRowSql);
             globalCommand.CommandTimeout = CommandTimeoutSeconds;
             if (await globalCommand.ExecuteScalarAsync(ct) is string json)
-                global = JsonDocument.Parse(json).RootElement.Clone();
+                global = JsonElement.Parse(json);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
