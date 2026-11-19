@@ -22,7 +22,7 @@ public sealed class DarlingMcpWriteGateTextTests
     {
         Assert.Equal(4, DarlingMcpWritePolicy.ServerAdminTools.Count);
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools,
-            name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine, StringComparison.Ordinal));
+            name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine(), StringComparison.Ordinal));
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools,
             name => Assert.Contains(name, DarlingMcpInstructions.Text, StringComparison.Ordinal));
     }

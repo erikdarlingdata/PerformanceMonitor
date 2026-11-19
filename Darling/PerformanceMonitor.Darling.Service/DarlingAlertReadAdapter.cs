@@ -1145,11 +1145,14 @@ LIMIT $3";
        also does Extended Events work, so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE)
        where the wait-type match alone misses it and the Long-Running Query alert fires anyway. The query-text
        match (case-insensitive, NULL-safe) catches it regardless of the wait it happens to be in at capture time. */
+    /* A request that is running and not waiting has a NULL wait_type. Each wait-type filter keeps it (wait_type IS NULL OR ...):
+       an opt-out drops the waits it names, and a request with no current wait is in none of them. Without the NULL arm a long
+       query would leave the read on every sample that catches it running, and the alert would clear while it still runs. */
     public const string SpServerDiagnosticsFilter =
-        "AND r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%'\n    AND (r.query_text IS NULL OR r.query_text NOT ILIKE '%sp_server_diagnostics%')";
-    public const string WaitForFilter = "AND r.wait_type NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR')";
-    public const string BackupsFilter = "AND r.wait_type NOT IN ('BACKUPTHREAD', 'BACKUPIO')";
-    public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
+        "AND (r.wait_type IS NULL OR r.wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%')\n    AND (r.query_text IS NULL OR r.query_text NOT ILIKE '%sp_server_diagnostics%')";
+    public const string WaitForFilter = "AND (r.wait_type IS NULL OR r.wait_type NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR'))";
+    public const string BackupsFilter = "AND (r.wait_type IS NULL OR r.wait_type NOT IN ('BACKUPTHREAD', 'BACKUPIO'))";
+    public const string MiscWaitsFilter = "AND (r.wait_type IS NULL OR r.wait_type NOT IN ('XE_LIVE_TARGET_TVF'))";
     public const string CdcFilter = "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE";
 
     /// <summary>#7573: the collector stores the monitor's own sessions again, so Active Queries can show them behind its switch. This alert read leaves them out itself, as it did when the collector dropped them (#7416). Always on: a monitor query is never the operator's long-running query to act on.</summary>

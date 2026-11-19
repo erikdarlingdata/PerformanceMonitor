@@ -541,7 +541,8 @@ public sealed class DarlingMcpWritePolicyTests
             writes = tokens.Union;
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, writes: writes,
-            addServers: new DarlingMcpAddServersPolicy(mcp.AllowWindowsAuthOverUnverifiedTls), tokens: tokens);
+            addServers: new DarlingMcpAddServersPolicy(mcp.AllowWindowsAuthOverUnverifiedTls), tokens: tokens,
+            agentMuteRules: mcp.AllowAgentMuteRules);
 
         var app = builder.Build();
 

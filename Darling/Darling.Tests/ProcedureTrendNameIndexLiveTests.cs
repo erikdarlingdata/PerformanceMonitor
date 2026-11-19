@@ -47,19 +47,6 @@ public sealed class ProcedureTrendNameIndexLiveTests
 
     private static DateTime At(int index) => T0.AddMinutes(5 * index);
 
-    /// <summary>
-    /// The end of the window the tool is asked for: 22:00 UTC on the UTC day before the earlier of the test clock and the real clock.
-    /// The tool reads the real clock and refuses an <c>as_of</c> after it, and a test clock ahead of the real clock (the pinned 00:30
-    /// pass, run before midnight) puts <see cref="LiveClock.AnchoredEnd"/> after it. Four hours before 22:00 is 18:00 the same day,
-    /// so the window stays inside one daily chunk at any hour.
-    /// </summary>
-    private static DateTime ToolWindowEnd()
-    {
-        var testNow = LiveClock.Now();
-        var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        return (testNow < realNow ? testNow : realNow).Date.AddDays(-1).AddHours(22);
-    }
-
     /// <summary>The by-name text is asked for one procedure only: the builder refuses it without the procedure filter.</summary>
     [Fact]
     public void TheByNameTextIsAskedForOneProcedureOnly()
@@ -505,7 +492,8 @@ FROM generate_series(0, $3 - 1) AS g(i)", connection))
                 + ProcedureStatsNameIndex.IndexName + "')",
                 ct) is true, "the start path did not leave the name index as a valid four-key expression index");
 
-            var end = ToolWindowEnd();
+            /* The seed's newest collection and the tool's as_of: the tool refuses an as_of after the real clock. */
+            var end = LiveClock.AnchoredEndNotAfterNow();
             await using (var seed = new NpgsqlCommand(@"
 INSERT INTO collect.procedure_stats
     (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
