@@ -919,14 +919,18 @@ LIMIT 2000";
         // so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE) where the wait-type match
         // alone misses it and the alert fires; the query-text match (case-insensitive, NULL-safe) catches it
         // regardless of the wait it happens to be in at capture time.
+        // A request that is running and not waiting has a NULL wait_type. Each wait-type filter keeps it
+        // (wait_type IS NULL OR ...): an opt-out drops the waits it names, and a request with no current wait is in
+        // none of them. Without the NULL arm a long query would leave the read on every sample that catches it
+        // running, and the alert would clear while it still runs.
         string spServerDiagnosticsFilter = excludeSpServerDiagnostics
-            ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%' AND (r.query_text IS NULL OR r.query_text NOT ILIKE N'%sp_server_diagnostics%')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%') AND (r.query_text IS NULL OR r.query_text NOT ILIKE N'%sp_server_diagnostics%')" : "";
         string waitForFilter = excludeWaitFor
-            ? "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR'))" : "";
         string backupsFilter = excludeBackups
-            ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO'))" : "";
         string miscWaitsFilter = excludeMiscWaits
-            ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
+            ? "AND (r.wait_type IS NULL OR r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF'))" : "";
         // CDC capture sessions are flagged server-side by the collector (is_cdc_capture). COALESCE
         // guards pre-migration / archived rows where the column is NULL.
         string cdcFilter = excludeCdc
