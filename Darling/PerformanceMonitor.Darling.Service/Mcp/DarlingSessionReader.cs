@@ -28,8 +28,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// Lite). get_active_queries reads the <c>query_snapshots</c> base table over the window (the viewer's
 /// <c>LatestQuerySnapshotsSql</c>). get_waiting_tasks reads the <c>waiting_tasks</c> BASE table (there is
 /// no <c>v_waiting_tasks</c> passthrough view — the base table has existed since V1, and the viewer's
-/// trend reads hit it directly the same way); <c>resource_description</c> holds
-/// <c>database_id:file_id:page_id</c> for page latch and page I/O latch waits and NULL for other waits (#9055). Every SQL string is a public const so Darling.Tests can pin the
+/// trend reads hit it directly the same way); <c>resource_description</c> is stored but the collector
+/// writes it NULL ("no longer collected"). Every SQL string is a public const so Darling.Tests can pin the
 /// dialect + columns without a live Postgres.
 /// </para>
 /// </summary>
@@ -420,8 +420,8 @@ internal static class DarlingSessionReader
 
     /// <summary>
     /// The recently-captured waiting tasks over the window — the base <c>waiting_tasks</c> table (there is no
-    /// <c>v_waiting_tasks</c> view), newest first then longest wait. resource_description is
-    /// <c>database_id:file_id:page_id</c> for page latch and page I/O latch waits and NULL for other waits (#9055). $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 the databases as one
+    /// <c>v_waiting_tasks</c> view), newest first then longest wait. resource_description is stored but always
+    /// NULL (the collector no longer collects it). $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 the databases as one
     /// <c>text[]</c> (#5244, <see cref="DatabaseFilter.Clause"/>): SQL NULL is every database, otherwise only the named databases'
     /// rows. The predicate sits in the WHERE, ahead of the cap, so the page is the newest N of the chosen databases.
     ///

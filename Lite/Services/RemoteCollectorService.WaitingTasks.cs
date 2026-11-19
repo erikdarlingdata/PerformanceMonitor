@@ -17,7 +17,7 @@ public partial class RemoteCollectorService
 {
     /// <summary>
     /// Collects point-in-time waiting tasks via the shared <see cref="WaitingTasksCollector"/>
-    /// definition (smallint widening, resource_description kept for page latch waits only (#9055), and the
+    /// definition (smallint widening, the NULL resource_description placeholder, and the
     /// exclusion splice live there — the cross-SKU parity contract).
     /// </summary>
     private Task<int> CollectWaitingTasksAsync(ServerConnection server, CancellationToken cancellationToken)
