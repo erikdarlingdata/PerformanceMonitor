@@ -215,10 +215,12 @@ public sealed class PgTargetReadsNoSpillLiveTests
         await DarlingMcpTestData.ExecAsync(connection, ct, """
             CREATE SCHEMA pm9062_snapshot;
             CREATE TABLE pm9062_snapshot.pg_buffercache AS SELECT * FROM public.pg_buffercache;
+            DELETE FROM pm9062_snapshot.pg_buffercache WHERE reldatabase = (SELECT oid FROM pg_database WHERE datname = 'template0');
             """);
 
         /* Another database's buffers, every usage count NULL: the group's average is NULL, and a division by the sum of the
-           usage-count counts would raise on it. template0 is a database nothing connects to, so the group holds only these. */
+           usage-count counts would raise on it. template0 is a database nothing connects to, so the group holds only these.
+           Scratch databases are created from template0, so its own pages can sit in the pool during a parallel run (#9067), and the snapshot drops them above. */
         await DarlingMcpTestData.ExecAsync(connection, ct, """
             INSERT INTO pm9062_snapshot.pg_buffercache (bufferid, relfilenode, reldatabase, isdirty, usagecount)
             SELECT 900000 + g, 990001, (SELECT oid FROM pg_database WHERE datname = 'template0'), false, NULL
