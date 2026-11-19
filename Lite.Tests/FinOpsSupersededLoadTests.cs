@@ -135,6 +135,8 @@ VALUES ($1, $2, $3, 'lite-finops-sample-text', 'Db0', $4, $5, $6, $7, 1000, 1000
 /// #9058: a whole-tab FinOps load that a newer one superseded stops its store reads and gives back their read locks. The
 /// token reaches the lock wait, the open and the statement.
 /// </summary>
+/* One test asserts a wall-clock bound on a cancelled statement, so it runs alone with the other timing classes. */
+[Collection("timing")]
 public sealed class FinOpsSupersededLoadTests : IClassFixture<SharedDuckDbFixture>
 {
     private readonly DuckDbInitializer _duckDb;
