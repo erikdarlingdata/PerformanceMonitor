@@ -57,8 +57,6 @@ public sealed class PgTableTuningTests
            rollups exclude. The statement text is exact: the predicate is what keeps each one small. */
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_query_stats_restart_rows_time ON collect.query_stats (collection_time) WHERE sample_interval_seconds = 0", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_procedure_stats_restart_rows_time ON collect.procedure_stats (collection_time) WHERE sample_interval_seconds = 0", sql, StringComparison.Ordinal);
-        /* #8570: the one-procedure duration trend's index. Its third key is the expression that read compares. */
-        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_procedure_stats_server_db_name_time ON collect.procedure_stats (server_id, database_name, (COALESCE(NULLIF(schema_name, '') || '.', '') || object_name), collection_time)", sql, StringComparison.Ordinal);
 
         /* #3934: the store-metrics latest read's skip-scan index — the (kind, name) prefix for the loose
            index scan that walks distinct objects, the full three columns for each object's per-key

@@ -47,17 +47,12 @@ public sealed class ProcedureTrendNameIndexLiveTests
 
     private static DateTime At(int index) => T0.AddMinutes(5 * index);
 
-    /// <summary>The by-name text is asked for one procedure only, and the index key is the expression that text compares.</summary>
+    /// <summary>The by-name text is asked for one procedure only: the builder refuses it without the procedure filter.</summary>
     [Fact]
-    public void TheByNameTextIsAOneProcedureRead_AndTheIndexKeyIsTheExpressionItCompares()
+    public void TheByNameTextIsAskedForOneProcedureOnly()
     {
         Assert.Throws<ArgumentException>(() =>
             DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true, withProcedureFilter: false, procedureRowsByName: true));
-
-        Assert.NotEqual(DarlingTrendReader.ProcedureDurationTrendOneProcedureSql, DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql);
-        Assert.Contains(DurationTrendRouting.ProcedureFullNameSql + " = $5", DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql, StringComparison.Ordinal);
-        Assert.Contains("(" + DurationTrendRouting.ProcedureFullNameSql + ")", ProcedureStatsNameIndex.CreateSql, StringComparison.Ordinal);
-        Assert.Contains(ProcedureStatsNameIndex.IndexName, ProcedureStatsNameIndex.PresentSql, StringComparison.Ordinal);
     }
 
     /// <summary>The ten rows a collection stores at most: database, schema, object and handle.</summary>

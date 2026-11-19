@@ -713,9 +713,11 @@ public static class PgTableTuning
            behind and applied every other statement, and the start after it tried again. A store whose build cannot fit
            the budget pauses for it at every start and keeps the FILTER statement.
 
-           ONE BUILD PER START: the index shares the one-build budget (s_oneBuildPerStart) and is the last of those in this
-           list. On a store where an earlier one is also missing from a table that has rows, this start builds that one and
-           this index waits for the next start; until then the read keeps the FILTER statement.
+           ONE BUILD PER START: the index shares the one-build budget (s_oneBuildPerStart) and is the last of those a
+           hypertable store builds. On a store where an earlier one is also missing from a table that has rows, this start
+           builds that one and this index waits for the next start; until then the read keeps the FILTER statement. On a
+           plain-table store the wait_stats daily cover (WaitStatsDailyCoverIndexName) is later in this list and can wait
+           a start behind this index.
 
            THE READ, on a rig of one server with 8.0 M rows in 7 daily chunks, 5 of them compressed, warm, one procedure in
            one database:
