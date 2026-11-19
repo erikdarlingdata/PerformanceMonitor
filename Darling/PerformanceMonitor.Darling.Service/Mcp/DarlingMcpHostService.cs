@@ -736,7 +736,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                write only investigation state and need the same token gate as the writes, but never WITH the writes: one
                token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
-               front of every request cover them as they cover the writes, since they are only served with a token. */
+               front of every request cover them as they cover the writes, since they are only served with a token.
+               The same arm serves the agent action tools (DarlingMcpWritePolicy.AgentActionTools), write tools called with
+               an agent_action, and the Warning line names both groups. */
             if (!namedTokensOnly)
             {
                 LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
@@ -1235,25 +1237,28 @@ public sealed class DarlingMcpHostService : BackgroundService
             else
             {
                 logger.LogWarning(
-                    "MCP investigation tools are ON ({Setting}): {Tools} write investigation state; every MCP request, loopback included, " +
+                    "MCP investigation tools are ON ({Setting}): {Tools}; every MCP request, loopback included, " +
                     "must present the bearer token.",
                     DarlingMcpWritePolicy.InvestigationsSetting,
-                    DescribeInvestigationArmTools(served));
+                    DescribeInvestigationArmTools(served, mcp.AllowAgentMuteRules));
             }
         }
     }
 
     /// <summary>
     /// What the start line says the investigations arm serves (#8611), built from the policy's own sets so it cannot drift from the gate: every
-    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), then the Level 2 agent action tools the
-    /// arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a counted family, not 16 names. The four
-    /// mute rule tools are among those action tools: the arm also serves them without an agent_action, which the line says in a clause.
+    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), which write investigation state, then
+    /// the Level 2 agent action tools the arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a
+    /// counted family, not 16 names, which are write tools called with an agent_action. The four mute rule tools are among those action tools:
+    /// while <paramref name="agentMuteRules"/> (<c>mcp.allowAgentMuteRules</c>) is on the arm also serves them without an agent_action, which
+    /// the line says in a clause.
     /// </summary>
-    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served)
+    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served, bool agentMuteRules = true)
     {
         var actionCount = DarlingMcpWritePolicy.AgentActionTools.Count(served.Offers);
         return string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(t => t, StringComparer.Ordinal))
-            + $", and {actionCount} agent action tools (each with an agent_action; the mute rule tools also work without one)";
+            + $" write investigation state, and {actionCount} agent action tools are write tools called with an agent_action"
+            + (agentMuteRules ? " (the mute rule tools also write mute and digest rules without one)" : string.Empty);
     }
 
     /// <summary>

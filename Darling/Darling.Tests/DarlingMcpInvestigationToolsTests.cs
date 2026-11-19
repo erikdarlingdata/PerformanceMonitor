@@ -210,11 +210,13 @@ public sealed class DarlingMcpInvestigationToolsTests
     public void Instructions_NameTheInvestigationSwitch_AndTheWritesOffCondition()
     {
         /* #8463: the parenthetical lists every tool in InvestigationTools, in ordinal order, so a tool added to the set
-           appears here without an edit to the text. */
+           appears here without an edit to the text. #9072: the same sentence counts the agent action tools the arm serves. */
         var names = string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
+        var actions = DarlingMcpWritePolicy.AgentActionTools.Count(n => !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
         Assert.Contains(
-            "Investigation tools (" + names + ") write only investigation state and are " +
-            "served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off.",
+            "When darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off, it serves the investigation tools (" +
+            names + "), which write investigation state, and the " + actions.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            " agent action tools, which are write tools called with an agent_action.",
             DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
