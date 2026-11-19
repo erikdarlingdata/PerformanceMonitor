@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>The read is sent as two statements in ONE command: a <c>set_config('work_mem', ..., true)</c> first, the read after
 /// it. Npgsql sends a multi-statement command as one extended-protocol batch with one Sync, which PostgreSQL runs as one
 /// implicit transaction, so the local setting covers the read and ends with it. Nothing reaches the pooled connection, and no
-/// BEGIN or COMMIT shows up in the target's statement statistics. The caller moves past the first result with
+/// BEGIN or COMMIT shows up in the target's statement statistics on the minute read. The hourly text fetch carries a positional parameter, which Npgsql does not split on, so it sets the value in a transaction of its own. The caller moves past the first result with
 /// <c>NextResultAsync</c>.</para>
 ///
 /// <para>The value is sized inside the same statement from the target's own <c>pg_stat_statements.max</c> (the entry count
