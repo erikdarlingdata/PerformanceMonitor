@@ -18,11 +18,13 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Query Store liveness touch guard is SINGLE-SOURCED (#3189). Three statements guard a
+/// The Query Store liveness touch guard is SINGLE-SOURCED (#3189). Four sites guard a
 /// <c>last_seen</c> touch — <see cref="QueryStorePlanMap.TouchAndProbeSql"/>'s <c>touched</c> CTE, that
-/// statement's <c>dim_touch</c>, and <see cref="QueryStoreTextStore.TouchAndProbeSql"/>'s <c>touched</c>
-/// CTE — and they must all carry the SAME width, from
-/// <see cref="QueryStoreLivenessTouchGuard.GuardInterval"/>.
+/// statement's <c>dim_touch</c>, and the select and the conflict arm of
+/// <see cref="QueryStoreTextStore.TouchSeenSql"/> — and they must all carry the SAME width, from
+/// <see cref="QueryStoreLivenessTouchGuard.GuardInterval"/>. The text row's own restamp
+/// (<see cref="QueryStoreTextStore.RefreshTextRowSql"/>) is not one of them: it has one site, at
+/// <see cref="QueryStoreTextSeen.TextRowRefreshInterval"/>.
 ///
 /// <para><b>Why the property and not the value.</b> <see cref="QueryStorePlanMap.TouchAndProbeSql"/>'s own
 /// documentation says the map row and the dimension row cannot age out at different times, and calls that
@@ -52,14 +54,15 @@ namespace Darling.Tests;
 public sealed class QueryStoreTouchGuardSingleSourceTests
 {
     /// <summary>
-    /// The three guarded touches: two in <see cref="QueryStorePlanMap"/> (the <c>touched</c> CTE and
-    /// <c>dim_touch</c>) and one in <see cref="QueryStoreTextStore"/>. An exact count, not a floor — a floor
-    /// passes when a site is deleted, and a deleted guard is an unguarded touch on every cycle.
+    /// The four guarded touches: two in <see cref="QueryStorePlanMap"/> (the <c>touched</c> CTE and
+    /// <c>dim_touch</c>) and two in <see cref="QueryStoreTextStore.TouchSeenSql"/> (its select and its
+    /// conflict arm). An exact count, not a floor — a floor passes when a site is deleted, and a deleted
+    /// guard is an unguarded touch on every cycle.
     /// </summary>
-    private const int GuardSiteCount = 3;
+    private const int GuardSiteCount = 4;
 
     /* Every guard site is this comparison against the batch stamp, immediately followed by the interval.
-       Anchoring on the shape rather than on a table alias is what lets one expectation cover all three. */
+       Anchoring on the shape rather than on a table alias is what lets one expectation cover all of them. */
     private const string GuardAnchor = "last_seen < $5::timestamp - ";
 
     /// <summary>
@@ -67,36 +70,51 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
     /// <see cref="GuardSiteCount"/> of them. The corroborator: it cannot see a hard-coded literal that
     /// happens to equal the constant, which is why
     /// <c>NoGuardSiteSpellsItsOwnWidth</c> is the control — but it does catch a guard site
-    /// disappearing (an unguarded touch, one write per row per cycle) or a fourth one arriving at some other
+    /// disappearing (an unguarded touch, one write per row per cycle) or another one arriving at some other
     /// width.
     /// </summary>
     [Fact]
     public void EveryGuardSiteInTheShippedSqlCarriesTheOneWidth()
     {
-        var statements = new[] { QueryStorePlanMap.TouchAndProbeSql, QueryStoreTextStore.TouchAndProbeSql };
-        var widths = new List<string>();
-
-        foreach (var sql in statements)
-        {
-            var at = sql.IndexOf(GuardAnchor, StringComparison.Ordinal);
-
-            while (at >= 0)
-            {
-                var after = at + GuardAnchor.Length;
-                var end = sql.IndexOf('\n', after);
-                widths.Add((end < 0 ? sql[after..] : sql[after..end]).TrimEnd('\r'));
-                at = sql.IndexOf(GuardAnchor, after, StringComparison.Ordinal);
-            }
-        }
+        var statements = new[] { QueryStorePlanMap.TouchAndProbeSql, QueryStoreTextStore.TouchSeenSql, QueryStoreTextStore.ProbeSql };
+        var widths = statements.SelectMany(WidthsAtTheAnchor).ToList();
 
         Assert.Equal(GuardSiteCount, widths.Count);
         Assert.All(widths, width => Assert.Equal(QueryStoreLivenessTouchGuard.GuardInterval, width));
 
-        /* The two plan-side sites are in ONE statement, so a reader checking only the file they are editing
-           still sees two of the three. Stated as its own assertion because that asymmetry is the reason the
-           third site gets missed. */
+        /* The two plan-side sites are in ONE statement and the two text-side sites in another, so a reader
+           checking only the file they are editing still sees two of the four. Stated as its own assertion
+           because that asymmetry is the reason the other file's sites get missed. */
         Assert.Equal(2, CountOf(QueryStorePlanMap.TouchAndProbeSql, GuardAnchor));
-        Assert.Equal(1, CountOf(QueryStoreTextStore.TouchAndProbeSql, GuardAnchor));
+        Assert.Equal(2, CountOf(QueryStoreTextStore.TouchSeenSql, GuardAnchor));
+        Assert.Equal(0, CountOf(QueryStoreTextStore.ProbeSql, GuardAnchor));
+    }
+
+    /// <summary>
+    /// The text row's own restamp is a different width on purpose, and it is exactly one site. It is the write this
+    /// statement exists to make rare (each one is a non-HOT update of a wide row under the trigram index), so a second
+    /// site, or the guard's width landing here, puts the text row back on the touch's cadence.
+    /// </summary>
+    [Fact]
+    public void TheTextRowRestampCarriesTheRefreshWidthAtItsOneSite()
+    {
+        var widths = WidthsAtTheAnchor(QueryStoreTextStore.RefreshTextRowSql).ToList();
+
+        Assert.Equal(new[] { QueryStoreTextSeen.TextRowRefreshInterval }, widths);
+        Assert.NotEqual(QueryStoreLivenessTouchGuard.GuardInterval, QueryStoreTextSeen.TextRowRefreshInterval);
+    }
+
+    private static IEnumerable<string> WidthsAtTheAnchor(string sql)
+    {
+        var at = sql.IndexOf(GuardAnchor, StringComparison.Ordinal);
+
+        while (at >= 0)
+        {
+            var after = at + GuardAnchor.Length;
+            var end = sql.IndexOf('\n', after);
+            yield return (end < 0 ? sql[after..] : sql[after..end]).TrimEnd('\r');
+            at = sql.IndexOf(GuardAnchor, after, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>

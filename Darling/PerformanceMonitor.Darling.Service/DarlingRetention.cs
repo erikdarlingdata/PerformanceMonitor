@@ -822,18 +822,35 @@ public static class DarlingRetention
                     tablesFailed++;
                 }
 
-                /* #2150: query_store statement text, same shape and same direction of margin as the two
-                   above — it must outlive the facts that reference it, because text retired early reads as a
-                   statement that never had text rather than as one whose text expired. */
+                /* #2150: query_store statement text, the same direction of margin as the two above — it must
+                   outlive the facts that reference it, because text retired early reads as a statement that
+                   never had text rather than as one whose text expired. #9043: the prune reads the liveness
+                   stamp from collect.query_store_text_seen and retires a text only when that stamp and the
+                   text row's own are both behind the cutoff (QueryStoreTextSeen.PruneSql). The cascade of the
+                   seen table's foreign key removes the seen row with the text row. */
                 var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
                 if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
                 {
                     var queryTextCutoff = utcNow.AddDays(
                         -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
+                    /* A text row with no seen row gets one first, stamped with its own last_seen, so the prune below
+                       judges it by that stamp instead of never finding it. Keys against keys, no pass over the text heap
+                       (QueryStoreTextSeen.AdoptMissingSql). It inserts rows, so its count stays out of the rows deleted. */
+                    var seenAdopted = await PurgeOneAsync(
+                        postgres, QueryStoreTextSeen.TableName, QueryStoreTextSeen.AdoptMissingSql, queryTextCutoff, logger, cancellationToken,
+                        batchSize: SingleShotStatement, pacer: walPacer);
+                    if (seenAdopted is not null)
+                    {
+                        tablesPurged++;
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
+
                     var queryTextDeleted = await PurgeOneAsync(
                         postgres, QueryStoreTextStore.TableName,
-                        UnorderedRowCappedDeleteSql(
-                            QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
+                        QueryStoreTextSeen.PruneSql(livenessTouchedTablePruneRowCap),
                         queryTextCutoff, logger, cancellationToken,
                         batchSize: livenessTouchedTablePruneRowCap,
                         pacer: walPacer);
@@ -2110,11 +2127,13 @@ WHERE NOT EXISTS
 
     /// <summary>
     /// A row-capped purge with NO <c>ORDER BY</c> (#4250 item 3) — the sibling of
-    /// <see cref="RowCappedDeleteSql"/> for the two tables whose V149 migration dropped their
-    /// <c>last_seen</c> btree (<see cref="QueryStorePlanMap"/>, <see cref="QueryStoreTextStore"/>): with no
+    /// <see cref="RowCappedDeleteSql"/> for a table with no <c>last_seen</c> btree
+    /// (<see cref="QueryStorePlanMap"/>, whose V149 migration dropped it): with no
     /// index, <c>ORDER BY {timeColumn}</c> forces a sort of every row under the cutoff before the
     /// <c>LIMIT</c> can apply, which is a second full pass over exactly the rows the seq scan already read.
     /// Dropping it removes that pass; the row cap and the drain contract are unchanged.
+    /// <see cref="QueryStoreTextStore"/>'s prune (<see cref="QueryStoreTextSeen.PruneSql"/>) is capped and
+    /// unordered for the same reason, over its narrow seen table.
     ///
     /// <para><b>Why dropping the ordering is still correct here, unlike the case
     /// <see cref="RowCappedDeleteSql"/>'s own doc warns against.</b> That doc's "an unordered cap would
@@ -2141,7 +2160,8 @@ WHERE NOT EXISTS
     ///
     /// <para>The <c>ctid</c> idiom itself requires a plain table — reading <c>ctid</c> through
     /// TimescaleDB's transparent decompression is unsupported (#1564) — and both
-    /// <see cref="QueryStorePlanMap.TableName"/> and <see cref="QueryStoreTextStore.TableName"/> are plain
+    /// <see cref="QueryStorePlanMap.TableName"/> and <see cref="QueryStoreTextStore.TableName"/> (which
+    /// <see cref="QueryStoreTextSeen.PruneSql"/> deletes from by <c>ctid</c>) are plain
     /// tables, never hypertables (no <c>create_hypertable</c> call anywhere in their migrations), so that
     /// constraint never applies to either.</para>
     /// </summary>
@@ -2975,9 +2995,10 @@ public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, in
 }
 
 /// <summary>
-/// The once-per-24-hours rule for the <c>collect.query_store_text</c> prune. Each prune statement is a full serial scan of the
-/// table's heap (about 33 seconds on the production store with 42 SQL Server servers), because the table has no
-/// <c>last_seen</c> index on purpose (it would stop the liveness touch from updating in place). A retention pass is due daily,
+/// The once-per-24-hours rule for the <c>collect.query_store_text</c> prune. Each prune statement is a full serial scan of
+/// <c>collect.query_store_text_seen</c>, the narrow table that holds the liveness stamp (about 1/28 of the text heap: 209 MB
+/// against 5,958 MB at 3.45 million texts), because neither table has a <c>last_seen</c> index on purpose (it would stop the
+/// liveness touch from updating in place). A retention pass is due daily,
 /// but a pass the wall budget stops brings the next one forward to within the hour, and each service start runs one at once, so
 /// the passes themselves are not a daily cadence. The gate holds the time of the last prune that finished, in memory, so the
 /// worker's passes share it. A restart forgets it, which costs one extra prune. A day's backlog is far under the prune's

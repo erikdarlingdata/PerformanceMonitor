@@ -188,7 +188,7 @@ ON CONFLICT (id) DO NOTHING";
 
     /// <summary>Deletes the keys whose text row is gone (retention pruned it). It runs with the text prune, so at most once a day
     /// (the text prune's gate), as one anti-join of the key table against the text table's primary key. At about 150,000 keys on a
-    /// large store that reads at most that primary key (about 0.8 GB), less than the text prune's own scan of the heap. <c>$1</c> is the retention
+    /// large store that reads at most that primary key (about 0.8 GB). <c>$1</c> is the retention
     /// pass's cutoff, which every purge statement is bound with. The test does not need it, and it is named only so the bind
     /// matches the statement.</summary>
     public const string PruneSql = @"

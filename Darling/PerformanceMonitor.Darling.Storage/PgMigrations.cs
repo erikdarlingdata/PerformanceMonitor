@@ -3346,6 +3346,37 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     ON collect.plan_correction (server_id, database_name, query_id, collection_time DESC)
     WHERE recommendation_name IS NOT NULL;";
 
+    /// <summary>
+    /// V281 (#9043): <c>collect.query_store_text_seen</c>, the narrow table that holds the Query Store text liveness stamp
+    /// (<see cref="QueryStoreTextSeen"/>), so the touch that runs every collection writes a 60-byte row instead of a new copy
+    /// of a text row and its trigrams.
+    ///
+    /// <para><b>Order, in the rung's one transaction.</b> The table with no key, then the statement trigger on
+    /// <c>collect.query_store_text</c> that writes the seen row of every inserted text row, then the backfill of the text
+    /// rows stored before the rung, then the primary key, then the foreign key to the text row (<c>ON DELETE CASCADE</c>).
+    /// <c>CREATE TRIGGER</c> takes a SHARE ROW EXCLUSIVE lock on the text table, held to the commit, so a writer of text
+    /// waits for the rung and no insert falls between the trigger and the backfill. The lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's and V219's.</para>
+    ///
+    /// <para><b>Cost, measured on PostgreSQL 18.6</b> against 6.9 million text rows (a 4.2 GB heap, 8.8 GB with TOAST and
+    /// indexes): the backfill is one sequential pass of the main heap, 3.7 s and 0.6 GB of WAL; the key builds in 2.3-2.4 s
+    /// (243 MB); the foreign key validates in 4.8-4.9 s. About 11 s in all, and the seen table is 418 MB. The same load into
+    /// a table that already has its key takes 51-55 s, which is why the constraints come last. The time follows the text
+    /// table's main heap, so this rung is one of the floor-setting rungs of <see cref="MigrationLockWaitTimeoutSeconds"/>.</para>
+    ///
+    /// <para><b>An older build against this store.</b> It keeps stamping <c>query_store_text.last_seen</c> and prunes on it,
+    /// and never reads the seen table. The trigger stays, so the text rows it inserts get seen rows, and the cascade
+    /// removes the seen rows of the text rows it prunes. See <see cref="QueryStoreTextSeen.TextRowRefreshHours"/> for what
+    /// keeps its first prune from retiring live text.</para>
+    /// </summary>
+    private static readonly string V281Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n"
+        + QueryStoreTextSeen.CreateTableSql + "\n"
+        + QueryStoreTextSeen.TriggerSql + "\n"
+        + QueryStoreTextSeen.BackfillSql + "\n"
+        + QueryStoreTextSeen.PrimaryKeySql + "\n"
+        + QueryStoreTextSeen.ForeignKeySql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3692,6 +3723,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V280 (#8570): the plan_correction recommendation index, so the force-plan target read seeks each target query's newest recommendation
            instead of reading a day of captures. Built on the uncompressed chunks only. */
         new Migration(280, "plan-correction-recommendation-index", V280Sql),
+        /* V281 (#9043): the Query Store text liveness stamp moves to collect.query_store_text_seen, so the touch no longer rewrites a
+           text row and its trigrams. Creates the table, the insert trigger on the text table, the backfill and the two constraints. */
+        new Migration(281, "query-store-text-seen", V281Sql),
     };
 
     /// <summary>
@@ -6738,16 +6772,18 @@ CREATE INDEX IF NOT EXISTS idx_read_latency_time
     /// <summary>
     /// V149 — the Query Store liveness touch becomes a HOT update on <c>collect.query_store_plan_map</c> and
     /// <c>collect.query_store_text</c> (#4250): drops each table's <c>last_seen</c> btree index and sets
-    /// <c>fillfactor = 90</c>. <c>TouchAndProbeSql</c> on both tables (<see cref="QueryStorePlanMap"/>,
-    /// <see cref="QueryStoreTextStore"/>) only ever writes <c>last_seen</c> and, conditionally, an
+    /// <c>fillfactor = 90</c>. The touch of each table (<see cref="QueryStorePlanMap.TouchAndProbeSql"/>,
+    /// <see cref="QueryStoreTextStore.RefreshTextRowSql"/>) only ever writes <c>last_seen</c> and, conditionally, an
     /// unindexed hash column — so once the index is gone, no indexed column the touch changes remains, and a
     /// page with fillfactor headroom lets the new tuple stay on its old page: both conditions Postgres's HOT
     /// optimization needs. Confirmed by <c>git grep</c> against the service and storage code: the only other
     /// reader of either index was each table's own <c>PruneSql</c> time-sliced <c>DELETE ... WHERE last_seen &lt;
-    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. This change
-    /// replaces that prune on both tables with <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.UnorderedRowCappedDeleteSql"/>:
+    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. Neither prune
+    /// needs the index: the plan map's is <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.UnorderedRowCappedDeleteSql"/>,
     /// one capped sequential pass per batch, with no ordering or subquery over <c>last_seen</c> to lose by
-    /// dropping the index. See that builder's summary for the shape and the measured cost.
+    /// dropping the index (see that builder's summary for the shape and the measured cost), and the text
+    /// table's is <see cref="QueryStoreTextSeen.PruneSql"/>, the same capped pass over the narrow table V281
+    /// keeps the liveness stamp in.
     ///
     /// <para>Plain <c>DROP INDEX</c> and <c>ALTER TABLE ... SET (fillfactor = ...)</c>, not <c>CONCURRENTLY</c>:
     /// <c>MigrateAsync</c> wraps every rung in a transaction, and <c>CREATE/DROP INDEX CONCURRENTLY</c> cannot
@@ -11078,7 +11114,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <c>pg_advisory_lock</c> there too). It is because the blocking form cannot say what it waited for:
     /// Npgsql surfaces the expiry as <c>NpgsqlException("Exception while reading from stream")</c> wrapping
     /// <c>TimeoutException("Timeout during reading attempt")</c>, and the one production caller logs
-    /// <c>ex.Message</c> alone — so a 25-minute wait on a sibling migrator reached the operator as a
+    /// <c>ex.Message</c> alone — so a 30-minute wait on a sibling migrator reached the operator as a
     /// sentence about a stream, which is exactly the #2874 misdiagnosis shape. Polling also makes the wait
     /// visible WHILE it happens rather than only after it fails, and makes the sleep cancellable by the
     /// stopping token directly instead of through a cancel-request round trip. Each attempt is a statement
@@ -11100,9 +11136,11 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// 0.301 s end to end at 108 rungs on a fresh PostgreSQL 17.11 / TimescaleDB 2.29.2 store, advisory lock
     /// and version stamps included. The applier gives each rung's WHOLE SQL a single
     /// <see cref="MigrationCommandTimeoutSeconds"/>, so that bound is per-RUNG and V39's two indexes cost one
-    /// multiple rather than two: four rungs is four times the bound for the data-moving part of a full
-    /// V21-to-current upgrade, and the fifth multiple here is margin, sized at one rung bound because that is
-    /// the granularity this ladder grows by — one new data-moving rung. Seeded reference points on that same
+    /// multiple rather than two. V281 (#9043) is the fifth rung big enough to spend this budget: its backfill
+    /// reads the main heap of the populated <c>query_store_text</c> once (about 11 s over a 4.2 GB heap on
+    /// PostgreSQL 18.6, see <see cref="V281Sql"/>). Five rungs is five times the bound for the data-moving
+    /// part of a full V21-to-current upgrade, and the sixth multiple here is margin, sized at one rung bound
+    /// because that is the granularity this ladder grows by — one new data-moving rung. Seeded reference points on that same
     /// local store, warm and on local NVMe (a cold busy store being why the rung bound is 300 s rather than
     /// 30): V22 1.29 s over 907 MB / 90 chunks, V23 9.37 s over a 608 MB heap, V39 1.44 s over 1.26 GB. The
     /// live 42-server store holds 2.72 GB, 0.69 GB and 24.5 GB in those same tables, so the real figures are
@@ -11145,7 +11183,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <para><b>What bounds a rung that overruns its own budget: that budget does, and the residual is a
     /// rung SHAPE rather than a missing mechanism.</b> <see cref="MigrationCommandTimeoutSeconds"/> is
     /// client-side, so whether it BINDS was measured rather than reasoned about — see that constant: the
-    /// cancel it sends is honoured by all four floor-setting rungs within 50 ms of the budget, from inside
+    /// cancel it sends is honoured by the four floor-setting rungs it was measured on within 50 ms of the budget, from inside
     /// I/O waits and from a full-budget <c>Lock/relation</c> wait, so the floor above is a ceiling on real
     /// holds too. What it does not bound is a rung that keeps TALKING, because Npgsql restarts the timeout
     /// on every backend message. Two rung shapes opt out of it and both are one line of plpgsql from V23's
@@ -11166,17 +11204,17 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// is beyond the others. Terminate is worse than merely redundant: it reports <c>57P01</c>, which
     /// <c>StartupFailureTriage</c> holds retryable, so it would turn a rung that can never apply into one
     /// that is retried. Splitting the expensive rungs so each statement gets its own budget helps exactly
-    /// one of the four — V22, V23 and V104 are each a single statement — and pays for that by raising this
-    /// floor from four multiples to five. Both server-side timeouts have the wrong unit or the wrong
+    /// one of those four — V22, V23 and V104 are each a single statement — and pays for that by raising this
+    /// floor by one multiple. Both server-side timeouts have the wrong unit or the wrong
     /// reach: <c>statement_timeout</c> is per STATEMENT, not per transaction — three one-second statements
     /// all survive a two-second setting — so it would bound V39's two <c>CREATE INDEX</c>es at one budget
-    /// EACH, making the ladder's floor five multiples instead of four and spending this constant's entire
+    /// EACH, adding one multiple to the ladder's floor and spending this constant's entire
     /// margin to buy a bound that still is not per-rung. <c>transaction_timeout</c> has exactly the right
     /// unit, since each rung is one transaction, but it is PostgreSQL 17+ against readers here that gate
     /// as low as 13, and it ends the session with FATAL rather than failing the statement.</para>
     ///
     /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the rung bound moves.
-    /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A fifth
+    /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A new
     /// FLOOR-SETTING rung is pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans
     /// every rung's shipped SQL for data-moving shapes and fails when that set stops matching the census
     /// above, so a new one arrives carrying this derivation in a failure message instead of arriving
@@ -11192,7 +11230,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// per poll on the store being migrated, to buy a case that needs a single rung to exceed five minutes
     /// on a ladder measured at 0.301 s.</para>
     /// </summary>
-    private const int MigrationLockWaitTimeoutSeconds = 5 * MigrationCommandTimeoutSeconds;
+    private const int MigrationLockWaitTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
 
     /// <summary>
     /// Gap (seconds) between <c>pg_try_advisory_lock</c> attempts while a sibling migrator holds the lock.

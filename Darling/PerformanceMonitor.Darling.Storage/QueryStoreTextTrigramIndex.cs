@@ -34,10 +34,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// so the search keeps reading through it while this one waits for its extensions or builds, and it is dropped once this one is valid. Turning
 /// the option off drops both.</para>
 ///
-/// <para><b>Write cost.</b> <c>query_sql_text</c> only changes when Query Store renumbers a <c>query_id</c>, so the liveness touch of
-/// <c>last_seen</c> stays a HOT update when the page has room (the table runs at fillfactor 90) and writes nothing to this index. A touch
-/// that cannot stay on its page, an insert and a text overwrite each add the row's trigrams, which GIN's fast update collects in its
-/// pending list and merges in bulk.</para>
+/// <para><b>Write cost.</b> An insert, a text overwrite and any update of a text row that cannot stay on its page (a non-HOT update) each
+/// add the row's trigrams, which GIN's fast update collects in its pending list and merges in bulk. Texts are wide, so few updates find
+/// room on their page: on 3.45 million texts of about 1.4 KB at fillfactor 90, about 9% of a 1,500-row batch of <c>last_seen</c> updates
+/// stayed HOT, and the batch took 308 to 455 ms and 33 to 55 MB of WAL with this index against 10 to 13 ms and 5 MB without it. That is
+/// why the liveness stamp lives in <see cref="QueryStoreTextSeen"/> and the fetch probe's touch writes it there (4 to 5 ms and 0.5 MB for
+/// the same batch). The touch updates a text row only through <see cref="QueryStoreTextStore.RefreshTextRowSql"/>, once every
+/// <see cref="QueryStoreTextSeen.TextRowRefreshHours"/> hours a row at most.</para>
 ///
 /// <para><b>One pass.</b> <see cref="RunPassAsync"/> follows the plan-cache index's pass (<see cref="QueryTextTrigramIndex"/>): option off,
 /// drop this index and the one it replaces (<c>DROP INDEX CONCURRENTLY</c>); option on and index valid, drop the replaced one if it is still

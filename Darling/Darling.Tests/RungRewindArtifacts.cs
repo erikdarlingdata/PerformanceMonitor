@@ -874,6 +874,12 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         // V280 (#8570): the plan_correction recommendation index. The index is the probe's newest sentinel. The rewind drops it, so a re-run of V280
         // builds it again. Safe on a store that never had it.
         new(280, "hasPlanCorrectionServerDbQueryIndex", "DROP INDEX IF EXISTS collect.idx_plan_correction_server_db_query_time;"),
+        // V281 (#9043): the Query Store text liveness table, its trigger on the text table and the trigger's function. The table is the probe's
+        // newest sentinel. The rewind drops all three, so a re-run of V281 creates the table, fills it from the text rows and re-arms the trigger.
+        // Safe on a store that never had them.
+        new(281, "hasQueryStoreTextSeen", @"DROP TRIGGER IF EXISTS trg_query_store_text_seen_ins ON collect.query_store_text;
+DROP FUNCTION IF EXISTS collect.query_store_text_seen_track();
+DROP TABLE IF EXISTS collect.query_store_text_seen;"),
     ];
 
     /// <summary>

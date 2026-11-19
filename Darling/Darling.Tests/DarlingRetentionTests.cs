@@ -1200,11 +1200,11 @@ WHERE hypertable_name = 'wait_stats'
     [Fact]
     public void UnorderedRowCappedDelete_HasNoOrderByAndNoMinSubquery()
     {
-        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_text", "last_seen", 300_000);
+        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_plan_map", "last_seen", 300_000);
 
         Assert.Equal(
-            "DELETE FROM collect.query_store_text WHERE ctid IN ("
-            + "SELECT ctid FROM collect.query_store_text WHERE last_seen < $1 "
+            "DELETE FROM collect.query_store_plan_map WHERE ctid IN ("
+            + "SELECT ctid FROM collect.query_store_plan_map WHERE last_seen < $1 "
             + "LIMIT 300000)",
             sql);
 
@@ -1216,7 +1216,31 @@ WHERE hypertable_name = 'wait_stats'
     }
 
     /// <summary>
-    /// Both liveness-touched tables' purge calls use the unordered builder, carry the shared cap as their
+    /// The text prune (#9043) is the same unordered, row-capped shape as <see cref="DarlingRetention.UnorderedRowCappedDeleteSql"/>,
+    /// with the capped scan on the narrow seen table: no <c>ORDER BY</c>, no <c>min()</c> subquery, no time slice, one bound
+    /// against the fixed cutoff, and the cap inside the scan so the drain loop's full-batch contract holds. The text row's own
+    /// stamp is tested twice, in the scan and again on the delete, so a text an older build stamped (or one restamped between
+    /// the scan and the delete) is kept.
+    /// </summary>
+    [Fact]
+    public void TextPrune_IsUnorderedAndRowCapped_OnTheSeenTable()
+    {
+        var sql = QueryStoreTextSeen.PruneSql(300_000).TrimStart();
+
+        Assert.StartsWith("DELETE FROM collect.query_store_text AS t", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_text_seen AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE s.last_seen < $1", sql, StringComparison.Ordinal);
+        Assert.Contains("k.last_seen < $1", sql, StringComparison.Ordinal);
+        Assert.Contains("t.last_seen < $1", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 300000", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("min(", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("INTERVAL", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Both liveness-touched tables' purge calls use an unordered row-capped delete (the map through the builder, the text
+    /// through <see cref="QueryStoreTextSeen.PruneSql"/>), carry the shared cap as their
     /// batch size (so the drain loop's "a full-cap batch means there may be more" contract applies), and
     /// leave <c>adaptiveRowCapTimeColumn</c> unset — that parameter exists only for the plan dimension's
     /// #4130 retry-at-half-cap behavior, which neither of these tables has been measured to need: both
@@ -1242,7 +1266,7 @@ WHERE hypertable_name = 'wait_stats'
         var textAt = source.IndexOf("var queryTextDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
         Assert.True(textAt >= 0, "the query text purge call moved");
         var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
-        Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreTextSeen.PruneSql(", textBody, StringComparison.Ordinal);
         Assert.Contains("livenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", textBody, StringComparison.Ordinal);
     }

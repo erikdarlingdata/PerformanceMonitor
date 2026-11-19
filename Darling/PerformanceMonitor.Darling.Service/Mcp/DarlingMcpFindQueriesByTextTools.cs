@@ -144,19 +144,36 @@ public sealed class DarlingMcpFindQueriesByTextTools
 
     /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1. The whole text comes back so the judge
     /// sees all of it before the excerpt is cut (see the class summary); the cap keeps that to at most $4 texts.
-    /// Primary-key order, so a common pattern stops at the cap instead of reading the scope.</summary>
+    /// Primary-key order, so a common pattern stops at the cap instead of reading the scope.
+    /// <para>The match is the inner statement, on the text table alone, and its cap is applied there. <c>last_seen</c> is the liveness stamp
+    /// the fetch probe keeps in <c>query_store_text_seen</c> (<see cref="QueryStoreTextSeen"/>), read by primary key for the at most $4 rows
+    /// of the page, or the text row's own stamp where that is the newer one or the text has no row there.</para></summary>
     internal const string QueryStoreSql = @"
-SELECT t.database_name,
-       t.query_id,
-       t.query_hash,
-       t.last_seen,
-       t.query_sql_text
-FROM query_store_text AS t
-WHERE t.server_id = $1
-AND   ($2::text IS NULL OR t.database_name = $2)
-AND   t.query_sql_text ILIKE '%' || $3 || '%' ESCAPE '\'
-ORDER BY t.database_name, t.query_id
-LIMIT $4";
+SELECT m.database_name,
+       m.query_id,
+       m.query_hash,
+       GREATEST(s.last_seen, m.last_seen) AS last_seen,
+       m.query_sql_text
+FROM
+(
+    SELECT t.server_id,
+           t.database_name,
+           t.query_id,
+           t.query_hash,
+           t.last_seen,
+           t.query_sql_text
+    FROM query_store_text AS t
+    WHERE t.server_id = $1
+    AND   ($2::text IS NULL OR t.database_name = $2)
+    AND   t.query_sql_text ILIKE '%' || $3 || '%' ESCAPE '\'
+    ORDER BY t.database_name, t.query_id
+    LIMIT $4
+) AS m
+LEFT JOIN query_store_text_seen AS s
+  ON  s.server_id = m.server_id
+  AND s.database_name = m.database_name
+  AND s.query_id = m.query_id
+ORDER BY m.database_name, m.query_id";
 
     /// <summary>Plan-cache text of one span of the raw tier. $1 server_id, $2 database or null, $3 the escaped pattern, $4 the rows still wanted
     /// (the page cap + 1 less the rows earlier spans found), $5 and $6 the span's floor and ceiling (naive UTC, floor inclusive), $7 and $8 the
