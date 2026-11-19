@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PerformanceMonitor.Exporter\PerformanceMonitor.Exporter.csproj" />
+    <!-- StoreColumnCoverageTests builds a real store schema from the migrations (PgMigrations.MigrateAsync). -->
+    <ProjectReference Include="..\..\Darling\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
   </ItemGroup>
 
   <ItemGroup>
