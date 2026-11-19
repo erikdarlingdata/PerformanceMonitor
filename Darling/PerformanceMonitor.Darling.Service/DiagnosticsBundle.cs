@@ -81,6 +81,8 @@ internal static class DiagnosticsBundle
         "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowAgentMuteRules", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "McpConfig.PersonalTokens", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
         /* #8184: the health port is projected as its on/off flag, like mcp_enabled; its port and address stay out, like McpConfig.Port. */
         "DarlingConfig.Health", "HealthConfig.Enabled",
+        /* #9013: the metrics port is projected as its on/off flag only; its port, address, token and allowFrom stay out. */
+        "DarlingConfig.Metrics", "MetricsConfig.Enabled",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -121,6 +123,10 @@ internal static class DiagnosticsBundle
         "WebConfig.Port",
         "HealthConfig.Port",
         "HealthConfig.Listen",
+        "MetricsConfig.Port",
+        "MetricsConfig.Listen",
+        "MetricsConfig.Token",
+        "MetricsConfig.AllowFrom",
         "WebConfig.PublicBaseUrl",
         "MonitoredServer.Name",
         "MonitoredServer.Host",
@@ -202,6 +208,7 @@ internal static class DiagnosticsBundle
             ["mcp_data_detail"] = McpDataDetailModes.Word(McpDataDetailModes.Resolve(config.Mcp?.DataDetail)),
             ["web_enabled"] = config.Web?.Enabled ?? false,
             ["health_enabled"] = config.Health?.Enabled ?? false,
+            ["metrics_enabled"] = config.Metrics?.Enabled ?? false,
             ["web_network_exposed"] = WebNetworkExposed(config),
             ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
             ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
