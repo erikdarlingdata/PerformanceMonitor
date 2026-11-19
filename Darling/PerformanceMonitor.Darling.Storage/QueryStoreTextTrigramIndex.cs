@@ -42,6 +42,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// the same batch). The touch updates a text row only through <see cref="QueryStoreTextStore.RefreshTextRowSql"/>, once every
 /// <see cref="QueryStoreTextSeen.TextRowRefreshHours"/> hours a row at most.</para>
 ///
+/// <para><b>The pending list.</b> The insert that takes the pending list past <c>gin_pending_list_limit</c> merges the whole list inside its
+/// own call, and at the server default of 4 MB that is the collector's insert every few dozen calls. Both indexes carry the plan-cache
+/// index's limit (<see cref="PendingListLimitKb"/>, 64 MB): the build creates this one with it, and the clean sets it on an index that
+/// lacks it, under <see cref="LockTimeout"/>. The clean (<see cref="CleanPendingListsAsync"/>) runs every <see cref="CleanInterval"/> on
+/// its own connection, apart from the pass, and empties the list of each index that is valid, this one and the one it replaces for as long
+/// as that one exists, so the merge is the clean's work and not the collector's.</para>
+///
 /// <para><b>One pass.</b> <see cref="RunPassAsync"/> follows the plan-cache index's pass (<see cref="QueryTextTrigramIndex"/>): option off,
 /// drop this index and the one it replaces (<c>DROP INDEX CONCURRENTLY</c>); option on and index valid, drop the replaced one if it is still
 /// there; a build running in another backend, nothing;
@@ -87,6 +94,19 @@ public static class QueryStoreTextTrigramIndex
     /// <summary>Time between passes.</summary>
     public static readonly TimeSpan PassInterval = QueryTextTrigramIndex.PassInterval;
 
+    /// <summary>Both indexes' <c>gin_pending_list_limit</c> in kB: the plan-cache index's value.</summary>
+    internal const int PendingListLimitKb = QueryTextTrigramIndex.PendingListLimitKb;
+
+    /// <summary>How long a limit change on either index waits for its lock: the plan-cache index's value.</summary>
+    internal const string LockTimeout = QueryTextTrigramIndex.LockTimeout;
+
+    /// <summary>The time between cleans of the two indexes' pending lists. Each row that reaches this GIN carries a whole Query Store
+    /// statement's trigrams, about 456 trigrams or about 1.9 pending-list pages on a text of 1.4 KB, so its list fills faster per row than the
+    /// plan-cache index's: at a store ten times the field's write rate a list cleaned every 5 minutes reaches the
+    /// <see cref="PendingListLimitKb"/> limit, and 2 minutes keeps it under half of it. This index's own value, with its own reason, apart
+    /// from <see cref="QueryTextTrigramIndex.CleanInterval"/>.</summary>
+    public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(2);
+
     /// <summary>One catalog read: the table, the index, the index it replaces, both extensions and any build in progress on the table. No
     /// parameters.</summary>
     internal const string StateSql = $@"
@@ -109,12 +129,13 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
 
     internal const string DropReplacedSql = "DROP INDEX CONCURRENTLY IF EXISTS " + ReplacedIndexName;
 
-    /// <summary>The build, with each operator class named in the schema its extension lives in (it is not always on the search path).</summary>
+    /// <summary>The build, with each operator class named in the schema its extension lives in (it is not always on the search path), and
+    /// with <see cref="PendingListLimitKb"/> as the index's pending list limit.</summary>
     internal static string CreateIndexSql(string extensionSchema, string keyExtensionSchema) =>
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS " + IndexBareName
         + " ON " + TableName + " USING gin (server_id "
         + QueryTextTrigramIndex.QuoteIdentifier(keyExtensionSchema) + ".int4_ops, query_sql_text "
-        + QueryTextTrigramIndex.QuoteIdentifier(extensionSchema) + ".gin_trgm_ops)";
+        + QueryTextTrigramIndex.QuoteIdentifier(extensionSchema) + ".gin_trgm_ops) WITH (gin_pending_list_limit = " + PendingListLimitKb + ")";
 
     /// <summary>Reads the catalog state on an open connection. The sample-index fields of the record stay at their defaults.</summary>
     public static async Task<TrigramCatalogState> ReadStateAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
@@ -352,15 +373,35 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// <paramref name="enabled"/> is the option's live, resolved value (#8978: the store's <c>config.config_service</c> column when it holds
     /// one, else <c>darling.json</c>), read at the start of every pass, so a store write takes effect at the next pass with no restart. With
     /// the option off and no index the pass is one catalog read. Never throws: a pass that fails is a Warning and the next interval tries again.
+    /// The clean of the pending lists runs beside the pass on its own loop, every <see cref="CleanInterval"/> after
+    /// <paramref name="firstDelay"/>, and ends with it at shutdown.
     /// </summary>
     public static Task RunAsync(
         NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
         TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
-        QueryTextTrigramIndex.RunLoopAsync(
-            enabled, tracker, logger, "Query Store text trigram index", firstDelay, interval,
-            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
-            static (wait, ct) => Task.Delay(wait, ct),
-            cancellationToken);
+        Task.WhenAll(
+            QueryTextTrigramIndex.RunLoopAsync(
+                enabled, tracker, logger, "Query Store text trigram index", firstDelay, interval,
+                (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+                static (wait, ct) => Task.Delay(wait, ct),
+                cancellationToken),
+            QueryTextTrigramIndex.RunCleanLoopAsync(
+                ct => CleanPendingListsAsync(postgres, enabled, logger, ct), logger, "Query Store text trigram index", firstDelay, CleanInterval,
+                cancellationToken));
+
+    /// <summary>
+    /// One clean of both indexes, this one and the one it replaces, each on the plan-cache index's terms
+    /// (<see cref="QueryTextTrigramIndex.CleanPendingListAsync(NpgsqlDataSource, Func{bool}, string, ILogger, CancellationToken)"/>): only when
+    /// the option is on and the index exists and is valid, an index that lacks <see cref="PendingListLimitKb"/> first gets it in its own
+    /// transaction under <see cref="LockTimeout"/>, and a lock that is not free in time is a quiet skip that the next clean retries. Each
+    /// index is handled on its own connection, so a skip or a failure on one never keeps the other from its limit or its clean. Throws only on
+    /// cancellation.
+    /// </summary>
+    internal static async Task CleanPendingListsAsync(NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, CancellationToken cancellationToken)
+    {
+        await QueryTextTrigramIndex.CleanPendingListAsync(postgres, enabled, IndexName, logger, cancellationToken).ConfigureAwait(false);
+        await QueryTextTrigramIndex.CleanPendingListAsync(postgres, enabled, ReplacedIndexName, logger, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>The status word for a catalog reading and the tracker's memory. Pure; the plan-cache index's rules, with the extensions
     /// counted as installed only when both are.</summary>

@@ -21,9 +21,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rather than carefully avoided, and separate literals per site make it neither — they are copies that
 /// happen to agree, and moving some of them is precisely the divergence that claim rules out. The width is
 /// spelled once here and interpolated into every site, so a partial migration cannot be expressed.
-/// <c>QueryStoreTouchGuardSingleSourceTests</c> pins the single-sourcing rather than the value: it fails on
-/// a hard-coded interval anywhere in either statement's source, on a guard site appearing or disappearing,
-/// and on a width that stops following the margin it is derived from.</para>
+/// <c>QueryStoreTouchGuardSingleSourceTests</c> pins the width's relation to its margin rather than the
+/// value: it fails on a width that is not the stated share of the stamp skew margin, and on an interval that
+/// is not rendered from the hours.</para>
 ///
 /// <para><b>What the guard is.</b> A PER-ROW predicate, not a statement-level skip. A row that keeps being
 /// referenced has its stamp refreshed at least once per guard window, so the width is exactly the bound on
@@ -45,8 +45,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// move at all. That is a relationship that does not hold, dressed as a derivation.</para>
 ///
 /// <para>Taken from the TIGHTEST margin among the tables this touch writes, because one shared width has to
-/// be safe on all of them. Which tables those are is a stated criterion with a test behind it, not an
-/// implied enumeration — see <see cref="StampSkewMarginDays"/>. Each table's cutoff also carries the
+/// be safe on all of them. Which tables those are is a stated criterion, not an implied enumeration — see
+/// <see cref="StampSkewMarginDays"/>. Each table's cutoff also carries the
 /// retention term on top of its margin, which is further room the guard does not count.</para>
 /// </summary>
 public static class QueryStoreLivenessTouchGuard
@@ -65,10 +65,10 @@ public static class QueryStoreLivenessTouchGuard
     /// <see cref="QueryStorePlanMap.TouchAndProbeSql"/>, and <c>query_store_text_seen</c> from
     /// <see cref="QueryStoreTextStore.TouchSeenSql"/>, whose stamp is the one the text prune reads, so its term is
     /// <see cref="QueryStoreTextStore.PruneMarginDays"/> — and it is emphatically NOT "every table with a
-    /// <c>PruneMarginDays</c>". Membership is enforced rather than asserted:
-    /// <c>QueryStoreTouchGuardSingleSourceTests</c> derives the guarded store types by scanning the whole
-    /// project for guard sites and requires the set of <c>PruneMarginDays</c> terms in this initializer to
-    /// equal it, so a term that is wrong to include reds even when it cannot move the value.</para>
+    /// <c>PruneMarginDays</c>". <c>QueryStoreTouchGuardSingleSourceTests</c> checks the value and not the
+    /// membership: it requires this margin to equal the smaller of <see cref="QueryStorePlanMap.PruneMarginDays"/>
+    /// and <see cref="QueryStoreTextStore.PruneMarginDays"/>, so a term that is wrong to include and cannot move
+    /// the value is this criterion's to keep out, not the test's.</para>
     ///
     /// <para><b>The anchor is a conservative PROXY for the room, and the precondition matters.</b>
     /// <c>PruneMarginDays</c> is the map's margin only while <c>ComputeMapCutoff</c>'s COUPLED arm wins. With
@@ -98,8 +98,7 @@ public static class QueryStoreLivenessTouchGuard
     /// MONOTONICITY guard (<c>EXCLUDED.last_seen &gt;= …</c>), not a staleness one, so nothing about this
     /// width can make its stamp trail. Its margin is a fact-OUTLIVING margin — its own doc says "so text
     /// outlives the statistics rows that reference it" — which is a different job wearing the same constant
-    /// name. The test asserts that file is inside the scanned population and outside the guarded set, so the
-    /// exclusion is a measured fact rather than a claim about a file the scan might be blind to.</para>
+    /// name. No test covers the exclusion: it rests on the criterion above.</para>
     /// </summary>
     public const int StampSkewMarginDays =
         QueryStorePlanMap.PruneMarginDays < QueryStoreTextStore.PruneMarginDays
