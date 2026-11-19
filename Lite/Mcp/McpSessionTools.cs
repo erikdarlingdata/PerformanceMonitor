@@ -17,7 +17,7 @@ public sealed class McpSessionTools
     /// <inheritdoc cref="QueryTextPreviewLength"/>
     private const int DefaultLimit = 25;
 
-    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> query_text is a preview by default (query_text_truncated: true), pass full_text for the whole text. Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window: critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name, blocking_only and wait_type are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit, raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks). is_head_blocker marks one that nothing blocks in turn: in a chain, only the top session has it. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture, an idle open transaction is the classic case; get_blocked_process_reports has its input buffer from the blocked-process report), filtered (your database_name or wait_type filter excluded it), or past_page (it is in the filtered population but beyond limit). When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts." + McpHelpers.UtcStampsDescription)]
+    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> query_text is a preview by default (query_text_truncated: true), pass full_text for the whole text. Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window: critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name, blocking_only and wait_type are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit, raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks). is_head_blocker marks one that nothing blocks in turn: in a chain, only the top session has it. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture, an idle open transaction is the classic case; get_blocked_process_reports has its input buffer from the blocked-process report), filtered (your database_name or wait_type filter excluded it), or past_page (it is in the filtered population but beyond limit). When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts. A row waiting on a page latch (PAGELATCH_ or PAGEIOLATCH_) carries page_latch: page_kind names the fixed allocation and header pages by their page number (file header, PFS, GAM, SGAM, DCM, BCM, boot page) and calls every other page data or index page, which can still be an IAM or system table page; for a data or index page the indexes come from the statement's own stored plan, ranked by the daily index snapshot's page latch waits, with match saying exact (the plan names one index in that database), plan or inferred; an index the snapshot has no row for shows null latch_wait_ms and latch_wait_count." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetActiveQueries(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -97,6 +97,11 @@ public sealed class McpSessionTools
             /* The page's own (capture, session) pairs, so a victim can say whether its blocker made the page. */
             var onPage = new HashSet<(DateTime, int)>(shown.Select(r => (r.CollectionTime, r.SessionId)));
 
+            /* #9055: a page latch wait names its page in wait_resource. The page kind, and the indexes the row's own stored plan touches
+               ranked by the daily index snapshot, are read from the store here, for the page's page latch rows only (Darling's twin is
+               DarlingPageLatchReader). */
+            var pageLatch = await dataService.DescribePageLatchWaitsAsync(resolved.ServerId, shown);
+
             var result = shown.Select(r => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
@@ -112,6 +117,8 @@ public sealed class McpSessionTools
                 reads = r.Reads,
                 writes = r.Writes,
                 wait_type = string.IsNullOrEmpty(r.WaitType) ? null : r.WaitType,
+                /* #9055: the lock or page the request waits on, as Darling's twin returns it. */
+                wait_resource = string.IsNullOrEmpty(r.WaitResource) ? null : r.WaitResource,
                 wait_time_ms = r.WaitTimeMs > 0 ? r.WaitTimeMs : (long?)null,
                 blocking_session_id = r.BlockingSessionId > 0 ? r.BlockingSessionId : (int?)null,
                 /* #3541 A13: the two blocking disclosures — see Darling's twin. */
@@ -162,6 +169,16 @@ public sealed class McpSessionTools
             if (tagScope.Named is { } sessionTagName && activePayload["filters_applied"] is System.Text.Json.Nodes.JsonObject appliedFilters)
             {
                 appliedFilters["tag"] = sessionTagName;
+            }
+
+            /* #9055: the page latch answer, in place on the row it describes (the rows are in `shown`'s order). */
+            if (activePayload["queries"] is System.Text.Json.Nodes.JsonArray queryRows)
+            {
+                for (var i = 0; i < shown.Count && i < queryRows.Count; i++)
+                {
+                    if (queryRows[i] is System.Text.Json.Nodes.JsonObject pageRow && pageLatch.TryGetValue((shown[i].CollectionTime, shown[i].SessionId, shown[i].RequestId), out var latchAnswer))
+                        pageRow["page_latch"] = latchAnswer.ToJson();
+                }
             }
 
             return activePayload.ToJsonString(McpHelpers.JsonOptions);

@@ -532,7 +532,8 @@ WITH window_rows AS (
         program_name,
         open_transaction_count,
         percent_complete,
-        query_hash
+        query_hash,
+        request_id
     FROM v_query_snapshots
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -595,7 +596,8 @@ SELECT
         WHERE q.collection_time = p.collection_time
         AND   q.session_id = p.blocking_session_id
     ) AS blocker_in_population,
-    COUNT(*) OVER () AS population_count
+    COUNT(*) OVER () AS population_count,
+    p.request_id
 FROM population p
 ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
 LIMIT $4";
@@ -652,6 +654,7 @@ LIMIT $4";
                 IsHeadBlocker = !reader.IsDBNull(25) && reader.GetBoolean(25),
                 BlockerInCapture = !reader.IsDBNull(26) && reader.GetBoolean(26),
                 BlockerInPopulation = !reader.IsDBNull(27) && reader.GetBoolean(27),
+                RequestId = reader.IsDBNull(29) ? 0 : reader.GetInt32(29),
             });
             populationCount = Convert.ToInt64(reader.GetValue(28));
         }

@@ -2071,14 +2071,14 @@ internal static class ToolRecommendations
         ],
         ["PAGELATCH_EX"] =
         [
-            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_active_queries", "See the page and the indexes the latch waits sit on", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
         ],
         ["PAGELATCH_UP"] =
         [
             new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
-            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_active_queries", "See the allocation page the waits sit on", new() { ["wait_type"] = "PAGELATCH_UP" }),
             new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
         ],
         ["MISSING_INDEX"] =

@@ -137,6 +137,8 @@ public sealed class StatementFilterPlanReadsLiveTests
                 await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(postgres, ServerId, Anchor, 51, 3, live: false, cancellationToken: ct));
             AssertFiltered("snapshot live_query_plan", snapshotLive,
                 await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(postgres, ServerId, Anchor, 51, 3, live: true, cancellationToken: ct));
+            AssertFiltered("snapshot query_plan (batch read, #9055)", snapshot,
+                (await DarlingStoredPlanReader.GetQuerySnapshotPlansAsync(postgres, ServerId, [(Anchor, 51, 3)], cancellationToken: ct)).GetValueOrDefault((Anchor, 51, 3)));
 
             AssertFiltered("blocked plan", blocked,
                 await DarlingStoredPlanReader.GetBlockingPlanXmlAsync(postgres, ServerId, Anchor, 61, 0, 62, 0, blockingSide: false, cancellationToken: ct));
