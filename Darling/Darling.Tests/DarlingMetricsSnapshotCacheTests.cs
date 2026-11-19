@@ -171,6 +171,7 @@ public sealed class DarlingMetricsSnapshotCacheTests
         Assert.False(scrape.LastRefreshSucceeded);
         Assert.Equal(DarlingMetricsSnapshotCache.RefreshTimeout.TotalSeconds, scrape.LastRefreshSeconds);
         Assert.Equal(1, _log.CountAtLevel(LogLevel.Warning));
+        Assert.Contains(_log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("timed out", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -184,6 +185,7 @@ public sealed class DarlingMetricsSnapshotCacheTests
         {
             cache.Scrape();
             await SettleAsync(cache);
+            _time.Advance(DarlingMetricsSnapshotCache.RefreshAge);
         }
 
         var failed = cache.Scrape();
@@ -223,6 +225,63 @@ public sealed class DarlingMetricsSnapshotCacheTests
         Assert.Same(warm, dropped.Snapshot);
         Assert.False(dropped.ServeServers);
         Assert.False(dropped.LastRefreshSucceeded);
+    }
+
+    [Fact]
+    public async Task AfterAFailure_TheNextRefresh_WaitsRefreshAge()
+    {
+        var cache = NewCache((call, ct) => call == 1
+            ? Task.FromResult(Fresh())
+            : Task.FromException<MetricsSnapshot>(new InvalidOperationException("store down")));
+        cache.Scrape();
+        await SettleAsync(cache);
+
+        _time.Advance(DarlingMetricsSnapshotCache.RefreshAge);
+        cache.Scrape();
+        await SettleAsync(cache);
+        Assert.Equal(2, Volatile.Read(ref _calls));
+        Assert.False(cache.Scrape().LastRefreshSucceeded);
+
+        for (var i = 0; i < 3; i++)
+        {
+            _time.Advance(TimeSpan.FromSeconds(15));
+            cache.Scrape();
+            Assert.Null(cache.InFlight);
+            Assert.Equal(2, Volatile.Read(ref _calls));
+        }
+
+        _time.Advance(TimeSpan.FromSeconds(10));
+        cache.Scrape();
+        await SettleAsync(cache);
+        Assert.Equal(3, Volatile.Read(ref _calls));
+    }
+
+    [Fact]
+    public async Task StoppingCancellation_LogsNothing_AndStartsNoStreak()
+    {
+        using var stopping = new CancellationTokenSource();
+        var cache = new DarlingMetricsSnapshotCache(
+            async ct =>
+            {
+                Interlocked.Increment(ref _calls);
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return Fresh();
+            },
+            () => true,
+            _time,
+            _log,
+            stopping.Token);
+
+        cache.Scrape();
+        TestWait.WaitUntil(() => Volatile.Read(ref _calls) == 1, s_wait);
+        stopping.Cancel();
+        await SettleAsync(cache);
+
+        var scrape = cache.Scrape();
+        Assert.Equal(0, _log.CountAtLevel(LogLevel.Warning));
+        Assert.Null(scrape.Snapshot);
+        Assert.False(scrape.LastRefreshSucceeded);
+        Assert.Null(scrape.LastRefreshSeconds);
     }
 
     [Fact]

@@ -34,7 +34,7 @@ internal sealed class DarlingMetricsSnapshotCache
     private readonly ILogger _logger;
     private readonly CancellationToken _stopping;
 
-    private volatile CacheState _state = new(null, LastRefreshSucceeded: false, LastRefreshSeconds: null, Failing: false);
+    private volatile CacheState _state = new(null, LastRefreshSucceeded: false, LastRefreshSeconds: null, Failing: false, LastAttemptStartedUtc: null);
     private Task? _inFlight;
 
     public DarlingMetricsSnapshotCache(
@@ -60,7 +60,7 @@ internal sealed class DarlingMetricsSnapshotCache
         var state = _state;
         var now = _time.GetUtcNow().UtcDateTime;
 
-        if (IsDue(state.Snapshot, now) && Volatile.Read(ref _inFlight) is null && _canRefresh())
+        if (IsDue(state, now) && Volatile.Read(ref _inFlight) is null && _canRefresh())
         {
             TryStartRefresh();
         }
@@ -69,8 +69,12 @@ internal sealed class DarlingMetricsSnapshotCache
         return new MetricsScrape(state.Snapshot, serveServers, state.LastRefreshSucceeded, state.LastRefreshSeconds);
     }
 
-    private static bool IsDue(MetricsSnapshot? snapshot, DateTime now) =>
-        snapshot is null || now - snapshot.BuiltAtUtc >= RefreshAge;
+    /* #9013: two gates. The snapshot must be stale, AND the previous attempt must have STARTED at least RefreshAge ago:
+       after a failure the old snapshot stays stale, and without the second gate every scrape would start a refresh
+       against a failing store. So it is at most one attempt a minute while scraped, failing or not. */
+    private static bool IsDue(CacheState state, DateTime now) =>
+        (state.Snapshot is null || now - state.Snapshot.BuiltAtUtc >= RefreshAge)
+        && (state.LastAttemptStartedUtc is null || now - state.LastAttemptStartedUtc.Value >= RefreshAge);
 
     private void TryStartRefresh()
     {
@@ -82,11 +86,17 @@ internal sealed class DarlingMetricsSnapshotCache
 
         /* #9013: re-read after claiming the slot. A scrape that read the old state can reach the claim just after a
            refresh finished (it writes the state BEFORE it frees the slot), and must not start a second one. */
-        if (!IsDue(_state.Snapshot, _time.GetUtcNow().UtcDateTime))
+        var state = _state;
+        var now = _time.GetUtcNow().UtcDateTime;
+        if (!IsDue(state, now))
         {
             Release(done);
             return;
         }
+
+        /* #9013: the attempt time is stamped only here, by the slot holder (the only writer) after the re-check passed,
+           so a claim that loses the re-check never moves it. */
+        _state = state with { LastAttemptStartedUtc = now };
 
         _ = Task.Run(() => RefreshAsync(done));
     }
@@ -103,18 +113,14 @@ internal sealed class DarlingMetricsSnapshotCache
             {
                 var snapshot = await _refresh(linked.Token).ConfigureAwait(false);
                 var seconds = _time.GetElapsedTime(started).TotalSeconds;
-                var wasFailing = _state.Failing;
-                _state = new CacheState(snapshot, LastRefreshSucceeded: true, seconds, Failing: false);
-                if (wasFailing)
+                var previous = _state;
+                _state = previous with { Snapshot = snapshot, LastRefreshSucceeded = true, LastRefreshSeconds = seconds, Failing = false };
+                if (previous.Failing)
                 {
                     _logger.LogInformation("Metrics refresh recovered; the /metrics snapshot is current again.");
                 }
             }
-            catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
-            {
-                /* #9013: the service is stopping. Not a failure, so nothing is logged and the state stays as it was. */
-            }
-            catch (Exception ex)
+            catch (Exception ex) when (!_stopping.IsCancellationRequested)
             {
                 var seconds = _time.GetElapsedTime(started).TotalSeconds;
                 var previous = _state;
@@ -131,6 +137,11 @@ internal sealed class DarlingMetricsSnapshotCache
                         DropAge.TotalMinutes);
                 }
             }
+            catch (Exception) when (_stopping.IsCancellationRequested)
+            {
+                /* #9013: the service is stopping, whatever the delegate threw on the way out. Not a failure, so nothing
+                   is logged and the outcome stays as it was. */
+            }
         }
         finally
         {
@@ -145,5 +156,6 @@ internal sealed class DarlingMetricsSnapshotCache
         done.TrySetResult();
     }
 
-    private sealed record CacheState(MetricsSnapshot? Snapshot, bool LastRefreshSucceeded, double? LastRefreshSeconds, bool Failing);
+    private sealed record CacheState(
+        MetricsSnapshot? Snapshot, bool LastRefreshSucceeded, double? LastRefreshSeconds, bool Failing, DateTime? LastAttemptStartedUtc);
 }
