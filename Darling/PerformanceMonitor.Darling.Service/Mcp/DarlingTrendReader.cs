@@ -1160,6 +1160,15 @@ internal static class DarlingTrendReader
         DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true, withProcedureFilter: true);
 
     /// <summary>
+    /// #8570: <see cref="ProcedureDurationTrendOneProcedureSql"/> for a store that has <see cref="ProcedureStatsNameIndex"/>, same
+    /// parameters and same rows. The collections and their interval come from the per-collection totals and the procedure's own rows,
+    /// read by name through the index, are joined to them, so a collection in which this procedure ran nothing is still zero work
+    /// over its real seconds.
+    /// </summary>
+    public static readonly string ProcedureDurationTrendOneProcedureByNameSql =
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true, withProcedureFilter: true, procedureRowsByName: true);
+
+    /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
     /// the database filter, INCLUDING the #1841 tier-2 interval placement and its legacy arm.
     /// <para>Copied rather than simplified. The two arms are not decoration: arm 1 dedups each runtime
@@ -1345,13 +1354,32 @@ internal static class DarlingTrendReader
     /// <summary>
     /// #6303: the procedure-stats duration trend of ONE procedure (<paramref name="procedureFullName"/>, the grid's <c>full_name</c>)
     /// in the chosen database(s), down <paramref name="route"/> (raw or the hourly rollup, which groups by schema and object).
+    /// #8570: on the raw tier the text follows the store. With <see cref="ProcedureStatsNameIndex"/> the procedure's rows are read by
+    /// name (<see cref="ProcedureDurationTrendOneProcedureByNameSql"/>); without it (a store whose start has not built it) the read is
+    /// <see cref="ProcedureDurationTrendOneProcedureSql"/>, which needs no index. Both return the same rows.
     /// </summary>
-    public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
+    public static async Task<DurationTrendResult> GetProcedureDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
         int bucketMinutes, DatabaseFilter databases, string procedureFullName, CancellationToken cancellationToken = default)
-        => ReadRoutedDurationTrendAsync(
-            ProcedureDurationTrendOneProcedureSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken,
-            procedureFullName);
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        var rawSql = route.Tier == RetentionTier.Raw
+            ? await OneProcedureRawSqlAsync(postgres, cancellationToken)
+            : ProcedureDurationTrendOneProcedureSql;
+        return await ReadRoutedDurationTrendAsync(
+            rawSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken, procedureFullName);
+    }
+
+    /// <summary>
+    /// The raw-tier text of the one-procedure trend for the store behind <paramref name="postgres"/>:
+    /// <see cref="ProcedureDurationTrendOneProcedureByNameSql"/> when the store has <see cref="ProcedureStatsNameIndex"/>,
+    /// <see cref="ProcedureDurationTrendOneProcedureSql"/> when it does not. Without the index the by-name text is the slower of the
+    /// two: its name predicate sends the planner down the time index, one heap fetch per stored row of the server.
+    /// </summary>
+    public static async ValueTask<string> OneProcedureRawSqlAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken) =>
+        await ProcedureStatsNameIndex.IsPresentAsync(postgres, cancellationToken)
+            ? ProcedureDurationTrendOneProcedureByNameSql
+            : ProcedureDurationTrendOneProcedureSql;
 
     /// <summary>
     /// #6303: the average CPU per execution (ms) of ONE procedure per bucket, in the buckets of the one-procedure

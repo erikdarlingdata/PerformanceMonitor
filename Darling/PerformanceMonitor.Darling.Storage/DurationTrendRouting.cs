@@ -44,7 +44,13 @@ public static class DurationTrendRouting
     /// text parameter, so the name never needs splitting on a dot a procedure name may itself hold. Case-sensitive, as the grid's
     /// own filter is.
     /// </summary>
-    public const string ProcedureFullNameMatchSql = "COALESCE(NULLIF(schema_name, '') || '.', '') || object_name = $5";
+    public const string ProcedureFullNameMatchSql = ProcedureFullNameSql + " = $5";
+
+    /// <summary>
+    /// The name <see cref="ProcedureFullNameMatchSql"/> compares: <c>schema.object</c>, or the bare object when the schema is empty or
+    /// NULL. <see cref="ProcedureStatsNameIndex"/> indexes this expression, so the predicate and the index key are one text.
+    /// </summary>
+    public const string ProcedureFullNameSql = "COALESCE(NULLIF(schema_name, '') || '.', '') || object_name";
 
     /// <summary>
     /// The seconds in one hourly-rollup bucket, as the SQL literal the hourly-tier duration trends divide by.
@@ -510,7 +516,7 @@ public static class DurationTrendRouting
     /// applied inside the sums as in <see cref="RawCollectionsCte"/>, and an idle point carries <c>matched_rows</c> 0. Ends in a
     /// CTE named <c>raw</c> with the query grain's columns. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    private static string ProcedureCollectionsCte(bool withDatabaseFilter, bool withProcedureFilter)
+    private static string ProcedureCollectionsCte(bool withDatabaseFilter, bool withProcedureFilter, bool procedureRowsByName)
     {
         /* #6303: with the procedure filter the database clause is parenthesized and ANDed with the procedure's name ($5); off, the text is unchanged. */
         var match = withProcedureFilter
@@ -536,10 +542,77 @@ public static class DurationTrendRouting
         var matched = withDatabaseFilter ? ", matched_rows" : "";
         var idleMatched = withDatabaseFilter ? ", CAST(0 AS bigint)" : "";
 
-        /* #6303: the totals table holds one row per (collection, database) and has no procedure columns, so a read of ONE procedure
-           cannot use it. With the procedure filter the raw rows are read for the whole window (the totals are a copy of their sums,
-           and the rows are kept), which is the read #3897 ran before #5638; off, the text is unchanged. */
-        var storedCte = withProcedureFilter
+        /* #6303: a read of ONE procedure. The totals table holds one row per (collection, database) and has no procedure columns, so
+           it cannot give the procedure's sums. The rows are read for the whole window with the filter inside the sums (the totals are
+           a copy of their sums, and the rows are kept), which is the read #3897 ran before #5638.
+
+           #8570: procedureRowsByName is the same read for a store that has ProcedureStatsNameIndex. The totals do give what the read
+           needs from every OTHER row of a collection: that the collection exists, and its longest stored interval. At or after the
+           server's floor the collections and their interval are read from the totals, and the procedure's own rows are read with the
+           name and the database in the WHERE (named), which the index seeks, so the aggregate takes in that procedure's rows and not
+           every procedure's. A collection the procedure has no row in joins to nothing and is zero work with matched_rows 0, which is
+           what the filtered sums give over a collection's rows. Before the floor (collections written before the totals table
+           existed) the rows are the only source, and they are read with the filter inside the sums. Each collection comes from one
+           side, as in the all-procedures read. Without the index the named read filters every row of the server in the window after
+           fetching it, slower than the sums over the same rows, so the caller picks this text only when the index is there. */
+        var storedCte = withProcedureFilter && procedureRowsByName
+            ? $"""
+totals_floor AS
+(
+    SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
+    FROM {ProcedureStatsTotals.Table}
+    WHERE server_id = $1
+),
+named AS
+(
+    SELECT
+        collection_time,
+        SUM(delta_elapsed_time) AS elapsed_time,
+        SUM(delta_execution_count) AS execution_count,
+        COUNT(*) AS matched_rows
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    AND   collection_time >= (SELECT floor_time FROM totals_floor)
+    AND   {match}
+    GROUP BY collection_time
+),
+stored AS
+(
+    SELECT
+        collection_time,
+        {sums}
+        MAX(sample_interval_seconds) AS max_interval_seconds
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT floor_time FROM totals_floor)
+    GROUP BY collection_time
+    UNION ALL
+    SELECT
+        collections.collection_time,
+        COALESCE(named.elapsed_time, 0) / 1000.0 AS total_elapsed_ms,
+        COALESCE(named.execution_count, 0) AS total_executions,
+        COALESCE(named.matched_rows, 0) AS matched_rows,
+        collections.max_interval_seconds
+    FROM
+    (
+        SELECT
+            collection_time,
+            MAX(max_sample_interval_seconds) AS max_interval_seconds
+        FROM {ProcedureStatsTotals.Table}
+        WHERE server_id = $1
+        AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+        AND   collection_time <= $3
+        GROUP BY collection_time
+    ) AS collections
+    LEFT JOIN named
+      ON named.collection_time = collections.collection_time
+),
+"""
+            : withProcedureFilter
             ? $"""
 stored AS
 (
@@ -686,10 +759,20 @@ stored AS
     /// <c>unrated_collections</c>, are unaffected; the viewer's chart uses it to tell a true singleton bucket from
     /// one the bucketing actually merged (see <c>ViewerDataService.QueryTrends.cs</c>'s bucketed reader).
     /// $1 server_id, $2/$3 window (naive UTC), [$4 database filter], the last $ the bucket width in minutes.</para>
+    ///
+    /// <para><paramref name="procedureRowsByName"/> (#8570) is the one-procedure read for a store that has
+    /// <see cref="ProcedureStatsNameIndex"/>: the same rows out, with the procedure's rows read by name and the collections taken
+    /// from the per-collection totals. Off, the one-procedure text is the read with the filter inside the sums.</para>
     /// </summary>
-    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter, bool withProcedureFilter = false)
+    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter, bool withProcedureFilter = false, bool procedureRowsByName = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
+        /* #8570: the by-name text is a shape of the one-procedure read and of nothing else. */
+        if (procedureRowsByName && !withProcedureFilter)
+        {
+            throw new ArgumentException("Reading the procedure's rows by name is a one-procedure read.", nameof(procedureRowsByName));
+        }
+
         /* #6303: one procedure of procedure_stats, by $5 (ProcedureFullNameMatchSql); the width moves to $6. Only the database-filtered procedure read takes it. */
         if (withProcedureFilter && (!withDatabaseFilter || rawTable != "procedure_stats"))
         {
@@ -699,7 +782,7 @@ stored AS
         var widthParam = withProcedureFilter ? "$6" : withDatabaseFilter ? "$5" : "$4";
         /* #5449: procedure_stats stores no row for a cycle in which nothing ran, so its collections are read through the
            collector's runs (ProcedureCollectionsCte); every other table stores every cycle and reads its own rows. */
-        var collections = rawTable == "procedure_stats" ? ProcedureCollectionsCte(withDatabaseFilter, withProcedureFilter) : RawCollectionsCte(rawTable, withDatabaseFilter);
+        var collections = rawTable == "procedure_stats" ? ProcedureCollectionsCte(withDatabaseFilter, withProcedureFilter, procedureRowsByName) : RawCollectionsCte(rawTable, withDatabaseFilter);
         /* #5414 M1: every bucket is read over EVERY collection in it. Round 2: whether the chosen databases had any
            row at all is decided once, for the whole window (the tool's empty), and never per bucket: a bucket the
            databases were quiet in is a measured 0 and a bucket the store covered, and dropping it made it read missing

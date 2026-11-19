@@ -225,6 +225,19 @@ public sealed class TuningStartPathOneBuildTests
         }
     }
 
+    /// <summary>
+    /// #8570: the procedure name index's first build reads the whole uncompressed heap of procedure_stats, so it shares the budget.
+    /// It is listed after the restart-row indexes, so a start that has one of those to build defers this one.
+    /// </summary>
+    [Fact]
+    public void TheProcedureNameIndex_IsListedAfterTheRestartRowIndexes_AndSharesTheBudget()
+    {
+        var order = PgTableTuning.Statements.Select((s, i) => (s, i)).ToList();
+        int At(string name) => order.First(o => o.s.Contains(name + " ON", StringComparison.Ordinal)).i;
+        Assert.True(At(PgTableTuning.ProcedureStatsRestartRowIndexName) < At(ProcedureStatsNameIndex.IndexName));
+        Assert.True(PgTableTuning.IsOneBuildPerStart(ProcedureStatsNameIndex.IndexName));
+    }
+
     [Fact]
     public void ABuildThatRanOutOfTime_IsToldApartFromAnyOtherFailure()
     {

@@ -57,6 +57,8 @@ public sealed class PgTableTuningTests
            rollups exclude. The statement text is exact: the predicate is what keeps each one small. */
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_query_stats_restart_rows_time ON collect.query_stats (collection_time) WHERE sample_interval_seconds = 0", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_procedure_stats_restart_rows_time ON collect.procedure_stats (collection_time) WHERE sample_interval_seconds = 0", sql, StringComparison.Ordinal);
+        /* #8570: the one-procedure duration trend's index. Its third key is the expression that read compares. */
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_procedure_stats_server_db_name_time ON collect.procedure_stats (server_id, database_name, (COALESCE(NULLIF(schema_name, '') || '.', '') || object_name), collection_time)", sql, StringComparison.Ordinal);
 
         /* #3934: the store-metrics latest read's skip-scan index — the (kind, name) prefix for the loose
            index scan that walks distinct objects, the full three columns for each object's per-key
@@ -67,7 +69,7 @@ public sealed class PgTableTuningTests
 
         /* Every remaining index is idempotent (no-op where a field box already hand-applied it, or a prior
            start made it); every #4247 drop is idempotent the same way (IF EXISTS no-ops once it is gone). */
-        Assert.Equal(8, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
+        Assert.Equal(9, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #8570 the procedure name index; #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
         Assert.Equal(5, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #4247: the two handle indexes + the three composer covering indexes */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
@@ -87,7 +89,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(35, PgTableTuning.Statements.Count);   /* 8 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover) + 5 DROP INDEX + 22 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables) */
+        Assert.Equal(36, PgTableTuning.Statements.Count);   /* 9 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover, #8570 the procedure name index) + 5 DROP INDEX + 22 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables) */
     }
 
     /// <summary>

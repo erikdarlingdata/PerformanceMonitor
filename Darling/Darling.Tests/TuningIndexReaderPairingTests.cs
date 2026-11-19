@@ -40,6 +40,7 @@ public sealed class TuningIndexReaderPairingTests
             [PgTableTuning.LegacyRowIndexName] = ("server_id", QueryStoreIntervalWide.HasLegacyRowSql),
             [PgTableTuning.QueryStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.QueryStatsRestartRowsSql),
             [PgTableTuning.ProcedureStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.ProcedureStatsRestartRowsSql),
+            [ProcedureStatsNameIndex.IndexName] = ("server_id", DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql),
             ["idx_store_metrics_kind_name_time"] = ("object_kind", DarlingStoreMetricsReader.StoreMetricsLatestSql),
             [PgTableTuning.WaitStatsDailyCoverIndexName] = ("server_id", DailySummarySql.RangeSql),
         };
@@ -94,9 +95,9 @@ public sealed class TuningIndexReaderPairingTests
     {
         var created = CreatedIndexes().ToList();
 
-        /* Sanity: this must actually see the eight indexes the list ships today (#4247 dropped five others),
+        /* Sanity: this must actually see the nine indexes the list ships today (#4247 dropped five others),
            or the regex/list drifted and the pairing check below would be vacuously true. */
-        Assert.Equal(8, created.Count);
+        Assert.Equal(9, created.Count);
 
         foreach (var (indexName, leadingColumn) in created)
         {
