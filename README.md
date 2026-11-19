@@ -117,4 +117,4 @@ Copyright (c) 2026 Darling Data, LLC. Licensed under the MIT License. See [LICEN
 
 Erik Darling: [erikdarling.com](https://erikdarling.com) and [Darling Data, LLC](https://darlingdata.com)
 
-Erik teaches database teams to work with AI agents on their own databases, in a [one-day workshop](https://erikdarling.com/ai-for-database-teams-workshop/) and a [video course](https://training.erikdarling.com/work-with-your-databases-the-way-i-do). He also does [SQL Server performance consulting](https://erikdarling.com/sql-server-performance-consulting/).
+Erik teaches database teams to work with AI agents on their own databases, in a [one-day workshop](https://erikdarling.com/ai-for-database-teams-workshop/), a [video course](https://training.erikdarling.com/work-with-your-databases-the-way-i-do), and [one-on-one for a day](https://erikdarling.com/work-with-me-for-a-day/). He also does [SQL Server performance consulting](https://erikdarling.com/sql-server-performance-consulting/).
