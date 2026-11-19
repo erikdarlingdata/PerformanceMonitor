@@ -282,7 +282,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// reporting failing collectors, and painting it amber would say it was.</para>
     /// </summary>
     [JsonIgnore]
-    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true);
+    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true, IsEnabled);
 
     /// <summary>
     /// Computed dot status for the sidebar indicator. One of: "Connecting", "Online", "Warning", "Offline".

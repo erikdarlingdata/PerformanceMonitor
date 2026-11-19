@@ -983,8 +983,9 @@ public partial class MainWindow : Window
         var servers = _serverManager.GetAllServers();
         foreach (var server in servers)
         {
+            /* #9084: a server whose collection is off has no live status here: the sidebar row says Disabled. */
             var connectionStatus = _serverManager.GetConnectionStatus(server.Id);
-            server.IsOnline = connectionStatus.IsOnline;
+            server.IsOnline = server.IsEnabled ? connectionStatus.IsOnline : null;
             server.UnreachableReason = connectionStatus.UnreachableReason;
             server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
@@ -1218,6 +1219,7 @@ public partial class MainWindow : Window
                         summary.ServerName = server.ServerName;
                         summary.Clock = await ReadOverviewClockAsync(serverId, refreshClocks);
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
+                        summary.IsEnabled = server.IsEnabled;
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
                         summary.UnreachableReason = connStatus.UnreachableReason;
@@ -1244,7 +1246,8 @@ public partial class MainWindow : Window
 
             /* Alerts run over the WHOLE fleet, never the filtered view — a search box narrowing what's on
                screen must not silence alerts for the servers it hides. */
-            foreach (var summary in summaries)
+            /* #9084: a server whose collection is off is not swept: no alert is raised for it and no live msdb read goes to it. */
+            foreach (var summary in DisabledServerGate.SummariesToSweep(summaries, servers))
             {
                 CheckPerformanceAlerts(summary);
             }
@@ -2747,10 +2750,11 @@ public partial class MainWindow : Window
             foreach (var server in servers)
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
-                server.IsOnline = status?.IsOnline;
+                /* #9084: no live status for a server whose collection is off, so no edge from it: no unreachable or restored notice. */
+                server.IsOnline = server.IsEnabled ? status?.IsOnline : null;
                 server.UnreachableReason = status?.UnreachableReason;
                 server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
-                if (status?.IsOnline == null) continue;
+                if (!server.IsEnabled || status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
                 /* #5642: an offline reading ends the connection, so the next online one is a new "watching since". */
