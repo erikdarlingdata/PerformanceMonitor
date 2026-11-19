@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -99,7 +100,7 @@ public sealed class DarlingMcpQuietWindowTools
             (int ServerId, string DisplayName)? target = null;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
-                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
                 if (error is not null)
                 {
                     return error;

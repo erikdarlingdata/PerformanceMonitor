@@ -81,7 +81,7 @@ public sealed class DarlingMcpInvestigationAdminTools
             string? serverDisplay = null;
             if (!string.IsNullOrWhiteSpace(server_name))
             {
-                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
                 if (error is not null)
                 {
                     return error;
