@@ -50,6 +50,7 @@ public sealed class DarlingMetricsFleetMapperTests
             FailedCollectorCount = 2,
             CollectorCount = 30,
             DeadlockMeasured = false,
+            LastCollectionTime = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc),
         };
 
         var (samples, stamps) = DarlingMetricsFleetMapper.Map(new[] { card }, Labels((1, "a")));
@@ -63,6 +64,30 @@ public sealed class DarlingMetricsFleetMapperTests
                 "darling_server_collectors",
             }.OrderBy(n => n),
             samples.Select(s => s.Name).OrderBy(n => n));
+        Assert.Single(stamps);
+    }
+
+    [Fact]
+    public void NoCollectionYet_EmitsTheBandOnly()
+    {
+        var card = new FleetServerCard
+        {
+            ServerId = 1,
+            DisplayName = "a",
+            Band = FleetHealthBand.Warning,
+            TotalCpuPercent = 50,
+            BlockingCount = 0,
+            FailedCollectorCount = 0,
+            CollectorCount = 0,
+            DeadlockMeasured = true,
+            LastCollectionTime = null,
+        };
+
+        var (samples, stamps) = DarlingMetricsFleetMapper.Map(new[] { card }, Labels((1, "a")));
+
+        var sample = Assert.Single(samples);
+        Assert.Equal("darling_server_health_band", sample.Name);
+        Assert.Equal((int)FleetHealthBand.Warning, sample.Value);
         Assert.Empty(stamps);
     }
 
@@ -106,10 +131,15 @@ public sealed class DarlingMetricsFleetMapperTests
     [Fact]
     public void Deadlocks_AbsentWhenNotMeasured()
     {
-        var card = new FleetServerCard { ServerId = 1, DisplayName = "a", DeadlockCount = 5, DeadlockMeasured = false };
+        var card = new FleetServerCard
+        {
+            ServerId = 1, DisplayName = "a", DeadlockCount = 5, DeadlockMeasured = false, LastCollectionTime = DateTime.UtcNow,
+        };
 
         var (samples, _) = DarlingMetricsFleetMapper.Map(new[] { card }, Labels((1, "a")));
 
+        /* The card has a collection, so its counts are written: the deadlock series alone is held back. */
+        Assert.Contains(samples, s => s.Name == "darling_server_blocking_events");
         Assert.DoesNotContain(samples, s => s.Name == "darling_server_deadlocks");
     }
 

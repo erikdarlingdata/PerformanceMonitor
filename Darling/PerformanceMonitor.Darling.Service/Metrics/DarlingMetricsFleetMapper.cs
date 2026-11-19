@@ -82,6 +82,14 @@ internal static class DarlingMetricsFleetMapper
             }
 
             Add("darling_server_health_band", (int)card.Band);
+
+            /* #9013: the owner's condition: a server with no data yet gets its band and no value series, never zeros. The
+               card's counts are plain ints, so before a first collection they would read as measured zeros. */
+            if (!card.LastCollectionTime.HasValue)
+            {
+                continue;
+            }
+
             Add("darling_server_cpu_percent", card.TotalCpuPercent);
             Add("darling_server_memory_mb", card.MemoryMb);
             Add("darling_server_buffer_pool_mb", card.BufferPoolMb);
@@ -92,10 +100,7 @@ internal static class DarlingMetricsFleetMapper
             Add("darling_server_failing_collectors", card.FailedCollectorCount);
             Add("darling_server_collectors", card.CollectorCount);
 
-            if (card.LastCollectionTime.HasValue)
-            {
-                stamps.Add(new ServerCollectionStamp(server, card.LastCollectionTime.Value));
-            }
+            stamps.Add(new ServerCollectionStamp(server, card.LastCollectionTime.Value));
         }
 
         return (samples, stamps);
