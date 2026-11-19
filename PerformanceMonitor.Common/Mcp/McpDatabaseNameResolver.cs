@@ -74,8 +74,10 @@ public static class McpDatabaseNameResolver
     /// <summary>What the served <c>database_name</c> parameter description of a resolving tool ends with.</summary>
     public const string MatchingSentence = "Exact match first, then a unique case-insensitive one.";
 
-    /// <summary>What the served <c>database_name</c> parameter description of a resolving tool that changes state ends with.</summary>
-    public const string ExactOnlySentence = "Exact spelling; another case of a listed name is refused.";
+    /// <summary>What the served <c>database_name</c> parameter description of a resolving tool that changes state ends with. No longer
+    /// than <see cref="MatchingSentence"/>, the sentence a tool is registered with, so a description that fits its length cap when
+    /// registered still fits once the write policy restates it.</summary>
+    public const string ExactOnlySentence = "Exact only: another case of a listed name is refused.";
 
     /// <summary>
     /// Resolves <paramref name="given"/> against <paramref name="known"/>, the names the server is known to have (the whole list, or

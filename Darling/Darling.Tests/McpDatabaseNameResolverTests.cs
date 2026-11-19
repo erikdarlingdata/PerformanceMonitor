@@ -482,6 +482,10 @@ public sealed class McpDatabaseNameResolverTests
         Assert.Equal("One database. " + McpDatabaseNameResolver.MatchingSentence, Described("dbname_probe"));
         Assert.Equal("One database. " + McpDatabaseNameResolver.ExactOnlySentence, Described("dbname_probe_write"));
         Assert.Equal("One database.", Described("dbname_probe_no_server"));
+
+        /* The description caps are measured on the tools as registered, which all carry the read sentence. */
+        Assert.True(McpDatabaseNameResolver.ExactOnlySentence.Length <= McpDatabaseNameResolver.MatchingSentence.Length,
+            "the sentence for a tool that changes state is longer than the one it replaces, so a description could pass its cap and be served over it");
     }
 
     [Fact]
@@ -513,6 +517,7 @@ public sealed class McpDatabaseNameResolverTests
 /// name at all. The tools are the host's registration list and the write marker is the host's own
 /// (<c>DarlingMcpWritePolicy.ApplyAnnotations</c>), so a tool added tomorrow is covered or fails here.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpDatabaseNameCensusTests
 {
     /// <summary>The tools that take a <c>database_name</c> and no <c>server_name</c>, so there is no one server to resolve it
