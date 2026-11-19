@@ -231,6 +231,14 @@ public interface ICollectorSchemaInfo
     bool ReadsAuroraFunctions => false;
 
     /// <summary>
+    /// When set, the host runs this PostgreSQL collector's read with a local <c>work_mem</c> sized from the target's
+    /// <c>pg_stat_statements.max</c> and this many bytes an entry (#9062), so a function in FROM that returns one row per
+    /// entry keeps its result in memory instead of spilling a temp file on every call. Null (the default) leaves the
+    /// target's setting alone. A default interface implementation, the choice <see cref="ReadsAuroraFunctions"/> made.
+    /// </summary>
+    int? ReadWorkMemBytesPerEntry => null;
+
+    /// <summary>
     /// Whether the query <see cref="ICollectorDefinition{TRow}.BuildQuery"/> builds for <paramref name="context"/> reads an
     /// object of <paramref name="extension"/> (#6888). True for every declared extension except where the collector
     /// runs without it on this target: the Aurora-native source in place of pg_stat_statements, the service-side
