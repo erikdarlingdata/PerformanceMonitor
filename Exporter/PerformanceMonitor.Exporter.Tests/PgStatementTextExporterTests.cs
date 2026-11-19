@@ -1,3 +1,4 @@
+using DuckDB.NET.Data;
 using PerformanceMonitor.Exporter;
 using Xunit;
 
@@ -193,5 +194,42 @@ public sealed class PgStatementTextExporterTests
         var tables = doc.RootElement.GetProperty("tables").EnumerateArray().ToList();
         Assert.Equal(7, tables[0].GetProperty("below_threshold_skipped").GetInt64());
         Assert.False(tables[1].TryGetProperty("below_threshold_skipped", out _));
+    }
+
+    [Fact]
+    public void A_null_own_entries_reaches_the_output_table_as_null_and_a_value_as_its_json_text()
+    {
+        using var connection = new DuckDBConnection("Data Source=:memory:");
+        connection.Open();
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE pg_statement_text (source_store VARCHAR, server_name VARCHAR, queryid BIGINT, query_text VARCHAR, " +
+                                 "first_seen TIMESTAMP, last_seen TIMESTAMP, own_entries VARCHAR)";
+            create.ExecuteNonQuery();
+        }
+
+        var seen = new DateTime(2026, 10, 22, 11, 0, 0);
+        PgStatementTextExporter.TextRow Row(int server, long queryId, string? own) => new(server, queryId, "select 1", seen, seen, own);
+        using (var appender = connection.CreateAppender("pg_statement_text"))
+        {
+            OptionalTableRunner.AppendPgStatementTextRows(appender, "store_a",
+                [Row(1, 101, "[{\"u\":10,\"d\":16384}]"), Row(1, 102, null), Row(9, 103, "[]")],
+                new Dictionary<int, string?> { [1] = "srv-1" });
+        }
+
+        var found = new Dictionary<long, string?>();
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT queryid, own_entries, own_entries IS NULL FROM pg_statement_text ORDER BY queryid";
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                found[reader.GetInt64(0)] = reader.GetBoolean(2) ? null : reader.GetString(1);
+            }
+        }
+
+        Assert.Equal(2, found.Count);                       // the row of the server that did not resolve is skipped
+        Assert.Equal("[{\"u\":10,\"d\":16384}]", found[101]);
+        Assert.Null(found[102]);
     }
 }

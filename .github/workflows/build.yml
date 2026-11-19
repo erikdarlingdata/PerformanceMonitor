@@ -91,9 +91,13 @@ jobs:
               - 'PerformanceMonitor.Ui/**/!(*.md)'
             # The Darling export tool (Exporter/). It reads PerformanceMonitor.PlanAnalysis (and Common through it), so a change
             # there reaches it too. pr.yml's exporter job reads this filter through ci-select.py. The root files are covered
-            # by the `root` filter above.
+            # by the `root` filter above. Its store-column guard (StoreColumnCoverageTests) builds a real store schema from the
+            # migrations, whose tables come from the migration ladder and the collectors' column lists, so a change to either
+            # reaches it too.
             exporter:
               - 'Exporter/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
               - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
               - 'PerformanceMonitor.Common/**/!(*.md)'
             lite:
