@@ -18,6 +18,11 @@ public partial class DuckDbFactCollector
     /// Collects total database data size from file_io_stats.
     /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
     /// of the window's end (#3896) — a file not seen in that span belongs to a database that no longer exists.
+    /// A file counts at its size in the newest of three snapshots of the lookback that holds it: the newest, the one
+    /// just before it, and the oldest (#9049). Two differences from a read of every row in the lookback are accepted,
+    /// the same two as Darling's: a file seen only in snapshots strictly between the oldest and the one just before
+    /// the newest is not counted, and a dropped file last seen between those two counts at the oldest snapshot's
+    /// size, not at its last one. The total has no scoring weight, and #3896 treats such a file as not a database anyway.
     /// </summary>
     private async Task CollectDatabaseSizeFactAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -33,15 +38,51 @@ public partial class DuckDbFactCollector
                Unbounded, the window function read every archived parquet file this server has — nothing
                could prune a row group on collection_time — and a dropped database's files stayed in the
                sum until the archive aged them out. */
+            /* #9049: the newest row per file among three snapshots of the lookback (the newest, the one just before
+               it, and the oldest), the same statement as Darling's PgFactCollector.DatabaseSizeSql, so both editions
+               give one answer for the same rows. A file takes its row from the newest of the three that holds it. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-WITH latest AS (
+WITH newest AS (
+    SELECT collection_time
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+prev AS (
+    SELECT collection_time
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+oldest AS (
+    SELECT collection_time
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time ASC
+    LIMIT 1
+),
+latest AS (
     SELECT database_name, file_name, size_mb,
            ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn
     FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    AND   collection_time IN ((SELECT collection_time FROM newest), (SELECT collection_time FROM prev), (SELECT collection_time FROM oldest))
     AND   size_mb > 0
 )
 SELECT SUM(size_mb) AS total_size_mb
