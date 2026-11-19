@@ -397,7 +397,33 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     internal static string CreateIndexSql(string extensionSchema) =>
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS " + IndexName[(IndexName.IndexOf('.', StringComparison.Ordinal) + 1)..]
         + " ON " + TableName + " USING gin (query_text "
-        + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops)";
+        + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops) WITH (gin_pending_list_limit = " + PendingListLimitKb + ")";
+
+    /// <summary>The index's <c>gin_pending_list_limit</c> in kB (64 MB, the option's own unit), against the server default of 4 MB.
+    /// Every row of a collector batch adds its text's trigrams to the index's pending list, and the insert that takes the list past
+    /// the limit flushes the whole list inside its own call. A 4 MB list is reached every few dozen calls and each flush reads
+    /// a share of the index; 64 MB makes the flush rare, and the <see cref="CleanInterval"/> clean empties the list long
+    /// before it can reach that size, so the insert rarely pays for one.</summary>
+    internal const int PendingListLimitKb = 65536;
+
+    /// <summary>The time between cleans of the pending list. The list grows with the collector's calls, and the clean must run often enough
+    /// that a store far busier than the largest field store still never fills it between cleans.</summary>
+    public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>How long the limit change waits for its lock. <c>ALTER INDEX ... SET (gin_pending_list_limit)</c> takes <c>ACCESS EXCLUSIVE</c> on the
+    /// index, so while a long search holds the index it queues, and every insert into the table queues behind it.</summary>
+    internal const string LockTimeout = "2s";
+
+    /// <summary>One row, when the index exists: whether it is valid, and whether it already carries <see cref="PendingListLimitKb"/>.</summary>
+    internal static readonly string PendingListStateSql =
+        "SELECT i.indisvalid, coalesce('gin_pending_list_limit=" + PendingListLimitKb + "' = ANY (c.reloptions), false) "
+        + "FROM pg_index AS i JOIN pg_class AS c ON c.oid = i.indexrelid WHERE i.indexrelid = to_regclass('" + IndexName + "')";
+
+    /// <summary>Sets the limit on an index built before the option existed. Run in its own transaction under <see cref="LockTimeout"/>.</summary>
+    internal static readonly string SetPendingListLimitSql = "ALTER INDEX IF EXISTS " + IndexName + " SET (gin_pending_list_limit = " + PendingListLimitKb + ")";
+
+    /// <summary>Empties the pending list, so no insert has to.</summary>
+    internal const string CleanPendingListSql = "SELECT gin_clean_pending_list(to_regclass('" + IndexName + "'))";
 
     internal static string QuoteIdentifier(string name) => "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
@@ -706,11 +732,104 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     public static Task RunAsync(
         NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
         TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
-        RunLoopAsync(
-            enabled, tracker, logger, "Trigram index", firstDelay, interval,
-            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
-            static (wait, ct) => Task.Delay(wait, ct),
-            cancellationToken);
+        Task.WhenAll(
+            RunLoopAsync(
+                enabled, tracker, logger, "Trigram index", firstDelay, interval,
+                (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+                static (wait, ct) => Task.Delay(wait, ct),
+                cancellationToken),
+            RunCleanLoopAsync(postgres, enabled, logger, firstDelay, CleanInterval, cancellationToken));
+
+    /// <summary>
+    /// #9044: cleans the index's pending list every <paramref name="interval"/> (<see cref="CleanInterval"/>) until shutdown, after
+    /// <paramref name="firstDelay"/>, apart from the build pass, whose retries and backoff stay on <see cref="PassInterval"/>. Never throws.
+    /// </summary>
+    internal static async Task RunCleanLoopAsync(
+        NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(firstDelay, cancellationToken).ConfigureAwait(false);
+            while (true)
+            {
+                await CleanPendingListAsync(postgres, enabled, logger, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogDebug("Trigram index clean loop was cancelled at shutdown.");
+        }
+    }
+
+    /// <summary>
+    /// #9044: one clean, when the option is on and the index exists and is valid. An index that does not carry <see cref="PendingListLimitKb"/>
+    /// first gets it, once, in its own transaction under <see cref="LockTimeout"/>: a lock that is not free in time is a quiet skip that the next
+    /// clean retries (the clean itself takes no lock an insert or a search waits on). Best effort: the index works the same without either, so any
+    /// other failure is a Warning and the next clean tries again. Throws only on cancellation.
+    /// </summary>
+    internal static async Task CleanPendingListAsync(NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!enabled())
+            {
+                return;
+            }
+
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            bool limitSet;
+            await using (var read = new NpgsqlCommand(PendingListStateSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            await using (var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || !reader.GetBoolean(0))
+                {
+                    return;
+                }
+
+                limitSet = reader.GetBoolean(1);
+            }
+
+            if (!limitSet)
+            {
+                await SetPendingListLimitAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var clean = new NpgsqlCommand(CleanPendingListSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            await clean.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Could not clean the pending list of trigram index {Index}: {Message}", IndexName, ErrorText(ex));
+        }
+    }
+
+    private static async Task SetPendingListLimitAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using (var timeout = new NpgsqlCommand("SET LOCAL lock_timeout = '" + LockTimeout + "'", connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            {
+                await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var set = new NpgsqlCommand(SetPendingListLimitSql, connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            {
+                await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+        {
+            logger.LogDebug("Setting the pending list limit on trigram index {Index} waited {Timeout} for its lock and is skipped; the next clean tries again.", IndexName, LockTimeout);
+        }
+    }
 
     /// <summary>
     /// #8978: the loop under both indexes' <c>RunAsync</c>, with the pass and the wait passed in so a test steps it without a store or a clock.
