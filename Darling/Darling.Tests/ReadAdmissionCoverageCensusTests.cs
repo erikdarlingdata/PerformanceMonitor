@@ -205,6 +205,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
         ["Hosting/DarlingHealthHostService.cs: GET \"/livez\""] = "health port (#8184): one word from the in-process startup state, no store read",
         ["Hosting/DarlingHealthHostService.cs: GET \"/readyz\""] = "health port (#8184): one word from the in-process startup state, no store read",
+        ["Hosting/DarlingMetricsHostService.cs: GET \"/metrics\""] = "metrics port (#9013): an in-memory snapshot; the refresh admits as get_fleet_overview",
         [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",
         [WebFile + "GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
         [WebFile + "GET \"/api/session\""] = "the seat's capability probe: reads no store",
