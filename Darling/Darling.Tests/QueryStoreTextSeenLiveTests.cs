@@ -33,6 +33,8 @@ namespace Darling.Tests;
 /// <item>the touch gives a text with no seen row one, and none to a statement the store holds no text for;</item>
 /// <item>the prune keeps a text either stamp says is live, retires the rest, and judges a text with no seen row by the
 /// text row's own stamp;</item>
+/// <item>the retention pass's adopt step counts as no purged table and no deleted row, a failure of it is one failed
+/// table and the prune still runs, and a pass whose time budget is spent starts no adopt and records the stop at the prune;</item>
 /// <item>a touch that commits while the prune waits for its text keeps the text and its seen row;</item>
 /// <item>a deleted text takes its seen row with it, whatever deleted it;</item>
 /// <item>the rung fills the table from the text rows it finds, arms the trigger, and can run again;</item>
@@ -282,6 +284,215 @@ public sealed class QueryStoreTextSeenLiveTests
     }
 
     /// <summary>
+    /// The adopt step writes seen rows and deletes nothing, so the pass counts it as no purged table and its rows as no
+    /// deleted rows. The count of purged tables is compared with the same pass held back by the once-a-day gate, which
+    /// skips the adopt step, the text prune and the self-statement key prune and runs every other table: the pass that
+    /// runs the three purges exactly two more tables.
+    /// </summary>
+    [Fact]
+    public async Task TheAdoptStep_GivesATextWithNoSeenRowOne_AndCountsAsNoPurgedTableAndNoDeletedRow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+
+        var utcNow = QueryStorePlanMap.Naive(WholeSecondUtcNow());
+        var stale = utcNow.AddDays(-StaleDays);
+        var fresh = utcNow.AddHours(-FreshHours);
+
+        /* 1, 2, 3: no seen row, text row fresh. Adopted and kept.
+           4: no seen row, text row old. Adopted, then retired on the stamp it was adopted with.
+           5, 6: both stamps old. Retired.
+           7: both stamps fresh. Kept.
+           Four rows adopted, three texts retired. */
+        await PlantAsync(connection, ServerId, 1, "0xA1", fresh, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 2, "0xA2", fresh, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 3, "0xA3", fresh, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 4, "0xA4", stale, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 5, "0xA5", stale, stale, ct);
+        await PlantAsync(connection, ServerId, 6, "0xA6", stale, stale, ct);
+        await PlantAsync(connection, ServerId, 7, "0xA7", fresh, fresh, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var log = new CapturingTestLogger();
+
+        var heldBack = await DarlingRetention.PurgeAsync(
+            postgres, timescaleAvailable: false, log, ct, queryTextPruneGate: AGateThatHoldsTheTextPruneBack());
+
+        /* Nothing else in the store has a row to delete, and the held-back pass leaves the texts as they were planted. */
+        Assert.True(0 == heldBack.RowsDeleted, log.Joined);
+        Assert.Equal(new long[] { 1, 2, 3, 4, 5, 6, 7 }, await IdsAsync(connection, "collect.query_store_text", ServerId, ct));
+        Assert.Equal(new long[] { 5, 6, 7 }, await IdsAsync(connection, "collect.query_store_text_seen", ServerId, ct));
+
+        var pass = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct);
+
+        var texts = await IdsAsync(connection, "collect.query_store_text", ServerId, ct);
+        Assert.True(texts.SequenceEqual(new long[] { 1, 2, 3, 7 }), $"text rows left: {string.Join(", ", texts)}\n{log.Joined}");
+        var seen = await IdsAsync(connection, "collect.query_store_text_seen", ServerId, ct);
+        Assert.True(seen.SequenceEqual(new long[] { 1, 2, 3, 7 }), $"seen rows left: {string.Join(", ", seen)}\n{log.Joined}");
+        Assert.Equal(fresh, await SeenAsync(connection, ServerId, 1, ct));
+        Assert.Equal(fresh, await SeenAsync(connection, ServerId, 2, ct));
+        Assert.Equal(fresh, await SeenAsync(connection, ServerId, 3, ct));
+
+        /* The three texts the prune retired, and none of the four rows the adopt step wrote. */
+        Assert.True(3 == pass.RowsDeleted, log.Joined);
+
+        /* The text table and the self-statement keys, and not the adopt step. */
+        Assert.True(heldBack.TablesPurged + 2 == pass.TablesPurged, $"held back {heldBack.TablesPurged}, pass {pass.TablesPurged}\n{log.Joined}");
+        Assert.Equal("SUCCESS", (await LastRunRecordAsync(connection, ct)).Status);
+    }
+
+    /// <summary>
+    /// An adopt step whose statement fails is one failed table in the pass's run record, with a warning that names the seen
+    /// table, and the text prune runs all the same. The failure is planted: a trigger on the seen table that refuses every
+    /// insert. The adopt step's <c>INSERT</c> is the only insert into that table a pass makes, and the prune's cascade is a
+    /// delete, so the same pass held back by the once-a-day gate fails nothing. A text with no seen row is kept until a pass
+    /// adopts it, which the pass after the trigger is dropped does.
+    /// </summary>
+    [Fact]
+    public async Task AnAdoptStepThatFails_CountsAsOneFailedTable_AndTheTextPruneStillRuns()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+
+        var utcNow = QueryStorePlanMap.Naive(WholeSecondUtcNow());
+        var stale = utcNow.AddDays(-StaleDays);
+        var fresh = utcNow.AddHours(-FreshHours);
+
+        /* 1: no seen row, text row fresh. 2: no seen row, text row old. 3: both stamps old. 4: both stamps fresh. */
+        await PlantAsync(connection, ServerId, 1, "0xA1", fresh, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 2, "0xA2", stale, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 3, "0xA3", stale, stale, ct);
+        await PlantAsync(connection, ServerId, 4, "0xA4", fresh, fresh, ct);
+
+        await ExecuteAsync(
+            connection,
+            "CREATE FUNCTION public.refuse_seen_insert() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'planted seen row insert failure'; END $f$",
+            ct);
+        await ExecuteAsync(
+            connection,
+            "CREATE TRIGGER refuse_seen_insert BEFORE INSERT ON collect.query_store_text_seen FOR EACH ROW EXECUTE FUNCTION public.refuse_seen_insert()",
+            ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var heldBackLog = new CapturingTestLogger();
+
+        var heldBack = await DarlingRetention.PurgeAsync(
+            postgres, timescaleAvailable: false, heldBackLog, ct, queryTextPruneGate: AGateThatHoldsTheTextPruneBack());
+
+        Assert.True("SUCCESS" == (await LastRunRecordAsync(connection, ct)).Status, heldBackLog.Joined);
+
+        var log = new CapturingTestLogger();
+        var pass = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct);
+
+        /* The prune ran: text 3 and its seen row are gone. Nothing was adopted, so text 2 has no seen row for the prune to
+           find it by and is kept with text 1. */
+        var texts = await IdsAsync(connection, "collect.query_store_text", ServerId, ct);
+        Assert.True(texts.SequenceEqual(new long[] { 1, 2, 4 }), $"text rows left: {string.Join(", ", texts)}\n{log.Joined}");
+        var seen = await IdsAsync(connection, "collect.query_store_text_seen", ServerId, ct);
+        Assert.True(seen.SequenceEqual(new long[] { 4 }), $"seen rows left: {string.Join(", ", seen)}\n{log.Joined}");
+        Assert.True(1 == pass.RowsDeleted, log.Joined);
+        Assert.True(heldBack.TablesPurged + 2 == pass.TablesPurged, $"held back {heldBack.TablesPurged}, pass {pass.TablesPurged}\n{log.Joined}");
+
+        var failed = await LastRunRecordAsync(connection, ct);
+        Assert.True("WARNING" == failed.Status, log.Joined);
+        Assert.Contains(", 1 failed ", failed.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            log.Lines,
+            l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains(QueryStoreTextSeen.TableName, StringComparison.Ordinal));
+
+        /* The pass after the failure is gone adopts both, and retires text 2 on the stamp it was adopted with. */
+        await ExecuteAsync(connection, "DROP TRIGGER refuse_seen_insert ON collect.query_store_text_seen", ct);
+        var laterLog = new CapturingTestLogger();
+        var later = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, laterLog, ct);
+
+        Assert.Equal(new long[] { 1, 4 }, await IdsAsync(connection, "collect.query_store_text", ServerId, ct));
+        Assert.Equal(new long[] { 1, 4 }, await IdsAsync(connection, "collect.query_store_text_seen", ServerId, ct));
+        Assert.Equal(fresh, await SeenAsync(connection, ServerId, 1, ct));
+        Assert.True(1 == later.RowsDeleted, laterLog.Joined);
+        Assert.True("SUCCESS" == (await LastRunRecordAsync(connection, ct)).Status, laterLog.Joined);
+    }
+
+    /// <summary>
+    /// A pass whose time budget is spent when it reaches the adopt step starts no adopt, and that is neither a failure nor a
+    /// table the budget kept from starting: the text prune that follows is the first table the pass records as not started.
+    /// The clock follows the work, as <see cref="RetentionCollectionYieldLiveTests"/> does it: it reads zero while the plan map
+    /// holds a row and past the budget once the map is empty, and the plan map's purge is the statement before the adopt
+    /// step. The count of tables not reached is compared with the same pass held back by the once-a-day gate, which skips
+    /// the adopt step and the two purges after it: the pass that reaches them leaves exactly two more tables.
+    /// </summary>
+    [Fact]
+    public async Task ABudgetSpentAtTheAdoptStep_StartsNoAdoptAndFailsNothing_AndTheTextPruneRecordsTheStop()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+
+        var utcNow = QueryStorePlanMap.Naive(WholeSecondUtcNow());
+        var stale = utcNow.AddDays(-StaleDays);
+        var fresh = utcNow.AddHours(-FreshHours);
+        const int mapRows = 10;
+
+        /* 1: no seen row, which an adopt step that ran would write. 2: both stamps old, which a prune that ran would retire. */
+        await PlantAsync(connection, ServerId, 1, "0xA1", fresh, seenStamp: null, ct);
+        await PlantAsync(connection, ServerId, 2, "0xA2", stale, stale, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        double Clock()
+        {
+            using var count = new NpgsqlCommand("SELECT count(*) FROM collect.query_store_plan_map", connection);
+            return (long)count.ExecuteScalar()! == 0 ? 100 : 0;
+        }
+
+        async Task<(PurgeSummary Summary, RetentionCollectionYield Yield, CapturingTestLogger Log)> StopAfterThePlanMapAsync(QueryTextPruneGate? gate)
+        {
+            await ExecuteAsync(
+                connection,
+                "INSERT INTO collect.query_store_plan_map (server_id, database_name, plan_id, digest, plan_hash, last_seen) "
+                + "SELECT 1, 'db', gs, ('\\x' || lpad(to_hex(gs), 8, '0'))::bytea, 'h' || gs, $1 FROM generate_series(1, " + mapRows + ") gs",
+                ct, stale);
+
+            var pacer = new RetentionWalPacer(rateBytesPerSecond: 1_000_000_000, delay: (_, _) => Task.CompletedTask);
+            var yield = new RetentionCollectionYield(
+                new NeverBehind(), TimeSpan.FromSeconds(50), logger: null, delay: (_, _) => Task.CompletedTask, secondsClock: Clock);
+            pacer.Yield = yield;
+            var log = new CapturingTestLogger();
+
+            var summary = await DarlingRetention.PurgeWithPacerAsync(
+                postgres, timescaleAvailable: false, log, ct, walPacer: pacer, queryTextPruneGate: gate);
+            return (summary, yield, log);
+        }
+
+        var heldBack = await StopAfterThePlanMapAsync(AGateThatHoldsTheTextPruneBack());
+        Assert.True(heldBack.Yield.StoppedOnBudget, heldBack.Log.Joined);
+        Assert.True(mapRows == heldBack.Summary.RowsDeleted, heldBack.Log.Joined);
+
+        var stopped = await StopAfterThePlanMapAsync(gate: null);
+
+        /* The plan map was drained and nothing after it ran: no row adopted, no text retired. */
+        Assert.True(mapRows == stopped.Summary.RowsDeleted, stopped.Log.Joined);
+        Assert.Null(await SeenAsync(connection, ServerId, 1, ct));
+        Assert.Equal(new long[] { 1, 2 }, await IdsAsync(connection, "collect.query_store_text", ServerId, ct));
+        Assert.Equal(new long[] { 2 }, await IdsAsync(connection, "collect.query_store_text_seen", ServerId, ct));
+
+        /* The stop is the text prune's, at its entry. The text table and the self-statement keys are the two more tables
+           not reached, and the adopt step is not a third. */
+        Assert.True("before " + QueryStoreTextStore.TableName == stopped.Yield.StoppedPlace, stopped.Log.Joined);
+        Assert.True(
+            heldBack.Yield.TablesNotReached + 2 == stopped.Yield.TablesNotReached,
+            $"held back {heldBack.Yield.TablesNotReached}, pass {stopped.Yield.TablesNotReached}\n{stopped.Log.Joined}");
+
+        var record = await LastRunRecordAsync(connection, ct);
+        Assert.True("SUCCESS" == record.Status, stopped.Log.Joined);
+        Assert.Contains("time budget before " + QueryStoreTextStore.TableName + ",", record.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A touch revives a text while the prune waits to delete it. Both stamps of text 1 are behind the cutoff, so the prune's
     /// scan picks it. The touch, in a transaction that is still open, restamps the text row (a text behind the smallest
     /// cutoff is also behind <see cref="QueryStoreTextSeen.TextRowRefreshHours"/>) and its seen row, and the prune's
@@ -510,6 +721,32 @@ LIMIT $4";
     }
 
     private readonly record struct TextVersion(string Ctid, string Xmin, DateTime LastSeen, string? QueryHash);
+
+    private sealed class NeverBehind : ICollectionPressure
+    {
+        public string? BehindReason() => null;
+    }
+
+    /// <summary>The once-a-day gate with a prune just finished and a clock that does not move: a pass handed it skips the
+    /// adopt step, the text prune and the self-statement key prune, and runs every other table.</summary>
+    private static QueryTextPruneGate AGateThatHoldsTheTextPruneBack()
+    {
+        var at = new DateTime(2026, 11, 18, 0, 0, 0, DateTimeKind.Utc);
+        var gate = new QueryTextPruneGate(() => at);
+        gate.MarkRan();
+        return gate;
+    }
+
+    /// <summary>The status and the message of the newest run record a retention pass wrote.</summary>
+    private static async Task<(string Status, string Message)> LastRunRecordAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT status, error_message FROM collect.collection_log WHERE collector_name = 'data_retention' ORDER BY collection_time DESC LIMIT 1",
+            connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "the retention pass wrote no run record");
+        return (reader.GetString(0), reader.GetString(1));
+    }
 
     private static DateTime WholeSecondUtcNow()
     {
