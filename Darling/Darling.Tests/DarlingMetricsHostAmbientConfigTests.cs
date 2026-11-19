@@ -9,6 +9,7 @@
 using System;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -43,6 +44,7 @@ public sealed class DarlingMetricsHostAmbientConfigTests
 
             Assert.True(host.IsListening);
             using var client = new HttpClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", DarlingMetricsHostTests.GoodToken);
             using var metrics = await client.GetAsync($"http://127.0.0.1:{metricsPort}/metrics", ct);
             Assert.Equal(HttpStatusCode.OK, metrics.StatusCode);
             await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync($"http://127.0.0.1:{extraPort}/metrics", ct));

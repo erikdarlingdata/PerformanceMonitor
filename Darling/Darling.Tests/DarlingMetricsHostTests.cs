@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -283,12 +284,19 @@ public sealed class DarlingMetricsHostTests : IDisposable
         Assert.True(host.IsListening);
 
         using var client = new HttpClient();
-        using var response = await client.GetAsync($"http://127.0.0.1:{port}/metrics", ct);
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}/metrics");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", GoodToken);
+        using var response = await client.SendAsync(request, ct);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.False(response.Headers.Contains("Server"));
         Assert.Equal(PrometheusText.ContentType, response.Content.Headers.ContentType?.ToString());
         Assert.Contains("darling_metrics_last_refresh_success 0\n", await response.Content.ReadAsStringAsync(ct), StringComparison.Ordinal);
+
+        /* The real listener runs the token gate: the same scrape without the header is refused. */
+        using var refused = await client.GetAsync($"http://127.0.0.1:{port}/metrics", ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+        Assert.Equal("", await refused.Content.ReadAsStringAsync(ct));
         await host.StopAsync(ct);
     }
 

@@ -36,6 +36,7 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposable
 {
     internal const string ApplicationName = "PerformanceMonitor Darling metrics";
+    private const string RefusalSurface = "Metrics";
 
     private readonly CollectorRuntimeState _collector;
     private readonly ReadAdmission _admission;
@@ -152,13 +153,9 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
                 options.Listen(listenAddress, port, l => l.Protocols = HttpProtocols.Http1);
             });
             app = builder.Build();
-            MapRoutes(app, context =>
-            {
-                var body = PrometheusText.Write(cache.Scrape(), _time.GetUtcNow().UtcDateTime);
-                context.Response.StatusCode = StatusCodes.Status200OK;
-                context.Response.ContentType = PrometheusText.ContentType;
-                return context.Response.WriteAsync(body);
-            });
+            /* #9013: one refusal log for this host, so its per-source rate limit spans every request the port answers. */
+            var refusals = new DarlingHttpRefusalLog();
+            MapRoutes(app, context => Answer(context, check, cache, refusals, _logger, _time));
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
 
             _app = app;
@@ -192,6 +189,49 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
 
             await DisposeFailedStartAsync(app).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// #9013: one <c>GET /metrics</c>, gated in the MCP host's order (#5288): an address outside <c>metrics.allowFrom</c> is a 403
+    /// whatever token it sends, then a missing or wrong bearer token is a 401, both with an empty body; only then the scrape. The
+    /// address is the TCP peer: forwarded headers are never read, and loopback is always admitted, as on web and MCP. An empty
+    /// <c>allowFrom</c> means no address filter, so the list is not asked at all (an empty list admits nobody).
+    /// </summary>
+    internal static async Task Answer(
+        HttpContext context, MetricsCheck check, DarlingMetricsSnapshotCache cache, DarlingHttpRefusalLog refusals, ILogger logger, TimeProvider time)
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        if (check.AllowList.Count > 0 && !DarlingHostBinding.IsRemoteAddressAllowed(remote, check.AllowList))
+        {
+            refusals.Report(
+                logger, RefusalSurface, DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden, remote,
+                $"its address is outside metrics.allowFrom ({check.AllowList})",
+                time.GetUtcNow().UtcDateTime);
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
+        var authorization = context.Request.Headers.Authorization.ToString();
+        var presented = DarlingMcpHostService.ExtractBearerToken(authorization);
+        if (presented is null || !DarlingHostBinding.FixedTimeTokenEquals(presented, check.Token))
+        {
+            /* #9013: the MCP host's three states, read from the header's shape only, so the line never holds what was presented. */
+            var refusal = presented is null
+                ? DarlingMcpHostService.DescribeBearerRefusal(authorization)
+                : "the presented bearer token does not match metrics.token";
+            refusals.Report(
+                logger, RefusalSurface, DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized, remote,
+                refusal,
+                time.GetUtcNow().UtcDateTime,
+                state: refusal);
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.Headers.WWWAuthenticate = "Bearer";
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = PrometheusText.ContentType;
+        await context.Response.WriteAsync(PrometheusText.Write(cache.Scrape(), time.GetUtcNow().UtcDateTime)).ConfigureAwait(false);
     }
 
     internal static void MapRoutes(IEndpointRouteBuilder app, Func<HttpContext, Task> answer)
