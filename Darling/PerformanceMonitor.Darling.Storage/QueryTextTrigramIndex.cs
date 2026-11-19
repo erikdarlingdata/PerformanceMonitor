@@ -397,7 +397,20 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     internal static string CreateIndexSql(string extensionSchema) =>
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS " + IndexName[(IndexName.IndexOf('.', StringComparison.Ordinal) + 1)..]
         + " ON " + TableName + " USING gin (query_text "
-        + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops)";
+        + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops) WITH (gin_pending_list_limit = " + PendingListLimitKb + ")";
+
+    /// <summary>The index's <c>gin_pending_list_limit</c> in kB (64 MB, the option's own unit), against the server default of 4 MB.
+    /// Every row of a collector batch adds its text's trigrams to the index's pending list, and the insert that takes the list past
+    /// the limit flushes the whole list inside its own call. A 4 MB list is reached every few dozen calls and each flush reads
+    /// a share of the index; 64 MB makes the flush rare, and the pass's <see cref="CleanPendingListSql"/> empties the list long
+    /// before it can reach that size, so the insert rarely pays for one.</summary>
+    internal const int PendingListLimitKb = 65536;
+
+    /// <summary>Sets the limit on an index built before the option existed. A catalog change that takes no lock an insert waits on.</summary>
+    internal static readonly string SetPendingListLimitSql = "ALTER INDEX IF EXISTS " + IndexName + " SET (gin_pending_list_limit = " + PendingListLimitKb + ")";
+
+    /// <summary>Empties the pending list from the pass, so no insert has to.</summary>
+    internal const string CleanPendingListSql = "SELECT gin_clean_pending_list(to_regclass('" + IndexName + "'))";
 
     internal static string QuoteIdentifier(string name) => "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
@@ -480,6 +493,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         if (state.IndexValid == true)
         {
             tracker.ClearExtensionBlock();
+            await TunePendingListAsync(connection, logger, buildTimeoutSeconds, cancellationToken).ConfigureAwait(false);
             await EnsureSampleIndexAsync(postgres, connection, state, tracker, utcNow, logger, buildTimeoutSeconds, cancellationToken).ConfigureAwait(false);
             return false;
         }
@@ -576,6 +590,30 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// form the table calls for (<see cref="CreateSampleIndexSql"/>). A failed build is recorded on the tracker with the same backoff as a failed
     /// trigram build, and its leftover is dropped at once.
     /// </summary>
+    /// <summary>Applies the pending-list limit to an existing index and empties the list. Best effort: the index works the same without
+    /// it, so a refusal (a login that does not own the index, a lock that does not clear) is logged and the next pass tries again.</summary>
+    private static async Task TunePendingListAsync(NpgsqlConnection connection, ILogger logger, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using (var set = new NpgsqlCommand(SetPendingListLimitSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            {
+                await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var clean = new NpgsqlCommand(CleanPendingListSql, connection) { CommandTimeout = timeoutSeconds };
+            await clean.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Could not tune or clean the pending list of trigram index {Index}: {Message}", IndexName, ErrorText(ex));
+        }
+    }
+
     private static async Task EnsureSampleIndexAsync(
         NpgsqlDataSource postgres, NpgsqlConnection connection, TrigramCatalogState state, QueryTextTrigramIndexTracker tracker, DateTime utcNow,
         ILogger logger, int buildTimeoutSeconds, CancellationToken cancellationToken)

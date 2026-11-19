@@ -134,6 +134,55 @@ public sealed class QueryTextTrigramIndexLiveTests
         Assert.Equal(oid, await OidAsync(admin, ct));
     }
 
+    private static async Task<int> PendingListLimitAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        Convert.ToInt32(await ScalarAsync(connection,
+            $"SELECT coalesce((SELECT option_value FROM pg_options_to_table(c.reloptions) WHERE option_name = 'gin_pending_list_limit')::int, (SELECT setting::int FROM pg_settings WHERE name = 'gin_pending_list_limit')) FROM pg_class AS c WHERE c.oid = '{QueryTextTrigramIndex.IndexName}'::regclass", ct),
+            CultureInfo.InvariantCulture);
+
+    private static async Task<long> PendingTuplesAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(connection, $"SELECT pending_tuples FROM pgstatginindex('{QueryTextTrigramIndex.IndexName}')", ct), CultureInfo.InvariantCulture);
+
+    /* Every collector batch adds its texts' trigrams to the index's pending list, and the insert that takes the list past the limit
+       flushes it inside its own call. A new build carries the 64 MB limit, and an index an earlier build made without it gets the limit
+       and an empty list from the next pass, so the insert rarely reaches the limit. */
+    [Fact]
+    public async Task APassSetsThePendingListLimitOnAnOlderIndex_AndEmptiesTheList_AndANewBuildCarriesTheLimit()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+        await admin.OpenAsync(ct);
+        await SeedAsync(admin, ct);
+        await ExecAsync(admin, "CREATE EXTENSION IF NOT EXISTS pg_trgm", ct);
+        await ExecAsync(admin, "CREATE EXTENSION IF NOT EXISTS pgstattuple", ct);
+        var schema = (string)(await ScalarAsync(
+            admin, "SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'", ct))!;
+        await ExecAsync(admin, $"CREATE INDEX ix_query_text_dim_trgm ON collect.query_text_dim USING gin (query_text \"{schema}\".gin_trgm_ops)", ct);
+        await ExecAsync(admin,
+            @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+              SELECT sha256(('new' || i)::bytea), 'SELECT * FROM dbo.Lines_' || i || ' WHERE LineId = @p', timezone('UTC', now())
+              FROM generate_series(1, 200) AS i", ct);
+        Assert.NotEqual(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
+        Assert.True(await PendingTuplesAsync(admin, ct) > 0);
+
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tracker = new QueryTextTrigramIndexTracker();
+        tracker.Configure(true);
+        await PassAsync(data, true, tracker, Now, ct);
+
+        Assert.Equal(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
+        Assert.Equal(0L, await PendingTuplesAsync(admin, ct));
+        Assert.Equal(0, tracker.BuildsStarted);
+
+        await ExecAsync(admin, $"DROP INDEX {QueryTextTrigramIndex.IndexName}", ct);
+        await PassAsync(data, true, tracker, Now.AddHours(1), ct);
+        Assert.Equal(1, tracker.BuildsStarted);
+        Assert.Equal(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
+    }
+
     [Fact]
     public async Task TurningTheOptionOff_DropsTheIndex()
     {
