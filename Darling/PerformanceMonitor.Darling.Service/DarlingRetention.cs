@@ -835,15 +835,9 @@ public static class DarlingRetention
                         -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
                     /* A text row with no seen row gets one first, stamped with its own last_seen, so the prune below
                        judges it by that stamp instead of never finding it. Keys against keys, no pass over the text heap
-                       (QueryStoreTextSeen.AdoptMissingSql). It inserts rows, so its count stays out of the rows deleted. */
-                    var seenAdopted = await PurgeOneAsync(
-                        postgres, QueryStoreTextSeen.TableName, QueryStoreTextSeen.AdoptMissingSql, queryTextCutoff, logger, cancellationToken,
-                        batchSize: SingleShotStatement, pacer: walPacer);
-                    if (seenAdopted is not null)
-                    {
-                        tablesPurged++;
-                    }
-                    else
+                       (QueryStoreTextSeen.AdoptMissingSql). It inserts rows and deletes none, so it is not one of the
+                       pass's purged tables and its rows are not rows deleted: only its failure is counted. */
+                    if (!await AdoptMissingSeenRowsAsync(postgres, queryTextCutoff, logger, walPacer, cancellationToken))
                     {
                         tablesFailed++;
                     }
@@ -2508,6 +2502,64 @@ $do$";
             logger?.LogWarning(
                 "Could not establish rollup coverage for {Table} ({Message}) — skipping its drop this cycle rather than deleting history on an assumption.",
                 tableName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The text prune's first statement (<see cref="QueryStoreTextSeen.AdoptMissingSql"/>), run once on its own connection:
+    /// an <c>INSERT</c> that gives every Query Store text row with no seen row one. Returns false when it failed (warned,
+    /// and the pass goes on to the prune, which then cannot find a text with no seen row until a later pass adopts it).
+    ///
+    /// <para>It deletes nothing, so it is kept out of the purge's table accounting: the caller does not count it as a
+    /// purged table, its rows are logged as adopted, and the wall budget's gate never records it as a table not reached or
+    /// left. A pass whose budget is spent does not start it, and the prune that follows records the stop at its own entry.
+    /// It is paced like any purge batch, through the same drain loop, so it waits for collection and the WAL of a large
+    /// adoption is paid for before the prune starts.</para>
+    /// </summary>
+    private static async Task<bool> AdoptMissingSeenRowsAsync(
+        NpgsqlDataSource postgres,
+        DateTime cutoff,
+        ILogger? logger,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken)
+    {
+        if (pacer?.Yield is { BudgetSpent: true })
+        {
+            return true;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(QueryStoreTextSeen.AdoptMissingSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+            command.Parameters.AddWithValue(cutoff);
+
+            /* SingleShotStatement as the cap: no row count reaches it, so the one execution is the whole step. */
+            var adopted = await DrainBatchesAsync(
+                async ct =>
+                {
+                    var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, ct);
+                    var rows = await command.ExecuteNonQueryAsync(ct);
+                    return (rows, SingleShotStatement, pacer is null ? 0 : await pacer.WalWrittenSinceAsync(connection, walBefore, ct));
+                },
+                pacer,
+                cancellationToken);
+
+            if (adopted > 0)
+            {
+                logger?.LogInformation(
+                    "Retention adopted {Rows} Query Store text row(s) that had no liveness row into {Table}",
+                    adopted, QueryStoreTextSeen.TableName);
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Retention could not write the missing liveness rows of {Table}; a Query Store text with none is kept until a later pass adopts it: {Failure}",
+                QueryStoreTextSeen.TableName, DescribePurgeFailure(ex));
             return false;
         }
     }
