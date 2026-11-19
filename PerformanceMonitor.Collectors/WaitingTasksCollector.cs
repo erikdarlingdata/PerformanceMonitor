@@ -17,8 +17,8 @@ namespace PerformanceMonitor.Collectors;
 /// <summary>
 /// Point-in-time waiting tasks from sys.dm_os_waiting_tasks. Extracted verbatim from Lite's
 /// RemoteCollectorService.WaitingTasks.cs — session ids read as smallint and widened to int on
-/// write, resource_description stays a NULL placeholder (no longer collected), and the
-/// database-exclusion filter splices at /*EXCLUSION_FILTER*/. Benign "ignored" wait types are
+/// write, resource_description holds the page (database_id:file_id:page_id) for page latch and page I/O latch
+/// waits and NULL for every other wait (#9055), and the database-exclusion filter splices at /*EXCLUSION_FILTER*/. Benign "ignored" wait types are
 /// skipped in <see cref="ReadAsync"/> via <c>context.IgnoredWaitTypes</c> — the same filter
 /// <see cref="WaitStatsCollector"/> applies — so the "Current Waits" surface honors the user's ignore
 /// list in both SKUs (Lite: ignored_wait_types.json, Darling: IgnoredWaitDefaults.All).
@@ -31,9 +31,18 @@ public sealed class WaitingTasksCollector : CollectorDefinitionBase<WaitingTasks
     {
     }
 
-    public readonly record struct Row(short SessionId, string? WaitType, long WaitDurationMs, short? BlockingSessionId, string? DatabaseName, string? ProgramName);
+    public readonly record struct Row(short SessionId, string? WaitType, long WaitDurationMs, short? BlockingSessionId, string? DatabaseName, string? ProgramName, string? ResourceDescription = null);
 
-    private const string QueryText = @"
+    /// <summary>
+    /// #9055: the value written to resource_description. For a page latch or page I/O latch wait it is the raw
+    /// <c>database_id:file_id:page_id</c> from the DMV (about 15 characters), the only thing that names the page. Every other wait
+    /// is NULL: lock descriptions can be long and blocking reports already cover them. The underscore is bracketed so
+    /// a name such as PAGELATCHX does not match. Used by the query, and by the live test that runs it alone.
+    /// </summary>
+    internal const string ResourceDescriptionExpression =
+        "CASE WHEN wt.wait_type LIKE N'PAGELATCH[_]%' OR wt.wait_type LIKE N'PAGEIOLATCH[_]%' THEN wt.resource_description END";
+
+    private const string QueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
@@ -44,7 +53,9 @@ SELECT /* PerformanceMonitorLite */
     blocking_session_id = NULLIF(wt.blocking_session_id, @@SPID),
     database_name = d.name,
     /* #7573: the session's program name, so a reader can leave the monitor's own waits out. NULL when the session is gone by the time of the join. */
-    program_name = es.program_name
+    program_name = es.program_name,
+    /* #9055: the page for page latch waits, NULL for any other wait. Appended LAST so the reader's positions stay. */
+    resource_description = {ResourceDescriptionExpression}
 FROM sys.dm_os_waiting_tasks AS wt
 LEFT JOIN sys.dm_exec_sessions AS es
   ON es.session_id = wt.session_id
@@ -108,7 +119,8 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(2) ? 0L : reader.GetInt64(2),
                 reader.IsDBNull(3) ? null : reader.GetInt16(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5)));
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
 
         return rows;
@@ -121,7 +133,7 @@ OPTION(RECOMPILE);";
             .Value(row.WaitType)                                                    /* wait_type VARCHAR */
             .Value(row.WaitDurationMs)                                              /* wait_duration_ms BIGINT */
             .Value(row.BlockingSessionId.HasValue ? row.BlockingSessionId.Value : (int?)null) /* blocking_session_id INTEGER (widened) */
-            .Value((string?)null)                                                   /* resource_description — no longer collected */
+            .Value(row.ResourceDescription)                                         /* resource_description VARCHAR: database_id:file_id:page_id for page latch waits, else NULL (#9055) */
             .Value(row.DatabaseName)                                                /* database_name VARCHAR */
             .Value(row.ProgramName);                                                /* program_name VARCHAR, nullable (#7573) */
     }

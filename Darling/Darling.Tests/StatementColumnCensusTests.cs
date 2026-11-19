@@ -120,7 +120,7 @@ public sealed class StatementColumnCensusTests
     /// </summary>
     private static readonly Dictionary<string, string> WatchedExempt = new(StringComparer.Ordinal)
     {
-        ["waiting_tasks.resource_description"] = "the collector writes a literal NULL there (WaitingTasksCollector.cs)",
+        ["waiting_tasks.resource_description"] = "a page id (database_id:file_id:page_id) for page latch waits, NULL otherwise (WaitingTasksCollector.cs)",
     };
 
     private static IEnumerable<(string Definition, string Column)> SqlServerPayloadColumns() =>

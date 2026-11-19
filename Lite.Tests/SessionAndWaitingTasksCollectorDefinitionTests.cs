@@ -84,11 +84,11 @@ public sealed class WaitingTasksCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task ReadAndWrite_WidensSmallints_AndKeepsNullPlaceholder()
+    public async Task ReadAndWrite_WidensSmallints_AndWritesNullResourceDescriptionWhenTheQueryGaveNone()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { (short)71, "LCK_M_X", 4500L, (short)55, "StackOverflow", "PerformanceMonitor Darling" },
-            new object[] { (short)72, "PAGEIOLATCH_SH", 20L, DBNull.Value, DBNull.Value, DBNull.Value });
+            new object[] { (short)71, "LCK_M_X", 4500L, (short)55, "StackOverflow", "PerformanceMonitor Darling", DBNull.Value },
+            new object[] { (short)72, "PAGEIOLATCH_SH", 20L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
 
         var rows = await WaitingTasksCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
 
@@ -102,8 +102,31 @@ public sealed class WaitingTasksCollectorDefinitionTests
         WaitingTasksCollector.Instance.WritePayload(rows[1], writer, CollectorTestContext.Make(s_deltas));
         Assert.Equal(72, writer.Values[0]);          /* smallint widened to int */
         Assert.Null(writer.Values[3]);               /* null blocking session survives */
-        Assert.Null(writer.Values[4]);               /* resource_description placeholder */
+        Assert.Null(writer.Values[4]);               /* a row with no resource description stores NULL */
         Assert.Null(writer.Values[6]);               /* #7573: a session with no program name stores NULL, never a placeholder */
+    }
+
+    /// <summary>
+    /// #9055: the page the query returned for a page latch wait travels from the reader to the resource_description
+    /// position of the payload, and a row with none keeps NULL there.
+    /// </summary>
+    [Fact]
+    public async Task ReadAndWrite_CarriesThePageToTheResourceDescriptionPosition()
+    {
+        using var reader = new FakeCollectorDataReader(
+            new object[] { (short)80, "PAGELATCH_EX", 3L, DBNull.Value, "SalesDb", "App", "5:1:4242" },
+            new object[] { (short)81, "LCK_M_X", 90L, (short)80, "SalesDb", "App", DBNull.Value });
+
+        var context = CollectorTestContext.Make(s_deltas);
+        var rows = await WaitingTasksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var writer = new RecordingCollectorRowWriter();
+        WaitingTasksCollector.Instance.WritePayload(rows[0], writer, context);
+        Assert.Equal(new object?[] { 80, "PAGELATCH_EX", 3L, null, "5:1:4242", "SalesDb", "App" }, writer.Values);
+
+        writer.Values.Clear();
+        WaitingTasksCollector.Instance.WritePayload(rows[1], writer, context);
+        Assert.Equal(new object?[] { 81, "LCK_M_X", 90L, 80, null, "SalesDb", "App" }, writer.Values);
     }
 
     [Fact]
@@ -114,9 +137,9 @@ public sealed class WaitingTasksCollectorDefinitionTests
            the collector now skips ignored types just like WaitStatsCollector, so both wait surfaces honor
            the same list (Lite: ignored_wait_types.json, Darling: IgnoredWaitDefaults.All). */
         using var reader = new FakeCollectorDataReader(
-            new object[] { (short)57, "LCK_M_X", 200L, (short)58, "SalesDb", "App" },
-            new object[] { (short)60, "WAITFOR", 5000L, DBNull.Value, "SalesDb", "App" },
-            new object[] { (short)62, "SOS_SCHEDULER_YIELD", 15L, DBNull.Value, "SalesDb", DBNull.Value });
+            new object[] { (short)57, "LCK_M_X", 200L, (short)58, "SalesDb", "App", DBNull.Value },
+            new object[] { (short)60, "WAITFOR", 5000L, DBNull.Value, "SalesDb", "App", DBNull.Value },
+            new object[] { (short)62, "SOS_SCHEDULER_YIELD", 15L, DBNull.Value, "SalesDb", DBNull.Value, DBNull.Value });
 
         var context = CollectorTestContext.Make(s_deltas, ignored: new[] { "WAITFOR" });
 
