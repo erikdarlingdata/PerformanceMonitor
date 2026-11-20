@@ -205,7 +205,7 @@ docker compose up -d
 
 The service runs as user 1654, so the `chown` is needed: a backup taken before the upgrade restores root-owned.
 
-The store container runs PostgreSQL 17 (`timescale/timescaledb:2.32.0-pg17`). Do not restore a dump from a newer major version into it.
+The store container runs PostgreSQL 17 (`timescale/timescaledb:2.32.1-pg17`). Do not restore a dump from a newer major version into it.
 
 ## How much disk will it use
 
