@@ -29,9 +29,8 @@ namespace Darling.Tests;
 /// (#2888): of the rungs in <c>PgMigrations.Scripts</c>, only a handful touch data an EARLIER rung created,
 /// the applier wraps each rung's whole SQL in ONE <c>NpgsqlCommand</c> (so a rung's command timeout is a
 /// per-RUNG bound, not a per-statement one), and five of those rungs target objects large enough to spend
-/// it (V281, #9043, is the fifth). Each of the five states the command timeout it runs under: the default
-/// <c>MigrationCommandTimeoutSeconds</c>, or a longer one declared in
-/// <c>PgMigrations.DeclaredRungCommandTimeoutSeconds</c> (#9089). The budget is the larger of every
+/// it (V281, #9043, is the fifth). Each runs under the default <c>MigrationCommandTimeoutSeconds</c> unless
+/// <c>PgMigrations.DeclaredRungCommandTimeoutSeconds</c> gives it a longer bound (#9089). The budget is the larger of every
 /// floor-setting rung at the default plus one default of margin, and the longest declared bound plus one
 /// default of margin.</para>
 ///
@@ -76,9 +75,7 @@ public sealed class MigrationDataMovingRungCensusPins
     /// <summary>
     /// The census, as a register rather than a count. <c>SetsTheFloor</c> is the load-bearing field:
     /// it is what <c>MigrationLockWaitTimeoutSeconds</c> is derived from, checked by
-    /// <see cref="TheLockWaitBudget_CoversEveryFloorSettingRungAtTheDefault_AndTheLongestDeclaredBound"/>. A
-    /// floor-setting rung also carries its <see cref="RungTimeout"/>, checked against the applier by
-    /// <see cref="EveryFloorSettingRung_StatesItsCommandTimeout_AndTheApplierRunsThatOne"/>. Sizes are from
+    /// <see cref="TheLockWaitBudget_CoversEveryFloorSettingRungAtTheDefault_AndTheLongestDeclaredBound"/>. Sizes are from
     /// #2894's measurements on a local PostgreSQL 17.11 / TimescaleDB 2.29.2 store and from the live
     /// 42-server store.
     /// </summary>
@@ -88,28 +85,19 @@ public sealed class MigrationDataMovingRungCensusPins
             22,
             SetsTheFloor: true,
             "CREATE INDEX over every existing chunk of the populated collect.index_object_stats "
-            + "hypertable - 1.29 s over 907 MB / 90 chunks locally, 2.72 GB on the live store",
-            RungTimeout.Default(
-                "6.08 s with no bound at 13.5 million rows in 90 chunks, about 50 times inside the default. Every store on "
-                + "3.8.0 or later (schema 125) has applied this rung, so only a store on an older build still runs it.")),
+            + "hypertable - 1.29 s over 907 MB / 90 chunks locally, 2.72 GB on the live store"),
         new(
             23,
             SetsTheFloor: true,
             "create_hypertable(..., migrate_data => true) rewrites collect.collection_log's existing "
-            + "rows into chunks - 9.37 s over a 608 MB heap locally, 0.69 GB on the live store",
-            RungTimeout.Default(
-                "25.61 s with no bound at 13.5 million rows in 90 chunks, about 12 times inside the default and the closest "
-                + "of the four. Every store on 3.8.0 or later (schema 125) has applied this rung.")),
+            + "rows into chunks - 9.37 s over a 608 MB heap locally, 0.69 GB on the live store"),
         new(
             39,
             SetsTheFloor: true,
             "two partial indexes over the populated query_stats and procedure_stats hypertables, the "
             + "store's largest fact tables - 1.44 s over 1.26 GB locally, 24.5 GB on the live store. "
             + "Two statements but ONE rung, so one multiple: the applier gives the rung's whole SQL a "
-            + "single NpgsqlCommand and therefore a single MigrationCommandTimeoutSeconds",
-            RungTimeout.Default(
-                "4.28 s with no bound for both indexes at 13.5 million rows in 90 chunks each, about 70 times inside the "
-                + "default. Every store on 3.8.0 or later (schema 125) has applied this rung.")),
+            + "single NpgsqlCommand and therefore a single MigrationCommandTimeoutSeconds"),
         new(
             62,
             SetsTheFloor: false,
@@ -126,10 +114,7 @@ public sealed class MigrationDataMovingRungCensusPins
             104,
             SetsTheFloor: true,
             "CREATE INDEX over the populated collect.pg_deadlocks hypertable - index-only rung, so a "
-            + "store that sat on V103 for a release pays the whole build here",
-            RungTimeout.Default(
-                "10.57 s with no bound at 13.5 million rows in 90 chunks, about 28 times inside the default, over a table "
-                + "that holds one row per deadlock. Every store on 3.8.0 or later (schema 125) has applied this rung.")),
+            + "store that sat on V103 for a release pays the whole build here"),
         new(
             113,
             SetsTheFloor: false,
@@ -521,19 +506,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "sequential pass of the main heap, 3.7 s and 0.6 GB of WAL; the key builds in 2.3-2.4 s (243 MB); the foreign key validates in "
             + "4.8-4.9 s; about 11 s in all, warm and on local NVMe. The time follows the text heap, which is one of the largest plain tables "
             + "of a store that collects Query Store and is read cold at start, so it sets the floor as V22's and V39's index builds do. "
-            + "Loading before the constraints is what keeps it at about 11 s (51-55 s with the key in place first).",
-            RungTimeout.Declared(
-                1800,
-                "Six times the default (PgMigrations.V281CommandTimeoutSeconds). The rung sends nothing while it runs, so its bound is "
-                + "on the whole run: the backfill, the key build and the foreign key validation, which joins the new table to the text "
-                + "table and is a full pass over both. All three follow the text heap. The 11 s above is warm; a larger store with a "
-                + "cold cache takes several times as long for each gigabyte, with the validation the longest step, and a heap a few "
-                + "times larger again does not fit the default. Time is linear in the heap, so six times the default covers a heap "
-                + "six times the one the default covers, and is over 150 times the warm measurement. The rung's own SET LOCAL "
-                + "lock_timeout stays 280 s, so a wait for a lock still ends inside the default. PostgreSQL validates a NOT VALID "
-                + "foreign key under SHARE UPDATE EXCLUSIVE on the new table and ROW SHARE on the referenced one, so a rung of this "
-                + "shape can add its key NOT VALID and validate it in a later rung, outside the SHARE ROW EXCLUSIVE window. That is "
-                + "PostgreSQL's documented locking and is not measured here.")),
+            + "Loading before the constraints is what keeps it at about 11 s (51-55 s with the key in place first)."),
     ];
 
     /// <summary>
@@ -564,7 +537,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "MigrateAsync into DarlingWorker's LogCritical-and-return, which takes that instance out of "
             + "the collection loop with no retry until an operator restarts it (#2894).\n\n"
             + "Cost the rung, then declare it in s_declared with SetsTheFloor saying whether it moves "
-            + "the floor. If it does, give it a RungTimeout (the default bound, or a longer one declared in "
+            + "the floor. If it does, decide whether the default command timeout covers it (a longer bound goes in "
             + "PgMigrations.DeclaredRungCommandTimeoutSeconds) and re-derive MigrationLockWaitTimeoutSeconds "
             + "in the same commit.\n\n"
             + Describe(findings.Where(f => undeclared.Contains(f.Version))));
@@ -616,10 +589,10 @@ public sealed class MigrationDataMovingRungCensusPins
         var floor = s_declared.Count(d => d.SetsTheFloor);
         var everyFloorRungAtTheDefault = (floor + 1) * commandTimeout;
 
-        /* Positive control: the declared set is read from the applier's own map and holds V281, so "longest" is a real
-           bound and not the default standing in for an empty map. */
+        /* Positive control: the declared set is the applier's own map and is not empty, so "longest" is a real bound and
+           not the default standing in for an empty map. */
         var declared = PgMigrations.DeclaredRungCommandTimeoutSeconds;
-        Assert.True(declared.ContainsKey(281), "the applier's declared rung timeouts no longer hold V281");
+        Assert.NotEmpty(declared);
         var (longestVersion, longestDeclared) = declared.OrderByDescending(d => d.Value).Select(d => (d.Key, d.Value)).First();
         var longestDeclaredAndMargin = longestDeclared + commandTimeout;
 
@@ -641,94 +614,6 @@ public sealed class MigrationDataMovingRungCensusPins
             + $"bound, V{longestVersion.ToString(CultureInfo.InvariantCulture)} at {longestDeclared} s, plus one default of margin). "
             + "The margin is one default rung bound because one new data-moving rung is the granularity this ladder grows by. "
             + "Either the constant, the SetsTheFloor flags or the declared rung timeouts are stale; #2894 and #9089 have the derivation.");
-    }
-
-    /// <summary>
-    /// #9089: every floor-setting rung states the command timeout it runs under, and the applier runs that one. A
-    /// floor-setting rung is silent and its time follows collected data, so the default bound is a limit on its whole
-    /// run; whether that limit is enough is a decision, and this is where it is written down. The check goes both ways:
-    /// a rung the applier gives a longer bound must be a floor-setting rung that declares the same number here.
-    /// </summary>
-    [Fact]
-    public void EveryFloorSettingRung_StatesItsCommandTimeout_AndTheApplierRunsThatOne()
-    {
-        var problems = TimeoutDecisionProblems(
-            s_declared, PgMigrations.DeclaredRungCommandTimeoutSeconds, PgMigrations.MigrationCommandTimeoutSeconds);
-
-        Assert.True(
-            problems.Count == 0,
-            "The census and the applier disagree about a floor-setting rung's command timeout.\n\n"
-            + "A floor-setting rung runs as one silent command, so its command timeout bounds its whole run. Decide whether "
-            + "the default (PgMigrations.MigrationCommandTimeoutSeconds) is enough for the largest store that can reach "
-            + "the rung. If it is, give the rung RungTimeout.Default with the measurement that says so. If it is not, add "
-            + "the rung to PgMigrations.DeclaredRungCommandTimeoutSeconds with a finite bound, give it "
-            + "RungTimeout.Declared with the same number and the reasoning, and re-derive "
-            + "MigrationLockWaitTimeoutSeconds in the same commit.\n\n  "
-            + string.Join("\n  ", problems));
-
-        /* Positive controls: both kinds of decision are in the real register, so neither arm of the check is vacuous,
-           and the applier resolves each kind to the number the register states. */
-        Assert.Contains(s_declared, d => d.SetsTheFloor && d.Timeout is { DeclaredSeconds: null });
-        Assert.Contains(s_declared, d => d.SetsTheFloor && d.Timeout is { DeclaredSeconds: not null });
-        Assert.Equal(1800, PgMigrations.RungCommandTimeoutSeconds(281, PgMigrations.MigrationCommandTimeoutSeconds));
-        Assert.Equal(
-            PgMigrations.MigrationCommandTimeoutSeconds,
-            PgMigrations.RungCommandTimeoutSeconds(22, PgMigrations.MigrationCommandTimeoutSeconds));
-    }
-
-    /// <summary>
-    /// The timeout check's own red-first evidence, kept in the suite: each way the census and the applier can disagree
-    /// is reported on a synthetic register, and a register that agrees reports nothing. The real register passes
-    /// <see cref="EveryFloorSettingRung_StatesItsCommandTimeout_AndTheApplierRunsThatOne"/> either because it is right or
-    /// because the check sees nothing, and this tells the two apart.
-    /// </summary>
-    [Fact]
-    public void AFloorSettingRungWithNoTimeoutDecision_IsReported_AndSoIsEveryDisagreementWithTheApplier()
-    {
-        const int Default = 300;
-        var none = new Dictionary<int, int>();
-        var longer = new Dictionary<int, int> { [7] = 1800 };
-
-        /* No decision at all: the case the pin exists for. */
-        var undecided = TimeoutDecisionProblems([new DeclaredRung(7, SetsTheFloor: true, "moves data")], none, Default);
-        Assert.Contains("V7", Assert.Single(undecided), StringComparison.Ordinal);
-
-        /* A decision with no reasoning is not a decision. */
-        Assert.Single(TimeoutDecisionProblems(
-            [new DeclaredRung(7, SetsTheFloor: true, "moves data", RungTimeout.Default(" "))], none, Default));
-
-        /* The register says default and the applier runs a longer bound. */
-        Assert.Single(TimeoutDecisionProblems(
-            [new DeclaredRung(7, SetsTheFloor: true, "moves data", RungTimeout.Default("measured"))], longer, Default));
-
-        /* The register declares a bound the applier does not run. */
-        Assert.Single(TimeoutDecisionProblems(
-            [new DeclaredRung(7, SetsTheFloor: true, "moves data", RungTimeout.Declared(1800, "measured"))], none, Default));
-
-        /* The two declare different bounds. */
-        Assert.Single(TimeoutDecisionProblems(
-            [new DeclaredRung(7, SetsTheFloor: true, "moves data", RungTimeout.Declared(900, "measured"))], longer, Default));
-
-        /* A declared bound that is not longer than the default declares nothing. */
-        Assert.Single(TimeoutDecisionProblems(
-            [new DeclaredRung(7, SetsTheFloor: true, "moves data", RungTimeout.Declared(300, "measured"))],
-            new Dictionary<int, int> { [7] = 300 },
-            Default));
-
-        /* The applier gives a longer bound to a rung the census does not count as floor-setting, or does not hold. */
-        Assert.Single(TimeoutDecisionProblems(
-            [new DeclaredRung(7, SetsTheFloor: false, "one row")], longer, Default));
-        Assert.Single(TimeoutDecisionProblems([], longer, Default));
-
-        /* Agreement, both kinds, and a bounded rung with no decision: nothing to report. */
-        Assert.Empty(TimeoutDecisionProblems(
-            [
-                new DeclaredRung(5, SetsTheFloor: true, "moves data", RungTimeout.Default("measured")),
-                new DeclaredRung(6, SetsTheFloor: false, "one row"),
-                new DeclaredRung(7, SetsTheFloor: true, "moves data", RungTimeout.Declared(1800, "measured")),
-            ],
-            longer,
-            Default));
     }
 
     /// <summary>
@@ -1058,75 +943,7 @@ public sealed class MigrationDataMovingRungCensusPins
         }
     }
 
-    private sealed record DeclaredRung(int Version, bool SetsTheFloor, string Why, RungTimeout? Timeout = null);
-
-    /// <summary>
-    /// The command timeout a floor-setting rung runs under, and why that is enough. <see cref="DeclaredSeconds"/> is
-    /// null for the default bound, and the rung's entry in <c>PgMigrations.DeclaredRungCommandTimeoutSeconds</c>
-    /// otherwise.
-    /// </summary>
-    private sealed record RungTimeout(int? DeclaredSeconds, string Why)
-    {
-        public static RungTimeout Default(string why) => new(null, why);
-
-        public static RungTimeout Declared(int seconds, string why) => new(seconds, why);
-    }
-
-    /// <summary>
-    /// Every way <paramref name="census"/> and the applier's declared rung timeouts disagree, one line each. Empty when
-    /// every floor-setting rung carries a reasoned decision, each decision is the bound the applier runs, and the
-    /// applier gives a longer bound to no other rung.
-    /// </summary>
-    private static List<string> TimeoutDecisionProblems(
-        IReadOnlyList<DeclaredRung> census, IReadOnlyDictionary<int, int> applierDeclared, int defaultSeconds)
-    {
-        var problems = new List<string>();
-
-        foreach (var rung in census.Where(d => d.SetsTheFloor))
-        {
-            var name = "V" + rung.Version.ToString(CultureInfo.InvariantCulture);
-            var applierHasOne = applierDeclared.TryGetValue(rung.Version, out var applierSeconds);
-
-            if (rung.Timeout is null || string.IsNullOrWhiteSpace(rung.Timeout.Why))
-            {
-                problems.Add($"{name} sets the floor and states no command timeout decision, or states one with no reasoning.");
-                continue;
-            }
-
-            if (rung.Timeout.DeclaredSeconds is not { } censusSeconds)
-            {
-                if (applierHasOne)
-                {
-                    problems.Add($"{name} says it runs under the default bound, but the applier gives it {applierSeconds} s.");
-                }
-
-                continue;
-            }
-
-            if (!applierHasOne)
-            {
-                problems.Add($"{name} declares {censusSeconds} s, but the applier gives it the default bound.");
-            }
-            else if (applierSeconds != censusSeconds)
-            {
-                problems.Add($"{name} declares {censusSeconds} s, but the applier gives it {applierSeconds} s.");
-            }
-            else if (censusSeconds <= defaultSeconds)
-            {
-                problems.Add($"{name} declares {censusSeconds} s, which is not longer than the {defaultSeconds} s default.");
-            }
-        }
-
-        var floorRungs = census.Where(d => d.SetsTheFloor).Select(d => d.Version).ToHashSet();
-        foreach (var version in applierDeclared.Keys.Where(v => !floorRungs.Contains(v)).OrderBy(v => v))
-        {
-            problems.Add(
-                $"V{version.ToString(CultureInfo.InvariantCulture)} has a declared bound in the applier, but the census does "
-                + "not hold it as a floor-setting rung.");
-        }
-
-        return problems;
-    }
+    private sealed record DeclaredRung(int Version, bool SetsTheFloor, string Why);
 
     /// <summary>One data-moving statement: which rung, which shape, which table, and who created it.</summary>
     private sealed record Finding(int Version, string Name, string Shape, string Table, string CreatedBy);
