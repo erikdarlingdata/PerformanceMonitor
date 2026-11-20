@@ -1,0 +1,641 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>
+/// The closed-day rollups of <c>collect.query_store_interval_wide</c> that the Query Store grid and its slicer read whole UTC days
+/// from (#9111), so a long window reads the interval table only for its edges.
+///
+/// <para><b>Three tables.</b> <c>collect.query_store_grid_daily</c> holds one row per (server, UTC day, database, query, plan, query hash,
+/// execution type, replica role), the grid's own group, with every part the grid's columns recombine from: the execution count, the
+/// eleven execution-weighted sums (<c>avg_x * execution_count</c>), the eleven minimum and maximum pairs and the plan-state columns
+/// under the aggregate the grid applies. <c>collect.query_store_slicer_hourly</c> holds one row per (server, UTC hour, database, query)
+/// with the five weighted sums the slicer adds up; the query stays in the key so the slicer's distinct query count is exact for any bin
+/// of whole hours. <c>collect.query_store_closed_day_built</c> says which (server, day) both tables hold.</para>
+///
+/// <para><b>Placement.</b> A row belongs to the day and hour of <c>COALESCE(interval_start_time_utc, collection_time)</c>, the
+/// expression the grid and the slicer place a row by, stored as naive UTC. A window is <c>[start, end)</c> on that expression, so a
+/// whole day inside the window is the same rows in the rollup and in the interval table.</para>
+///
+/// <para><b>What equal means.</b> The weighted sums are sums of whole numbers held as double precision, in the rollup as in the
+/// interval-table read. Below 2^53 such a sum is exact whatever the order it is added in, so a read that takes whole days from the
+/// rollup returns the interval-table read's digits. Minimums, maximums, counts and <c>bool_or</c> recombine exactly at any size.</para>
+///
+/// <para><b>When a day is built.</b> A day is closed once its end plus <see cref="CloseAfter"/> has passed: the longest interval a row
+/// can span plus the collector's longest catch-up, so no interval starting in the day is still being written. A closed day is built
+/// once, in one transaction that takes the day's built row first, clears the day from both tables and fills them again. The interval
+/// table's writer marks a day <c>rebuild_needed</c> when it writes a row into a day that is no longer open
+/// (<see cref="MarkLateDaysSql"/>); the reader leaves a marked day to the interval table and the next tick builds it again. The mark
+/// and the build take the same built row, so a row written while its day is being built is either read by that build or marks the
+/// day after it.</para>
+///
+/// <para><b>Retention.</b> The interval table is purged by <c>first_execution_time</c>, which can sit below a row's own day, so the
+/// days near the purge edge can differ between the two. A tick removes every day before the first whole day
+/// (<see cref="GcMarginDays"/> after the retention edge's date) from both tables and leaves the newest removed day in the built table
+/// as <c>removed</c>. That row only moves forward: no day at or before it is built again, so a retention that was lowered and raised
+/// does not bring back a day built from a partly purged table. The reader takes a server's days only while its newest build is no
+/// older than <see cref="FreshFor"/>, which keeps a stopped tick from being outrun by the purge.</para>
+/// </summary>
+public static class QueryStoreClosedDayRollup
+{
+    /// <summary>The migration that creates the three tables.</summary>
+    public const int Version = 283;
+
+    /// <summary>The eleven averages the grid weights by execution count; each has an <c>_wsum</c> column in the daily table.</summary>
+    internal static readonly string[] WeightedColumns =
+    [
+        "avg_duration_us", "avg_cpu_time_us", "avg_logical_io_reads", "avg_logical_io_writes", "avg_physical_io_reads", "avg_rowcount",
+        "avg_clr_time_us", "avg_tempdb_space_used", "avg_log_bytes_used", "avg_query_max_used_memory", "avg_num_physical_io_reads",
+    ];
+
+    /// <summary>The eleven metrics whose <c>min_</c> and <c>max_</c> the grid shows.</summary>
+    internal static readonly string[] MinMaxMetrics =
+    [
+        "duration_us", "cpu_time_us", "logical_io_reads", "logical_io_writes", "physical_io_reads", "clr_time_us", "rowcount",
+        "log_bytes_used", "tempdb_space_used", "query_max_used_memory", "num_physical_io_reads",
+    ];
+
+    /// <summary>The grid's six group columns, in the daily table's key order.</summary>
+    public const string GridKeyColumns = "database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
+
+    private static string Lines(IEnumerable<string> parts) => string.Join(",\n    ", parts);
+
+    /// <summary>The daily table's value columns, in one order for the table, the build and the readers.</summary>
+    public static readonly string GridValueColumns = string.Join(", ",
+        new[] { "module_name", "execution_count" }
+            .Concat(WeightedColumns.Select(c => c + "_wsum"))
+            .Concat(MinMaxMetrics.SelectMany(m => new[] { "min_" + m, "max_" + m }))
+            .Concat(["min_dop", "max_dop", "last_execution_time", "query_plan_hash", "is_forced_plan", "plan_forcing_type", "first_execution_time",
+                "plan_type", "force_failure_count", "last_force_failure_reason", "compatibility_level"]));
+
+    /// <summary>
+    /// The value columns as read from an interval-table row (alias-free): the same names and types as <see cref="GridValueColumns"/>,
+    /// so an interval row and a daily row stack in one <c>UNION ALL</c> and recombine under one set of aggregates.
+    /// </summary>
+    public static readonly string GridValueColumnsFromInterval = string.Join(", ",
+        new[] { "module_name", "execution_count" }
+            .Concat(WeightedColumns.Select(c => $"CAST({c} AS double precision) * execution_count AS {c}_wsum"))
+            .Concat(MinMaxMetrics.SelectMany(m => new[] { $"CAST(min_{m} AS double precision) AS min_{m}", $"CAST(max_{m} AS double precision) AS max_{m}" }))
+            .Concat(["min_dop", "max_dop", "last_execution_time", "query_plan_hash", "is_forced_plan", "plan_forcing_type", "first_execution_time",
+                "plan_type", "force_failure_count", "last_force_failure_reason", "compatibility_level"]));
+
+    /// <summary>V283: the three tables, created empty. The service's tick fills them; no data moves in the migration.</summary>
+    public static readonly string CreateSql = $@"
+/* #9111: the Query Store grid's closed-day rollup. One row per (server, UTC day of the interval's start, the grid's six group
+   columns). NULL key columns are stored as they are. */
+CREATE TABLE IF NOT EXISTS collect.query_store_grid_daily
+(
+    server_id integer NOT NULL,
+    day_utc date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    query_hash text,
+    execution_type_desc text,
+    replica_role text,
+    module_name text,
+    execution_count bigint,
+    {Lines(WeightedColumns.Select(c => c + "_wsum double precision"))},
+    {Lines(MinMaxMetrics.SelectMany(m => new[] { $"min_{m} double precision", $"max_{m} double precision" }))},
+    min_dop bigint,
+    max_dop bigint,
+    last_execution_time timestamp,
+    query_plan_hash text,
+    is_forced_plan boolean,
+    plan_forcing_type text,
+    first_execution_time timestamp,
+    plan_type text,
+    force_failure_count bigint,
+    last_force_failure_reason text,
+    compatibility_level integer
+);
+
+/* NULLS NOT DISTINCT: replica_role and the other key columns are NULL for many rows, and two NULLs are one group. Leads with
+   (server_id, day_utc), so it also serves a window's range of days and the delete of one day. */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_grid_daily
+ON collect.query_store_grid_daily (server_id, day_utc, {GridKeyColumns})
+NULLS NOT DISTINCT;
+
+/* The grid fetches the kept keys' rows by key. */
+CREATE INDEX IF NOT EXISTS idx_query_store_grid_daily_query
+ON collect.query_store_grid_daily (server_id, database_name, query_id, day_utc);
+
+/* #9111: the slicer's closed-day rollup. One row per (server, UTC hour of the interval's start, database, query). */
+CREATE TABLE IF NOT EXISTS collect.query_store_slicer_hourly
+(
+    server_id integer NOT NULL,
+    hour_utc timestamp NOT NULL,
+    database_name text,
+    query_id bigint,
+    cpu_wsum double precision,
+    duration_wsum double precision,
+    logical_reads_wsum double precision,
+    logical_writes_wsum double precision,
+    physical_reads_wsum double precision
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_slicer_hourly
+ON collect.query_store_slicer_hourly (server_id, hour_utc, database_name, query_id)
+NULLS NOT DISTINCT;
+
+/* Which (server, day) both rollups hold. rebuild_needed: a row was written into the day after it was built, so readers leave the day
+   to the interval table until it is built again. removed: retention took the day; the newest such row per server stays, and no day
+   at or before it is built again. */
+CREATE TABLE IF NOT EXISTS collect.query_store_closed_day_built
+(
+    server_id integer NOT NULL,
+    day_utc date NOT NULL,
+    built_at timestamp NOT NULL,
+    source_rows bigint NOT NULL,
+    rebuild_needed boolean NOT NULL DEFAULT false,
+    removed boolean NOT NULL DEFAULT false,
+    CONSTRAINT pk_query_store_closed_day_built PRIMARY KEY (server_id, day_utc)
+);";
+
+    /// <summary>A day is closed once its end plus this has passed: the longest interval a row can span plus the collector's longest
+    /// catch-up, so no interval that starts in the day is still being written.</summary>
+    public static readonly TimeSpan CloseAfter = QueryStoreTopDaily.FinalBuildAfter;
+
+    /// <summary>The first day the rollups keep is this many days after the date of the interval table's retention edge. The purge
+    /// deletes on <c>first_execution_time</c>, which can sit <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> below a row's own
+    /// day; the rest is the room between a tick's cleanup and a later purge (<see cref="FreshFor"/>).</summary>
+    public const int GcMarginDays = 4;
+
+    /// <summary>A reader takes a server's built days only while the server's newest build is no older than this. A closed day is
+    /// built every day, so a healthy tick is always inside it; a tick that stopped is outside it before the purge can reach a day
+    /// the cleanup left.</summary>
+    public static readonly TimeSpan FreshFor = TimeSpan.FromHours(36);
+
+    /// <summary>The most (server, day) builds one tick plans: high enough that <see cref="MaxTickDuration"/> is the bound that holds.</summary>
+    public const int MaxBuildsPerTick = 1000;
+
+    /// <summary>The wall-clock budget of one tick: no new build starts once this much time has passed since the tick began.</summary>
+    public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(5);
+
+    /// <summary>The server-side <c>statement_timeout</c> each build's transaction runs under.</summary>
+    public const int BuildStatementTimeoutSeconds = 60;
+
+    private const int CommandTimeoutSeconds = BuildStatementTimeoutSeconds + 30;
+
+    private static readonly string StatementTimeoutSql = $"SET LOCAL statement_timeout = '{BuildStatementTimeoutSeconds}s'";
+
+    /// <summary>One day's rows of the interval table for one server, by the grid's own predicate: the interval's start inside the day,
+    /// with the <c>first_execution_time</c> range the grid's read carries so the day's partitions serve it. $1 server_id, $2 day.</summary>
+    private static readonly string DayRowsWhereSql = $@"
+    WHERE w.server_id = $1
+      AND COALESCE(w.interval_start_time_utc, w.collection_time) >= $2::timestamp
+      AND COALESCE(w.interval_start_time_utc, w.collection_time) < $2::timestamp + interval '1 day'
+      AND w.first_execution_time >= $2::timestamp - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+      AND w.first_execution_time <= $2::timestamp + interval '1 day' + {QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}";
+
+    /// <summary>Takes the day's built row before anything is read, so a writer marking the same day waits for this build or is read
+    /// by it. A removed day stays removed. $1 server_id, $2 day, $3 built_at.</summary>
+    public const string ClaimDaySql = @"
+INSERT INTO collect.query_store_closed_day_built AS b (server_id, day_utc, built_at, source_rows, rebuild_needed)
+VALUES ($1, $2, $3, 0, false)
+ON CONFLICT (server_id, day_utc) DO UPDATE
+SET built_at = EXCLUDED.built_at,
+    rebuild_needed = false
+WHERE NOT b.removed
+RETURNING 1;";
+
+    /// <summary>Clears one (server, day) of the daily table. $1 server_id, $2 day.</summary>
+    public const string DeleteGridDaySql = @"
+DELETE FROM collect.query_store_grid_daily
+WHERE server_id = $1
+  AND day_utc = $2;";
+
+    /// <summary>Clears one (server, day) of the hourly table. $1 server_id, $2 day.</summary>
+    public const string DeleteSlicerDaySql = @"
+DELETE FROM collect.query_store_slicer_hourly
+WHERE server_id = $1
+  AND hour_utc >= $2::timestamp
+  AND hour_utc < $2::timestamp + interval '1 day';";
+
+    /// <summary>Fills one (server, day) of the daily table and returns the interval rows it read. $1 server_id, $2 day.</summary>
+    public static readonly string BuildGridDaySql = $@"
+WITH built AS
+(
+    INSERT INTO collect.query_store_grid_daily (server_id, day_utc, {GridKeyColumns}, {GridValueColumns})
+    SELECT
+        w.server_id, $2, w.database_name, w.query_id, w.plan_id, w.query_hash, w.execution_type_desc, w.replica_role,
+        MAX(w.module_name), CAST(SUM(w.execution_count) AS bigint),
+        {Lines(WeightedColumns.Select(c => $"SUM(CAST(w.{c} AS double precision) * w.execution_count)"))},
+        {Lines(MinMaxMetrics.SelectMany(m => new[] { $"MIN(CAST(w.min_{m} AS double precision))", $"MAX(CAST(w.max_{m} AS double precision))" }))},
+        MIN(w.min_dop), MAX(w.max_dop), MAX(w.last_execution_time), MAX(w.query_plan_hash), bool_or(w.is_forced_plan),
+        MAX(w.plan_forcing_type), MIN(w.first_execution_time), MAX(w.plan_type), MAX(w.force_failure_count),
+        MAX(w.last_force_failure_reason), MAX(w.compatibility_level)
+    FROM collect.query_store_interval_wide AS w{DayRowsWhereSql}
+    GROUP BY w.server_id, w.database_name, w.query_id, w.plan_id, w.query_hash, w.execution_type_desc, w.replica_role
+    RETURNING 1
+)
+SELECT
+    (SELECT COUNT(*) FROM collect.query_store_interval_wide AS w{DayRowsWhereSql}) AS source_rows,
+    (SELECT COUNT(*) FROM built) AS built_rows;";
+
+    /// <summary>Fills one (server, day) of the hourly table. $1 server_id, $2 day. The five sums are the slicer's own products.</summary>
+    public static readonly string BuildSlicerDaySql = $@"
+INSERT INTO collect.query_store_slicer_hourly
+    (server_id, hour_utc, database_name, query_id, cpu_wsum, duration_wsum, logical_reads_wsum, logical_writes_wsum, physical_reads_wsum)
+SELECT
+    w.server_id, date_trunc('hour', COALESCE(w.interval_start_time_utc, w.collection_time)), w.database_name, w.query_id,
+    SUM(CAST(w.avg_cpu_time_us AS double precision) * w.execution_count),
+    SUM(CAST(w.avg_duration_us AS double precision) * w.execution_count),
+    SUM(CAST(w.avg_logical_io_reads AS double precision) * w.execution_count),
+    SUM(CAST(w.avg_logical_io_writes AS double precision) * w.execution_count),
+    SUM(CAST(w.avg_physical_io_reads AS double precision) * w.execution_count)
+FROM collect.query_store_interval_wide AS w{DayRowsWhereSql}
+GROUP BY w.server_id, date_trunc('hour', COALESCE(w.interval_start_time_utc, w.collection_time)), w.database_name, w.query_id;";
+
+    /// <summary>Records how many interval rows the build read. $1 server_id, $2 day, $3 source_rows.</summary>
+    public const string RecordSourceRowsSql = @"
+UPDATE collect.query_store_closed_day_built
+SET source_rows = $3
+WHERE server_id = $1
+  AND day_utc = $2;";
+
+    /// <summary>
+    /// Marks the days a batch wrote into as needing a rebuild. $1 server_id, $2 the days (a <c>date[]</c>), $3 now. A day with no built
+    /// row gets one already marked, so a build of that day running at the same moment cannot record it as built without this row:
+    /// the insert waits on the build's own row and then marks it. A removed day stays as it is.
+    /// </summary>
+    public const string MarkLateDaysSql = @"
+INSERT INTO collect.query_store_closed_day_built AS b (server_id, day_utc, built_at, source_rows, rebuild_needed)
+SELECT $1, d.day_utc, $3, 0, true
+FROM unnest($2::date[]) AS d(day_utc)
+ON CONFLICT (server_id, day_utc) DO UPDATE
+SET rebuild_needed = true
+WHERE NOT b.rebuild_needed
+  AND NOT b.removed;";
+
+    /// <summary>
+    /// The days of <paramref name="writtenDays"/> that can already be built at <paramref name="nowUtc"/>: a day is built no sooner
+    /// than <see cref="CloseAfter"/> (more than a day) after it ends, so today and yesterday are never among them and an ordinary
+    /// batch marks nothing.
+    /// </summary>
+    public static DateOnly[] LateDays(IEnumerable<DateOnly> writtenDays, DateTime nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(writtenDays);
+        var yesterday = DateOnly.FromDateTime(nowUtc).AddDays(-1);
+        return writtenDays.Where(d => d < yesterday).Distinct().ToArray();
+    }
+
+    /// <summary>Runs <see cref="MarkLateDaysSql"/> for the late days of a batch, in the batch's own transaction.</summary>
+    public static async Task MarkLateDaysAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateOnly[] lateDays, DateTime nowUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(lateDays);
+        if (lateDays.Length == 0)
+        {
+            return;
+        }
+
+        await using var command = new NpgsqlCommand(MarkLateDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = lateDays });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The builds due now, newest day first, so the short windows are served within the first ticks after an upgrade and the older
+    /// days follow. $1 now, $2 retention days, $3 <see cref="CloseAfter"/>, $4 the cap, $5 <see cref="GcMarginDays"/>. Servers are the
+    /// enabled ones with an interval-table coverage claim, and a server's days start the day after its <c>filled_since</c>. Days run
+    /// from the first day the cleanup keeps through the newest closed day, above the server's newest removed day. A day is due when
+    /// it has no built row or its row is marked.
+    /// </summary>
+    public const string PlanSql = @"
+SELECT s.server_id, d.day
+FROM
+(
+    SELECT c.server_id, c.filled_since
+    FROM collect.query_store_interval_wide_coverage AS c
+    JOIN collect.servers AS sv ON sv.server_id = c.server_id
+    WHERE sv.is_enabled
+) AS s
+CROSS JOIN LATERAL
+(
+    SELECT g::date AS day
+    FROM generate_series((($1 - make_interval(days => $2))::date + $5)::timestamp, (($1 - $3)::date - 1)::timestamp, interval '1 day') AS g
+) AS d
+LEFT JOIN collect.query_store_closed_day_built AS b
+  ON b.server_id = s.server_id AND b.day_utc = d.day
+WHERE d.day >= s.filled_since::date + 1
+  AND d.day > COALESCE((SELECT max(t.day_utc) FROM collect.query_store_closed_day_built AS t WHERE t.server_id = s.server_id AND t.removed), '-infinity'::date)
+  AND (b.server_id IS NULL OR b.rebuild_needed)
+ORDER BY d.day DESC, s.server_id
+LIMIT $4;";
+
+    /// <summary>Marks every day before the first day kept as removed and returns their keys. $1 now, $2 retention days,
+    /// $3 <see cref="GcMarginDays"/>.</summary>
+    public const string GcMarkRemovedSql = @"
+UPDATE collect.query_store_closed_day_built
+SET removed = true,
+    rebuild_needed = false
+WHERE day_utc < ($1 - make_interval(days => $2))::date + $3
+  AND NOT removed
+RETURNING server_id, day_utc;";
+
+    /// <summary>Keeps only the newest removed day of each server: it is the line no build goes back across.</summary>
+    public const string GcPruneRemovedSql = @"
+DELETE FROM collect.query_store_closed_day_built AS b
+WHERE b.removed
+  AND EXISTS (SELECT 1 FROM collect.query_store_closed_day_built AS n
+              WHERE n.server_id = b.server_id AND n.removed AND n.day_utc > b.day_utc);";
+
+    /// <summary>
+    /// The built days of one server a reader may take, oldest first. $1 server_id, $2 the first day, $3 the day after the last,
+    /// $4 <see cref="FreshFor"/>. No row comes back when the server's newest build is older than $4 on the store's clock.
+    /// </summary>
+    public const string ServedDaysSql = @"
+SELECT b.day_utc
+FROM collect.query_store_closed_day_built AS b
+WHERE b.server_id = $1
+  AND b.day_utc >= $2
+  AND b.day_utc < $3
+  AND NOT b.rebuild_needed
+  AND NOT b.removed
+  AND (SELECT max(n.built_at) FROM collect.query_store_closed_day_built AS n WHERE n.server_id = $1 AND NOT n.removed)
+      >= (now() AT TIME ZONE 'UTC') - $4
+ORDER BY b.day_utc;";
+
+    /// <summary>One planned build.</summary>
+    public readonly record struct Build(int ServerId, DateOnly Day);
+
+    /// <summary>What one tick did.</summary>
+    public readonly record struct TickResult(int Built, int Failed, long DaysRemoved, int Deferred);
+
+    /// <summary>The whole built UTC days a read takes from the rollups: <c>[Start, End)</c>, both at midnight.</summary>
+    public readonly record struct ServedDays(DateTime Start, DateTime End);
+
+    private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The longest unbroken run of built days that lies wholly inside <c>[readStart, end)</c>, or null when there is none. The read
+    /// takes that run from the rollups and everything on either side of it (the window's partial first and last days, the open days
+    /// and any day that is not built) from the interval table. Run it on the read's own connection and transaction, on a store at
+    /// <see cref="Version"/> or above.
+    /// </summary>
+    public static async Task<ServedDays?> ResolveServedDaysAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var first = DateOnly.FromDateTime(readStart);
+        if (readStart.TimeOfDay > TimeSpan.Zero)
+        {
+            first = first.AddDays(1);
+        }
+
+        var afterLast = DateOnly.FromDateTime(end);
+        if (afterLast <= first)
+        {
+            return null;
+        }
+
+        var days = new List<DateOnly>();
+        await using (var command = new NpgsqlCommand(ServedDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = first });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = afterLast });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = FreshFor });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                days.Add(reader.GetFieldValue<DateOnly>(0));
+            }
+        }
+
+        return LongestRun(days);
+    }
+
+    /// <summary>The longest run of consecutive days in <paramref name="days"/> (sorted, oldest first); the newest such run on a tie.</summary>
+    public static ServedDays? LongestRun(IReadOnlyList<DateOnly> days)
+    {
+        ArgumentNullException.ThrowIfNull(days);
+        if (days.Count == 0)
+        {
+            return null;
+        }
+
+        int bestStart = 0, bestLength = 1, runStart = 0;
+        for (var i = 1; i <= days.Count; i++)
+        {
+            if (i < days.Count && days[i] == days[i - 1].AddDays(1))
+            {
+                continue;
+            }
+
+            if (i - runStart >= bestLength)
+            {
+                bestStart = runStart;
+                bestLength = i - runStart;
+            }
+
+            runStart = i;
+        }
+
+        return new ServedDays(
+            days[bestStart].ToDateTime(TimeOnly.MinValue),
+            days[bestStart + bestLength - 1].AddDays(1).ToDateTime(TimeOnly.MinValue));
+    }
+
+    /// <summary>The builds due at <paramref name="nowUtc"/>, newest day first.</summary>
+    public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var builds = new List<Build>();
+        await using var command = new NpgsqlCommand(PlanSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = CloseAfter });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = GcMarginDays });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            builds.Add(new Build(reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
+        }
+
+        return builds;
+    }
+
+    /// <summary>Removes the days before the first day kept from both rollups and leaves each server's newest removed day in the built
+    /// table, in one transaction; returns how many (server, day) went.</summary>
+    public static async Task<long> GcAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var expired = new List<(int ServerId, DateOnly Day)>();
+        await using (var command = new NpgsqlCommand(GcMarkRemovedSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = GcMarginDays });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                expired.Add((reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
+            }
+        }
+
+        foreach (var (serverId, day) in expired)
+        {
+            await DeleteDayAsync(connection, transaction, serverId, day, cancellationToken);
+        }
+
+        if (expired.Count > 0)
+        {
+            await using var prune = new NpgsqlCommand(GcPruneRemovedSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            await prune.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return expired.Count;
+    }
+
+    private static async Task DeleteDayAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateOnly day, CancellationToken cancellationToken)
+    {
+        foreach (var sql in new[] { DeleteGridDaySql, DeleteSlicerDaySql })
+        {
+            await using var delete = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Builds one (server, day) in one transaction: the built row is taken first, the day is cleared from both tables and filled
+    /// again. Returns the interval rows read, or -1 when the day is removed and nothing was built.
+    /// </summary>
+    public static async Task<long> BuildDayAsync(
+        NpgsqlConnection connection, int serverId, DateOnly day, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var claim = new NpgsqlCommand(ClaimDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            claim.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            claim.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            claim.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+            if (await claim.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return -1;
+            }
+        }
+
+        await DeleteDayAsync(connection, transaction, serverId, day, cancellationToken);
+
+        long sourceRows;
+        await using (var grid = new NpgsqlCommand(BuildGridDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            grid.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            grid.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            sourceRows = Convert.ToInt64(await grid.ExecuteScalarAsync(cancellationToken));
+        }
+
+        await using (var slicer = new NpgsqlCommand(BuildSlicerDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            slicer.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            slicer.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            await slicer.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var record = new NpgsqlCommand(RecordSourceRowsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            record.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            record.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            record.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sourceRows });
+            await record.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return sourceRows;
+    }
+
+    /// <summary>
+    /// One maintenance tick: remove the days retention took, plan, then build each day in its own transaction, newest first. A build
+    /// that fails is logged and the loop goes on; the next tick plans it again. Once <see cref="MaxTickDuration"/> has passed no
+    /// further build starts, and the planned days left are reported as deferred.
+    /// </summary>
+    public static Task<TickResult> RunTickAsync(
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, CancellationToken cancellationToken)
+    {
+        var clock = Stopwatch.StartNew();
+        return RunTickAsync(dataSource, nowUtc, retentionDays, logger, () => clock.Elapsed, cancellationToken);
+    }
+
+    /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> with the elapsed time since the
+    /// tick began supplied by <paramref name="elapsed"/>, read before each build starts.</summary>
+    public static async Task<TickResult> RunTickAsync(
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(elapsed);
+
+        int built = 0, failed = 0, started = 0;
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        var removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
+        var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
+
+        foreach (var item in plan)
+        {
+            if (elapsed() >= MaxTickDuration)
+            {
+                break;
+            }
+
+            started++;
+            try
+            {
+                await BuildDayAsync(connection, item.ServerId, item.Day, nowUtc, cancellationToken);
+                built++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failed++;
+                logger.LogWarning(ex, "Query Store closed-day rollups: building server {ServerId} day {Day:yyyy-MM-dd} failed and is retried next tick: {Message}",
+                    item.ServerId, item.Day, ex.Message);
+            }
+        }
+
+        var deferred = plan.Count - started;
+        logger.LogInformation("Query Store closed-day rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} day(s), {ElapsedMs} ms",
+            built, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
+        return new TickResult(built, failed, removed, deferred);
+    }
+}

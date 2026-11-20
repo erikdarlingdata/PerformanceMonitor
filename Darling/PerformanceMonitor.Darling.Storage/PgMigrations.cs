@@ -3729,6 +3729,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V282 (#9110): the daily rollup of job_history's successful job outcomes, read by the Job History read's per-job average and last success.
            Three new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(JobOutcomeDaily.Version, "job-outcome-daily", JobOutcomeDaily.CreateSql),
+        /* V283 (#9111): the closed-day rollups the Query Store grid and its slicer read whole UTC days from, and the table that says which days
+           are built. Three new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
+        new Migration(QueryStoreClosedDayRollup.Version, "query-store-closed-day-rollups", QueryStoreClosedDayRollup.CreateSql),
     };
 
     /// <summary>

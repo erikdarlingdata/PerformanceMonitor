@@ -885,6 +885,11 @@ DROP TABLE IF EXISTS collect.query_store_text_seen;"),
         new(282, "hasJobOutcomeDaily", @"DROP TABLE IF EXISTS collect.job_outcome_daily;
 DROP TABLE IF EXISTS collect.job_outcome_daily_days;
 DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
+        // V283 (#9111): the Query Store closed-day rollups' three tables. The trio is the probe's newest sentinel. The rewind drops all three, so a re-run of
+        // V283 creates them empty and the service builds the days again. Safe on a store that never had them.
+        new(283, "hasQueryStoreClosedDayRollups", @"DROP TABLE IF EXISTS collect.query_store_grid_daily;
+DROP TABLE IF EXISTS collect.query_store_slicer_hourly;
+DROP TABLE IF EXISTS collect.query_store_closed_day_built;"),
     ];
 
     /// <summary>
