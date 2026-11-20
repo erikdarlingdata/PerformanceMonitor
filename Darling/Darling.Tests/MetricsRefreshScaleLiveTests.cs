@@ -54,6 +54,10 @@ public sealed class MetricsRefreshScaleLiveTests
     private const int TimedRefreshes = 10;
     private const int StatementRuns = 10;
     private const int SeedTimeoutSeconds = 3600;
+    /* #9013: one server more than the case's count stopped collecting this long before the newest collection: past every
+       freshness bound (3 intervals of a 1-minute collector, the 15 and 30 minute floors, the 3 hour floor of the hourly
+       sizes), so each statement's per-server probe finds no fresh row for it, the probe a stopped collector costs. */
+    private const int StoppedMinutes = 240;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -79,7 +83,8 @@ public sealed class MetricsRefreshScaleLiveTests
         await using (var connection = await postgres.OpenConnectionAsync(ct))
         {
             layout = await PrepareStoreAsync(connection, scratch.TimescaleEnabled, ct);
-            await SeedAsync(connection, servers, anchor, ct);
+            await SeedAsync(connection, servers + 1, anchor, ct);
+            await SeedSchedulesAsync(connection, servers + 1, ct);
         }
 
         var seedSeconds = Stopwatch.GetElapsedTime(seedClock).TotalSeconds;
@@ -145,6 +150,7 @@ public sealed class MetricsRefreshScaleLiveTests
 
         var statements = new List<(string Name, int Rows, double P50, double P95)>();
         string fileIoPlan;
+        long schedules;
         await using (var connection = await postgres.OpenConnectionAsync(ct))
         {
             foreach (var (name, sql) in ServerSetStatements())
@@ -153,6 +159,7 @@ public sealed class MetricsRefreshScaleLiveTests
             }
 
             fileIoPlan = await ExplainAsync(connection, DarlingMetricsServerSetReader.FileIoSql, anchor, ct);
+            schedules = await ScalarAsync<long>(connection, "SELECT count(*) FROM config.config_collector_schedules", ct);
         }
 
         var health = await TimeCollectionHealthAsync(postgres, timedNows, raw: false, ct);
@@ -161,27 +168,33 @@ public sealed class MetricsRefreshScaleLiveTests
         var healthPlan = await ExplainCollectionHealthAsync(postgres, timedNows[^1], ct);
 
         var markdown = Markdown(servers, rowCounts, layout, rollupNote, seedSeconds, fleet, serverSet, total, statements,
-            health.Path, rawHealth, scansPerRefresh, fileIoPlan, healthPlan);
+            health.Path, rawHealth, scansPerRefresh, schedules, fileIoPlan, healthPlan);
         TestContext.Current.SendDiagnosticMessage(markdown);
         File.WriteAllText(Path.Combine(Path.GetTempPath(), $"darling-metrics-scale-{servers}.md"), markdown);
     }
 
-    /// <summary>The plant check: every seeded server carries a fresh series from each freshness bound (the 1-minute disk
-    /// and CPU readings, the 5-minute sessions, the hourly volumes) and a collector count from the collection-health read,
-    /// so fast numbers cannot come from a window that went stale.</summary>
+    /// <summary>The plant check: every collecting server carries a fresh series from each freshness bound (the 1-minute
+    /// disk and CPU readings, the 5-minute sessions, the hourly volumes) and a collector count from the collection-health
+    /// read, so fast numbers cannot come from a window that went stale; the stopped server carries none of those series
+    /// but is still in the snapshot, so its probes ran and found nothing.</summary>
     private static void AssertPlant(MetricsSnapshot snapshot, int servers, string which)
     {
+        var stopped = "scale-" + (servers + 1).ToString(CultureInfo.InvariantCulture);
         foreach (var series in new[] { "darling_disk_read_latency_ms", "darling_cpu_sql_percent", "darling_sessions", "darling_disk_volume_min_free_percent" })
         {
             var reporting = snapshot.Samples.Where(s => s.Name == series)
-                .Select(s => s.Labels[0].Value).Distinct(StringComparer.Ordinal).Count();
-            Assert.True(reporting == servers,
-                $"after {which} the plant is meant to give every server a fresh {series}, but {reporting} of {servers} have one; the numbers would not measure a full server set");
+                .Select(s => s.Labels[0].Value).Distinct(StringComparer.Ordinal).ToList();
+            Assert.True(!reporting.Contains(stopped, StringComparer.Ordinal),
+                $"after {which} the stopped server {stopped} should have no fresh {series}, but it has one; its probe would not measure the no-fresh-row case");
+            Assert.True(reporting.Count == servers,
+                $"after {which} the plant is meant to give every collecting server a fresh {series}, but {reporting.Count} of {servers} have one; the numbers would not measure a full server set");
         }
 
-        var counted = snapshot.Samples.Count(s => s.Name == "darling_server_collectors" && s.Value > 0);
+        Assert.True(snapshot.Samples.Any(s => s.Name == "darling_server_health_band" && s.Labels[0].Value == stopped),
+            $"after {which} the stopped server {stopped} should still be in the snapshot through its health band");
+        var counted = snapshot.Samples.Count(s => s.Name == "darling_server_collectors" && s.Value > 0 && s.Labels[0].Value != stopped);
         Assert.True(counted == servers,
-            $"after {which} every server should carry collectors from the collection-health read, but {counted} of {servers} do");
+            $"after {which} every collecting server should carry collectors from the collection-health read, but {counted} of {servers} do");
     }
 
     private static readonly string[] SeededTables =
@@ -352,11 +365,36 @@ FROM generate_series(1, $1) AS sv (id)", ct, servers, MonitoredEngineKind.SqlSer
         }
     }
 
+    /// <summary>
+    /// #9013: the freshness cutoff looks up each collector's interval per server (the server's row, then the fleet-wide
+    /// row), so the store carries both: a fleet-wide row for each of the ten collectors and a row per collector on every
+    /// second server, each at the collector's shipped interval, so every lookup finds rows and the bounds stay the
+    /// seeded cadence's.
+    /// </summary>
+    private static async Task SeedSchedulesAsync(NpgsqlConnection connection, int servers, CancellationToken ct)
+    {
+        var names = new[]
+        {
+            "cpu_utilization", "cpu_scheduler_stats", "perfmon_stats", "session_summary_stats", "memory_stats",
+            "memory_grant_stats", "file_io_stats", "database_size_stats", "wait_stats", "tempdb_stats",
+        };
+        var minutes = names.Select(n => CollectorScheduleDefaults.ResolveFrequencyMinutes(n, null, null)).ToArray();
+        await ExecAsync(connection, @"
+INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, enabled)
+SELECT NULL, c.name, c.minutes, TRUE
+FROM unnest($1::text[], $2::int[]) AS c (name, minutes)
+UNION ALL
+SELECT sv.id, c.name, c.minutes, TRUE
+FROM unnest($1::text[], $2::int[]) AS c (name, minutes)
+CROSS JOIN generate_series(2, $3::int, 2) AS sv (id)", ct, names, minutes, servers);
+    }
+
     /* The 1-minute seeds share their parameters: $1 the pinned now, $2 the server count, $3 and $4 the newest and oldest
-       minute of the slice (k minutes back from the newest collection, which is 30 s before now). */
-    private const string SliceTimes = @"
+       minute of the slice (k minutes back from the newest collection, which is 30 s before now). The last server, $2, has
+       no rows in the newest StoppedMinutes. */
+    private static readonly string SliceTimes = $@"
 FROM generate_series($4::int, $3::int, -1) AS k
-CROSS JOIN generate_series(1, $2::int) AS sv (id)";
+JOIN generate_series(1, $2::int) AS sv (id) ON NOT (sv.id = $2::int AND k < {StoppedMinutes})";
 
     private const string CollectionTime = "$1::timestamp - interval '30 seconds' - k * interval '1 minute'";
 
@@ -474,19 +512,19 @@ SELECT sv.id::bigint * 1000 + k, {CollectionTime}, sv.id, 'scale-' || sv.id, 147
 ORDER BY k DESC, sv.id",
     };
 
-    /// <summary>Every 5 minutes for the 6 hours. $1 the pinned now, $2 the server count.</summary>
-    private const string SessionsSeed = @"
+    /// <summary>Every 5 minutes for the 6 hours. $1 the pinned now, $2 the server count; the last server stopped.</summary>
+    private static readonly string SessionsSeed = $@"
 INSERT INTO session_summary_stats (collection_id, collection_time, server_id, server_name, total_sessions, running_sessions, sleeping_sessions,
     background_sessions, dormant_sessions, idle_sessions_over_30min, sessions_waiting_for_memory, databases_with_connections,
     top_application_name, top_application_connections, top_host_name, top_host_connections)
 SELECT sv.id::bigint * 1000 + k, $1::timestamp - interval '30 seconds' - k * interval '5 minutes', sv.id, 'scale-' || sv.id,
        400, 10 + k % 7, 300, 60, 30 - k % 7, 40, 0, 25, 'scale app', 120, 'scale host', 90
 FROM generate_series(71, 0, -1) AS k
-CROSS JOIN generate_series(1, $2::int) AS sv (id)
+JOIN generate_series(1, $2::int) AS sv (id) ON NOT (sv.id = $2::int AND k < {StoppedMinutes / 5})
 ORDER BY k DESC, sv.id";
 
-    /// <summary>Hourly, 40 files on two volumes. $1 the pinned now, $2 the server count.</summary>
-    private const string DatabaseSizeSeed = @"
+    /// <summary>Hourly, 40 files on two volumes. $1 the pinned now, $2 the server count; the last server stopped.</summary>
+    private static readonly string DatabaseSizeSeed = $@"
 INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc,
     file_name, physical_name, total_size_mb, used_size_mb, auto_growth_mb, max_size_mb, recovery_model_desc, compatibility_level, state_desc,
     volume_mount_point, volume_total_mb, volume_free_mb, is_percent_growth, growth_pct)
@@ -497,7 +535,7 @@ SELECT (sv.id::bigint * 1000 + k) * 100 + f, $1::timestamp - interval '30 second
        CASE WHEN f % 2 = 1 THEN 'L:\' ELSE 'D:\' END, CASE WHEN f % 2 = 1 THEN 512000 ELSE 2048000 END,
        CASE WHEN f % 2 = 1 THEN 300000 ELSE 900000 - k * 100 END, false, 0
 FROM generate_series(5, 0, -1) AS k
-CROSS JOIN generate_series(1, $2::int) AS sv (id)
+JOIN generate_series(1, $2::int) AS sv (id) ON NOT (sv.id = $2::int AND k < {StoppedMinutes / 60})
 CROSS JOIN generate_series(0, 39) AS f
 ORDER BY k DESC, sv.id, f";
 
@@ -593,13 +631,13 @@ ORDER BY k DESC, sv.id, c.n";
         int servers, List<(string Table, long Rows)> rowCounts, string layout, string rollupNote, double seedSeconds,
         List<double> fleet, List<double> serverSet, List<double> total, List<(string Name, int Rows, double P50, double P95)> statements,
         string healthPath, (int Rows, double P50, double P95, string Path) rawHealth, List<int> scansPerRefresh,
-        string fileIoPlan, string healthPlan)
+        long schedules, string fileIoPlan, string healthPlan)
     {
         static string Ms(double value) => value.ToString("F1", CultureInfo.InvariantCulture);
 
         var fileIoRows = rowCounts.First(r => r.Table == "file_io_stats").Rows;
         var md = new StringBuilder();
-        md.AppendLine(CultureInfo.InvariantCulture, $"### /metrics refresh: {servers} servers, 6 h of 1-minute history, 7 days of collection_log");
+        md.AppendLine(CultureInfo.InvariantCulture, $"### /metrics refresh: {servers} collecting servers and 1 stopped, 6 h of 1-minute history, 7 days of collection_log");
         md.AppendLine();
         md.AppendLine("| servers | file_io_stats rows | fleet p50 ms | fleet p95 ms | server set p50 ms | server set p95 ms | whole refresh p50 ms | whole refresh p95 ms |");
         md.AppendLine("|---:|---:|---:|---:|---:|---:|---:|---:|");
@@ -629,6 +667,8 @@ ORDER BY k DESC, sv.id, c.n";
             + "The collection-health row is the fleet read's 7-day statement alone, chosen by the reader's own rollup guard and run in its work-memory transaction "
             + "at each timed refresh's store clock (one warm-up run first); path: " + healthPath + ". "
             + string.Create(CultureInfo.InvariantCulture, $"For reference, the raw 7-day scan a store without the rollup runs: p50 {Ms(rawHealth.P50)} ms, p95 {Ms(rawHealth.P95)} ms ({rawHealth.Rows} rows). ")
+            + string.Create(CultureInfo.InvariantCulture, $"One more server, scale-{servers + 1}, stopped collecting {StoppedMinutes} minutes before the newest collection, past every freshness bound, so every statement probes it and finds no fresh row. ")
+            + string.Create(CultureInfo.InvariantCulture, $"config_collector_schedules: {schedules} rows, a fleet-wide row per collector and a row per collector on every second server, each at the shipped interval. ")
             + "Store: " + layout + "; " + rollupNote + ". "
             + string.Create(CultureInfo.InvariantCulture, $"Seed: {seedSeconds:F0} s. ")
             + "Per server and collection: 272 files, 150 wait types, the 12 perfmon counters (20 database instances and _Total on the Databases and Locks objects), "

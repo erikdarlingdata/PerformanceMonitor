@@ -16,7 +16,7 @@ namespace PerformanceMonitorLite
     public static class Program
     {
         [STAThread]
-        public static void Main(string[] args)
+        public static int Main(string[] args)
         {
             VelopackApp.Build().Run();
 
@@ -27,7 +27,9 @@ namespace PerformanceMonitorLite
 
             var app = new App();
             app.InitializeComponent();
-            app.Run();
+            /* #9142: Run's return value is the process exit code (Shutdown(code)). --stop's 0/1/2 and a failed headless start's
+               nonzero code reach %ERRORLEVEL% and Task Scheduler's last run result only if Main returns it. */
+            return app.Run();
         }
     }
 }

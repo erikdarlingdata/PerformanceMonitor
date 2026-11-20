@@ -454,13 +454,23 @@ WHERE slow_read_id IN
             return postgres.SqlState;
         }
 
+        /* #8570: the driver's own command timeout carries no SQLSTATE. It records the one class a tool-caught client timeout records
+           (ErrorClassOf(ReadOutcome, string)), not the wrapper's type name, so both paths agree. */
+        if (Hosting.DarlingWebFailureLog.IsStatementTimeout(ex))
+        {
+            return ClientTimeoutClass;
+        }
+
         return ex.GetType().Name;
     }
 
+    /// <summary>#8570: the <c>error_class</c> of a read the CLIENT's command timeout stopped. The store never raised 57014 for it.</summary>
+    internal const string ClientTimeoutClass = "client_timeout";
+
     /// <summary>The class of an error that arrived as a tool's caught answer rather than an exception.</summary>
-    internal static string? ErrorClassOf(ReadOutcome outcome) => outcome switch
+    internal static string? ErrorClassOf(ReadOutcome outcome, string? sentence = null) => outcome switch
     {
-        ReadOutcome.Timeout => "57014",
+        ReadOutcome.Timeout => sentence is not null && Hosting.DarlingWebFailureLog.IsClientTimeoutSentence(sentence) ? ClientTimeoutClass : "57014",
         ReadOutcome.Limit => "53400",
         _ => null,
     };
