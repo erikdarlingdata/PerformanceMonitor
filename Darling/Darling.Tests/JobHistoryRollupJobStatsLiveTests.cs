@@ -181,6 +181,150 @@ public sealed class JobHistoryRollupJobStatsLiveTests
         AssertSame(raw, await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerA, 100000, 60, null, ct), "first day bumped");
     }
 
+    // ── Retention (#9110) ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A retention pass that runs a day ahead of the window's first day: the old pass deleted the days table's row of the window's partial first
+    /// day, so the read lost that day's rows. The server is behind UTC, where the first day is the one before the UTC edge day.
+    /// </summary>
+    [Fact]
+    public async Task ARetentionPassPastTheWindowsFirstDay_StillReadsWhatTheRawRowsRead()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var anchor = await SeedAsync(dataSource, ct);
+        await MoveOffsetServerAsync(dataSource, -300, ct);
+        await SetRetentionAsync(dataSource, 30, ct);
+        await RunTickAsync(dataSource, null, ct);
+
+        /* The pass of the next day: its edge is past the first day of a 30-day window read now. */
+        await using (var connection = await dataSource.OpenConnectionAsync(ct))
+        {
+            Assert.True(await JobOutcomeDaily.GcAsync(connection, anchor + TimeSpan.FromDays(1), 30, ct) > 0);
+        }
+
+        await AssertWindowMatchesAsync(dataSource, anchor, TimeSpan.FromDays(30), ct);
+    }
+
+    /// <summary>
+    /// Retention at 20 days with a 30-day window. The raw rows older than the horizon are gone (what the chunk drop does), and the rollup's
+    /// days that are whole hold rows the drop removed, so a read that took them from the rollup would count rows the raw read cannot see.
+    /// </summary>
+    [Fact]
+    public async Task WhenRetentionIsShorterThanTheWindow_TheReadSeesWhatTheRawRowsStillHold()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var anchor = await SeedAsync(dataSource, ct);
+        await InsertLateRowsAsync(dataSource, aboveTheWatermark: false, ct);
+        await InsertLateRowsAsync(dataSource, aboveTheWatermark: true, ct);
+        await SetRetentionAsync(dataSource, 20, ct);
+
+        await RunTickAsync(dataSource, null, ct);
+        await ExecuteAsync(dataSource, "DELETE FROM collect.job_history WHERE collection_time < (now() AT TIME ZONE 'UTC') - interval '20 days'", ct);
+
+        await AssertEveryReadMatchesAsync(dataSource, anchor, ct);
+    }
+
+    /// <summary>
+    /// Retention at 14 days deletes the rollup's days older than that, and a row that was collected late for a day 20 days back is counted and
+    /// deleted with them. Retention is then raised to 30 days: raw keeps that row and the days the rollup has lost, so a 30-day window cannot read
+    /// the rollup for them.
+    /// </summary>
+    [Fact]
+    public async Task WhenRetentionIsRaisedAfterDaysWereDeleted_TheReadStillSeesWhatTheRawRowsHold()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var anchor = await SeedAsync(dataSource, ct);
+        await ExecuteAsync(dataSource, @"
+INSERT INTO collect.job_history (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled, step_id, step_name, run_status, run_status_desc, run_datetime, run_duration_seconds, retries_attempted, message)
+VALUES (933000001, (now() AT TIME ZONE 'UTC') - interval '2 hours', 9301, 'rl-9301', 933000001, 'job1', 'job1', true, 0, '(Job outcome)', 1, 'ok', (now() AT TIME ZONE 'UTC') - interval '20 days', 5000, 0, NULL)", ct);
+        await SetRetentionAsync(dataSource, 14, ct);
+
+        await RunTickAsync(dataSource, null, ct);
+        await RunTickAsync(dataSource, null, ct);
+        Assert.Equal(0L, await ScalarAsync<long>(dataSource, "SELECT count(*) FROM collect.job_outcome_daily WHERE run_day < ((now() AT TIME ZONE 'UTC') - interval '17 days')::date", ct));
+        Assert.True(await ScalarAsync<long>(dataSource, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE gc_before IS NOT NULL", ct) > 0);
+
+        await SetRetentionAsync(dataSource, 30, ct);
+        await AssertEveryReadMatchesAsync(dataSource, anchor, ct);
+    }
+
+    /// <summary>
+    /// The default (Past 30 days, 30 days of retention) reads the summary for a server at any UTC offset: a bump of one full day's stored sum
+    /// changes the average, which a raw read would not show. The window start is the app's clock some seconds before the store's now, which the
+    /// retention check allows for.
+    /// </summary>
+    [Theory]
+    [InlineData(-720)]
+    [InlineData(-300)]
+    [InlineData(330)]
+    [InlineData(840)]
+    public async Task Past30DaysAtThirtyDaysOfRetention_ReadsTheSummary_AtAnyOffset(int offsetMinutes)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var anchor = await SeedAsync(dataSource, ct);
+        await MoveOffsetServerAsync(dataSource, offsetMinutes, ct);
+        await SetRetentionAsync(dataSource, 30, ct);
+        await RunTickAsync(dataSource, null, ct);
+
+        var since = anchor - TimeSpan.FromDays(30);
+        var raw = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since, ServerOffset, 100000, 60, null, ct);
+        AssertSame(raw, await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerOffset, 100000, 60, null, ct), "before the bump");
+        var ladder = raw.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning).ToList();
+
+        await ExecuteAsync(dataSource, string.Create(CultureInfo.InvariantCulture, $"UPDATE collect.job_outcome_daily SET success_duration_sum = success_duration_sum + 100000 WHERE server_id = {ServerOffset} AND job_id = 'job1' AND run_day = ((now() AT TIME ZONE 'UTC') + make_interval(mins => {offsetMinutes}) - interval '5 days')::date"), ct);
+        var rolled = await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerOffset, 100000, 60, null, ct);
+        Assert.NotEqual(ladder, rolled.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning));
+    }
+
+    private static async Task AssertWindowMatchesAsync(NpgsqlDataSource dataSource, DateTime anchor, TimeSpan span, CancellationToken ct)
+    {
+        foreach (var serverId in new int?[] { null, ServerA, ServerOffset })
+        {
+            var since = anchor - span;
+            var raw = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct);
+            var rolled = await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct);
+            Assert.NotEmpty(raw);
+            AssertSame(raw, rolled, string.Create(CultureInfo.InvariantCulture, $"span {span.TotalDays}d server {serverId}"));
+        }
+    }
+
+    /// <summary>
+    /// Puts the second server at <paramref name="offsetMinutes"/> from UTC. <see cref="SeedAsync"/> lays it out at +330, so its stored local run
+    /// times move by the difference and its rows stay at the same UTC instants.
+    /// </summary>
+    private static async Task MoveOffsetServerAsync(NpgsqlDataSource dataSource, int offsetMinutes, CancellationToken ct)
+    {
+        await ExecuteAsync(dataSource, string.Create(CultureInfo.InvariantCulture, $@"
+UPDATE collect.job_history SET run_datetime = run_datetime + make_interval(mins => {offsetMinutes - 330}) WHERE server_id = {ServerOffset};
+UPDATE server_properties SET utc_offset_minutes = {offsetMinutes} WHERE server_id = {ServerOffset}"), ct);
+    }
+
+    /// <summary>Sets the fleet retention of job_history, the horizon the purge applies.</summary>
+    private static async Task SetRetentionAsync(NpgsqlDataSource dataSource, int days, CancellationToken ct) =>
+        await ExecuteAsync(dataSource, string.Create(CultureInfo.InvariantCulture, $@"
+DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'job_history';
+INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, 'job_history', {days})"), ct);
+
     // ── The comparison ────────────────────────────────────────────────────────
 
     private static async Task AssertEveryReadMatchesAsync(NpgsqlDataSource dataSource, DateTime anchor, CancellationToken ct)

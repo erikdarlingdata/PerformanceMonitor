@@ -29,7 +29,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>last_success_run_local</c> is the newest <c>run_datetime</c> of every row of the day, a NULL-duration row included.
 /// <c>job_outcome_daily_days</c>: per (server, <c>run_day</c>), <c>max_collection_time</c> (timestamptz at UTC), the newest
 /// <c>collection_time</c> of any row ever added to that day. <c>job_outcome_daily_watermark</c>: per server, <c>collected_through</c>
-/// (timestamptz at UTC).</para>
+/// (timestamptz at UTC) and <c>gc_before</c> (a date, NULL until a retention pass has run): the newest first-day-kept the retention pass has
+/// used, so every day before it may have been deleted from the rollup, and a day at or after it is whole.</para>
 ///
 /// <para><b>The invariant.</b> Every qualifying <c>job_history</c> row of a server whose <c>collection_time</c> (naive UTC) is at or before
 /// that server's <c>collected_through</c> is counted in the rollup exactly once, and no row above it is counted. A reader takes the rollup
@@ -43,8 +44,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// transaction. The hour covers a collector transaction that commits after the tick with an earlier <c>collection_time</c>. A server with no
 /// watermark starts at its oldest <c>collection_time</c> and works forward a day at a time, oldest first, so the watermark only moves
 /// forward. A tick runs rounds of one step per server until nothing is due, <see cref="MaxStepsPerTick"/> steps or
-/// <see cref="MaxTickDuration"/> have passed. Retention deletes the days before job_history's retention edge from the rollup and the days
-/// table; the watermark row stays.</para>
+/// <see cref="MaxTickDuration"/> have passed. Retention deletes the days more than <see cref="GcMarginDays"/> before job_history's retention
+/// edge from the rollup and the days table, and moves <c>gc_before</c> of every watermark row up to that first day kept in the same
+/// transaction (it never moves back, so a retention that was lowered and raised again does not make the deleted days look whole). The
+/// watermark row stays.</para>
+///
+/// <para><b>Retention and the reader (#9110).</b> The raw rows go by <c>collection_time</c> (a chunk at a time, or a time-sliced delete), the
+/// rollup by run day, so the two can disagree about a day near the window's start. The margin keeps the window's partial first day, whatever
+/// the server's UTC offset. The reader takes a server's summary only when <c>gc_before</c> is not past the window's first day and the window
+/// starts no earlier than the oldest <c>collection_time</c> that job_history's retention is sure to keep; otherwise it reads that server raw.</para>
 /// </summary>
 public static class JobOutcomeDaily
 {
@@ -85,8 +93,12 @@ CREATE TABLE IF NOT EXISTS collect.job_outcome_daily_watermark
 (
     server_id integer NOT NULL,
     collected_through timestamptz NOT NULL,
+    gc_before date NULL,
     CONSTRAINT pk_job_outcome_daily_watermark PRIMARY KEY (server_id)
-);";
+);
+
+/* The rung is unreleased: a store that already ran it before gc_before was added gets the column here. */
+ALTER TABLE collect.job_outcome_daily_watermark ADD COLUMN IF NOT EXISTS gc_before date NULL;";
 
     /// <summary>The wall-clock margin behind now that a step never reaches, so a collector transaction that commits late is still ahead of it.</summary>
     public static readonly TimeSpan Margin = TimeSpan.FromHours(1);
@@ -190,7 +202,7 @@ ON CONFLICT (server_id) DO UPDATE
 SET collected_through = GREATEST(collect.job_outcome_daily_watermark.collected_through, EXCLUDED.collected_through);";
 
     /// <summary>
-    /// Removes the days table's rows before the retention edge and returns their keys. $1 the first day kept. The rollup rows go key by key with
+    /// Removes the days table's rows before the first day kept and returns their keys. $1 the first day kept (<see cref="GcFirstDayKept"/>). The rollup rows go key by key with
     /// <see cref="GcRolledSql"/> in the same transaction: the days table is one row a day per server, the rollup one per job as well, and a
     /// delete on the rollup with its own predicate cannot use its key (the shape <c>QueryStoreTopDaily</c> took in #5507).
     /// </summary>
@@ -205,6 +217,14 @@ DELETE FROM collect.job_outcome_daily
 WHERE server_id = $1::integer
 AND   run_day = $2::date;";
 
+    /// <summary>
+    /// Moves <c>gc_before</c> of every watermark row up to $1 (the first day kept), never back. Runs in <see cref="GcAsync"/>'s transaction, with
+    /// the deletes, so a reader never sees the deletes without it.
+    /// </summary>
+    internal const string GcMarkSql = @"
+UPDATE collect.job_outcome_daily_watermark
+SET gc_before = GREATEST(COALESCE(gc_before, $1::date), $1::date);";
+
     /// <summary>One planned step: the server and the range <c>(WOld, WNew]</c> of <c>collection_time</c>.</summary>
     public readonly record struct DueStep(int ServerId, DateTime WOld, DateTime WNew);
 
@@ -213,6 +233,16 @@ AND   run_day = $2::date;";
 
     /// <summary>The first day kept for <paramref name="nowUtc"/>: the retention edge as a date.</summary>
     internal static DateOnly RetentionEdge(DateTime nowUtc, int retentionDays) => DateOnly.FromDateTime(nowUtc.Date.AddDays(-retentionDays));
+
+    /// <summary>
+    /// How many days before the retention edge retention still keeps (#9110). The window's first day is the day of <c>since + the server's UTC
+    /// offset</c>, which is up to 14 hours before the UTC day of the edge and so one day earlier at most, and the edge itself moves with the UTC
+    /// hour; two days keep that first day whole at any offset.
+    /// </summary>
+    internal const int GcMarginDays = 2;
+
+    /// <summary>The first day <see cref="GcAsync"/> keeps for <paramref name="nowUtc"/>: <see cref="GcMarginDays"/> before the retention edge.</summary>
+    internal static DateOnly GcFirstDayKept(DateTime nowUtc, int retentionDays) => RetentionEdge(nowUtc, retentionDays).AddDays(-GcMarginDays);
 
     private static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
@@ -238,18 +268,19 @@ AND   run_day = $2::date;";
         return steps;
     }
 
-    /// <summary>Removes the days before the retention edge from the rollup and the days table in ONE transaction; returns how many (server, day)
-    /// rows went. The watermark rows stay.</summary>
+    /// <summary>Removes the days before <see cref="GcFirstDayKept"/> from the rollup and the days table, and moves every watermark row's
+    /// <c>gc_before</c> up to it, in ONE transaction; returns how many (server, day) rows went. The watermark rows stay.</summary>
     public static async Task<long> GcAsync(
         NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
+        var firstDayKept = GcFirstDayKept(nowUtc, retentionDays);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var expired = new List<(int ServerId, DateOnly Day)>();
         await using (var command = new NpgsqlCommand(GcDaysSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = RetentionEdge(nowUtc, retentionDays) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = firstDayKept });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -263,6 +294,12 @@ AND   run_day = $2::date;";
             rolled.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
             rolled.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
             await rolled.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var mark = new NpgsqlCommand(GcMarkSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = firstDayKept });
+            await mark.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);

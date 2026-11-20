@@ -197,11 +197,12 @@ public sealed class JobOutcomeDailyLiveTests
     }
 
     /// <summary>
-    /// Retention deletes the days before job_history's own retention edge (the fleet override) from the rollup and the days table, and keeps the
-    /// rest and every watermark row.
+    /// Retention deletes the days more than two before job_history's own retention edge (the fleet override) from the rollup and the days table,
+    /// keeps the rest and every watermark row, and moves every watermark row's gc_before up to the first day kept. A server that is already
+    /// ahead stays there, and a later pass at an earlier edge does not move it back.
     /// </summary>
     [Fact]
-    public async Task Retention_DeletesTheDaysPastJobHistorysHorizon_AndKeepsTheWatermark()
+    public async Task Retention_DeletesTheDaysTwoPastJobHistorysEdge_KeepsTheWatermark_AndMovesGcBeforeOnlyForward()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
@@ -213,21 +214,61 @@ public sealed class JobOutcomeDailyLiveTests
         await SeedServersAsync(connection, ct);
         await ExecuteAsync(connection, "INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, 'job_history', 10)", ct);
 
+        /* Now is 2026-11-20, so the edge is 11-10 and the first day kept is 11-08. */
         await ExecuteAsync(connection, @"
 INSERT INTO collect.job_outcome_daily (server_id, job_id, run_day, success_count, success_duration_sum, last_success_run_local) VALUES
-    (9201, 'old', DATE '2026-11-09', 1, 1, '2026-11-09 01:00:00'),
+    (9201, 'old', DATE '2026-11-07', 1, 1, '2026-11-07 01:00:00'),
+    (9201, 'margin', DATE '2026-11-08', 1, 1, '2026-11-08 01:00:00'),
     (9201, 'edge', DATE '2026-11-10', 1, 1, '2026-11-10 01:00:00'),
     (9201, 'new', DATE '2026-11-18', 1, 1, '2026-11-18 01:00:00');
 INSERT INTO collect.job_outcome_daily_days (server_id, run_day, max_collection_time) VALUES
-    (9201, DATE '2026-11-09', now()), (9201, DATE '2026-11-10', now()), (9201, DATE '2026-11-18', now());
-INSERT INTO collect.job_outcome_daily_watermark (server_id, collected_through) VALUES (9201, now())", ct);
+    (9201, DATE '2026-11-07', now()), (9201, DATE '2026-11-08', now()), (9201, DATE '2026-11-10', now()), (9201, DATE '2026-11-18', now());
+INSERT INTO collect.job_outcome_daily_watermark (server_id, collected_through, gc_before) VALUES (9201, now(), NULL), (9202, now(), DATE '2026-11-15')", ct);
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var result = await JobOutcomeDaily.RunTickAsync(dataSource, new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc), NullLogger.Instance, ct);
         Assert.Equal(1, result.DaysRemoved);
-        Assert.Equal(["edge", "new"], await ReadAsync(connection, "SELECT job_id FROM collect.job_outcome_daily ORDER BY job_id", ct));
-        Assert.Equal(["2026-11-10", "2026-11-18"], await ReadAsync(connection, "SELECT run_day::text FROM collect.job_outcome_daily_days ORDER BY run_day", ct));
-        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE server_id = 9201", ct));
+        Assert.Equal(["edge", "margin", "new"], await ReadAsync(connection, "SELECT job_id FROM collect.job_outcome_daily ORDER BY job_id", ct));
+        Assert.Equal(["2026-11-08", "2026-11-10", "2026-11-18"], await ReadAsync(connection, "SELECT run_day::text FROM collect.job_outcome_daily_days ORDER BY run_day", ct));
+        Assert.Equal(2L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE server_id IN (9201, 9202)", ct));
+        Assert.Equal(["9201 2026-11-08", "9202 2026-11-15"], await ReadAsync(connection, "SELECT server_id || ' ' || gc_before::text FROM collect.job_outcome_daily_watermark WHERE server_id IN (9201, 9202) ORDER BY server_id", ct));
+
+        /* An earlier edge (retention raised to 30 days) deletes nothing and leaves gc_before where it was. */
+        await ExecuteAsync(connection, "UPDATE config.config_collector_schedules SET retention_days = 30 WHERE collector_name = 'job_history'", ct);
+        result = await JobOutcomeDaily.RunTickAsync(dataSource, new DateTime(2026, 11, 21, 12, 0, 0, DateTimeKind.Utc), NullLogger.Instance, ct);
+        Assert.Equal(0, result.DaysRemoved);
+        Assert.Equal(["9201 2026-11-08", "9202 2026-11-15"], await ReadAsync(connection, "SELECT server_id || ' ' || gc_before::text FROM collect.job_outcome_daily_watermark WHERE server_id IN (9201, 9202) ORDER BY server_id", ct));
+    }
+
+    /// <summary>The deletes and the gc_before move are one transaction: when the move fails, no day is gone and no gc_before moved.</summary>
+    [Fact]
+    public async Task Retention_WhenTheGcBeforeMoveFails_RollsTheDeletesBack()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await SeedServersAsync(connection, ct);
+        await ExecuteAsync(connection, @"
+INSERT INTO collect.job_outcome_daily (server_id, job_id, run_day, success_count, success_duration_sum, last_success_run_local) VALUES
+    (9201, 'old', DATE '2026-11-01', 1, 1, '2026-11-01 01:00:00');
+INSERT INTO collect.job_outcome_daily_days (server_id, run_day, max_collection_time) VALUES (9201, DATE '2026-11-01', now());
+INSERT INTO collect.job_outcome_daily_watermark (server_id, collected_through) VALUES (9201, now());
+CREATE FUNCTION collect.refuse_gc_before() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+CREATE TRIGGER refuse_gc_before BEFORE UPDATE ON collect.job_outcome_daily_watermark FOR EACH ROW EXECUTE FUNCTION collect.refuse_gc_before();", ct);
+
+        await Assert.ThrowsAnyAsync<PostgresException>(() => JobOutcomeDaily.GcAsync(connection, new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc), 10, ct));
+        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily WHERE run_day = DATE '2026-11-01'", ct));
+        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_days WHERE run_day = DATE '2026-11-01'", ct));
+        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE gc_before IS NULL", ct));
+
+        await ExecuteAsync(connection, "DROP TRIGGER refuse_gc_before ON collect.job_outcome_daily_watermark", ct);
+        Assert.Equal(1, await JobOutcomeDaily.GcAsync(connection, new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc), 10, ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_days", ct));
+        Assert.Equal(["2026-11-08"], await ReadAsync(connection, "SELECT gc_before::text FROM collect.job_outcome_daily_watermark", ct));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -676,6 +676,33 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     internal const string RollupDaysTable = "collect.job_outcome_daily_days";
     internal const string RollupWatermarkTable = "collect.job_outcome_daily_watermark";
 
+    /// <summary>How far before the store's retention horizon a window may start and still read the summary (#9110): the gap between the app's
+    /// clock, when it made the window start, and the store's now. Under the slack, a row the purge could have dropped but the rollup still
+    /// counts has to be collected inside the minute before the horizon and the purge has to have run in the minute before the read.</summary>
+    internal const string RollupRetentionSlack = "interval '1 minute'";
+
+    /// <summary>
+    /// The watermark the summary read of one server uses (#9110), NULL when that server reads <c>job_history</c> alone (the <c>bd.w IS NULL</c>
+    /// arm). The summary answers only when all three hold:
+    /// <list type="bullet">
+    /// <item>the server has a watermark row;</item>
+    /// <item><c>gc_before</c> is NULL or not past the window's first server-local day: retention deletes the rollup's days by run day, and a day
+    /// before <c>gc_before</c> may be gone (retention was raised after it ran, say);</item>
+    /// <item>the window starts no earlier than the oldest <c>collection_time</c> that <c>job_history</c>'s retention is sure to keep: the
+    /// store's clock minus the retention days, the fleet row's override or the default (the one rule the purge applies, whether it drops a
+    /// chunk or deletes by time; the purge never reads a per-server row). A row collected before that may be gone from <c>job_history</c>
+    /// while the rollup still counts it, or the other way round. <see cref="RollupRetentionSlack"/> covers the few milliseconds between the
+    /// app's clock and the store's, so Past 30 days at the default retention stays on the summary.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="sinceParam">The window start parameter, naive UTC.</param>
+    internal static string RollupWatermarkSql(string sinceParam) => $@"CASE
+                WHEN wm.collected_through IS NOT NULL
+                 AND (wm.gc_before IS NULL OR ({sinceParam} + make_interval(mins => so.offset_minutes))::date >= wm.gc_before)
+                 AND {sinceParam} + {RollupRetentionSlack} >= (now() AT TIME ZONE 'UTC') - make_interval(days => {DarlingRetentionHorizons.FleetRetentionDaysSql("job_history")})
+                THEN wm.collected_through AT TIME ZONE 'UTC'
+            END";
+
     /// <summary>
     /// #9110: <c>job_stats</c> from the daily summary (the daily summary tables). Per listed server, with <c>W</c> the server's
     /// <c>collected_through</c>: the summary counts every qualifying row with <c>collection_time &lt;= W</c> exactly once and no row above it,
@@ -691,7 +718,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     /// up to the day's newest late row;</item>
     /// <item>the raw rows of each edge day with <c>collection_time &gt; W</c>.</item>
     /// </list>
-    /// A server with no watermark row reads <c>job_history</c> for the whole window, as the statement without the summary does. The average is
+    /// A server with no watermark row, or one whose retention does not match the window (<see cref="RollupWatermarkSql"/>), reads <c>job_history</c> for the whole window, as the statement without the summary does. The average is
     /// the summed durations over the summed counts as a numeric, so it matches <c>AVG(bigint)</c> digit for digit, and a job with only NULL
     /// durations has a NULL average and still has its last success. The summary counts only non-NULL durations, so the raw count does the same.
     /// </summary>
@@ -716,7 +743,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
             s.w,
             (date_trunc('day', GREATEST(s.since_local, {floorParam} + make_interval(mins => so.offset_minutes) + interval '1 hour') - interval '1 microsecond') + interval '1 day')::date AS full_lo,
             {fullHiSql} AS full_hi
-        FROM (SELECT $1 + make_interval(mins => so.offset_minutes) AS since_local, {untilLocalSql} AS until_local, wm.collected_through AT TIME ZONE 'UTC' AS w) AS s
+        FROM (SELECT $1 + make_interval(mins => so.offset_minutes) AS since_local, {untilLocalSql} AS until_local, {RollupWatermarkSql("$1")} AS w) AS s
     ) AS bd
     CROSS JOIN LATERAL (
         SELECT
