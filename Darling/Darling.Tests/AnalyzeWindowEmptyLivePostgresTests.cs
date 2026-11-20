@@ -247,7 +247,8 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
         try
         {
             await RegisterServerAsync(connection, ct);
-            var service = new DarlingAnalysisService(postgres);
+            var logger = new CapturingTestLogger();
+            var service = new DarlingAnalysisService(postgres, logger: logger);
 
             int retentionDays;
             using (var days = new NpgsqlCommand("SELECT " + DarlingRetentionHorizons.FleetRetentionDaysSql("wait_stats"), connection))
@@ -290,6 +291,12 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
                 Assert.DoesNotContain("may not have run yet", message, StringComparison.Ordinal);
             }
 
+            /* #9152: the service log line reaches the conclusion the answers above did. A window retention removed is an
+               Information line that says so, and no Warning says collection may be down. */
+            Assert.Contains("Information: [DarlingAnalysisService] No collection in the analysis window for " + ServerName, logger.Joined, StringComparison.Ordinal);
+            Assert.Contains("because retention removed it, not because collection is down", logger.Joined, StringComparison.Ordinal);
+            Assert.Equal(0, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
             /* ── a window INSIDE the retained span that holds no rows: today's text, today's pointer. */
             var inside = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 4, as_of: AsOf(retentionDays / 2.0));
             using (var doc = JsonDocument.Parse(inside))
@@ -315,6 +322,10 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
             Assert.DoesNotContain("Retention removed it", young, StringComparison.Ordinal);
             Assert.Contains("Collection may have stopped or broken", young, StringComparison.Ordinal);
             Assert.False(service.WindowEmptyRemovedByRetention);
+
+            /* #9152: the windows retention did not remove keep the Warning. */
+            Assert.Contains("Warning: [DarlingAnalysisService] No observed collection in the analysis window for " + ServerName, logger.Joined, StringComparison.Ordinal);
+            Assert.Contains("collection may be down", logger.Joined, StringComparison.Ordinal);
 
             /* ── a store whose purge has stalled: its oldest row sits ten days BEFORE the horizon, so a window before that row
                was never held by a store that has been removing rows. Retention did not remove it either. */
