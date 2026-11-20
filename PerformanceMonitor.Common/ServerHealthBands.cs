@@ -927,6 +927,13 @@ namespace PerformanceMonitor.Common
             return string.IsNullOrWhiteSpace(lastError) ? text : text + ": " + lastError.Trim();
         }
 
+        /// <summary>The <c>status</c> word of a <c>list_servers</c> row for a server whose data collection is turned off (#9087). It is the word
+        /// Lite's window shows for the same setting (<c>ServerCardStatus.Disabled</c>).</summary>
+        public const string DisabledServerStatus = "Disabled";
+
+        /// <summary>The <c>reason</c> of that row (#9087): collection is off, and the tools that read collected data answer only for the servers listed with another status.</summary>
+        public const string DisabledServerReason = "Data collection is turned off for this server, so the tools that read collected data answer only for the servers listed with another status.";
+
         /// <summary>
         /// What Collection Health says while a server's connect has failed (#7590): collection is waiting on the connection, since when,
         /// the last error (<see cref="UnreachableReason"/>), and when the service tries the connect next. A retry time already past reads
@@ -3358,6 +3365,15 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
+                /* #9107: the default trace is turned off on the server. The run is a SUCCESS (so the row bands by its runs, not as a
+                   failure or a denial) and the count alone does not say what to do, so the sentence names the setup step. */
+                if (DefaultTraceOffNote.TryParse(lastNote))
+                {
+                    return noteCount >= totalRuns && totalRuns > 0
+                        ? "latest run: " + DefaultTraceOffNote.Sentence + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", DefaultTraceOffNote.Sentence, lastNote, noteCount, totalRuns);
+                }
+
                 /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
                 /* #8146: the same for ring-buffer loss; when a note carries both, truncation reads first. */
                 var truncationSentence = RingBufferTruncationNote.Describe(lastNote);

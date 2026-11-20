@@ -1914,10 +1914,21 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
-    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Each row carries monthly_cost_usd, the cost set on the definition (0 means none is set); get_server_settings shows every field edit_server changes. Lists all monitored servers (SQL Server and PostgreSQL), with their collection freshness status and last collection time. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row, the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\", or \"Azure SQL Database\" / \"Azure SQL Managed Instance\" with no year for those two Azure platforms; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working, read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers: this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove. same_machine_as lists the names of the OTHER enabled registrations that last reported the same machine identity as this one (empty when none): an address can start reaching another machine, for example after an availability group listener fails over, and then two registrations watch one machine. Nothing is refused and nothing alerts; the list is worked out when you read it, so it clears when the address moves back. An agent-scoped notification route on one of those registrations does not cover the other. A server the service cannot connect to reads Offline at once instead of waiting out the age rule, and its row then carries reason (Server unreachable since <time> UTC and the last connect error), connect_down_since and last_connect_error; all three are null otherwise.")]
-    public static async Task<string> ListServers(
+    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Each row carries monthly_cost_usd, the cost set on the definition (0 means none is set); get_server_settings shows every field edit_server changes. Lists all monitored servers (SQL Server and PostgreSQL), with their collection freshness status and last collection time. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row, the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\", or \"Azure SQL Database\" / \"Azure SQL Managed Instance\" with no year for those two Azure platforms; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working, read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). A server whose data collection is turned off is listed too: it reads Disabled with a reason saying so. The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers: this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove. same_machine_as lists the names of the OTHER enabled registrations that last reported the same machine identity as this one (empty when none): an address can start reaching another machine, for example after an availability group listener fails over, and then two registrations watch one machine. Nothing is refused and nothing alerts; the list is worked out when you read it, so it clears when the address moves back. An agent-scoped notification route on one of those registrations does not cover the other. A server the service cannot connect to reads Offline at once instead of waiting out the age rule, and its row then carries reason (Server unreachable since <time> UTC and the last connect error), connect_down_since and last_connect_error; connect_down_since and last_connect_error are null otherwise, and so is reason unless the row reads Disabled.")]
+    public static Task<string> ListServers(
         NpgsqlDataSource postgres,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ListServersCore(postgres, includeDisabled: true, cancellationToken);
+
+    /// <summary>
+    /// The <c>list_servers</c> read. <paramref name="includeDisabled"/> is true for the MCP tool (#9087: a server whose collection is off is
+    /// listed as Disabled, so it is not the one server the list pretends does not exist). The web read route passes false: its pickers feed
+    /// pages whose reads answer only for a collecting server, so they keep listing the servers that are collecting.
+    /// </summary>
+    internal static async Task<string> ListServersCore(
+        NpgsqlDataSource postgres,
+        bool includeDisabled,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -1925,6 +1936,8 @@ public sealed class DarlingMcpDataTools
             try
             {
                 servers = await DarlingDataReader.GetServerListAsync(postgres, cancellationToken);
+                if (!includeDisabled)
+                    servers = servers.Where(server => server.IsEnabled).ToList();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2011,13 +2024,19 @@ public sealed class DarlingMcpDataTools
                    sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
                    is described, and retiring it belongs to a later major of the MCP contract, not here. */
                 sql_version = engineVersion,
-                status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc, s.ConnectDownSince, s.Attempted),
-                /* #7590: a server the service cannot connect to reads Offline at once, and says why here; all three are null otherwise. */
-                reason = connectDownSince.HasValue
-                    ? ServerHealthClassifier.UnreachableReason(connectDownSince.Value, s.LastConnectError)
-                    : null,
-                connect_down_since = connectDownSince?.ToString("o"),
-                last_connect_error = connectDownSince.HasValue ? s.LastConnectError : null,
+                /* #9087: a server whose collection is off reads Disabled with the reason, and its stored connect failure is not shown: the
+                   service no longer tries it, so that failure is a record of a past attempt and not a current state. */
+                status = !s.IsEnabled
+                    ? ServerHealthClassifier.DisabledServerStatus
+                    : FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc, s.ConnectDownSince, s.Attempted),
+                /* #7590: a server the service cannot connect to reads Offline at once, and says why here; connect_down_since and last_connect_error are null otherwise, and so is reason unless the row reads Disabled. */
+                reason = !s.IsEnabled
+                    ? ServerHealthClassifier.DisabledServerReason
+                    : connectDownSince.HasValue
+                        ? ServerHealthClassifier.UnreachableReason(connectDownSince.Value, s.LastConnectError)
+                        : null,
+                connect_down_since = s.IsEnabled ? connectDownSince?.ToString("o") : null,
+                last_connect_error = s.IsEnabled && connectDownSince.HasValue ? s.LastConnectError : null,
                 read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
                 last_collection = s.LastCollection?.ToString("o"),
                 /* #6351: the other enabled registrations that last reported this machine's identity. Worked out at read, never stored. */

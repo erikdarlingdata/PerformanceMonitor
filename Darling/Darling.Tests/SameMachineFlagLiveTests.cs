@@ -98,13 +98,14 @@ VALUES (1, 'flag-a', 'flag-a-host', 'integrated', TRUE, 'sqlserver'),
        (4, 'flag-d', 'flag-d-host', 'integrated', TRUE, 'sqlserver'),
        (5, 'flag-e', 'flag-e-host', 'integrated', TRUE, 'sqlserver')", ct);
 
-            /* MCP list_servers: each is in the other's list; the disabled one is in nobody's list (and has no row of its own). */
+            /* MCP list_servers: each is in the other's list; the disabled one is in nobody's list, and has a row of its own (#9087) that names the enabled ones. */
             var mcp = await McpFlagsAsync(owner, ct);
             Assert.Equal(new[] { "flag-b" }, mcp["flag-a"]);
             Assert.Equal(new[] { "flag-a" }, mcp["flag-b"]);
             Assert.Empty(mcp["flag-d"]);
             Assert.Empty(mcp["flag-e"]);
-            Assert.DoesNotContain("flag-c", mcp.Keys);
+            Assert.Equal(new[] { "flag-a", "flag-b" }, mcp["flag-c"]);
+            Assert.DoesNotContain(mcp.Values, others => others.Contains("flag-c"));
 
             /* The web admin grid: the names arrive joined and display-ready; a disabled registration still sees the enabled ones. */
             var admin = JsonDocument.Parse(DarlingAdminServersReader.Render(await DarlingAdminServersReader.ReadAsync(owner, ct), DateTime.UtcNow))

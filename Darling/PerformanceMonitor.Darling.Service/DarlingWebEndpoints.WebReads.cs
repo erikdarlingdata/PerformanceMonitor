@@ -333,7 +333,7 @@ public static partial class DarlingWebEndpoints
             ["find_database"] = (c, pg, an) => !RequireText(c, "database_name", out var fdDatabase)
                 ? MissingParam("database_name")
                 : DarlingMcpFindDatabaseTools.FindDatabase(pg, fdDatabase, c.RequestAborted),
-            ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg, c.RequestAborted),
+            ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServersCore(pg, includeDisabled: false, c.RequestAborted),
             ["list_query_tags"] = (c, pg, an) => DarlingMcpQueryTagTools.ListQueryTags(pg, c.RequestAborted),
 
             /* ── trends ── */
