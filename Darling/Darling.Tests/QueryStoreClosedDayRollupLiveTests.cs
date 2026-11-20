@@ -233,10 +233,8 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
     [Fact]
     public async Task TheRungIsTheNewestOnADenseLadder_MakesItsTablesEmpty_RunsTwice_AndTheStoreProbeSeesThem()
     {
-        var rung = PgMigrations.Scripts[^1];
-        Assert.Equal(QueryStoreClosedDayRollup.Version, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
-        Assert.Equal(rung.Version - 1, PgMigrations.Scripts[^2].Version);
+        /* #9148: V285 is the newest rung now; this one is found by its version. */
+        var rung = PgMigrations.Scripts.Single(m => m.Version == QueryStoreClosedDayRollup.Version);
 
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
         var ct = TestContext.Current.CancellationToken;
@@ -260,8 +258,10 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
 
+        /* #9148: the probe reads newest-first, so V285's tables go too for the store to read as the version below this rung. */
+        await ExecuteAsync(connection, "DROP TABLE collect.query_store_clutter_plan_daily", ct);
         await ExecuteAsync(connection, "DROP TABLE collect.query_store_closed_day_built", ct);
-        Assert.Equal(StorageVersion.SchemaVersion - 1, await viewer.GetStoreSchemaVersionAsync(ct));
+        Assert.Equal(QueryStoreClosedDayRollup.Version - 1, await viewer.GetStoreSchemaVersionAsync(ct));
     }
 
     [Fact]

@@ -3732,6 +3732,10 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V283 (#9111): the closed-day rollups the Query Store grid and its slicer read whole UTC days from, and the table that says which days
            are built. Three new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(QueryStoreClosedDayRollup.Version, "query-store-closed-day-rollups", QueryStoreClosedDayRollup.CreateSql),
+        /* V285 (#9148): the Query Store clutter rollups get_query_store_clutter's plan-churn arm reads whole UTC days from, built by the V283
+           pass, and the built table's clutter_built_at column. Two new plain tables created empty and a nullable column: no data moves, so the
+           upgrade stays fast. The next ticks build the clutter rows of the days already built. An older build ignores them. */
+        new Migration(QueryStoreClosedDayRollup.ClutterVersion, "query-store-clutter-daily", QueryStoreClosedDayRollup.ClutterCreateSql),
     };
 
     /// <summary>

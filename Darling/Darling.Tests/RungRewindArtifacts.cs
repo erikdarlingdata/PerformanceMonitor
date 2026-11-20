@@ -891,6 +891,11 @@ DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
 DROP TABLE IF EXISTS collect.query_store_slicer_hourly;
 DROP TABLE IF EXISTS collect.query_store_closed_day_built;
 DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
+        // V285 (#9148): the Query Store clutter rollups' two tables and the built table's clutter_built_at. The two tables are the probe's newest
+        // sentinel. The rewind drops them and the column, so a re-run of V285 creates them empty and the service builds the days again.
+        new(285, "hasQueryStoreClutterDaily", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_daily;
+DROP TABLE IF EXISTS collect.query_store_clutter_collections_daily;
+DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_built') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_built DROP COLUMN IF EXISTS clutter_built_at; END IF; END $$;"),
     ];
 
     /// <summary>
