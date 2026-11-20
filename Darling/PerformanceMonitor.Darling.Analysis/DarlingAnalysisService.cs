@@ -397,6 +397,9 @@ public sealed class DarlingAnalysisService
                live. */
             ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
             RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,
+            /* #9149: an on-demand pass overlaps its family reads. The scheduled pass (the one caller that persists caveats)
+               keeps the serial loop, because its sweeps already share the store's pool. */
+            FamilyParallelism = persistCollectionCaveats ? 1 : PgFactCollector.MaxFamilyParallelism,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once
@@ -848,6 +851,7 @@ public sealed class DarlingAnalysisService
             /* #5812: get_analysis_facts with no as_of answers PLAN_REGRESSION from the candidates the last current pass
                read while they are fresh; a past as_of reads live. */
             ReusePlanRegressionCandidates = asOfUtc is null,
+            FamilyParallelism = PgFactCollector.MaxFamilyParallelism, /* #9149 */
             CancellationToken = cancellationToken
         };
 
