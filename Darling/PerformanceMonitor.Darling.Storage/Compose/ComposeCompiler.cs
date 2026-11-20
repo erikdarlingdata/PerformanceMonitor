@@ -227,7 +227,7 @@ public static class ComposeCompiler
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
         string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
-        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null)
+        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null, string? sharedQueryStoreRelation = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -370,7 +370,8 @@ public static class ComposeCompiler
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
-        return QueryStoreRawDedupe(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null);
+        /* #9151: a RankedTimeSeries panel reads the deduped rows from the shared CTE the caller built once (QueryStoreSharedDedupeCte). */
+        return sharedQueryStoreRelation ?? QueryStoreRawDedupe(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null);
     }
 
     /// <summary>
@@ -449,7 +450,7 @@ public static class ComposeCompiler
     /// </summary>
     private static string QueryStorePartitionRestriction(
         string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe,
-        string? rawServersParam = null)
+        string? rawServersParam = null, string outerRef = QueryStoreTable)
     {
         if (!restrictDedupe || dimensionFilters is not { Count: > 0 })
         {
@@ -470,12 +471,56 @@ public static class ComposeCompiler
             _ => "''",
         };
         var hashKey = string.Concat(keys.Select(c => c == "server_id"
-            ? $" AND k.server_id = {QueryStoreTable}.server_id"
-            : $" AND coalesce(k.{c}, {Sentinel(c)}) = coalesce({QueryStoreTable}.{c}, {Sentinel(c)})"));
-        var residual = string.Concat(keys.Where(c => c != "server_id").Select(c => $" AND k.{c} IS NOT DISTINCT FROM {QueryStoreTable}.{c}"));
+            ? $" AND k.server_id = {outerRef}.server_id"
+            : $" AND coalesce(k.{c}, {Sentinel(c)}) = coalesce({outerRef}.{c}, {Sentinel(c)})"));
+        var residual = string.Concat(keys.Where(c => c != "server_id").Select(c => $" AND k.{c} IS NOT DISTINCT FROM {outerRef}.{c}"));
         return $" AND EXISTS (SELECT 1 FROM (SELECT DISTINCT {string.Join(", ", keys.Select(c => FactAlias + "." + c))}"
             + $" FROM {table} AS {FactAlias} WHERE {window}) AS k WHERE true{hashKey}{residual})";
     }
+
+    /// <summary>The columns the shared Query Store dedupe CTE carries (#9151): every column a Query Store measure or dimension reads
+    /// (<see cref="s_splitColumns"/>), the dedupe's own key, and the tie-break column. Not <c>SELECT *</c>: the text and plan columns
+    /// of a wide row would ride through the sort and the materialization for nothing.</summary>
+    private static readonly string[] s_sharedDedupeColumns = s_splitColumns
+        .Concat(s_queryStorePartitionKey)
+        .Concat(new[] { "execution_count" })
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+
+    /// <summary>
+    /// The shared dedupe CTE of an all-raw Query Store RankedTimeSeries panel (#9151). The rank CTE and the series query each read the
+    /// deduped rows, and each used to build them (the window ranked twice, plus the partition restriction's scan twice: four heap passes
+    /// of the window). This is the same dedupe, built once as a MATERIALIZED CTE of the columns the panel reads, which both read. Same
+    /// window, same key, same ORDER BY, same partition restriction as <see cref="QueryStoreRawDedupe"/>.
+    ///
+    /// <para>The outer query's server scope and the filters on a partition column (server, database) are repeated inside, because
+    /// Postgres pushed them through the old subquery's window function and cannot push them into a MATERIALIZED CTE. That is exact: every
+    /// row of a partition has one value of its partition columns, so keeping or dropping a partition before the ranking picks the same
+    /// survivors. A filter on a non-partition column (module_name, query_hash) stays outside, and the restriction decides which partitions
+    /// are ranked, exactly as before. The outer query repeats the scope and every filter, as it always did.</para>
+    ///
+    /// <para>The table is aliased <c>f</c> here (as the restriction's own scan is) so the scope and filter text, which is spelled
+    /// <c>f.column</c>, applies unchanged; the restriction's inner <c>f</c> hides it inside its derived table, and the correlation
+    /// to this scan is its <c>outerRef</c>.</para>
+    /// </summary>
+    private static string QueryStoreSharedDedupeCte(
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string> dimensionFilters, IReadOnlyList<string> partitionFilters,
+        string? serverScopeSql, bool restrictDedupe)
+    {
+        var f = FactAlias.ToString();
+        return $"{QueryStoreSharedCte} AS MATERIALIZED (\n"
+            + $"    SELECT {string.Join(", ", s_sharedDedupeColumns)} FROM (SELECT {string.Join(", ", s_sharedDedupeColumns.Select(c => f + "." + c))}, "
+            + $"ROW_NUMBER() OVER (PARTITION BY {string.Join(", ", s_queryStorePartitionKey.Select(c => f + "." + c))} "
+            + $"ORDER BY {f}.{timeColumn} DESC, {f}.execution_count DESC) AS qs_rn\n"
+            + $"        FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} AS {f}\n"
+            + $"        WHERE {f}.{timeColumn} >= {startParam} AND {f}.{timeColumn} <= {endParam}"
+            + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
+            + string.Concat(partitionFilters.Select(c => " AND " + c))
+            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null, f)
+            + ") AS qs_ranked WHERE qs_rn = 1\n)\n";
+    }
+
+    private const string QueryStoreSharedCte = "qs_dedup";
 
     /// <summary>The raw sources whose only usable index is (server_id, collection_time): they have no index on collection_time alone
     /// (#9151). A fleet read of a short window on them, with no server predicate, makes the planner read the whole day's chunk and
@@ -523,10 +568,12 @@ public static class ComposeCompiler
     /// <see cref="Compile"/> with the #5582 single-scan RankedTimeSeries shape switchable. <c>false</c> compiles exactly the
     /// text every route emitted before that change (the rank CTE and the outer query each scan the fact rows). It is the
     /// live exactness oracle in <c>ComposeQueryStoreRankedSingleScanLiveTests</c> and the plan test's two-scan baseline;
-    /// no product path passes <c>false</c>.
+    /// no product path passes <c>false</c>. <paramref name="sharedQueryStoreDedupe"/> is the same kind of switch for #9151: <c>false</c>
+    /// compiles the all-raw Query Store RankedTimeSeries statement that builds the deduped rows twice, the live oracle's baseline.
     /// </summary>
     internal static (ComposeCompiled? Compiled, string? Error) CompileCore(
-        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries, Func<string, string?>? stampColumns = null)
+        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries, Func<string, string?>? stampColumns = null,
+        bool sharedQueryStoreDedupe = true)
     {
         if (plan is null)
         {
@@ -649,6 +696,7 @@ public static class ComposeCompiler
            placeholders rather than double-binding each value. */
         var filterClauses = new List<string>(plan.Filters.Count);
         var pushableFilterClauses = new List<string>();
+        var partitionFilterClauses = new List<string>();
         var restrictDedupe = false;
         foreach (var filter in plan.Filters)
         {
@@ -658,7 +706,12 @@ public static class ComposeCompiler
                 && string.Equals(filter.Dimension.SourceTable, QueryStoreTable, StringComparison.Ordinal))
             {
                 pushableFilterClauses.Add(clause);
-                restrictDedupe |= !s_queryStorePartitionKey.Contains(filter.Dimension.Column, StringComparer.Ordinal);
+                var onPartitionColumn = s_queryStorePartitionKey.Contains(filter.Dimension.Column, StringComparer.Ordinal);
+                restrictDedupe |= !onPartitionColumn;
+                if (onPartitionColumn)
+                {
+                    partitionFilterClauses.Add(clause);
+                }
             }
         }
 
@@ -680,6 +733,17 @@ public static class ComposeCompiler
         }
 
         var singleScan = partialValue is not null;
+
+        /* #9151: an all-raw Query Store RankedTimeSeries panel (the wide route has its own single scan above) builds the deduped rows once,
+           into the qs_dedup CTE below, and the rank CTE and the series query both read it. Every other statement is unchanged. */
+        var sharedQsDedupe = sharedQueryStoreDedupe
+            && !singleScan
+            && plan.Mode == PanelMode.RankedTimeSeries
+            && !route.IsCagg
+            && route.Tier == ComposeSourceTier.Raw
+            && !context.QueryStoreWideEligible
+            && !plan.UsesModuleJoin
+            && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal);
 
         /* The stamp relation's inputs: its partial columns, $stampThrough, and the server scope spelled on the registry join the
            three arms share (`s.`), because the rollup rows and the wide rows both carry server_id and the registry row carries the name. */
@@ -703,7 +767,8 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null,
+                sharedQsDedupe ? QueryStoreSharedCte : null));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -806,6 +871,12 @@ public static class ComposeCompiler
                 sql.Append("    WHERE rn = 1\n");
                 sql.Append(")\n");
             }
+        }
+
+        if (sharedQsDedupe)
+        {
+            sql.Append(sql.Length == 0 ? "WITH " : ", ")
+                .Append(QueryStoreSharedDedupeCte(timeColumn, startParam, endParam, pushableFilterClauses, partitionFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe));
         }
 
         /* The #2734 rank pass: RankedTimeSeries prepends a CTE that IS the Ranked query minus the time
