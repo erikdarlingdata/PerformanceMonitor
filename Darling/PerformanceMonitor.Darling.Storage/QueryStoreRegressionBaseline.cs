@@ -991,17 +991,31 @@ public static class QueryStoreRegressionBaseline
     /// <summary>Today's <c>recent_performance</c>, which weights each interval's averages by its count.</summary>
     private const string RecentPerformanceSql = """
         recent_performance AS (
+            /* #9148: per plan first, then per query, as baseline_performance is. */
             SELECT
                 database_name,
                 query_id,
-                MAX(query_text) AS query_text_sample,
-                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_duration_ms,
-                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_cpu_time_ms,
-                CAST(SUM(execution_count) AS bigint) AS exec_count,
-                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
+                MAX(query_text_sample) AS query_text_sample,
+                CAST(SUM(dur_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(execs) AS bigint) AS exec_count,
+                CAST(COUNT(plan_id) AS integer) AS plan_count,
                 MAX(last_execution_time) AS last_execution_time
-            FROM deduped_recent
-            WHERE rn = 1
+            FROM
+            (
+                SELECT
+                    database_name,
+                    query_id,
+                    plan_id,
+                    MAX(query_text) AS query_text_sample,
+                    SUM(CAST(avg_duration_us AS numeric) * execution_count) AS dur_us,
+                    SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS cpu_us,
+                    SUM(execution_count) AS execs,
+                    MAX(last_execution_time) AS last_execution_time
+                FROM deduped_recent
+                WHERE rn = 1
+                GROUP BY database_name, query_id, plan_id
+            ) AS recent_plans
             GROUP BY database_name, query_id
         ),
         """;
@@ -1013,16 +1027,30 @@ public static class QueryStoreRegressionBaseline
     /// </summary>
     private const string RecentPerformancePreWeightedSql = """
         recent_performance AS (
+            /* #9148: per plan first, then per query, as baseline_performance is. */
             SELECT
                 database_name,
                 query_id,
-                MAX(query_text) AS query_text_sample,
+                MAX(query_text_sample) AS query_text_sample,
                 CAST(SUM(dur_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_duration_ms,
                 CAST(SUM(cpu_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_cpu_time_ms,
                 CAST(SUM(execs) AS bigint) AS exec_count,
-                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
+                CAST(COUNT(plan_id) AS integer) AS plan_count,
                 MAX(last_execution_time) AS last_execution_time
-            FROM deduped_recent
+            FROM
+            (
+                SELECT
+                    database_name,
+                    query_id,
+                    plan_id,
+                    MAX(query_text) AS query_text_sample,
+                    SUM(dur_us) AS dur_us,
+                    SUM(cpu_us) AS cpu_us,
+                    SUM(execs) AS execs,
+                    MAX(last_execution_time) AS last_execution_time
+                FROM deduped_recent
+                GROUP BY database_name, query_id, plan_id
+            ) AS recent_plans
             GROUP BY database_name, query_id
         ),
         """;
@@ -1041,28 +1069,51 @@ public static class QueryStoreRegressionBaseline
 
     private const string AggregatesTailSql = """
         baseline_performance AS (
+            /* #9148: summed per plan first, then per query. COUNT(DISTINCT plan_id) over the parts forced a sort of every part
+               row (315,000 on a measured store, about 1.3 s of the read); the per-plan step hashes them to one row per plan and
+               the second step counts those rows. The sums are exact numeric sums, so they add up to the same totals, and a NULL
+               plan_id is one group that COUNT(plan_id) skips, as COUNT(DISTINCT) did. */
             SELECT
                 database_name,
                 query_id,
                 CAST(SUM(dur_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_duration_ms,
                 CAST(SUM(cpu_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_cpu_time_ms,
                 CAST(SUM(execs) AS bigint) AS exec_count,
-                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count
-            FROM baseline_parts
+                CAST(COUNT(plan_id) AS integer) AS plan_count
+            FROM
+            (
+                SELECT database_name, query_id, plan_id, SUM(execs) AS execs, SUM(cpu_us) AS cpu_us, SUM(dur_us) AS dur_us
+                FROM baseline_parts
+                GROUP BY database_name, query_id, plan_id
+            ) AS baseline_plans
             GROUP BY database_name, query_id
         ),
         recent_performance AS (
+            /* #9148: per plan first, then per query, as baseline_performance is. */
             SELECT
                 database_name,
                 query_id,
-                MAX(query_text) AS query_text_sample,
-                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_duration_ms,
-                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_cpu_time_ms,
-                CAST(SUM(execution_count) AS bigint) AS exec_count,
-                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
+                MAX(query_text_sample) AS query_text_sample,
+                CAST(SUM(dur_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_us) AS double precision) / NULLIF(SUM(execs), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(execs) AS bigint) AS exec_count,
+                CAST(COUNT(plan_id) AS integer) AS plan_count,
                 MAX(last_execution_time) AS last_execution_time
-            FROM deduped_recent
-            WHERE rn = 1
+            FROM
+            (
+                SELECT
+                    database_name,
+                    query_id,
+                    plan_id,
+                    MAX(query_text) AS query_text_sample,
+                    SUM(CAST(avg_duration_us AS numeric) * execution_count) AS dur_us,
+                    SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS cpu_us,
+                    SUM(execution_count) AS execs,
+                    MAX(last_execution_time) AS last_execution_time
+                FROM deduped_recent
+                WHERE rn = 1
+                GROUP BY database_name, query_id, plan_id
+            ) AS recent_plans
             GROUP BY database_name, query_id
         ),
         failure_performance AS (
