@@ -388,6 +388,18 @@ internal static class PgStatementTable
         return (int)(await command.ExecuteScalarAsync(ct))!;
     }
 
+    /// <summary>
+    /// How many new entries a body must make for the table to hold <paramref name="wanted"/> in all: <paramref name="wanted"/>
+    /// less what the table holds now, never below 0. A body that needs many entries (a read whose result must outgrow
+    /// <c>work_mem</c>) fills only the gap. Every entry in the table is a row of the module's function whatever its database
+    /// or owner, so a table that is already full of other sessions' entries needs none of the body's own, and the body adds
+    /// no more than <see cref="Headroom"/> has room for. A body that always filled <paramref name="wanted"/> entries could
+    /// not hold on a near-full table: one pass frees five percent of it, and the pass takes the lowest-usage entries first,
+    /// which are the ones the body made (#9106).
+    /// </summary>
+    internal static async Task<int> EntriesToAddAsync(NpgsqlConnection connection, CancellationToken ct, int wanted)
+        => Math.Max(0, wanted - (await EntryCountAsync(connection, ct) ?? 0));
+
     /// <summary>How many entries the module's hash table holds right now, without loading the query texts; NULL where this database has no <c>pg_stat_statements</c> view.</summary>
     internal static async Task<int?> EntryCountAsync(NpgsqlConnection connection, CancellationToken ct)
     {
