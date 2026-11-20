@@ -57,12 +57,14 @@ internal static class DarlingStoreLogins
         /// <summary>The MCP server: the <c>mcp</c> role's surface.</summary>
         Mcp,
 
-        /// <summary>#9013: the metrics port. It resolves the web dashboard's login (the same setting, the same role) and differs only
-        /// in the name its log lines give.</summary>
+        /// <summary>#9013: the metrics port. It reads the web dashboard's setting (<c>postgres.webConnectionString</c>), but it only
+        /// reads, so on the compose store it takes the read-only <c>viewer</c> login before the <c>web</c> one; its log lines name the
+        /// metrics port.</summary>
         Metrics,
     }
 
-    /// <summary>#9013: whether a surface resolves the web dashboard's login, so the metrics port takes every web branch.</summary>
+    /// <summary>#9013: whether a surface resolves the web dashboard's login: the same setting, and the web role as the metrics port's
+    /// fallback after the viewer one.</summary>
     private static bool UsesWebLogin(Surface surface) => surface is Surface.Web or Surface.Metrics;
 
     /* #9013: how a line about a failed attempt opens. The web dashboard and the MCP server do not start; the metrics port is
@@ -88,7 +90,8 @@ internal static class DarlingStoreLogins
         ComposeStoreRoleFromEarlierStart,
 
         /// <summary>The web host on the <c>viewer</c> credential an earlier start gave that role, because this start did
-        /// not provision the roles and no <c>web</c> credential exists yet: reads work, every write is refused.</summary>
+        /// not provision the roles and no <c>web</c> credential exists yet: reads work, every write is refused. #9013: the metrics
+        /// port, which only reads, takes it first, whether or not a <c>web</c> credential exists.</summary>
         ComposeStoreViewerFromEarlierStart,
 
         /// <summary><c>postgres.connectionString</c>: the owner.</summary>
@@ -149,8 +152,13 @@ internal static class DarlingStoreLogins
         /// <summary>What provisioning wrote onto the roles, for the worker's #2918 reload baseline.</summary>
         internal int AppliedComposeStatementTimeoutSeconds { get; }
 
-        internal string? ConnectionStringFor(Surface surface) =>
-            UsesWebLogin(surface) ? WebConnectionString : McpConnectionString;
+        /* #9013: the metrics port only reads, so the login this start provisioned for it is the read-only viewer one. */
+        internal string? ConnectionStringFor(Surface surface) => surface switch
+        {
+            Surface.Metrics => ViewerConnectionString,
+            Surface.Web => WebConnectionString,
+            _ => McpConnectionString,
+        };
 
         internal static ComposeStoreVerdict ProvisionedWith(
             string viewerConnectionString, string mcpConnectionString, int appliedSeconds, string webConnectionString) =>
@@ -426,10 +434,23 @@ internal static class DarlingStoreLogins
                 return null;
             }
 
-            earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, ComposeRole(surface), logger);
-            if (UsesWebLogin(surface) && earlier.Password is null)
+            /* #9013: the metrics port reads the viewer credential first and the web one only when there is no viewer one; the web
+               dashboard the other way round. */
+            if (surface == Surface.Metrics)
             {
                 earlierViewer = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.ViewerRoleName, logger);
+                if (earlierViewer.Password is null)
+                {
+                    earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, ComposeRole(surface), logger);
+                }
+            }
+            else
+            {
+                earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, ComposeRole(surface), logger);
+                if (UsesWebLogin(surface) && earlier.Password is null)
+                {
+                    earlierViewer = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.ViewerRoleName, logger);
+                }
             }
         }
 
@@ -457,7 +478,8 @@ internal static class DarlingStoreLogins
     /// The decision, pure (#3914): a configured login wins; then, in a container, the compose store's role — with
     /// the login this start provisioned, or, when this start did not provision the roles, with the trusted
     /// credential an earlier start left (<paramref name="earlier"/>); then the owner.
-    /// <paramref name="configuredConnectionString"/> is already resolved.
+    /// <paramref name="configuredConnectionString"/> is already resolved. #9013: the metrics port only reads, so its compose-store
+    /// order is the viewer login (this start's, then an earlier start's), then the web one an earlier start left, then the owner.
     /// </summary>
     internal static StoreLogin Resolve(
         Surface surface, string ownerConnectionString, string? configuredConnectionString, bool inContainer,
@@ -477,6 +499,19 @@ internal static class DarlingStoreLogins
                 return new StoreLogin(roleLogin, LoginSource.ComposeStoreRole, null);
             }
 
+            var viewerLogin = earlierViewer?.Password is { } viewerPassword
+                ? new StoreLogin(
+                    BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, viewerPassword),
+                    LoginSource.ComposeStoreViewerFromEarlierStart,
+                    EarlierViewerWarning(verdict.NotProvisionedReason, surface))
+                : null;
+
+            /* #9013: the metrics port only reads, so the viewer credential an earlier start left comes before the web one. */
+            if (surface == Surface.Metrics && viewerLogin is not null)
+            {
+                return viewerLogin;
+            }
+
             if (earlier?.Password is { } password)
             {
                 return new StoreLogin(
@@ -488,12 +523,9 @@ internal static class DarlingStoreLogins
             /* The web host with no web credential yet: the viewer login an earlier start gave that role comes before
                the owner, the way the managed path falls back. Reads work; the store refuses every write, which the web
                answers as a refused change. The owner stays the last resort, where dev used it. */
-            if (UsesWebLogin(surface) && earlierViewer?.Password is { } viewerPassword)
+            if (UsesWebLogin(surface) && viewerLogin is not null)
             {
-                return new StoreLogin(
-                    BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, viewerPassword),
-                    LoginSource.ComposeStoreViewerFromEarlierStart,
-                    EarlierViewerWarning(verdict.NotProvisionedReason, surface));
+                return viewerLogin;
             }
         }
 
@@ -536,15 +568,15 @@ internal static class DarlingStoreLogins
 
     /// <summary>The startup warning for the web host on the read-only viewer login an earlier start provisioned: the store's
     /// roles were not provisioned this start (<paramref name="reason"/> says why) and no web credential exists, so the
-    /// pages read but every change is refused until the web role exists. #9013: the metrics port only reads, so its text says
-    /// nothing about refused changes.</summary>
+    /// pages read but every change is refused until the web role exists. #9013: the metrics port only reads and takes this login
+    /// before a web one, so its text says nothing about refused changes or a missing web credential.</summary>
     internal static string EarlierViewerWarning(string? reason, Surface surface = Surface.Web)
     {
         if (surface == Surface.Metrics)
         {
             var metricsWarning =
                 "The metrics port connects to the store as the read-only viewer role with the credential an earlier start provisioned, not as the owner: "
-                + "the store's least-privilege roles were not provisioned this start and no web credential exists yet.";
+                + "the store's least-privilege roles were not provisioned this start.";
             if (reason is not null)
             {
                 metricsWarning += " " + reason;
