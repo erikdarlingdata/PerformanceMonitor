@@ -1859,7 +1859,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                read somebody needs the moment the plans one comes back empty. */
             .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
             /* get_pg_logging_audit (#3607) - the rest of the logging surface, in readiness's shape:
-               log_lock_waits, log_temp_files, log_autovacuum_min_duration, log_checkpoints,
+               log_lock_waits, log_temp_files, log_autovacuum_min_duration (with log_autoanalyze_min_duration
+               beside it on PostgreSQL 19 and later), log_checkpoints,
                log_connections / log_disconnections and log_min_duration_statement, each judged from
                the stored pg_server_config snapshot with what it unlocks, the recommended value and its
                cost, and the remedy in the hosting flavour's syntax. Registered beside the plan tools
