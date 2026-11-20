@@ -1132,9 +1132,12 @@ internal static class McpHelpers
     /// </summary>
     public const string CommandTimeoutToken = "command timeout";
 
-    /// <summary>True for a <see cref="TimeoutException"/>, bare or as the inner exception the driver wraps it in. The same two shapes
-    /// the service's live-exception classifier treats as a statement timeout.</summary>
-    private static bool IsClientTimeout(Exception ex) => ex is TimeoutException || ex.InnerException is TimeoutException;
+    /// <summary>True for a <see cref="TimeoutException"/>, bare or wrapped by the database driver's own exception (a
+    /// <see cref="System.Data.Common.DbException"/>, which is what Npgsql's exception derives from). The same two shapes the service's
+    /// live-exception classifier treats as a statement timeout. A <see cref="TimeoutException"/> inside any OTHER wrapper is not one: an
+    /// HttpClient request that timed out is a <see cref="TaskCanceledException"/> over a <see cref="TimeoutException"/>, and it is no store timeout.</summary>
+    internal static bool IsClientTimeout(Exception ex) =>
+        ex is TimeoutException || (ex is System.Data.Common.DbException && ex.InnerException is TimeoutException);
 
     /// <summary>
     /// The ONE wire shape a tool REFUSAL takes, on both SKUs — <see cref="FormatError"/>'s twin for the fourth

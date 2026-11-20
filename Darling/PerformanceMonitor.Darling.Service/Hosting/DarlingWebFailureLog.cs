@@ -91,6 +91,14 @@ internal static class DarlingWebFailureLog
     internal static bool IsStatementTimeoutSentence(string sentence) =>
         sentence is not null && s_sentenceTimeoutToken.IsMatch(sentence);
 
+    private static readonly Regex s_sentenceClientTimeoutToken = SentenceTokenRegex(Regex.Escape(McpHelpers.CommandTimeoutToken));
+
+    /// <summary>#8570: true when the sentence carries <see cref="McpHelpers.CommandTimeoutToken"/> where a SQLSTATE would sit, which
+    /// is a tool-caught CLIENT command timeout (the store never raised 57014 for it). <see cref="IsStatementTimeoutSentence"/> takes
+    /// this and a real 57014 alike; the slow-read record's <c>error_class</c> needs to tell them apart.</summary>
+    internal static bool IsClientTimeoutSentence(string sentence) =>
+        sentence is not null && s_sentenceClientTimeoutToken.IsMatch(sentence);
+
     /// <summary>#7938: the same anchored shape for the store's <c>temp_file_limit</c> refusal (SQLSTATE 53400,
     /// <c>configuration_limit_exceeded</c>, #4605): a tool that caught the store refusing a read's on-disk spill leaves
     /// <c>"Error during {op}: 53400: temporary file size exceeds temp_file_limit (…)"</c>, and

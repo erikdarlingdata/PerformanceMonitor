@@ -56,8 +56,9 @@ public static class ReadOutcomeClassifier
 
         /* #8570: the driver's own command timeout (30 s) fires before the role's statement_timeout (60 s), so a read held that long
            arrives as the driver's TimeoutException with no SQLSTATE: a timeout the store never reported, not an error. The same two
-           shapes the web's 503 mapping takes (DarlingWebFailureLog.IsStatementTimeout). */
-        if (exception is TimeoutException || exception.InnerException is TimeoutException)
+           shapes the web's 503 mapping takes (DarlingWebFailureLog.IsStatementTimeout): a bare TimeoutException, or an NpgsqlException
+           wrapping one. A TimeoutException inside any other wrapper (an HttpClient TaskCanceledException) is not a store timeout. */
+        if (Hosting.DarlingWebFailureLog.IsStatementTimeout(exception))
         {
             return ReadOutcome.Timeout;
         }

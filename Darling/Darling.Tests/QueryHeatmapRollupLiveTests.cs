@@ -235,6 +235,61 @@ public sealed class QueryHeatmapRollupLiveTests
         }
     }
 
+    /// <summary>A bin of 70 minutes is no multiple of an hour, so a bin edge falls inside some hours. Each rollup hour still counts once, in the bin that
+    /// holds its start: one query per hour, so the cells' query counts add up to the hours, and each bin holds exactly the hours that start in it.</summary>
+    [Fact]
+    public async Task RollupRoute_AtA70MinuteBin_CountsEveryHourOnce_InTheBinHoldingItsStart()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t = NewTimeline();
+        var store = await CreateStoreAsync(ct);
+        await using var scratch = store.Scratch;
+        await using var connection = store.Connection;
+        var bodySucceeded = false;
+        try
+        {
+            const int hours = 12;
+            const int bin = 70;
+            var first = t.End.AddHours(-hours);
+            for (var i = 0; i < hours; i++)
+            {
+                await InsertAsync(connection, first.AddHours(i).AddMinutes(10), "H" + i.ToString("00"), 1, 5_000, ct);
+            }
+
+            await RefreshAsync(connection, first.AddHours(-1), t.End, ct);
+            var (pg, coverage) = await OpenAsync(scratch, ct);
+            await using var _ = pg;
+
+            var routed = await DarlingQueryHeatmapReader.GetQueryHeatmapRoutedAsync(
+                pg, coverage, ServerId, HeatmapMetric.Duration, first, t.End.AddMinutes(30), DatabaseFilter.One(null), bin, 5000, 80, ct);
+
+            Assert.Equal(DarlingQueryHeatmapReader.SourceHourlyRollup, routed.Source);
+            Assert.Equal(first, routed.Rollup!.FromUtc);
+            Assert.Equal(t.End, routed.Rollup.ToUtc);
+
+            /* The bin an hour belongs to: the 70-minute step from 1970-01-01 00:00 that holds the hour's start. */
+            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            var expected = Enumerable.Range(0, hours)
+                .Select(i => first.AddHours(i))
+                .GroupBy(h => epoch.AddMinutes(Math.Floor((h - epoch).TotalMinutes / bin) * bin))
+                .ToDictionary(g => g.Key, g => (long)g.Count());
+            Assert.Contains(1L, expected.Values);
+            Assert.Contains(2L, expected.Values);
+
+            var actual = routed.Rows
+                .GroupBy(r => r.TimeBucket)
+                .ToDictionary(g => g.Key, g => g.Sum(r => r.QueryCount));
+            Assert.Equal(expected.OrderBy(e => e.Key).ToArray(), actual.OrderBy(e => e.Key).ToArray());
+            Assert.Equal(hours, routed.Rows.Sum(r => r.QueryCount));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
     /// <summary>A bin under 60 minutes reads raw whatever the rollup holds, and so do the metrics the rollup cannot rebuild. Two samples in one hour land in two 30 minute bins.</summary>
     [Fact]
     public async Task NarrowBins_AndOtherMetrics_ReadRaw_AndTheReplyNamesTheSource()

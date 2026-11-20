@@ -385,7 +385,8 @@ internal static class DarlingQueryHeatmapReader
     /// <para>Three arms feed one <c>base</c>: the raw rows before $7, the rollup's whole hours from $7 to $8, and the raw rows from $8. A rollup hour
     /// is one row per (database, query_hash, sql_handle) and counts as one sample: its metric is the hour's sum over the hour's executions, so a cell
     /// counts each query's hourly average where the raw read counts every sample. With one sample per query per hour the two reads agree cell for cell.
-    /// An hour is placed by its start, so a bin is whole hours.</para>
+    /// An hour counts in the bin that holds its start: at a bin width that is not a multiple of 60 minutes a bin edge can fall inside an hour, and the hour
+    /// is still counted once, in the bin it starts in.</para>
     /// <para>The rollup carries no statement text. The top query of each winning cell (and only those, after the cap) takes the text of its hash's
     /// newest raw row through <c>idx_query_stats_server_hash_time</c>, falling back to <c>query_text_dim</c>. A hash whose raw rows have all aged
     /// out reads an empty text.</para>
