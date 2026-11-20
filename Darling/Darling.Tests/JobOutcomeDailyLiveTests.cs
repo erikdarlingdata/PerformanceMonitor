@@ -38,22 +38,27 @@ public sealed class JobOutcomeDailyLiveTests
     // ── The rung ──────────────────────────────────────────────────────────────
 
     [Fact]
-    public void TheRungIsTheNewestOnADenseLadder_AndTheProbeMapsItWhenItsTablesAreThere()
+    public void TheRungIsOnADenseLadder_AndTheProbeMapsItWhenItsTablesAreThere()
     {
-        var rung = PgMigrations.Scripts[^1];
-        Assert.Equal(JobOutcomeDaily.Version, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
+        var rung = PgMigrations.Scripts.Single(s => s.Version == JobOutcomeDaily.Version);
 
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Equal(rung.Version - 1, PgMigrations.Scripts[^2].Version);
+        Assert.Contains(rung.Version - 1, versions);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasJobOutcomeDaily", parameters[^1].Name);
+        var own = Array.FindIndex(parameters, p => p.Name == "hasJobOutcomeDaily");
+        Assert.True(own >= 0, "the probe has no sentinel for the job outcome daily rung");
+
+        /* The sentinels are in ladder order. With every newer rung's sentinel off, this rung is the newest one the probe saw. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        for (var i = own + 1; i < all.Length; i++)
+        {
+            all[i] = false;
+        }
         Assert.Equal(rung.Version, (int)method.Invoke(null, all)!);
-        all[^1] = false;
+        all[own] = false;
         Assert.Equal(rung.Version - 1, (int)method.Invoke(null, all)!);
     }
 
@@ -70,8 +75,9 @@ public sealed class JobOutcomeDailyLiveTests
         await PgMigrations.MigrateAsync(connection, null, ct);
 
         await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.job_outcome_daily; DROP TABLE IF EXISTS collect.job_outcome_daily_days; DROP TABLE IF EXISTS collect.job_outcome_daily_watermark", ct);
-        await ExecuteAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
-        await ExecuteAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
+        var rung = PgMigrations.Scripts.Single(s => s.Version == JobOutcomeDaily.Version);
+        await ExecuteAsync(connection, rung.Sql, ct);
+        await ExecuteAsync(connection, rung.Sql, ct);
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily", ct));
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_days", ct));
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark", ct));
@@ -79,8 +85,11 @@ public sealed class JobOutcomeDailyLiveTests
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
 
+        /* With every newer rung's sentinel gone, the store reads as this rung, and without one of this rung's tables as the rung below. */
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, JobOutcomeDaily.Version, ct);
+        Assert.Equal(JobOutcomeDaily.Version, await viewer.GetStoreSchemaVersionAsync(ct));
         await ExecuteAsync(connection, "DROP TABLE collect.job_outcome_daily_watermark", ct);
-        Assert.Equal(StorageVersion.SchemaVersion - 1, await viewer.GetStoreSchemaVersionAsync(ct));
+        Assert.Equal(JobOutcomeDaily.Version - 1, await viewer.GetStoreSchemaVersionAsync(ct));
     }
 
     // ── The ticks ─────────────────────────────────────────────────────────────
