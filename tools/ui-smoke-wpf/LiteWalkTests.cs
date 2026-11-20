@@ -31,6 +31,8 @@ public sealed class LiteWalkTests : WalkBase
     /// and the access keys in the tab headers (#8768).</summary>
     protected override void ExtraSteps(AutomationElement main)
     {
+        MeasureNewScreens(main);
+
         Step("More menu", () =>
         {
             Find(main, "MoreButton").AsButton().Invoke();
@@ -83,6 +85,77 @@ public sealed class LiteWalkTests : WalkBase
         MeasureEditDialogs(main);
     }
 
+    /// <summary>The screens the 11-15 nightly added to Lite, each shot at the runner's full window size. A step that fails is kept
+    /// and the next one still runs, so one run shows every screen it can reach (<see cref="ThrowDialogFailures"/> fails the walk
+    /// at the end of <see cref="MeasureEditDialogs"/>).
+    /// <list type="bullet">
+    /// <item>The tempdb tab (#8881): the chart's Log Used line and the card line naming the session that holds the log.</item>
+    /// <item>The FinOps High Impact sub-tab (#9058).</item>
+    /// <item>The Overview card and the sidebar dot of a server whose collection is off (#9085): both say Disabled.</item>
+    /// </list></summary>
+    private void MeasureNewScreens(AutomationElement main)
+    {
+        Safely("lite tempdb log", () =>
+        {
+            Step("tempdb tab", () => SelectTabInWindow(main, "tempdb"));
+            // The chart and the holder line are drawn after the tab's read finishes; no control carries either as text.
+            System.Threading.Thread.Sleep(5000);
+            Shot("12-tempdb-log");
+        });
+
+        Safely("lite finops high impact", () =>
+        {
+            Step("FinOps tab", () => SelectMainTab(main, "FinOpsTab", "FinOps"));
+            Step("High Impact sub-tab", () => SelectTab(main, "High Impact"));
+            Step("high impact rows", () => WaitForRows(main, "HighImpactDataGrid", ControlType.DataItem));
+            Shot("13-finops-high-impact");
+        });
+
+        Safely("lite disabled server", () =>
+        {
+            Step("Overview tab again", () => SelectMainTab(main, "OverviewTab", "Overview"));
+            Step("disabled Overview card", () => WaitFor(() =>
+                main.FindAllDescendants(cf => cf.ByAutomationId("OverviewServerCardName"))
+                    .FirstOrDefault(c => c.Name == LiteSeed.DisabledServerName), "an OverviewServerCardName reading " + LiteSeed.DisabledServerName));
+            System.Threading.Thread.Sleep(2000);
+            Shot("14-overview-disabled-server");
+        });
+    }
+
+    /// <summary>Selects one of the main window's own tabs by its x:Name, which the server tab's same-named tabs do not share.
+    /// Falls back to the header text when the name is not in the automation tree.</summary>
+    private static bool SelectMainTab(AutomationElement main, string automationId, string header)
+    {
+        var byId = main.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
+        if (byId is not null)
+        {
+            byId.AsTabItem().Select();
+            return true;
+        }
+        Console.WriteLine("no tab with AutomationId " + automationId + "; selecting by header " + header);
+        return SelectTab(main, header);
+    }
+
+    /// <summary>The Alert rules tab (#8881, #8882, #8884): focuses the last of the four new switches so the page scrolls to show
+    /// them, logs where each sits against the window, and takes the shot.</summary>
+    private void ShotAlertSwitches(Window settings)
+    {
+        Step("Alert rules tab", () => SelectTab(settings, "Alert rules"));
+        var ids = new[] { "AlertInstanceRestartedCheckBox", "AlertMemoryDumpsCheckBox", "AlertTempDbLogSpaceCheckBox", "AlertTempDbGrowthFitCheckBox" };
+        var last = Find(settings, ids[^1]);
+        last.Focus();
+        System.Threading.Thread.Sleep(1000);
+        var win = settings.BoundingRectangle;
+        foreach (var id in ids)
+        {
+            var box = Find(settings, id);
+            var r = box.BoundingRectangle;
+            Console.WriteLine($"SWITCH {id}: offscreen={box.Properties.IsOffscreen.ValueOrDefault} top={r.Top} bottom={r.Bottom} "
+                + $"window top={win.Top} bottom={win.Bottom} inside={r.Top >= win.Top && r.Bottom <= win.Bottom}");
+        }
+        ShotDialog("32-lite-alert-switches", settings);
+    }
+
     /// <summary>The two auto-sized edit dialogs (#8804): each is opened from Settings, shot with its screen position logged
     /// ("DIALOG ..." lines), and closed. Both open with every field they can show.</summary>
     private void MeasureEditDialogs(AutomationElement main)
@@ -90,6 +163,8 @@ public sealed class LiteWalkTests : WalkBase
         Safely("lite settings", () =>
         {
             var settings = OpenWindow("Settings", () => Find(main, "SettingsButton").AsButton().Invoke(), "SettingsTabs");
+
+            Safely("lite alert switches", () => ShotAlertSwitches(settings));
 
             Safely("lite route dialog", () =>
             {
