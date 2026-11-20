@@ -10,9 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 
 namespace Darling.Tests;
@@ -43,6 +45,8 @@ public sealed class TuningIndexReaderPairingTests
             [ProcedureStatsNameIndex.IndexName] = ("server_id", DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql),
             ["idx_store_metrics_kind_name_time"] = ("object_kind", DarlingStoreMetricsReader.StoreMetricsLatestSql),
             [PgTableTuning.WaitStatsDailyCoverIndexName] = ("server_id", DailySummarySql.RangeSql),
+            [PgTableTuning.DatabaseStatesNameCoverIndexName] = ("server_id", QueryStoreBackfillState.LastSeenPerDatabaseSql),
+            [PgTableTuning.CpuWindowCoverIndexName] = ("collection_time", DarlingFinOpsInventoryReader.ServerMetricsSql),
         };
 
     /// <summary>Every <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ... (&lt;leading&gt;, ...)</c> statement
@@ -95,9 +99,9 @@ public sealed class TuningIndexReaderPairingTests
     {
         var created = CreatedIndexes().ToList();
 
-        /* Sanity: this must actually see the nine indexes the list ships today (#4247 dropped five others),
+        /* Sanity: this must actually see the eleven indexes the list ships today (#4247 dropped five others),
            or the regex/list drifted and the pairing check below would be vacuously true. */
-        Assert.Equal(9, created.Count);
+        Assert.Equal(11, created.Count);
 
         foreach (var (indexName, leadingColumn) in created)
         {

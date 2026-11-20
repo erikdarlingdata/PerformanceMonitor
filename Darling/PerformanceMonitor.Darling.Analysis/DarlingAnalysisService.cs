@@ -317,12 +317,15 @@ public sealed class DarlingAnalysisService
     /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
     /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
     /// — today's behavior, byte-for-byte.</param>
+    /// <param name="sqlServerCollectorWrapper">#9149 test seam: wraps the SQL Server set's fact collector so a test can watch the
+    /// context a pass hands it (how many family reads it lets run at once). Null (every production caller) keeps the collector as is.</param>
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
         ILogger? logger = null,
         BaselineCache? baselineCache = null,
-        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
+        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -333,7 +336,9 @@ public sealed class DarlingAnalysisService
         /* The SQL Server set: the five objects this service always composed, in the same order. */
         var sqlServerBaselines = new PgBaselineProvider(postgres, logger, baselineCache);
         _sqlServerEngine = new AnalysisEngineSet(
-            new PgFactCollector(postgres, logger, analyzerConfig),
+            sqlServerCollectorWrapper is null
+                ? new PgFactCollector(postgres, logger, analyzerConfig)
+                : sqlServerCollectorWrapper(new PgFactCollector(postgres, logger, analyzerConfig)),
             new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
             new InferenceEngine(new RelationshipGraph()),
             new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
@@ -397,6 +402,9 @@ public sealed class DarlingAnalysisService
                live. */
             ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
             RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,
+            /* #9149: an on-demand pass overlaps its family reads. The scheduled pass (the one caller that persists caveats)
+               keeps the serial loop, because its sweeps already share the store's pool. */
+            FamilyParallelism = persistCollectionCaveats ? 1 : PgFactCollector.MaxFamilyParallelism,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once
@@ -848,6 +856,7 @@ public sealed class DarlingAnalysisService
             /* #5812: get_analysis_facts with no as_of answers PLAN_REGRESSION from the candidates the last current pass
                read while they are fresh; a past as_of reads live. */
             ReusePlanRegressionCandidates = asOfUtc is null,
+            FamilyParallelism = PgFactCollector.MaxFamilyParallelism, /* #9149 */
             CancellationToken = cancellationToken
         };
 

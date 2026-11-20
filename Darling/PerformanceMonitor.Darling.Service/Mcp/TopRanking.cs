@@ -178,6 +178,20 @@ public static class TopRankings
         return ReplaceOnce(statement, RankAnchor, hourly ? HourlyMetric(ranking) : RawMetric(ranking));
     }
 
+    /// <summary>
+    /// #9164: <see cref="Apply"/> for the host-hourly top-queries statement, whose ranking pass sums the rollup-shaped unit columns
+    /// (<c>total_cpu_us</c> and the like) that hold the raw read's honest-row sums, so every ranking has a column, reads included.
+    /// </summary>
+    public static string ApplyHostHourly(string statement, TopRanking ranking) =>
+        ReplaceOnce(statement, RankAnchor, ranking switch
+        {
+            TopRanking.Cpu => "SUM(total_cpu_us)",
+            TopRanking.Duration => "SUM(total_elapsed_us)",
+            TopRanking.Reads => "SUM(total_reads)",
+            TopRanking.Executions => "SUM(total_executions)",
+            _ => throw new ArgumentOutOfRangeException(nameof(ranking)),
+        });
+
     private static string RawMetric(TopRanking ranking) => ranking switch
     {
         TopRanking.Cpu => "SUM(delta_worker_time)",

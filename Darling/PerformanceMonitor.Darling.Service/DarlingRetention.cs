@@ -1489,6 +1489,31 @@ public static class DarlingRetention
             {
                 tablesFailed++;
             }
+            /* collect.query_stats_collection (#9147, V286): the per-collection summary of query_stats that the duration trend reads for a window
+               its oldest row covers. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
+               It ages with the raw collector it summarises, at the same resolved days as query_stats (EffectivePurgeRetentionDays, so a
+               per-collector override moves both), in the same pass as the raw purge above, so the read never shows a collection raw has dropped:
+               raw holds a chunk past that cutoff when a purge gate holds it, which only leaves raw with MORE than the summary, and a window the
+               summary no longer covers reads raw. A plain table with a plain time-sliced DELETE on both store kinds; about one row per database per
+               collection, so a slice is a small fraction of a raw slice. Failure-isolated like every sibling. */
+            var queryStatsSummaryDays = EffectivePurgeRetentionDays(
+                "query_stats",
+                retentionDaysFor?.Invoke("query_stats")
+                    ?? (CollectorScheduleDefaults.All.TryGetValue("query_stats", out var queryStatsSchedule) ? queryStatsSchedule.RetentionDays : DataRetentionBaseDays));
+            var queryStatsSummaryDeleted = await PurgeOneAsync(
+                postgres, QueryStatsCollectionSummary.Table,
+                TimeSlicedDeleteSql(QueryStatsCollectionSummary.Table, "collection_time"),
+                utcNow.AddDays(-queryStatsSummaryDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (queryStatsSummaryDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += queryStatsSummaryDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
             /* collect.oversized_plan_backlog (#3392) purges on last_seen_at at
                OversizedPlanBacklogRetentionDays. NOT in CollectorCatalog.All (it is written by the collector
                runner's post-write hook and by the backlog sweep, not by a collector definition), so the loop
