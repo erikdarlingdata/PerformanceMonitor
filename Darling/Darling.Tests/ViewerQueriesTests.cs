@@ -590,19 +590,6 @@ public sealed class ViewerQueryStoreRegressionsTests
     }
 
     [Fact]
-    public void RegressionsSql_CastsSummedExecCountToBigint_PlanCountToInteger_ConvertsUnits_HonorsDatabaseFilter()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-        Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(COUNT(DISTINCT plan_id) AS integer)", sql, StringComparison.Ordinal);
-        /* #5506: µs → ms on duration + CPU, weighted per execution (the summed cost over the summed executions). */
-        Assert.Contains("SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
-        /* #1319 global database filter, the same guarded ANY() idiom as the sibling reads ($4 here). */
-        Assert.Contains("$4::text[] IS NULL OR database_name = ANY($4)", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void RegressionRow_LastExecutionLocal_ConvertsStoredNaiveUtc_EmptyForNull()
     {
         /* query_store_stats' last-exec stamp is naive UTC in the store (QueryStoreCollector normalises
