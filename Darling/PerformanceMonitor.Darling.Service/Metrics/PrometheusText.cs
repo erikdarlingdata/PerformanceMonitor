@@ -53,7 +53,8 @@ internal static class PrometheusText
         var none = Array.Empty<KeyValuePair<string, string>>();
         if (scrape.Snapshot != null)
         {
-            Add(new MetricSample(SnapshotAge, none, (nowUtc - scrape.Snapshot.BuiltAtUtc).TotalSeconds));
+            /* #9013: clamped at 0, so a wall clock that stepped back since the snapshot was built never reads as a negative age. */
+            Add(new MetricSample(SnapshotAge, none, Math.Max(0d, (nowUtc - scrape.Snapshot.BuiltAtUtc).TotalSeconds)));
         }
         Add(new MetricSample(RefreshSuccess, none, scrape.LastRefreshSucceeded ? 1 : 0));
         if (scrape.LastRefreshSeconds is double seconds)

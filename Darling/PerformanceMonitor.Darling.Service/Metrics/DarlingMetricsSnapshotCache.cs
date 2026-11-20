@@ -65,7 +65,7 @@ internal sealed class DarlingMetricsSnapshotCache
             TryStartRefresh();
         }
 
-        var serveServers = state.Snapshot is not null && now - state.Snapshot.BuiltAtUtc < DropAge;
+        var serveServers = state.Snapshot is not null && !IsAtLeast(state.Snapshot.BuiltAtUtc, now, DropAge);
         return new MetricsScrape(state.Snapshot, serveServers, state.LastRefreshSucceeded, state.LastRefreshSeconds);
     }
 
@@ -73,8 +73,14 @@ internal sealed class DarlingMetricsSnapshotCache
        after a failure the old snapshot stays stale, and without the second gate every scrape would start a refresh
        against a failing store. So it is at most one attempt a minute while scraped, failing or not. */
     private static bool IsDue(CacheState state, DateTime now) =>
-        (state.Snapshot is null || now - state.Snapshot.BuiltAtUtc >= RefreshAge)
-        && (state.LastAttemptStartedUtc is null || now - state.LastAttemptStartedUtc.Value >= RefreshAge);
+        (state.Snapshot is null || IsAtLeast(state.Snapshot.BuiltAtUtc, now, RefreshAge))
+        && (state.LastAttemptStartedUtc is null || IsAtLeast(state.LastAttemptStartedUtc.Value, now, RefreshAge));
+
+    /* #9013: a stamp ahead of the clock (the wall clock stepped back since it was written) counts as old enough, not as
+       fresh. Otherwise a 10-minute step back would freeze the snapshot, served as current, for 10 minutes plus a window.
+       #4732's LastFiredStamp.Settle does not fit: it holds one more window from the step, and a scrape wants the
+       refresh now. */
+    private static bool IsAtLeast(DateTime stampUtc, DateTime now, TimeSpan age) => stampUtc > now || now - stampUtc >= age;
 
     private void TryStartRefresh()
     {

@@ -112,6 +112,28 @@ public sealed class DarlingMetricsSnapshotCacheTests
     }
 
     [Fact]
+    public async Task AClockSteppedBack_DoesNotFreezeTheSnapshot_AndNeverWritesANegativeAge()
+    {
+        var cache = NewCache(FreshAsync);
+        cache.Scrape();
+        await SettleAsync(cache);
+        var before = cache.Scrape().Snapshot!;
+
+        _time.Advance(TimeSpan.FromMinutes(-10));
+        var stepped = cache.Scrape();
+        var text = PrometheusText.Write(stepped, _time.GetUtcNow().UtcDateTime);
+
+        Assert.Contains("darling_metrics_snapshot_age_seconds 0\n", text, StringComparison.Ordinal);
+        Assert.False(stepped.ServeServers);
+        await SettleAsync(cache);
+        Assert.Equal(2, Volatile.Read(ref _calls));
+        var after = cache.Scrape();
+        Assert.NotSame(before, after.Snapshot);
+        Assert.Equal(_time.GetUtcNow().UtcDateTime, after.Snapshot!.BuiltAtUtc);
+        Assert.True(after.ServeServers);
+    }
+
+    [Fact]
     public async Task Scrape_DuringAHungRefresh_AnswersAtOnce_AndStartsNoSecond()
     {
         var hung = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
