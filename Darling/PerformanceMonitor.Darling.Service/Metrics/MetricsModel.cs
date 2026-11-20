@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Metrics;
 
@@ -46,7 +48,9 @@ internal static class DarlingMetricCatalog
     /// <summary>Label names and the only values each may take: no text from a monitored server reaches a label.</summary>
     public static readonly IReadOnlyDictionary<string, string[]> FixedLabelValues = new Dictionary<string, string[]>
     {
-        ["category"] = new[] { "cpu", "parallelism", "storage", "memory", "network", "locks", "latches", "other" },
+        /* #9013: aliased from the CASE's own list (REVIEW-TRAPS "alias, do not copy"), so a new category cannot reach a
+           scrape without reaching this set. */
+        ["category"] = WaitCategorySql.Categories.Select(c => c.ToLowerInvariant()).ToArray(),
         ["file_type"] = new[] { "data", "log" },
         ["scope"] = new[] { "user", "tempdb" },
         ["kind"] = new[] { "user_objects", "internal_objects", "version_store" },

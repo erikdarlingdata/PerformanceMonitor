@@ -42,6 +42,7 @@ public sealed class WaitCategorySqlLiveTests
         }
 
         Assert.Equal(new[] { "CPU", "Parallelism", "Storage", "Storage", "Memory", "Network", "Locks", "Latches", "Other" }, categories);
-        Assert.Equal(new[] { "CPU", "Parallelism", "Storage", "Memory", "Network", "Locks", "Latches", "Other" }, WaitCategorySql.Categories);
+        /* #9013: the list the metrics port's label values are derived from is exactly what the CASE can return. */
+        Assert.Equal(new HashSet<string>(WaitCategorySql.Categories), new HashSet<string>(categories));
     }
 }
