@@ -808,6 +808,47 @@ public sealed class DarlingStoreLoginsTests
         }
     }
 
+    /// <summary>
+    /// #9013: the metrics port resolves the web dashboard's login, but its lines name the metrics port, and never say it is not
+    /// started (it listens; only the refresh cannot log in) or that writes are refused (it only reads). The web dashboard's lines
+    /// for the same paths keep their own text.
+    /// </summary>
+    [Fact]
+    public async Task OnTheMetricsSurface_TheLoginLinesNameTheMetricsPort_NotTheWebDashboard()
+    {
+        var name = "DARLING_TEST_9013_UNSET_" + Guid.NewGuid().ToString("N");
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        try
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
+            var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = "env:" + name };
+
+            var metricsLog = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Metrics, postgres, metricsLog, CancellationToken.None));
+            Assert.Contains("Error: The metrics port cannot read the store this attempt: postgres.webConnectionString", metricsLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("not started", metricsLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("web dashboard", metricsLog.Joined, StringComparison.Ordinal);
+
+            var webLog = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, webLog, CancellationToken.None));
+            Assert.Contains("Error: The web dashboard not started this attempt: postgres.webConnectionString", webLog.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+        }
+
+        /* The viewer login an earlier start left: the metrics port reads with it, and its warning says nothing about refused changes. */
+        var verdict = NotProvisioned("refusal");
+        var metrics = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Metrics, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreViewerFromEarlierStart, metrics.Source);
+        Assert.StartsWith("The metrics port connects to the store as the read-only viewer role", metrics.Warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("refused", metrics.Warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("web dashboard", metrics.Warning, StringComparison.Ordinal);
+    }
+
     /* ─────────────────────────── which store is the service's own ─────────────────────────── */
 
     [Fact]

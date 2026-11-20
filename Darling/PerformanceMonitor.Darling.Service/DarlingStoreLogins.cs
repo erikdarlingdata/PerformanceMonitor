@@ -65,6 +65,15 @@ internal static class DarlingStoreLogins
     /// <summary>#9013: whether a surface resolves the web dashboard's login, so the metrics port takes every web branch.</summary>
     private static bool UsesWebLogin(Surface surface) => surface is Surface.Web or Surface.Metrics;
 
+    /* #9013: how a line about a failed attempt opens. The web dashboard and the MCP server do not start; the metrics port is
+       already listening, and only its refresh cannot log in. */
+    private static string NotThisAttempt(Surface surface, string what) =>
+        surface == Surface.Metrics ? "The metrics port cannot read the store this attempt" : $"{what} not started this attempt";
+
+    /* #9013: what a refused login does to the surface, for the warnings that say so. */
+    private static string StaysDown(Surface surface, string what) =>
+        surface == Surface.Metrics ? "the metrics port's refreshes fail" : $"{char.ToLowerInvariant(what[0])}{what[1..]} stays down";
+
     /// <summary>Where a surface's store login came from.</summary>
     internal enum LoginSource
     {
@@ -347,7 +356,7 @@ internal static class DarlingStoreLogins
 
         var candidate = BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.WebRoleName, password);
         return await AcceptsLoginAsync(
-            candidate, "Custom alert evaluator", DarlingManagedPostgres.WebRoleName, logger, cancellationToken)
+            candidate, "Custom alert evaluator not started this attempt", "It stays down", DarlingManagedPostgres.WebRoleName, logger, cancellationToken)
             ? candidate
             : null;
     }
@@ -367,6 +376,7 @@ internal static class DarlingStoreLogins
         ArgumentNullException.ThrowIfNull(logger);
 
         var (what, setting, role) = Describe(surface);
+        var notThisAttempt = NotThisAttempt(surface, what);
         var raw = UsesWebLogin(surface) ? postgres.WebConnectionString : postgres.McpConnectionString;
         string? configured = null;
         if (!string.IsNullOrWhiteSpace(raw))
@@ -377,7 +387,7 @@ internal static class DarlingStoreLogins
             }
             catch (InvalidOperationException ex)
             {
-                logger.LogError("{What} not started this attempt: {Message}", what, ex.Message);
+                logger.LogError("{What}: {Message}", notThisAttempt, ex.Message);
                 return null;
             }
 
@@ -387,8 +397,8 @@ internal static class DarlingStoreLogins
             if (string.IsNullOrWhiteSpace(configured))
             {
                 logger.LogError(
-                    "{What} not started this attempt: {Setting} is set but resolves to a blank connection string, and the owner login is never used in its place",
-                    what, setting);
+                    "{What}: {Setting} is set but resolves to a blank connection string, and the owner login is never used in its place",
+                    notThisAttempt, setting);
                 return null;
             }
         }
@@ -397,7 +407,7 @@ internal static class DarlingStoreLogins
         var verdict = ReadComposeStoreVerdict();
         if (configured is null && inContainer && verdict is null)
         {
-            verdict = await WaitForComposeStoreVerdictAsync(what, logger, cancellationToken);
+            verdict = await WaitForComposeStoreVerdictAsync(what, notThisAttempt, logger, cancellationToken);
             if (verdict is null)
             {
                 return null;
@@ -412,7 +422,7 @@ internal static class DarlingStoreLogins
                so the surface stays down like one whose role login is refused, never the owner. */
             if (DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(directory) is { } refusal)
             {
-                logger.LogWarning("{What} not started this attempt: {Reason}", what, refusal.Sentence);
+                logger.LogWarning("{What}: {Reason}", notThisAttempt, refusal.Sentence);
                 return null;
             }
 
@@ -433,7 +443,7 @@ internal static class DarlingStoreLogins
 
         if (login.Source is LoginSource.ComposeStoreRoleFromEarlierStart or LoginSource.ComposeStoreViewerFromEarlierStart
             && !await AcceptsLoginAsync(
-                login.ConnectionString, what,
+                login.ConnectionString, notThisAttempt, surface == Surface.Metrics ? "Its refreshes fail" : "It stays down",
                 login.Source == LoginSource.ComposeStoreViewerFromEarlierStart ? DarlingManagedPostgres.ViewerRoleName : ComposeRole(surface),
                 logger, cancellationToken))
         {
@@ -483,7 +493,7 @@ internal static class DarlingStoreLogins
                 return new StoreLogin(
                     BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, viewerPassword),
                     LoginSource.ComposeStoreViewerFromEarlierStart,
-                    EarlierViewerWarning(verdict.NotProvisionedReason));
+                    EarlierViewerWarning(verdict.NotProvisionedReason, surface));
             }
         }
 
@@ -520,15 +530,30 @@ internal static class DarlingStoreLogins
         }
 
         return warning
-            + $" If the store refuses that login (the {role} role was dropped, or its password changed by hand), {char.ToLowerInvariant(what[0])}{what[1..]} "
-            + "stays down with the store's error until a start provisions the roles again; it never falls back to the owner login.";
+            + $" If the store refuses that login (the {role} role was dropped, or its password changed by hand), {StaysDown(surface, what)} "
+            + "with the store's error until a start provisions the roles again; it never falls back to the owner login.";
     }
 
     /// <summary>The startup warning for the web host on the read-only viewer login an earlier start provisioned: the store's
     /// roles were not provisioned this start (<paramref name="reason"/> says why) and no web credential exists, so the
-    /// pages read but every change is refused until the web role exists.</summary>
-    internal static string EarlierViewerWarning(string? reason)
+    /// pages read but every change is refused until the web role exists. #9013: the metrics port only reads, so its text says
+    /// nothing about refused changes.</summary>
+    internal static string EarlierViewerWarning(string? reason, Surface surface = Surface.Web)
     {
+        if (surface == Surface.Metrics)
+        {
+            var metricsWarning =
+                "The metrics port connects to the store as the read-only viewer role with the credential an earlier start provisioned, not as the owner: "
+                + "the store's least-privilege roles were not provisioned this start and no web credential exists yet.";
+            if (reason is not null)
+            {
+                metricsWarning += " " + reason;
+            }
+
+            return metricsWarning
+                + " If the store refuses the viewer login, the metrics port's refreshes fail with the store's error; it never falls back to the owner login.";
+        }
+
         var warning =
             "The web dashboard connects to the store as the read-only viewer role with the credential an earlier start provisioned, not as the owner: "
             + "the store's least-privilege roles were not provisioned this start and no web credential exists yet.";
@@ -550,7 +575,7 @@ internal static class DarlingStoreLogins
     /// supervisor's retry tries again — never the owner in its place.
     /// </summary>
     private static async Task<bool> AcceptsLoginAsync(
-        string connectionString, string what, string role, ILogger logger, CancellationToken cancellationToken)
+        string connectionString, string notThisAttempt, string staysDown, string role, ILogger logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -567,8 +592,8 @@ internal static class DarlingStoreLogins
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, 
-                "{What} not started this attempt: the store did not accept the {Role} login an earlier start provisioned ({Message}). It stays down rather than connect as the owner, until a start provisions the roles again.",
-                what, role, ex.Message);
+                "{What}: the store did not accept the {Role} login an earlier start provisioned ({Message}). {StaysDown} rather than connect as the owner, until a start provisions the roles again.",
+                notThisAttempt, role, ex.Message, staysDown);
             return false;
         }
     }
@@ -641,7 +666,9 @@ internal static class DarlingStoreLogins
         /* The web dashboard's writes belong to the web login. A webConnectionString that names viewer (what the script's example
            and the docs said before the web role existed) is the read-only seat login: once the script has been run again the
            web pages' writes are refused for it, and on a store not yet moved it can still write, which a seat login must not. */
-        if (UsesWebLogin(surface)
+        /* #9013: the metrics port only reads, so a viewer login is all it needs: the warning about refused writes is the web
+           dashboard's, which resolves the same setting and says it in its own log line. */
+        if (surface == Surface.Web
             && string.Equals(configuredUser, DarlingManagedPostgres.ViewerRoleName, StringComparison.Ordinal))
         {
             return $"{setting} logs in as '{configuredUser}', the read-only login meant for remote and locked-down Viewer seats. "
@@ -681,7 +708,7 @@ internal static class DarlingStoreLogins
         if (UsesWebLogin(surface) && login.Source == LoginSource.Owner
             && DarlingManagedRoles.RefusalNamesForeignRole(verdict?.NotProvisionedReason, DarlingManagedPostgres.WebRoleName))
         {
-            WarnOnce(surface, ForeignWebRoleWarning, logger);
+            WarnOnce(surface, surface == Surface.Metrics ? ForeignWebRoleMetricsWarning : ForeignWebRoleWarning, logger);
         }
     }
 
@@ -689,6 +716,12 @@ internal static class DarlingStoreLogins
     internal const string ForeignWebRoleWarning =
         "The role named web in this store was not created by Darling, so Darling left it alone and created none of its own roles. "
         + "The web dashboard is using the store owner login (postgres.connectionString) until that role is renamed or dropped. "
+        + "To fix it, run ALTER ROLE web RENAME TO <another name>; or DROP ROLE web; as the store's superuser, then restart the service so it creates its own web role.";
+
+    /// <summary>#9013: <see cref="ForeignWebRoleWarning"/> for the metrics port, which resolves the same login.</summary>
+    internal const string ForeignWebRoleMetricsWarning =
+        "The role named web in this store was not created by Darling, so Darling left it alone and created none of its own roles. "
+        + "The metrics port is using the store owner login (postgres.connectionString) until that role is renamed or dropped. "
         + "To fix it, run ALTER ROLE web RENAME TO <another name>; or DROP ROLE web; as the store's superuser, then restart the service so it creates its own web role.";
 
     /// <summary>The warning is stated once per distinct text per surface, not on every supervisor restart.</summary>
@@ -704,7 +737,7 @@ internal static class DarlingStoreLogins
     }
 
     private static async Task<ComposeStoreVerdict?> WaitForComposeStoreVerdictAsync(
-        string what, ILogger logger, CancellationToken cancellationToken)
+        string what, string notThisAttempt, ILogger logger, CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < VerdictPollAttempts; attempt++)
         {
@@ -731,8 +764,8 @@ internal static class DarlingStoreLogins
         }
 
         logger.LogWarning(
-            "{What} not started this attempt: the collector has not reached role provisioning after {Minutes} minutes (a long migration does this); retrying",
-            what, (int)(VerdictPollInterval.TotalMinutes * VerdictPollAttempts));
+            "{What}: the collector has not reached role provisioning after {Minutes} minutes (a long migration does this); retrying",
+            notThisAttempt, (int)(VerdictPollInterval.TotalMinutes * VerdictPollAttempts));
         return null;
     }
 }
