@@ -1,0 +1,213 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Darling.Tests;
+using Npgsql;
+using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace PerformanceMonitor.Darling.Tests;
+
+/// <summary>
+/// #9147 part E: the query-stats duration trend reads the per-collection summary (V286) for a server whose summary covers the whole
+/// window, and reads raw otherwise. The summary route must give the raw route's answer for every database filter, with a NULL database,
+/// ties and a collection that holds rows of several databases. Raw rows are planted directly, the summary is written by the collector's
+/// own writer, so a summary row is exactly what the collector would have stored.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DurationTrendCollectionSummaryLiveTests
+{
+    private const string A = "SummaryA";
+    private const string B = "SummaryB";
+
+    private const string Cleanup =
+        "DELETE FROM query_stats WHERE server_id = {0}; DELETE FROM collect.query_stats_collection WHERE server_id = {0}";
+
+    private static Task PlantAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string? db, string hash, long weight) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO query_stats
+                  (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                   query_text, query_text_digest, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                   delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                   min_dop, max_dop, sample_interval_seconds)
+              VALUES ($1, $2, $3, $4, $5, $6, '0xP', '0xS', '0xL', 'SELECT 1', decode('00', 'hex'), 10, $7, $7, 100, 0, 0, 1, $7, 1, $7, 1, 1, 1200)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(at), serverId, serverName, (object?)db ?? DBNull.Value, hash, weight);
+
+    private static async Task WriteSummaryAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, DateTime at)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await QueryStatsCollectionSummary.UpsertBatchAsync(connection, transaction, serverId, DarlingMcpTestData.TruncateToSeconds(at), 1, 30, null, ct);
+        await transaction.CommitAsync(ct);
+    }
+
+    private static async Task<long> ScalarAsync(NpgsqlConnection connection, CancellationToken ct, string sql)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    private static string Stamp(DateTime at) => DarlingMcpTestData.TruncateToSeconds(at).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    private static async Task<string> ReadAsync(NpgsqlDataSource postgres, int serverId, DateTime now, DatabaseFilter filter, CancellationToken ct)
+    {
+        var start = now.AddHours(-24);
+        var end = now.AddMinutes(5);
+        var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
+        var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, rollups.Item1, rollups.Item2, windowEndUtc: end);
+        Assert.Equal(RetentionTier.Raw, route.Tier);
+        var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 1, filter, ct);
+        return JsonSerializer.Serialize(result.Points);
+    }
+
+    /// <summary>30 collections across the window: A twice (a tie), the NULL database once, and every third collection also B.</summary>
+    private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime now)
+    {
+        for (var k = 0; k < 30; k++)
+        {
+            var at = now.AddHours(-26).AddMinutes(k * 50);
+            await PlantAsync(connection, ct, serverId, serverName, at, A, "0xQ1", 3_000 + k);
+            await PlantAsync(connection, ct, serverId, serverName, at, A, "0xQ2", 3_000 + k);
+            await PlantAsync(connection, ct, serverId, serverName, at, null, "0xQ3", 500 + k);
+            if (k % 3 == 0)
+            {
+                await PlantAsync(connection, ct, serverId, serverName, at, B, "0xQ4", 7_000 + k);
+            }
+
+            await WriteSummaryAsync(connection, ct, serverId, at);
+        }
+    }
+
+    [Fact]
+    public Task TheSummaryRoute_GivesTheRawRoutesAnswer_ForEveryFilter_AndNeverReadsRawRows() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-equals-raw", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            await SeedAsync(connection, ct, serverId, serverName, now);
+            var filters = new[] { DatabaseFilter.All, DatabaseFilter.One(A), DatabaseFilter.One(B), DatabaseFilter.Of(new[] { A, B }) };
+
+            var fromSummary = new List<string>();
+            foreach (var filter in filters)
+            {
+                fromSummary.Add(await ReadAsync(postgres, serverId, now, filter, ct));
+            }
+
+            /* Tamper proof: the route really reads the summary, because a changed summary row changes the answer. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.query_stats_collection SET sum_elapsed = sum_elapsed * 100 WHERE server_id = $1", serverId);
+            Assert.NotEqual(fromSummary[0], await ReadAsync(postgres, serverId, now, DatabaseFilter.All, ct));
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1", serverId);
+
+            var fromRaw = new List<string>();
+            foreach (var filter in filters)
+            {
+                fromRaw.Add(await ReadAsync(postgres, serverId, now, filter, ct));
+            }
+
+            for (var i = 0; i < filters.Length; i++)
+            {
+                Assert.Equal(fromRaw[i], fromSummary[i]);
+            }
+
+            /* The summary alone answers: rebuild it from the rows, remove the rows, read again. */
+            for (var k = 0; k < 30; k++)
+            {
+                await WriteSummaryAsync(connection, ct, serverId, now.AddHours(-26).AddMinutes(k * 50));
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", serverId);
+            for (var i = 0; i < filters.Length; i++)
+            {
+                Assert.Equal(fromRaw[i], await ReadAsync(postgres, serverId, now, filters[i], ct));
+            }
+        }, Cleanup);
+
+    [Fact]
+    public Task AServerWhoseSummaryStartsAfterTheWindowStart_ReadsRaw_AndALateBatchUpdatesItsOwnRow() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-floor", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            await SeedAsync(connection, ct, serverId, serverName, now);
+            var raw = await ReadAsync(postgres, serverId, now, DatabaseFilter.All, ct);
+
+            /* A late batch: one more row lands in an old collection, and the writer's second run sets that collection's row. */
+            var old = now.AddHours(-26).AddMinutes(10 * 50);
+            await PlantAsync(connection, ct, serverId, serverName, old, A, "0xQ9", 1);
+            await WriteSummaryAsync(connection, ct, serverId, old);
+            Assert.Equal(3, await ScalarAsync(connection, ct, $"SELECT n FROM collect.query_stats_collection WHERE server_id = {serverId} AND database_name = '{A}' AND collection_time = '{Stamp(old)}'"));
+            Assert.Equal(2, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId} AND collection_time = '{Stamp(old)}'"));
+
+            /* The summary starts after the window start, so it does not cover the window and the read ignores it: a tampered summary changes nothing. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.query_stats_collection SET sum_elapsed = sum_elapsed * 100 WHERE server_id = $1", serverId);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1 AND collection_time < $2", serverId, now.AddHours(-23));
+            var withHole = await ReadAsync(postgres, serverId, now, DatabaseFilter.All, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1", serverId);
+            Assert.Equal(await ReadAsync(postgres, serverId, now, DatabaseFilter.All, ct), withHole);
+            Assert.Equal(raw.Length > 2, withHole.Length > 2);
+        }, Cleanup);
+
+    [Fact]
+    public Task ACollectionAnOlderBuildLeftWithoutASummaryRow_MovesTheSummaryFloorUpToTheNextBatch() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-hole", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            var t1 = now.AddHours(-3);
+            var t2 = now.AddHours(-2);
+            var t3 = now.AddHours(-1);
+            await PlantAsync(connection, ct, serverId, serverName, t1, A, "0xQ1", 10);
+            await WriteSummaryAsync(connection, ct, serverId, t1);
+            await PlantAsync(connection, ct, serverId, serverName, t2, A, "0xQ1", 10);
+            await PlantAsync(connection, ct, serverId, serverName, t3, A, "0xQ1", 10);
+            await WriteSummaryAsync(connection, ct, serverId, t3);
+
+            Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId}"));
+            Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId} AND collection_time = '{Stamp(t3)}'"));
+        }, Cleanup);
+
+    [Fact]
+    public Task TheSummaryRoute_ReadsFewerBuffersThanTheRawRoute() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-buffers", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            for (var k = 0; k < 40; k++)
+            {
+                var at = DarlingMcpTestData.TruncateToSeconds(now.AddHours(-26).AddMinutes(k * 40));
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO query_stats
+                          (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                           query_text, query_text_digest, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                           delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                           min_dop, max_dop, sample_interval_seconds)
+                      SELECT $1 * 1000 + g, $2, $3, $4, 'Bulk' || (g % 5), '0xQ' || g, '0xP', '0xS', '0xL', repeat('x', 300), decode('00', 'hex'), 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 1200
+                      FROM generate_series(1, 300) AS g",
+                    (long)k, at, serverId, serverName);
+                await WriteSummaryAsync(connection, ct, serverId, at);
+            }
+
+            var summaryBuffers = await BuffersAsync(connection, ct, serverId, now);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1", serverId);
+            var rawBuffers = await BuffersAsync(connection, ct, serverId, now);
+            Assert.True(summaryBuffers * 3 < rawBuffers, $"summary {summaryBuffers} buffers, raw {rawBuffers}");
+        }, Cleanup);
+
+    private static async Task<long> BuffersAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, DateTime now)
+    {
+        await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + DarlingTrendReader.QueryDurationTrendFilteredSql, connection);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now.AddHours(-24) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now.AddMinutes(5) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 60 });
+        var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        var plan = JsonDocument.Parse(json).RootElement[0].GetProperty("Plan");
+        return plan.GetProperty("Shared Hit Blocks").GetInt64() + plan.GetProperty("Shared Read Blocks").GetInt64();
+    }
+}

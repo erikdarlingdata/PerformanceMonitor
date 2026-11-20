@@ -3732,6 +3732,10 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V283 (#9111): the closed-day rollups the Query Store grid and its slicer read whole UTC days from, and the table that says which days
            are built. Three new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(QueryStoreClosedDayRollup.Version, "query-store-closed-day-rollups", QueryStoreClosedDayRollup.CreateSql),
+        /* V286 (#9147): the per-collection summary of query_stats that the duration trend reads in place of the rows. One plain table created empty:
+           no data moves and nothing backfills, so the upgrade stays fast and the read stays on raw until the summary covers a window. An older
+           build ignores the table and keeps writing raw rows, which the next V286 batch notices (QueryStatsCollectionSummary.FloorMoveSql). */
+        new Migration(QueryStatsCollectionSummary.RungVersion, "query-stats-collection-summary", QueryStatsCollectionSummary.CreateSql),
     };
 
     /// <summary>

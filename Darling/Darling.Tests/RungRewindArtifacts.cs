@@ -891,6 +891,9 @@ DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
 DROP TABLE IF EXISTS collect.query_store_slicer_hourly;
 DROP TABLE IF EXISTS collect.query_store_closed_day_built;
 DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
+        // V286 (#9147): the query_stats per-collection summary table, the probe's newest sentinel. The rewind drops it, so a re-run of V286 creates it
+        // empty and the duration trend reads raw until it covers a window. Safe on a store that never had it.
+        new(286, "hasQueryStatsCollectionSummary", @"DROP TABLE IF EXISTS collect.query_stats_collection;"),
     ];
 
     /// <summary>
