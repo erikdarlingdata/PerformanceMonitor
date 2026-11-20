@@ -129,11 +129,29 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs,
-        AwsRdsKind awsRdsKind)
+        AwsRdsKind awsRdsKind, int sqlMajorVersion = 0)
     {
         var noRun = NoRunNote(serverName, collectorName, skipped, runs);
-        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind, noRun);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind, noRun, sqlMajorVersion);
     }
+
+    /// <summary>
+    /// The sentence an empty panel shows (#9099): the engine or version gap sentence (<see cref="EngineGapNote"/>) while the panel has
+    /// no rows and its collector does not collect for this server, else <paramref name="ownText"/>, the panel's ordinary empty
+    /// sentence. Only those two axes speak here. The collector run history is read by other tabs only, so a panel on a tab that does
+    /// not read it must not say "never collected" from a history that may be stale.
+    /// </summary>
+    internal static string EmptyPanelText(
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, AwsRdsKind awsRdsKind, int sqlMajorVersion, string ownText)
+    {
+        var gap = EngineGapState(serverName, isAzureSqlDatabase, collectorNeverRan: false, collectorName, rowCount, awsRdsKind, sqlMajorVersion: sqlMajorVersion);
+        return gap.Visibility == Visibility.Visible ? gap.Text : ownText;
+    }
+
+    /// <summary><see cref="EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string)"/> for this tab's server, for a panel whose
+    /// empty sentence is the time-range strip's message (Active Queries, Top Queries by CPU, Procedure Stats).</summary>
+    private string EmptyPanelText(string collectorName, int rowCount, string ownText) =>
+        EmptyPanelText(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, _awsRdsKind, _sqlMajorVersion, ownText);
 
     /// <summary>
     /// Whether an empty surface says its collector does not collect for this server, and with what sentence. The note
@@ -152,9 +170,10 @@ public partial class ServerTab : UserControl
         string collectorName,
         int rowCount,
         AwsRdsKind awsRdsKind,
-        string? neverRanNote = null)
+        string? neverRanNote = null,
+        int sqlMajorVersion = 0)
     {
-        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, awsRdsKind)
+        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, awsRdsKind, sqlMajorVersion)
             ?? (collectorNeverRan ? neverRanNote ?? NeverCollectedNote(serverName, collectorName) : null);
 
         return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
@@ -170,7 +189,9 @@ public partial class ServerTab : UserControl
     /// <param name="collectorName">The collector that feeds the surface, as the collector catalog names it.</param>
     /// <param name="rowCount">How many rows (or points) the surface is showing.</param>
     /// <param name="keepsOwnEmptyText">Whether the element shows its own text when the surface is empty and no gap applies.</param>
-    private void ShowEngineGap(TextBlock message, string collectorName, int rowCount, bool keepsOwnEmptyText = false)
+    /// <param name="engineAxisOnly">True for a panel on a tab that does not read the collector run history (#9099): only the engine and
+    /// version gaps speak, never the skipped-collector or never-ran sentences, which that tab could word from a stale history.</param>
+    private void ShowEngineGap(TextBlock message, string collectorName, int rowCount, bool keepsOwnEmptyText = false, bool engineAxisOnly = false)
     {
         if (message.Tag is not string ownText)
         {
@@ -178,8 +199,15 @@ public partial class ServerTab : UserControl
             message.Tag = ownText;
         }
 
-        _skippedNotes.TryGetValue(collectorName, out var skipped);
-        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns, _awsRdsKind);
+        string? skipped = null;
+        if (!engineAxisOnly)
+        {
+            _skippedNotes.TryGetValue(collectorName, out skipped);
+        }
+
+        var gap = EngineGapStateFromRuns(
+            _server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, engineAxisOnly ? CollectorRunHistory.Empty : _collectorRuns,
+            _awsRdsKind, _sqlMajorVersion);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;
