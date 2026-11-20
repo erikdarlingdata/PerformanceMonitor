@@ -625,6 +625,7 @@ internal static class DarlingDataReader
             CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
             CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second
         FROM raw
+        WHERE collection_time > $3
         ORDER BY collection_time
         """;
 
@@ -649,7 +650,9 @@ internal static class DarlingDataReader
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type IN ($2, $2 || ' ')
-            AND   collection_time > $3
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $3 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($3, $4]. */
+            AND   collection_time >= $3
             AND   collection_time <= $4
         )
         """;
@@ -674,6 +677,7 @@ internal static class DarlingDataReader
                 CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
                 CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
             FROM raw
+            WHERE collection_time > $3
         )
         SELECT
             GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,

@@ -132,7 +132,9 @@ internal static class DarlingBlockingTrendReader
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type LIKE 'LCK%'
-            AND   collection_time > $2
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($2, $3]. */
+            AND   collection_time >= $2
             AND   collection_time <= $3
         ),
         rated AS
@@ -145,6 +147,7 @@ internal static class DarlingBlockingTrendReader
             FROM raw
             WHERE interval_seconds > 0
             AND   delta_wait_time_ms >= 0
+            AND   collection_time > $2
         )
         """;
 

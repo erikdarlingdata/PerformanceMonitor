@@ -41,7 +41,9 @@ public static class ServerTrendSql
                 extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS lag_seconds
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time > $2
+            /* A pre-V127 collection takes its interval from the row before it, so the collection stamped on $2 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($2, $3]. */
+            AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY collection_time
         ),
@@ -54,6 +56,7 @@ public static class ServerTrendSql
                 CASE WHEN unstored THEN CASE WHEN lag_seconds > 0 THEN lag_seconds END
                      ELSE cadence_seconds END AS rated_seconds
             FROM per_collection
+            WHERE collection_time > $2
         )
         SELECT
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
@@ -304,7 +307,9 @@ public static class ServerTrendSql
                     END AS interval_seconds
                 FROM {{view}}
                 WHERE server_id = $1
-                AND   collection_time > $2
+                /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+                   the read below drops it, and every row it returns was collected in ($2, $3]. */
+                AND   collection_time >= $2
                 AND   collection_time <= $3
                 AND   {{nameColumn}} IN ({{nameParams}})
             )
@@ -315,6 +320,7 @@ public static class ServerTrendSql
                 MIN(collection_time) AS first_collection_time,
                 COUNT(*) AS collection_count
             FROM raw
+            WHERE collection_time > $2
             GROUP BY {{nameColumn}}, 2
             HAVING COUNT(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN 1 END) > 0
             ORDER BY {{nameColumn}}, 2
@@ -439,7 +445,9 @@ public static class ServerTrendSql
                     END AS interval_seconds
                 FROM v_file_io_stats
                 WHERE server_id = $1
-                AND   collection_time > $2
+                /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+                   the read below drops it, and every row it returns was collected in ($2, $3]. */
+                AND   collection_time >= $2
                 AND   collection_time <= $3
                 AND   database_name || '.' || file_name IN ({{nameParams}})
             )
@@ -453,6 +461,7 @@ public static class ServerTrendSql
                 MIN(collection_time) AS first_collection_time,
                 COUNT(*) AS collection_count
             FROM with_interval
+            WHERE collection_time > $2
             GROUP BY file_label, 2
             HAVING COUNT(CASE WHEN interval_seconds > 0 AND (delta_read_bytes IS NOT NULL OR delta_write_bytes IS NOT NULL) THEN 1 END) > 0
             ORDER BY file_label, 2

@@ -363,6 +363,7 @@ public static class DarlingPgTrendReader
                  THEN coalesce(calls, 0)::double precision / interval_seconds
             END                                             AS calls_per_second
         FROM per_snapshot
+        WHERE collection_time > $3
         ORDER BY collection_time
         """;
 
@@ -388,7 +389,9 @@ public static class DarlingPgTrendReader
             FROM pg_statement_stats
             WHERE server_id = $1
             AND   queryid = $2
-            AND   collection_time > $3
+            /* A pre-V128 snapshot takes its interval from the row before it, so the snapshot stamped on $3 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($3, $4]. */
+            AND   collection_time >= $3
             AND   collection_time <= $4
             GROUP BY collection_time
         )
@@ -426,7 +429,9 @@ public static class DarlingPgTrendReader
             FROM pg_statement_stats
             WHERE server_id = $1
             AND   queryid = $2
-            AND   collection_time > $3
+            /* The snapshot stamped on $3 is read so the run that stored it owns it, and so a snapshot no run claims has its
+               predecessor: its point sits on $3 and the read below drops it, as it drops every point outside ($3, $4]. */
+            AND   collection_time >= $3
             AND   collection_time <= $4
             GROUP BY collection_time
         ),
@@ -520,7 +525,7 @@ public static class DarlingPgTrendReader
         WHERE interval_seconds > 0
         AND   point_time > $3
         AND   point_time <= $4
-        AND   EXISTS (SELECT 1 FROM statement_snapshots)
+        AND   EXISTS (SELECT 1 FROM statement_snapshots WHERE collection_time > $3)
         GROUP BY 1
         ORDER BY 1
         """;
