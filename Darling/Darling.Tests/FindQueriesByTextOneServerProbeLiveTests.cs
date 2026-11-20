@@ -214,6 +214,42 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
         Assert.All(bound, type => Assert.Equal(NpgsqlDbType.Text, type));
     }
 
+    /// <summary>#9150: a match read that is slow but inside the source's budget (a sleep of 1.5 s inside it, past the 1 s the one-server search once
+    /// gave it) still serves the search by the digests, as the all-servers search's match read does. The budget is the tool's own default for the
+    /// match read; the rest of it is roomy so the sample read cannot run out.</summary>
+    [Fact]
+    public async Task IndexReady_ASlowButInBudgetMatchRead_StillTakesTheProbe()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tracker = await FindQueriesByTextIndexScopeLiveTests.BuildIndexAsync(data, ct);
+        var slowMatch = new DarlingMcpFindQueriesByTextTools.SourceBudget(60_000) { MatchTestDelaySeconds = 1.5 };
+
+        var planCache = await PlanCacheAsync(data, RarePattern, "ix-a", null, 20, tracker, ct, slowMatch);
+
+        Assert.True(planCache.GetProperty("status").GetString() == "ok", planCache.GetProperty("message").ToString());
+        Assert.Equal(DarlingMcpFindQueriesByTextTools.SampleReadProbe, planCache.GetProperty("sample_read").GetString());
+        Assert.Equal(1, planCache.GetProperty("matched_texts").GetInt32());
+        Assert.Equal(["0xA001@Sales"], Keys(planCache));
+    }
+
+    /// <summary>#9150: a finished one-server search says it read the whole raw window of the server it was asked about.</summary>
+    [Fact]
+    public async Task AFinishedSearch_SaysItSearchedTheServersWholeWindow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var searched = (await PlanCacheAsync(data, RarePattern, "ix-a", null, 20, new QueryTextTrigramIndexTracker(), ct)).GetProperty("searched");
+
+        Assert.Equal(["ix-a"], searched.GetProperty("servers").EnumerateArray().Select(s => s.GetString()).ToArray());
+        Assert.True(searched.GetProperty("complete").GetBoolean());
+        Assert.Equal(searched.GetProperty("window_from").GetString(), searched.GetProperty("searched_from").GetString());
+        Assert.Equal(searched.GetProperty("window_to").GetString(), searched.GetProperty("searched_to").GetString());
+    }
+
     /// <summary>The match read runs while the Query Store source does: the Query Store statement is held until the match read has started, which it
     /// can do only if it does not wait for that source to finish. The hold gives up after 30 s, so a match read that waits fails the test rather
     /// than hanging it.</summary>

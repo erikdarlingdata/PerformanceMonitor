@@ -142,6 +142,15 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.Contains($"after the newest {searched} of the {days}-day raw tier had been searched, newest first", message, StringComparison.Ordinal);
         Assert.Contains("the matches in the part searched and not a complete answer", message, StringComparison.Ordinal);
         Assert.Equal(1, statements);
+
+        /* #9150: the reply names the servers and the part of the window it read: the newest span, ending now. */
+        var searchedWindow = planCache.GetProperty("searched");
+        Assert.Equal("every enabled server", searchedWindow.GetProperty("servers").GetString());
+        Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
+        var from = DateTime.Parse(searchedWindow.GetProperty("searched_from").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var to = DateTime.Parse(searchedWindow.GetProperty("searched_to").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        Assert.InRange((to - from).TotalSeconds, (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds - 1, (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds + 1);
+        Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
     }
 
     [Fact]
@@ -222,9 +231,9 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
     }
 
     /// <summary>A pattern more texts contain than the probe takes joins the window in one statement; a budget gone before it runs is stopped with
-    /// the message that names no span, because the join is not searched in spans.</summary>
+    /// the reply that names no part of the window as searched, because the join is not searched in spans.</summary>
     [Fact]
-    public async Task TheWindowJoin_IsOneStatement_AndItsStoppedMessageNamesNoSpan()
+    public async Task TheWindowJoin_IsOneStatement_AndItsStoppedReplyNamesNoPartSearched()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
@@ -249,8 +258,14 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.Equal("stopped", stopped.GetProperty("status").GetString());
         Assert.Equal("join", stopped.GetProperty("sample_read").GetString());
         var message = stopped.GetProperty("message").GetString()!;
-        Assert.Contains("before the search finished", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("span", message, StringComparison.Ordinal);
+
+        /* #9150: the cut join read none of the window, and the reply says so by naming the window and no part of it searched. */
+        var searchedWindow = stopped.GetProperty("searched");
+        Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, searchedWindow.GetProperty("searched_from").ValueKind);
+        Assert.Equal(JsonValueKind.Null, searchedWindow.GetProperty("searched_to").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, searchedWindow.GetProperty("window_from").ValueKind);
+        Assert.True(searchedWindow.GetProperty("server_count").GetInt32() > 0);
     }
 
     /// <summary>The window join run directly with the tool's own parameters, its rows in its order as <c>server@query_hash@database</c>, the row

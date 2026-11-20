@@ -99,9 +99,12 @@ public sealed class DarlingMcpFindQueriesByTextTools
     /// <summary>The time each source's statement may run: 4 s, so two sources stay under 10 s.</summary>
     public const int BudgetMilliseconds = 4000;
 
-    /// <summary>#8570: the time the one-server search's match read may take before the search falls back to the span read: 1 s. The match read runs
-    /// while the Query Store source does, on a connection of its own, so its time is not taken from the plan-cache source's budget.</summary>
-    public const int MatchBudgetMilliseconds = 1000;
+    /// <summary>#8570: the time the one-server search's match read may take before the search falls back to the span read. #9150: the whole
+    /// <see cref="BudgetMilliseconds"/>, as the all-servers search's match read has. At 1 s a match read that was only slow (a cold index) gave up on
+    /// the digests and sent a rare pattern to the span read, which tests every text the server has and, on a server with many, ends at its budget
+    /// before the newest span is done. The match read runs while the Query Store source does, on a connection of its own, so its time is not
+    /// taken from the plan-cache source's budget, and the search still ends within one match read and one span read.</summary>
+    public const int MatchBudgetMilliseconds = BudgetMilliseconds;
 
     /// <summary>Characters of text returned around the first match.</summary>
     public const int ExcerptLength = 300;
@@ -343,6 +346,29 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         return rendered + " " + unit + (rendered == "1" ? string.Empty : "s");
     }
 
+    /// <summary>#9150: what a plan-cache source's reply says it searched: the servers, the raw window the search covers (<c>window_from</c> to
+    /// <c>window_to</c>) and the part of it that was read (<c>searched_from</c> to <c>searched_to</c>). A search that finished read the whole
+    /// window. A stopped search that read in spans (<paramref name="completedSpans"/> of them, newest first) read the newest part of it, and one
+    /// that stopped before its first span, or that was one statement over the whole window (the join), read none of it: both times are null.
+    /// <paramref name="completedSpans"/> is null for a search that was not in spans.</summary>
+    internal static object SearchedWindow(object servers, int? serverCount, string status, int? completedSpans, DateTime floor, DateTime now)
+    {
+        var stopped = string.Equals(status, "stopped", StringComparison.Ordinal);
+        DateTime? searchedFrom = !stopped
+            ? floor
+            : completedSpans is > 0 ? now - (now - floor) / RawTierSpanCount * completedSpans.Value : null;
+        return new
+        {
+            servers,
+            server_count = serverCount,
+            window_from = Utc(floor),
+            window_to = Utc(now),
+            searched_from = searchedFrom is { } from ? Utc(from) : null,
+            searched_to = searchedFrom is null ? null : Utc(now),
+            complete = !stopped,
+        };
+    }
+
     /// <summary>#7849: the matched digests, read first so the sample read can take them as an array. $1 the escaped pattern, $2 the cap + 1: a result
     /// that fills the cap + 1 rows says the pattern matched more texts than the probe takes, and the sample read is the window join instead.</summary>
     internal const string MatchedDigestsSql = @"
@@ -483,7 +509,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
         + " days, one row per server, query_hash and database. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. The text is not indexed unless the operator turns an index on, so each source has a 4 second budget. One server's Query Store text is read through its opt-in trigram index when that index is ready (darling.json queryStoreTextTrigramIndexEnabled; get_store_metrics query_store_text_index says its state), which makes a rare pattern fast. One server's plan-cache text is read through the plan-cache text index when that one is ready (queryTextTrigramIndexEnabled): its source then says sample_read probe (the matching texts were found first; matched_texts says how many) or plain (more than 1000 texts matched, or finding them was slow, so each span's texts were tested). A source that runs out is reported stopped with the rows it had found by then (the plan-cache text is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a server, and a database, to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. The text is not indexed unless the operator turns an index on, so each source has a 4 second budget. One server's Query Store text is read through its opt-in trigram index when that index is ready (darling.json queryStoreTextTrigramIndexEnabled; get_store_metrics query_store_text_index says its state), which makes a rare pattern fast. One server's plan-cache text is read through the plan-cache text index when that one is ready (queryTextTrigramIndexEnabled): its source then says sample_read probe (the matching texts were found first; matched_texts says how many) or plain (more than 1000 texts matched, or finding them was slow, so each span's texts were tested). A source that runs out is reported stopped with the rows it had found by then (the plan-cache text is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a server, and a database, to narrow it). The plan-cache source also carries searched: the servers, the raw window it covers (window_from to window_to) and the part of it that was read (searched_from to searched_to, null when none was; complete says whether it all was), so a stopped search says what it covered. Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -685,6 +711,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     /* #8570: how the samples were found with the index ready. matched_texts is the count under the cap, null when the span read served it. */
                     matched_texts = matchedTexts,
                     sample_read = sampleRead,
+                    searched = SearchedWindow(new[] { resolved.DisplayName }, 1, planCacheOutcome.Status, planCacheOutcome.CompletedSteps, floor, now),
                     returned = planCacheOutcome.Returned,
                     truncated = planCacheOutcome.Truncated,
                     rows = planCacheOutcome.Rows,
@@ -694,6 +721,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     status = planCacheOutcome.Status,
                     message = planCacheOutcome.Message,
                     horizon = PlanCacheHorizon,
+                    searched = SearchedWindow(new[] { resolved.DisplayName }, 1, planCacheOutcome.Status, planCacheOutcome.CompletedSteps, floor, now),
                     returned = planCacheOutcome.Returned,
                     truncated = planCacheOutcome.Truncated,
                     rows = planCacheOutcome.Rows,
@@ -831,11 +859,16 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     return new SourceStatement(PlanCacheAllServersProbeSql, p => BindAllServersSpan(p, probed, wanted, span, collected));
                 },
                 "Use a longer, more specific pattern, or name a server with server_name (and database_name) to search it directly.",
-                completedSpans => sampleRead != SampleReadProbe
-                    ? null
-                    : completedSpans == 0
+                completedSpans => sampleRead switch
+                {
+                    /* #9150: a cut before the matching texts were known, or in the one statement that joins them to the window, names what was
+                       not searched too: every enabled server over the whole raw window. */
+                    null => $"before the matching texts had been read, so none of the {RawTierDays} raw tier of the {servers.Count} enabled servers had been searched",
+                    SampleReadJoin => $"before the join of the matching texts to the {RawTierDays} raw tier of the {servers.Count} enabled servers had finished, so none of it had been searched",
+                    _ => completedSpans == 0
                         ? $"before the newest span of the {RawTierDays} raw tier had been searched"
                         : $"after the newest {DescribeSearched(completedSpans, floor, now)} of the {RawTierDays} raw tier had been searched, newest first, and the rest had not",
+                },
                 r => new AllServersHit(r.GetInt32(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.GetDateTime(3),
                     r.IsDBNull(4) ? null : r.GetString(4)),
                 null,
@@ -880,6 +913,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                         /* #7849: how the samples were found. matched_texts is the count under the cap, null when the window was joined. */
                         matched_texts = matchedTexts,
                         sample_read = sampleRead,
+                        searched = SearchedWindow("every enabled server", servers.Count, planCache.Status, sampleRead == SampleReadProbe ? planCache.CompletedSteps : null, floor, now),
                         returned = planCache.Returned,
                         truncated = planCache.Truncated,
                         rows = planCache.Rows,
@@ -1070,7 +1104,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     private sealed record SourceStatement(string Sql, Action<NpgsqlParameterCollection> Bind);
 
     /// <summary>What one source's read came to, before the reply names its horizon.</summary>
-    private sealed record SourceOutcome<TRow>(string Status, string? Message, int Returned, bool Truncated, IReadOnlyList<TRow> Rows);
+    private sealed record SourceOutcome<TRow>(string Status, string? Message, int Returned, bool Truncated, IReadOnlyList<TRow> Rows, int CompletedSteps);
 
     /// <summary>The source read as a sequence of statements inside one transaction and one budget. <paramref name="next"/> is asked for the
     /// statement of each step in turn, with the rows the earlier steps found, and may read first (#7849: the all-servers scope reads the matched
@@ -1181,7 +1215,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
         var shaped = rows.ConvertAll(r => shape(r));
         if (stoppedMessage is not null)
         {
-            return new SourceOutcome<TRow>("stopped", stoppedMessage, shaped.Count, truncated, shaped);
+            return new SourceOutcome<TRow>("stopped", stoppedMessage, shaped.Count, truncated, shaped, completed);
         }
 
         return new SourceOutcome<TRow>(
@@ -1189,7 +1223,8 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             shaped.Count == 0 ? "No statement in this source contains the pattern. Only what the horizon covers was searched." : null,
             shaped.Count,
             truncated,
-            shaped);
+            shaped,
+            completed);
     }
 
     /// <summary>#7849: the digests of the texts the pattern matches, at most <see cref="ProbeDigestCap"/> + 1 of them, in the caller's transaction: the
