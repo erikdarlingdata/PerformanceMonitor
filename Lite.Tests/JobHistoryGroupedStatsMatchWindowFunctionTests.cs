@@ -78,7 +78,7 @@ public sealed class JobHistoryGroupedStatsMatchWindowFunctionTests : IClassFixtu
 
     /// <summary>Mirrors <c>LocalDataService.ToInt64</c> (private to that partial class, so not reachable here):
     /// DuckDB returns <see cref="BigInteger"/> for some aggregate/positional reads.</summary>
-    private static long ToInt64(object value) => value is BigInteger bi ? (long)bi : Convert.ToInt64(value);
+    private static long ToInt64(object value) => value is BigInteger bi ? (long)bi : value is Int128 wide ? (long)wide : Convert.ToInt64(value);
 
     /// <summary>The pre-#4229 <c>GetJobHistoryAsync</c> SQL text (server-scoped rendering), copied verbatim from
     /// origin/dev (the string no longer exists in source after that fix).</summary>

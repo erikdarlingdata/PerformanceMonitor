@@ -259,7 +259,7 @@ SELECT * FROM v_job_history WHERE run_datetime >= TIMESTAMP '2025-12-01 00:00:00
             filtersOnRunDatetime.Add(extra);
         if (name is "SEQ_SCAN" or "READ_PARQUET" or "TABLE_SCAN")
         {
-            if (extra.Contains("run_datetime>=", StringComparison.Ordinal))
+            if (extra.Replace(" ", "", StringComparison.Ordinal).Contains("run_datetime>=", StringComparison.Ordinal))
                 scansWith.Add(name);
             else
                 scansWithout.Add(name + " " + extra);

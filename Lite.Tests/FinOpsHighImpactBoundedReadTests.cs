@@ -243,5 +243,5 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
     }
 
     /// <summary>A summed BIGINT comes back from DuckDB as a <see cref="BigInteger"/>.</summary>
-    private static long ToInt64(object value) => value is BigInteger big ? (long)big : Convert.ToInt64(value);
+    private static long ToInt64(object value) => value is BigInteger big ? (long)big : value is Int128 wide ? (long)wide : Convert.ToInt64(value);
 }

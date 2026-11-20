@@ -933,6 +933,7 @@ ORDER BY collection_time DESC";
         DateTime time => JsonValue.Create(time.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)),
         byte[] bytes => JsonValue.Create(Convert.ToHexString(bytes)),
         System.Numerics.BigInteger big => JsonValue.Create((long)big),
+        Int128 wide => JsonValue.Create((long)wide),
         _ => JsonValue.Create(Convert.ToString(value, CultureInfo.InvariantCulture)),
     };
 

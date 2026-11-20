@@ -191,9 +191,12 @@ FROM slots, range(10) b(c) ORDER BY t;
     private static void CollectParquetScans(JsonElement node, string statement, ProfiledRead profiled)
     {
         var scans = profiled.Scans;
-        if (node.TryGetProperty("operator_type", out var type)
+        /* DuckDB 2.0 renamed the profile keys (operator_type -> type, operator_cardinality -> intermediate_rows,
+           operator_rows_scanned -> rows_scanned) and moved the plan under a root "operator" array. Read both shapes. */
+        if ((node.TryGetProperty("operator_type", out var type) || node.TryGetProperty("type", out type))
+            && type.ValueKind == JsonValueKind.String
             && (type.GetString() ?? "").Contains("WINDOW", StringComparison.OrdinalIgnoreCase)
-            && node.TryGetProperty("operator_cardinality", out var windowRows))
+            && (node.TryGetProperty("operator_cardinality", out var windowRows) || node.TryGetProperty("intermediate_rows", out windowRows)))
             profiled.WindowRows += windowRows.GetInt64();
 
         if (node.TryGetProperty("extra_info", out var extra)
@@ -206,14 +209,17 @@ FROM slots, range(10) b(c) ORDER BY t;
                 : "";
             scans.Add(new ParquetScan(
                 statement,
-                node.TryGetProperty("operator_rows_scanned", out var scanned) ? scanned.GetInt64() : 0,
-                node.TryGetProperty("operator_cardinality", out var rowsOut) ? rowsOut.GetInt64() : 0,
+                (node.TryGetProperty("operator_rows_scanned", out var scanned) || node.TryGetProperty("rows_scanned", out scanned)) ? scanned.GetInt64() : 0,
+                (node.TryGetProperty("operator_cardinality", out var rowsOut) || node.TryGetProperty("intermediate_rows", out rowsOut)) ? rowsOut.GetInt64() : 0,
                 columns));
         }
 
         if (node.TryGetProperty("children", out var children))
             foreach (var child in children.EnumerateArray())
                 CollectParquetScans(child, statement, profiled);
+        if (node.TryGetProperty("operator", out var roots) && roots.ValueKind == JsonValueKind.Array)
+            foreach (var root in roots.EnumerateArray())
+                CollectParquetScans(root, statement, profiled);
     }
 
     /// <summary>
