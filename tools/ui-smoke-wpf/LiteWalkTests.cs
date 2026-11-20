@@ -142,16 +142,11 @@ public sealed class LiteWalkTests : WalkBase
     }
 
     /// <summary>Selects one of the main window's own tabs by its x:Name, which the server tab's same-named tabs do not share.
-    /// A missing name fails the step: selecting by header text instead could pick the server tab's tab of the same name.</summary>
+    /// Find waits for the name and throws when it never appears, so the step fails: selecting by header
+    /// text instead could pick the server tab's tab of the same name.</summary>
     private static bool SelectMainTab(AutomationElement main, string automationId)
     {
-        var byId = main.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
-        if (byId is null)
-        {
-            Console.WriteLine("no main window tab with AutomationId " + automationId);
-            return false;
-        }
-        byId.AsTabItem().Select();
+        Find(main, automationId).AsTabItem().Select();
         return true;
     }
 
