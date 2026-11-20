@@ -150,6 +150,11 @@ spec:
               containerPort: {{ int .Values.mcp.port }}
               protocol: TCP
             {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ int .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
             - name: health
               containerPort: 5154
               protocol: TCP
