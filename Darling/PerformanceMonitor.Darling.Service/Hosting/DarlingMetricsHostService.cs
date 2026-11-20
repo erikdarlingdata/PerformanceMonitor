@@ -145,6 +145,9 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
                developer exception page on this listener, and an empty Kestrel configuration, so a Kestrel__Endpoints__* variable or an
                appsettings file cannot add a second listener. The limits are the health port's: a scrape is a short GET with no body. */
             var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
+            /* #9013: the slim builder still registers the framework's forwarded-headers filter, which ASPNETCORE_FORWARDEDHEADERS_ENABLED
+               turns on; pinned off as on the web and MCP hosts (#5288), so metrics.allowFrom and the token throttle key on the TCP peer. */
+            DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);
             builder.Logging.ClearProviders();
             var listenAddress = address;
             builder.WebHost.ConfigureKestrel(options =>

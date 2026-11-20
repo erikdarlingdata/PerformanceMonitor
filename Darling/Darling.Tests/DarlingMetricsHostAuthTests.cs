@@ -14,11 +14,15 @@ using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Metrics;
 using Xunit;
 
@@ -44,8 +48,29 @@ public sealed class DarlingMetricsHostAuthTests
         return check;
     }
 
+    /// <summary>
+    /// The slim builder the host starts from, with the host's forwarded-headers pin on the line after it.
+    /// <paramref name="frameworkSwitchOn"/> turns the framework's forwarded-headers switch on through the builder's own
+    /// configuration, as a command-line argument, which the framework reads the way it reads
+    /// <c>ASPNETCORE_FORWARDEDHEADERS_ENABLED</c>; never through the process environment, which every parallel class shares.
+    /// </summary>
+    private static WebApplicationBuilder CreateBuilder(bool frameworkSwitchOn, bool pinned = true)
+    {
+        var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
+        {
+            Args = frameworkSwitchOn ? new[] { "--ForwardedHeaders_Enabled=true" } : Array.Empty<string>(),
+        });
+        if (pinned)
+        {
+            DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);
+        }
+
+        return builder;
+    }
+
     private static async Task<WebApplication> StartAsync(
-        IPAddress? remote, string? allowFrom = null, DarlingMetricsHostTests.CapturingLogger? logger = null, TimeProvider? clock = null)
+        IPAddress? remote, string? allowFrom = null, DarlingMetricsHostTests.CapturingLogger? logger = null, TimeProvider? clock = null,
+        bool frameworkSwitchOn = false)
     {
         var check = CheckWith(allowFrom);
         var ct = TestContext.Current.CancellationToken;
@@ -56,7 +81,7 @@ public sealed class DarlingMetricsHostAuthTests
         var time = clock ?? TimeProvider.System;
         ILogger log = logger ?? (ILogger)NullLogger.Instance;
 
-        var builder = WebApplication.CreateSlimBuilder();
+        var builder = CreateBuilder(frameworkSwitchOn);
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
         var app = builder.Build();
@@ -277,5 +302,59 @@ public sealed class DarlingMetricsHostAuthTests
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
         Assert.Equal("", await response.Content.ReadAsStringAsync(ct));
+    }
+
+    /* ---- forwarded headers (#5288's pin, on this host) ---- */
+
+    /// <summary>A scrape with the right token from <paramref name="peer"/>, set on the connection before the pipeline runs (so
+    /// the framework's forwarded-headers filter, which runs first, sees it), naming <paramref name="forwardedFor"/> in
+    /// <c>X-Forwarded-For</c>.</summary>
+    private static async Task<int> ScrapeFromAsync(WebApplication app, IPAddress peer, string forwardedFor)
+    {
+        var context = await app.GetTestServer().SendAsync(c =>
+        {
+            c.Request.Method = HttpMethods.Get;
+            c.Request.Path = "/metrics";
+            c.Request.Headers.Authorization = "Bearer " + Token;
+            c.Request.Headers["X-Forwarded-For"] = forwardedFor;
+            c.Connection.RemoteIpAddress = peer;
+        }, TestContext.Current.CancellationToken);
+
+        return context.Response.StatusCode;
+    }
+
+    /// <summary>
+    /// #9013: with the framework's forwarded-headers switch ON, the allowFrom check still judges the TCP peer. A loopback peer that
+    /// names an address outside <c>metrics.allowFrom</c> is still admitted, an outside peer that names an in-list address or loopback
+    /// is still refused, and an in-list peer that names an outside address still gets through: the header is read in no direction.
+    /// </summary>
+    [Theory]
+    [InlineData("10.1.2.3")]
+    [InlineData("127.0.0.1")]
+    public async Task ForwardedFor_IsIgnored_EvenWithTheFrameworkSwitchOn(string forwardedFor)
+    {
+        await using var app = await StartAsync(remote: null, allowFrom: "10.0.0.0/8", frameworkSwitchOn: true);
+
+        Assert.Equal(StatusCodes.Status200OK, await ScrapeFromAsync(app, IPAddress.Loopback, Outside.ToString()));
+        Assert.Equal(StatusCodes.Status403Forbidden, await ScrapeFromAsync(app, Outside, forwardedFor));
+        Assert.Equal(StatusCodes.Status200OK, await ScrapeFromAsync(app, Inside, Outside.ToString()));
+    }
+
+    /// <summary>
+    /// The premise of the test above, so it cannot pass for the wrong reason: on the slim builder this host uses, the framework's
+    /// switch really does turn forwarded-header handling on, and the pin turns it back off.
+    /// </summary>
+    [Fact]
+    public void FrameworkSwitch_TurnsForwardedHeadersOnInTheSlimBuilder_AndThePinTurnsThemOffAgain()
+    {
+        using var unpinned = CreateBuilder(frameworkSwitchOn: true, pinned: false).Build();
+        Assert.NotEqual(
+            Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.None,
+            unpinned.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value.ForwardedHeaders);
+
+        using var pinned = CreateBuilder(frameworkSwitchOn: true).Build();
+        Assert.Equal(
+            Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.None,
+            pinned.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value.ForwardedHeaders);
     }
 }
