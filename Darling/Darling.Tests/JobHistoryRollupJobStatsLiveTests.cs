@@ -162,13 +162,23 @@ public sealed class JobHistoryRollupJobStatsLiveTests
 
         /* Five days back is a full day of the 7-day window: not its first day and not the day the floor cuts. */
         await ExecuteAsync(dataSource, string.Format(CultureInfo.InvariantCulture, bump, 100000, 5), ct);
-        var rolled = await DarlingJobHistoryReader.GetAsync(dataSource, since, ServerA, 100000, 60, null, ct);
+        var rolled = await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerA, 100000, 60, null, ct);
         Assert.Equal(raw.Count, rolled.Count);
         Assert.NotEqual(ladder.Select(r => r.IsLongRunning), rolled.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning));
 
+        /* The read itself uses the summary for a long window and not for a short one (DarlingJobHistoryReader.SummaryMinWindow). */
+        var since30 = anchor - TimeSpan.FromDays(30);
+        var long30 = await DarlingJobHistoryReader.GetAsync(dataSource, since30, ServerA, 100000, 60, null, ct);
+        var ladder30 = long30.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning).ToList();
+        var raw30 = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since30, ServerA, 100000, 60, null, ct);
+        Assert.NotEqual(raw30.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning), ladder30);
+        AssertSame(raw, await DarlingJobHistoryReader.GetAsync(dataSource, since, ServerA, 100000, 60, null, ct), "short window reads raw");
+        Assert.False(DarlingJobHistoryReader.UsesSummary(DateTime.UtcNow - TimeSpan.FromDays(7)));
+        Assert.True(DarlingJobHistoryReader.UsesSummary(DateTime.UtcNow - TimeSpan.FromDays(30)));
+
         await ExecuteAsync(dataSource, string.Format(CultureInfo.InvariantCulture, bump, -100000, 5), ct);
         await ExecuteAsync(dataSource, string.Format(CultureInfo.InvariantCulture, bump, 100000, 7), ct);
-        AssertSame(raw, await DarlingJobHistoryReader.GetAsync(dataSource, since, ServerA, 100000, 60, null, ct), "first day bumped");
+        AssertSame(raw, await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerA, 100000, 60, null, ct), "first day bumped");
     }
 
     // ── The comparison ────────────────────────────────────────────────────────
@@ -184,7 +194,7 @@ public sealed class JobHistoryRollupJobStatsLiveTests
                     var since = anchor - span;
                     var filter = endAgo is { } ago ? new JobHistoryFilter(UntilUtc: anchor - ago) : null;
                     var raw = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since, serverId, limit, 120, filter, ct);
-                    var rolled = await DarlingJobHistoryReader.GetAsync(dataSource, since, serverId, limit, 120, filter, ct);
+                    var rolled = await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, serverId, limit, 120, filter, ct);
                     var label = string.Create(CultureInfo.InvariantCulture, $"span {span.TotalDays}d end {endAgo} server {serverId} limit {limit}");
                     Assert.NotEmpty(raw);
                     AssertSame(raw, rolled, label);

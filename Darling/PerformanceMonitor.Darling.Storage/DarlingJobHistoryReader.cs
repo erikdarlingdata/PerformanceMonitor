@@ -188,9 +188,27 @@ public static class DarlingJobHistoryReader
         NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
         JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
-        var rollup = await RollupTablesExistAsync(dataSource, commandTimeoutSeconds, cancellationToken);
+        var rollup = UsesSummary(sinceUtc) && await RollupTablesExistAsync(dataSource, commandTimeoutSeconds, cancellationToken);
         return await ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup, cancellationToken);
     }
+
+    /// <summary>
+    /// The shortest window, measured back from now, whose <c>job_stats</c> reads the daily summary (#9110). A shorter window starts in
+    /// <c>job_history</c>'s uncompressed chunks, where the plain read is cheap and an edge day read from a chunk that has just been compressed
+    /// costs more than it saves (on a seeded store, 7 days read about 4,000 buffers plain and about 14,700 with the summary, and 9 days about
+    /// 14,900 and 14,000); from 10 days the summary reads fewer buffers and runs faster (10 days about 9,000 against 6,700, 30 days about 44,700
+    /// against 13,200).
+    /// </summary>
+    public static readonly TimeSpan SummaryMinWindow = TimeSpan.FromDays(10);
+
+    /// <summary>Whether a window that starts at <paramref name="sinceUtc"/> (naive UTC) reads <c>job_stats</c> from the daily summary (#9110), where the store has it.</summary>
+    public static bool UsesSummary(DateTime sinceUtc) => DateTime.UtcNow - sinceUtc >= SummaryMinWindow;
+
+    /// <summary>The read of <see cref="GetAsync"/> that always reads the daily summary (#9110), for a test to compare with the plain read.</summary>
+    internal static Task<List<DarlingJobHistoryRow>> GetWithSummaryAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        JobHistoryFilter? filter = null, CancellationToken cancellationToken = default) =>
+        ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup: true, cancellationToken);
 
     /// <summary>The read of <see cref="GetAsync"/> with the daily summary left out (#9110): the statement that reads <c>job_history</c> alone, so a test can compare the two.</summary>
     internal static Task<List<DarlingJobHistoryRow>> GetWithoutSummaryAsync(
