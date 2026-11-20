@@ -375,6 +375,9 @@ public partial class RemoteCollectorService
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. Mirrors Darling. */
                 string? stagedOpenIntervalStamp = null;
+                /* #9088: the raw watermark this database's cycle clamped, landed in _queryStoreClampReports only
+                   once its read and flush succeed. Mirrors Darling. */
+                DateTime? stagedClampRaw = null;
 
                 /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
                    iteration so a fault cannot leak this database's staged cursor into a sibling's landing.
@@ -486,7 +489,19 @@ public partial class RemoteCollectorService
                            enumeration path emits, so the bounded history hole stays LOGGED and does
                            not become the one silent hole in a policy whose whole premise is that it
                            is visible. */
-                        if (context.CatchupClampApplied)
+                        /* #9088: a database whose Query Store has nothing new never advances its stored watermark, so
+                           the same clamp repeats every cycle. Once an earlier successful cycle reported this raw
+                           watermark and read everything the new floor skips, the warning and the hole stay quiet. */
+                        if (context.CatchupClampApplied
+                            && context.Watermark is DateTime clampedRaw)
+                        {
+                            stagedClampRaw = clampedRaw;
+                        }
+
+                        if (context.CatchupClampApplied
+                            && !(context.Watermark is DateTime seenRaw
+                                 && WatermarkPolicy.ClampCatchup(seenRaw, collectionTime) is DateTime seenFloor
+                                 && _queryStoreClampReports.AlreadyReported(serverId, databaseName, seenRaw, seenFloor)))
                         {
                             _logger?.LogWarning(
                                 "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -584,6 +599,7 @@ public partial class RemoteCollectorService
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(serverId, databaseName);
+                        _queryStoreClampReports.Land(serverId, databaseName, stagedClampRaw, collectionTime);
 
                         /* #2312: read and flush both landed — the staged open-interval stamp may too. */
                         if (stagedOpenIntervalStamp is not null)
@@ -933,6 +949,10 @@ public partial class RemoteCollectorService
                    15-minute refresh window on a cycle that captured nothing. Mirrors Darling. */
                 var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
 
+                /* #9088: the raw watermark each database's cycle clamped, staged at decision time and landed in
+                   _queryStoreClampReports from onItemComplete, after the read and flush succeeded. */
+                var stagedClampRaws = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+
                 /* One database's cutoff, hole records and open-interval decision for the given routing decision (null for every
                    collector but query_store). Also the retry on the primary after a replica read fails (#6254). */
                 async Task PrepareItemAsync(string item, QueryStoreRouteDecision? decision, CancellationToken ct)
@@ -953,7 +973,19 @@ public partial class RemoteCollectorService
                     var cutoff = QueryStoreReplicaRouting.ComputeCutoff(
                         raw, collectionTime, decision?.LookBack ?? TimeSpan.Zero, qsState?.Guard.WasCut(item) ?? false);
                     var clamped = cutoff.Cutoff;
-                    if (cutoff.ClampFired)
+                    stagedClampRaws.Remove(item);
+                    if (cutoff.ClampFired && raw is DateTime clampedRaw)
+                    {
+                        stagedClampRaws[item] = clampedRaw;
+                    }
+
+                    /* #9088: a database with nothing new in its Query Store keeps the same stale raw watermark, so the clamp
+                       repeats every cycle. Once an earlier successful cycle reported this raw watermark and read everything
+                       the new floor skips, the warning and the hole stay quiet. */
+                    if (cutoff.ClampFired
+                        && !(raw is DateTime seenRaw
+                             && clamped is DateTime seenFloor
+                             && _queryStoreClampReports.AlreadyReported(serverId, item, seenRaw, seenFloor)))
                     {
                         _logger?.LogWarning(
                             "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -1200,6 +1232,9 @@ public partial class RemoteCollectorService
                             {
                                 OnQueryStoreItemSucceeded(serverId, item);
                             }
+
+                            _queryStoreClampReports.Land(
+                                serverId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime);
 
                             /* #2312: NOW the open-interval stamp may land — this hook only fires after
                                the item's read and flush both succeeded. Remove, not read: a stamp left
