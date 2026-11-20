@@ -117,6 +117,34 @@ public sealed class ViewerCustomViewsTests
     }
 
     [Fact]
+    public void ABoundList_LoadsTheRowTheGridSelectsOnItsOwn_SoExportAndRunAreOnAtOnce()
+    {
+        CustomViewSummary S(long id, string name) =>
+            new(id, name, null, 1, DateTime.UtcNow, "erik", null, null, false, null, false);
+
+        // A collection view makes its first row current as soon as the grid binds it, and the grid shows that row selected.
+        var collection = new System.Windows.Data.ListCollectionView(CustomViewsEditorModel.Rows(new[] { S(1, "b"), S(2, "a") }).ToList());
+        var shownSelected = collection.CurrentItem;
+
+        var row = CustomViewsEditorModel.RowToLoad(shownSelected, editorHoldsAView: false);
+
+        Assert.NotNull(row);
+        Assert.Equal(2L, row!.Id);
+        Assert.Same(shownSelected, row);
+    }
+
+    [Fact]
+    public void AClickOnTheSelectedRow_LoadsItOnlyWhileTheEditorHoldsNothing()
+    {
+        var row = new CustomViewRow(new CustomViewSummary(7, "v", null, 1, DateTime.UtcNow, "erik", null, null, false, null, false));
+
+        Assert.Same(row, CustomViewsEditorModel.RowToLoad(row, editorHoldsAView: false));
+        Assert.Null(CustomViewsEditorModel.RowToLoad(row, editorHoldsAView: true));
+        Assert.Null(CustomViewsEditorModel.RowToLoad(null, editorHoldsAView: false));
+        Assert.Null(CustomViewsEditorModel.RowToLoad("a group header", editorHoldsAView: false));
+    }
+
+    [Fact]
     public void TheWriteBanner_NamesTheMissingPrivileges_AndIsAbsentWhenNoneIsMissing()
     {
         Assert.Null(new ViewerDataService.CustomViewWriteAccess(true, true, true).Banner);
