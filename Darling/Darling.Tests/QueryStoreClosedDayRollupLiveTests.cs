@@ -214,12 +214,19 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
 
     /// <summary>Builds every due day at the tick's clock, then stamps the builds and the heartbeat at the store's own clock, which is what
     /// the reader's freshness tests compare with.</summary>
-    internal static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
+    internal static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null, int? rawRetentionDays = null)
     {
-        var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, NullLogger.Instance, ct);
+        var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, rawRetentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
+        Assert.Equal(0, result.HoursFailed);
         await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC', clutter_built_at = CASE WHEN clutter_built_at = built_at THEN now() AT TIME ZONE 'UTC' END WHERE NOT removed", ct);
         await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = (now() AT TIME ZONE 'UTC') - interval '10 minutes'", ct);
+        if (rawRetentionDays is not null)
+        {
+            /* #9173: the hour heartbeat, on the store's clock like the day one. */
+            await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET hour_ticked_at = (now() AT TIME ZONE 'UTC') - interval '10 minutes'", ct);
+        }
+
         return result;
     }
 

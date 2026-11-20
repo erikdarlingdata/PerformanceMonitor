@@ -92,7 +92,7 @@ FROM
         new("reaches the first seeded day", E.AddDays(-9), E, null),
     ];
 
-    private static async Task SeedServerAsync(QueryStoreClosedDayRollupLiveTests.Store store, int server, DateTime firstDay, int days, int perDay, int plans, bool covered, CancellationToken ct)
+    internal static async Task SeedServerAsync(QueryStoreClosedDayRollupLiveTests.Store store, int server, DateTime firstDay, int days, int perDay, int plans, bool covered, CancellationToken ct, bool oddRows = false)
     {
         if (server != A)
         {
@@ -117,7 +117,7 @@ FROM
             ("server_id", server), ("first_day", firstDay), ("days", days), ("per_day", perDay), ("plans", plans), ("id_base", (long)(Math.Abs(server) % 1000) * 1_000_000_000L),
         };
         await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, BulkSql, ct, parameters);
-        if (perDay <= 8)
+        if (perDay <= 8 || oddRows)
         {
             await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, OddRowsSql, ct, parameters);
         }
