@@ -3736,6 +3736,10 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
            pass, and the built table's clutter_built_at column. Two new plain tables created empty and a nullable column: no data moves, so the
            upgrade stays fast. The next ticks build the clutter rows of the days already built. An older build ignores them. */
         new Migration(QueryStoreClosedDayRollup.ClutterVersion, "query-store-clutter-daily", QueryStoreClosedDayRollup.ClutterCreateSql),
+        /* V289 (#9173): the hourly Query Store clutter rollups a 24-hour read takes whole hours from, their built table, and the hour heartbeat column.
+           Three new plain tables created empty and a nullable column: no data moves, so the upgrade stays fast. The next ticks build the closed hours
+           inside raw's retention. An older build ignores them. */
+        new Migration(QueryStoreClutterHourly.Version, "query-store-clutter-hourly", QueryStoreClutterHourly.CreateSql),
     };
 
     /// <summary>

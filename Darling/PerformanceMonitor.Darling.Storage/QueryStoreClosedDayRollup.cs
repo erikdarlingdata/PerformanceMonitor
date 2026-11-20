@@ -436,7 +436,8 @@ WHERE NOT b.rebuild_needed
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         var lateDays = LateDays([DateOnly.FromDateTime(collectionTime)], nowUtc);
-        if (lateDays.Length == 0)
+        var lateHour = QueryStoreClutterHourly.IsClosed(QueryStoreClutterHourly.FloorHour(collectionTime), nowUtc);
+        if (lateDays.Length == 0 && !lateHour)
         {
             return false;
         }
@@ -444,25 +445,39 @@ WHERE NOT b.rebuild_needed
         await transaction.SaveAsync(LateCollectionDaySavepointName, cancellationToken);
         try
         {
+            bool hasDaily, hasHourly;
             await using (var probe = new NpgsqlCommand(
-                "SELECT to_regclass('collect.query_store_clutter_plan_daily') IS NOT NULL", connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+                "SELECT to_regclass('collect.query_store_clutter_plan_daily') IS NOT NULL, to_regclass('collect.query_store_clutter_hour_built') IS NOT NULL",
+                connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+            await using (var probed = await probe.ExecuteReaderAsync(cancellationToken))
             {
-                if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
-                {
-                    await transaction.ReleaseAsync(LateCollectionDaySavepointName, cancellationToken);
-                    return false;
-                }
+                await probed.ReadAsync(cancellationToken);
+                hasDaily = probed.GetBoolean(0);
+                hasHourly = probed.GetBoolean(1);
             }
 
-            await MarkLateDaysAsync(connection, transaction, serverId, lateDays, nowUtc, commandTimeoutSeconds, cancellationToken);
+            var marked = false;
+            if (hasDaily && lateDays.Length > 0)
+            {
+                await MarkLateDaysAsync(connection, transaction, serverId, lateDays, nowUtc, commandTimeoutSeconds, cancellationToken);
+                marked = true;
+            }
+
+            /* #9173: the hourly clutter rollups close an hour a grace after it ends, long before a day closes, so a batch can be late for its
+               hour while its day is still open. */
+            if (hasHourly && lateHour)
+            {
+                marked |= await QueryStoreClutterHourly.TryMarkLateHourAsync(connection, transaction, serverId, collectionTime, nowUtc, commandTimeoutSeconds, cancellationToken);
+            }
+
             await transaction.ReleaseAsync(LateCollectionDaySavepointName, cancellationToken);
-            return true;
+            return marked;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             await transaction.RollbackAsync(LateCollectionDaySavepointName, cancellationToken);
-            logger?.LogWarning(ex, "Query Store closed-day rollups: marking server {ServerId} day {Day:yyyy-MM-dd} for a rebuild failed; its clutter rollup stays as built until the day is next built: {Message}",
-                serverId, lateDays[0], ex.Message);
+            logger?.LogWarning(ex, "Query Store closed-day rollups: marking server {ServerId} collection {Collection:yyyy-MM-dd HH:mm} for a rebuild failed; its clutter rollups stay as built until the day or hour is next built: {Message}",
+                serverId, collectionTime, ex.Message);
             return false;
         }
     }
@@ -620,7 +635,8 @@ ORDER BY b.day_utc;";
     public readonly record struct Build(int ServerId, DateOnly Day);
 
     /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int Built, int Failed, long DaysRemoved, int Deferred);
+    public readonly record struct TickResult(
+        int Built, int Failed, long DaysRemoved, int Deferred, int HoursBuilt = 0, int HoursFailed = 0, long HoursRemoved = 0, int HoursDeferred = 0);
 
     /// <summary>The whole built UTC days a read takes from the rollups: <c>[Start, End)</c>, both at midnight.</summary>
     public readonly record struct ServedDays(DateTime Start, DateTime End);
@@ -919,16 +935,30 @@ ORDER BY b.day_utc;";
     /// further build starts, and the planned days left are reported as deferred.
     /// </summary>
     public static Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, CancellationToken cancellationToken) =>
+        RunTickAsync(dataSource, nowUtc, retentionDays, null, logger, cancellationToken);
+
+    /// <summary>
+    /// <see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> that also runs the hourly clutter step (#9173,
+    /// <see cref="QueryStoreClutterHourly"/>) when <paramref name="rawRetentionDays"/> is given: the retention raw <c>query_store_stats</c>
+    /// is purged on, which the hourly rollups follow. Null skips the hourly step.
+    /// </summary>
+    public static Task<TickResult> RunTickAsync(
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, CancellationToken cancellationToken)
     {
         var clock = Stopwatch.StartNew();
-        return RunTickAsync(dataSource, nowUtc, retentionDays, logger, () => clock.Elapsed, cancellationToken);
+        return RunTickAsync(dataSource, nowUtc, retentionDays, rawRetentionDays, logger, () => clock.Elapsed, cancellationToken);
     }
 
     /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> with the elapsed time since the
     /// tick began supplied by <paramref name="elapsed"/>, read before each build starts.</summary>
+    public static Task<TickResult> RunTickAsync(
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken) =>
+        RunTickAsync(dataSource, nowUtc, retentionDays, null, logger, elapsed, cancellationToken);
+
+    /// <summary>The tick, with the hourly step (<paramref name="rawRetentionDays"/>) and the elapsed clock.</summary>
     public static async Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
@@ -938,6 +968,22 @@ ORDER BY b.day_utc;";
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
+
+        /* #9173: the hourly clutter step first: an hour costs little and is what a 24-hour read waits on, and it stops at its own share of the
+           tick so a backlog of hours leaves the daily builds their time. It has its own catch, so a failure leaves the day work standing. */
+        QueryStoreClutterHourly.TickResult hours = default;
+        if (rawRetentionDays is { } rawDays)
+        {
+            try
+            {
+                hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Query Store hourly clutter rollups could not run; the next tick retries: {Message}", ex.Message);
+            }
+        }
+
         var removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
 
@@ -965,6 +1011,6 @@ ORDER BY b.day_utc;";
         var deferred = plan.Count - started;
         logger.LogInformation("Query Store closed-day rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} day(s), {ElapsedMs} ms",
             built, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
-        return new TickResult(built, failed, removed, deferred);
+        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred);
     }
 }

@@ -896,6 +896,12 @@ DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
         new(285, "hasQueryStoreClutterDaily", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_daily;
 DROP TABLE IF EXISTS collect.query_store_clutter_collections_daily;
 DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_built') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_built DROP COLUMN IF EXISTS clutter_built_at; END IF; END $$;"),
+        // V289 (#9173): the hourly Query Store clutter rollups' three tables and the hour heartbeat column on the tick table. The three tables are the
+        // probe's newest sentinel. The rewind drops them and the column, so a re-run of V289 creates them empty and the service builds the hours again.
+        new(289, "hasQueryStoreClutterHourly", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_hourly;
+DROP TABLE IF EXISTS collect.query_store_clutter_collections_hourly;
+DROP TABLE IF EXISTS collect.query_store_clutter_hour_built;
+DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_tick DROP COLUMN IF EXISTS hour_ticked_at; END IF; END $$;"),
     ];
 
     /// <summary>
