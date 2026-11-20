@@ -792,6 +792,10 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     private readonly ConcurrentDictionary<(int ServerId, string Database), int> _consecutiveQueryStoreItemFailures = new();
 
+    /// <summary>#9088: which stale-watermark catch-up clamps were already warned about and recorded as holes, so a database
+    /// with no new Query Store rows reports its gap once, not every cycle. In memory: a restart reports once more.</summary>
+    private readonly QueryStoreClampReports _queryStoreClampReports = new();
+
     private int ConsecutiveQueryStoreItemFailures(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryGetValue((serverId, database), out var count) ? count : 0;
 

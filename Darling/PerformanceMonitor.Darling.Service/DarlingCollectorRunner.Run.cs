@@ -836,6 +836,10 @@ public sealed partial class DarlingCollectorRunner
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
 
+                /* #9088: the raw watermark this database's cycle clamped, landed in _queryStoreClampReports only
+                   once its read and flush succeed. Mirrors Lite. */
+                DateTime? stagedClampRaw = null;
+
                 /* #5514: this database's contribution to the per-database Query Store watermark cache, staged
                    after the read and landed only once the flush returned — per iteration, like the stamp above,
                    so a fault cannot leak one database's contribution into a sibling's. */
@@ -1011,7 +1015,19 @@ public sealed partial class DarlingCollectorRunner
                            enumeration path emits, so the bounded history hole stays LOGGED and does
                            not become the one silent hole in a policy whose whole premise is that it
                            is visible. Mirrors Lite. */
-                        if (context.CatchupClampApplied)
+                        /* #9088: a database whose Query Store has nothing new never advances its stored watermark, so
+                           the same clamp repeats every cycle. Once an earlier successful cycle reported this raw
+                           watermark and read everything the new floor skips, the warning and the hole stay quiet. */
+                        if (context.CatchupClampApplied
+                            && context.Watermark is DateTime clampedRaw)
+                        {
+                            stagedClampRaw = clampedRaw;
+                        }
+
+                        if (context.CatchupClampApplied
+                            && !(context.Watermark is DateTime seenRaw
+                                 && WatermarkPolicy.ClampCatchup(seenRaw, collectionTime) is DateTime seenFloor
+                                 && _queryStoreClampReports.AlreadyReported(server.ServerId, databaseName, seenRaw, seenFloor)))
                         {
                             _logger?.LogWarning(
                                 "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -1344,6 +1360,7 @@ public sealed partial class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
+                        _queryStoreClampReports.Land(server.ServerId, databaseName, stagedClampRaw, collectionTime);
 
                         /* #5514: the flush returned, so the staged batch is in the store and the cache may
                            advance past it. Never earlier: a watermark ahead of committed rows skips them. */
@@ -1681,6 +1698,10 @@ public sealed partial class DarlingCollectorRunner
                    onItemComplete, i.e. after the item's COPY transaction committed. */
                 var stagedDatabaseWatermarks = new Dictionary<string, StagedDatabaseWatermark>(StringComparer.Ordinal);
 
+                /* #9088: the raw watermark each database's cycle clamped, staged at decision time and landed in
+                   _queryStoreClampReports from onItemComplete, after the read and flush succeeded. */
+                var stagedClampRaws = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+
                 /* #6254: per-item state of this run: the raw stored watermark (a fallback recomputes its cutoff from it), what the read
                    saw before the ship guard filtered it, and the holes a read cut by the row cap or byte budget leaves. */
                 var qsRawWatermarks = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
@@ -1698,7 +1719,19 @@ public sealed partial class DarlingCollectorRunner
             var cut = QueryStoreReplicaRouting.ComputeCutoff(
                 raw, collectionTime, decision?.LookBack ?? TimeSpan.Zero, decision is not null && qsRun!.State.Guard.WasCut(item));
             var clamped = cut.Cutoff;
-            if (cut.ClampFired)
+            stagedClampRaws.Remove(item);
+            if (cut.ClampFired && raw is DateTime clampedRaw)
+            {
+                stagedClampRaws[item] = clampedRaw;
+            }
+
+            /* #9088: a database with nothing new in its Query Store keeps the same stale raw watermark, so the clamp
+               repeats every cycle. Once an earlier successful cycle reported this raw watermark and read everything
+               the new floor skips, the warning and the hole stay quiet. */
+            if (cut.ClampFired
+                && !(raw is DateTime seenRaw
+                     && clamped is DateTime seenFloor
+                     && _queryStoreClampReports.AlreadyReported(server.ServerId, item, seenRaw, seenFloor)))
             {
                 _logger?.LogWarning(
                     "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
@@ -2018,6 +2051,9 @@ public sealed partial class DarlingCollectorRunner
                             {
                                 OnQueryStoreItemSucceeded(server.ServerId, item);
                             }
+
+                            _queryStoreClampReports.Land(
+                                server.ServerId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime);
 
                             if (stagedDatabaseWatermarks.Remove(item, out var stagedWatermark))
                             {

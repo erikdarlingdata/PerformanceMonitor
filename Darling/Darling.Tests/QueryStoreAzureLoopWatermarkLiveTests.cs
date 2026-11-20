@@ -13,6 +13,7 @@ using System.Data;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -71,6 +72,7 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
         public NpgsqlDataSource Source = null!;
         public CommandCountingLoggerFactory Logger = new();
         public DarlingCollectorRunner Runner = null!;
+        public List<(LogLevel Level, string Message)> Logged = [];
 
         public static async Task<Rig> OpenAsync(CancellationToken ct)
         {
@@ -83,7 +85,7 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
             }
 
             rig.Source = new NpgsqlDataSourceBuilder(rig.Scratch.ConnectionString).UseLoggerFactory(rig.Logger).Build();
-            rig.Runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator());
+            rig.Runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), new CapturingLogger(rig.Logged));
             return rig;
         }
 
@@ -97,7 +99,8 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
     /// <summary>One run of the Azure loop over alpha and zeta. Both return one runtime-stats row stamped five
     /// minutes ago. <paramref name="writeFaultsOn"/> throws from the per-database write hook (after the stage);
     /// <paramref name="readFaultsOn"/> throws from the database's read (before the stage).</summary>
-    private static async Task RunAsync(Rig rig, string? writeFaultsOn, string? readFaultsOn, CancellationToken token)
+    private static async Task RunAsync(
+        Rig rig, string? writeFaultsOn, string? readFaultsOn, CancellationToken token, string? idleDatabase = null)
     {
         var stamp = new DateTimeOffset(DateTime.UtcNow.AddMinutes(-5), TimeSpan.Zero);
         object[] Row(long id)
@@ -117,7 +120,12 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
         }
 
         var provider = new FakeTargetProvider(
-            new Dictionary<string, object[][]> { [Alpha] = new[] { Row(1) }, [Zeta] = new[] { Row(2) } }, readFaultsOn);
+            new Dictionary<string, object[][]>
+            {
+                [Alpha] = idleDatabase == Alpha ? Array.Empty<object[]>() : new[] { Row(1) },
+                [Zeta] = idleDatabase == Zeta ? Array.Empty<object[]>() : new[] { Row(2) },
+            },
+            readFaultsOn);
         rig.Runner.TargetProviderOverrideForTests = _ => provider;
         rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Alpha, Zeta });
         rig.Runner.PerDatabaseWriteFaultForTests = db =>
@@ -170,6 +178,55 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
         Assert.True(rig.Runner.QueryStoreWatermarkSeedReader.EmptySideReads >= 2);
     }
 
+    /// <summary>
+    /// #9088, through the real Azure loop: a database whose Query Store has nothing new keeps the same stale stored watermark, so
+    /// the catch-up clamp repeats every cycle. Three cycles over it warn once and leave the first cycle's hole as it was (a repeat
+    /// record would merge it wider, because the clamp floor moves with the clock).
+    /// </summary>
+    [Fact]
+    public async Task AnIdleDatabaseWithAStaleWatermark_WarnsAndRecordsTheHoleOnce_NotOnEveryCycle()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #9088 Azure loop pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+
+        var stale = DateTime.UtcNow - WatermarkPolicy.MaxCatchup - TimeSpan.FromMinutes(30);
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            await using var seed = new NpgsqlCommand(
+                "INSERT INTO collect.query_store_stats (collection_id, server_id, server_name, collection_time, database_name, query_id, plan_id, last_execution_time)"
+                + " VALUES (1, @s, 'h', @t, 'alpha', 1, 2, @t);"
+                + " UPDATE collect.query_store_watermarks_coverage SET covered_since = @c;"
+                + " DELETE FROM collect.query_store_watermarks;",
+                connection);
+            seed.Parameters.AddWithValue("s", LiveServerId);
+            seed.Parameters.AddWithValue("t", DateTime.SpecifyKind(stale, DateTimeKind.Unspecified));
+            seed.Parameters.AddWithValue("c", DateTime.SpecifyKind(stale.AddHours(-3), DateTimeKind.Unspecified));
+            await seed.ExecuteNonQueryAsync(token);
+        }
+
+        int Warnings() => rig.Logged.FindAll(l => l.Level == LogLevel.Warning
+            && l.Message.Contains("catch-up clamped", StringComparison.Ordinal)
+            && l.Message.Contains("[" + Alpha + "]", StringComparison.Ordinal)).Count;
+
+        async Task<string?> HoleAsync()
+        {
+            var state = await rig.Runner.GetCollectorStateAsync(LiveServerId, QueryStoreBackfillState.StateCollectorName, token);
+            return state.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + Alpha, out var hole) ? hole : null;
+        }
+
+        await RunAsync(rig, writeFaultsOn: null, readFaultsOn: null, token, idleDatabase: Alpha);
+        var firstHole = await HoleAsync();
+        Assert.Equal(1, Warnings());
+        Assert.NotNull(firstHole);
+
+        await RunAsync(rig, writeFaultsOn: null, readFaultsOn: null, token, idleDatabase: Alpha);
+        await RunAsync(rig, writeFaultsOn: null, readFaultsOn: null, token, idleDatabase: Alpha);
+        Assert.Equal(1, Warnings());
+        Assert.Equal(firstHole, await HoleAsync());
+    }
+
     [Fact]
     public async Task AWriteFaultAfterTheStage_DropsThatDatabasesKey_AndTheNextResolveReadsTheStore()
     {
@@ -218,6 +275,16 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
         var alpha = await ResolveAsync(rig.Runner, server, Alpha, token);
         Assert.NotNull(alpha);
         Assert.Equal(await StoreAsync(rig.Runner, Alpha, token), alpha);
+    }
+
+    private sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
     }
 
     private sealed class FakeTargetProvider(Dictionary<string, object[][]> rowsByDatabase, string? readFaultOn) : ITargetProvider

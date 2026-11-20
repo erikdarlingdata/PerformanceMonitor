@@ -21,6 +21,7 @@ using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
 using PerformanceMonitorLite.Tests.Helpers;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace Lite.Tests;
@@ -284,9 +285,110 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         Assert.Equal(0, await CountAsync(f, queryId: inside.QueryId));
     }
 
+    private sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger<RemoteCollectorService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
+    }
+
     private sealed record QsRow(long QueryId, DateTime LastExecution, string Role);
 
     private static QsRow Row(long queryId, DateTime lastExecution, string role = "Primary") => new(queryId, lastExecution, role);
+
+    /* ---- #9088: a stale watermark warns once per real gap, not once per cycle ---- */
+
+    private static int ClampWarnings(Fixture f) =>
+        f.Logged.Count(l => l.Level == LogLevel.Warning && l.Message.Contains("catch-up clamped", StringComparison.Ordinal));
+
+    /// <summary>A database with one stored row, then its stored watermark moved to <paramref name="age"/> before now and
+    /// the source left idle: the shape of a Query Store with nothing new.</summary>
+    private async Task<Fixture> IdleDatabaseWithStaleWatermarkAsync(TimeSpan age, int engineEdition = 3)
+    {
+        var f = await BuildAsync(replica: null, engineEdition: engineEdition);
+        if (engineEdition == 5)
+        {
+            f.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Sales });
+            f.Service.AzureDatabaseReaderOverrideForTests = (database, plan) => Answer(f, plan, replica: false, database);
+        }
+
+        f.PrimaryRows = [Row(queryId: 1, lastExecution: DateTime.UtcNow.AddMinutes(-30))];
+        await RunAsync(f);
+        Assert.Equal(1, await CountAsync(f));
+        f.PrimaryRows = [];
+        await SetWatermarkAsync(f, Truncate(DateTime.UtcNow - age));
+        f.Logged.Clear();
+        return f;
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(5)]
+    public async Task AnIdleDatabaseWithAStaleWatermark_WarnsAndRecordsTheHoleOnce_NotOnEveryCycle(int engineEdition)
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30), engineEdition);
+
+        await RunAsync(f);
+        var firstHole = await ReadHoleAsync(f, Sales);
+        Assert.Equal(1, ClampWarnings(f));
+        Assert.NotNull(firstHole);
+
+        await RunAsync(f);
+        await RunAsync(f);
+
+        /* Three cycles over the same stale watermark: one warning, and the hole is the one the first cycle recorded (a repeat
+           record would merge it wider, because the clamp floor moves with the clock). */
+        Assert.Equal(1, ClampWarnings(f));
+        Assert.Equal(firstHole, await ReadHoleAsync(f, Sales));
+    }
+
+    [Fact]
+    public async Task AWatermarkThatMovesAndGoesStaleAgain_WarnsAgain()
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30));
+        await RunAsync(f);
+        await RunAsync(f);
+        Assert.Equal(1, ClampWarnings(f));
+
+        /* New rows arrive, so the watermark moves to a fresh value and nothing clamps. */
+        f.PrimaryRows = [Row(queryId: 2, lastExecution: DateTime.UtcNow.AddMinutes(-20))];
+        await RunAsync(f);
+        Assert.Equal(1, ClampWarnings(f));
+        Assert.Equal(1, await CountAsync(f, queryId: 2));
+
+        /* It then goes stale again, at a different value: a new gap, reported once. */
+        f.PrimaryRows = [];
+        await SetWatermarkAsync(f, Truncate(DateTime.UtcNow - WatermarkPolicy.MaxCatchup - TimeSpan.FromHours(1)));
+        await RunAsync(f);
+        await RunAsync(f);
+        Assert.Equal(2, ClampWarnings(f));
+    }
+
+    [Fact]
+    public async Task ACycleThatFailsAfterTheClamp_DoesNotUseUpTheReport_SoTheNextCycleReportsAndWidensTheHole()
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30));
+
+        f.PrimaryItemReadFails.Add(Sales);
+        await RunAsync(f);
+        var afterFailure = await ReadHoleAsync(f, Sales);
+        Assert.Equal(1, ClampWarnings(f));
+
+        /* The read faulted, so the range was not covered: the next cycle reports again and the hole grows to its new floor. */
+        f.PrimaryItemReadFails.Clear();
+        await RunAsync(f);
+        var afterRecovery = await ReadHoleAsync(f, Sales);
+        Assert.Equal(2, ClampWarnings(f));
+        Assert.True(afterRecovery!.Value.To > afterFailure!.Value.To);
+
+        /* That cycle read cleanly, so the next one stays quiet. */
+        await RunAsync(f);
+        Assert.Equal(2, ClampWarnings(f));
+        Assert.Equal(afterRecovery, await ReadHoleAsync(f, Sales));
+    }
 
     private static DateTime Truncate(DateTime value) =>
         new(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
@@ -307,6 +409,10 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         /* Databases whose item read on the replica throws (the replica answers everything else). */
         public HashSet<string> ReplicaItemReadFails { get; } = new(StringComparer.OrdinalIgnoreCase);
         public bool ReplicaFails { get; set; }
+
+        /* #9088: databases whose primary item read throws, and every line the service logged. */
+        public HashSet<string> PrimaryItemReadFails { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public required List<(LogLevel Level, string Message)> Logged { get; init; }
         public int ReplicaCalls;
 
         public List<QsRow> PrimaryRows
@@ -341,13 +447,15 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         status.SqlEngineEdition = engineEdition;
         status.SqlMajorVersion = 16;
 
-        var service = new RemoteCollectorService(duckDb, serverManager, new ScheduleManager(_configDir));
+        var logged = new List<(LogLevel Level, string Message)>();
+        var service = new RemoteCollectorService(duckDb, serverManager, new ScheduleManager(_configDir), new CapturingLogger(logged));
         var fixture = new Fixture
         {
             Service = service,
             Server = server,
             ServerId = RemoteCollectorService.GetServerId(server),
             DuckDb = duckDb,
+            Logged = logged,
         };
 
         service.ServerReaderOverrideForTests = plan => Answer(fixture, plan, replica: false);
@@ -359,7 +467,7 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         f.Service.RunCollectorAsync(f.Server, QueryStoreCollector.Instance.Name, CancellationToken.None);
 
     /// <summary>One side's reader for one statement. Item reads apply the cutoff as the SQL does, and note it.</summary>
-    private static DbDataReader Answer(Fixture f, CollectorQuery plan, bool replica)
+    private static DbDataReader Answer(Fixture f, CollectorQuery plan, bool replica, string? azureDatabase = null)
     {
         if (replica)
         {
@@ -373,8 +481,17 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         if (plan.Parameters?.Any(static p => p.Name == "@cutoff_time") == true)
         {
             /* The item statement names its database: EXECUTE [db].sys.sp_executesql ... */
-            var open = plan.Text.IndexOf("EXECUTE [", StringComparison.Ordinal) + "EXECUTE [".Length;
-            var database = plan.Text[open..plan.Text.IndexOf("].sys.sp_executesql", open, StringComparison.Ordinal)];
+            string database;
+            if (azureDatabase is not null)
+            {
+                database = azureDatabase;
+            }
+            else
+            {
+                var open = plan.Text.IndexOf("EXECUTE [", StringComparison.Ordinal) + "EXECUTE [".Length;
+                database = plan.Text[open..plan.Text.IndexOf("].sys.sp_executesql", open, StringComparison.Ordinal)];
+            }
+
             var cutoff = plan.Parameters.First(static p => p.Name == "@cutoff_time").Value as DateTime?;
             var cutoffs = replica ? f.ReplicaCutoffsByDb : f.PrimaryCutoffsByDb;
             if (!cutoffs.TryGetValue(database, out var seen))
@@ -386,6 +503,11 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
             if (replica && f.ReplicaItemReadFails.Contains(database))
             {
                 throw new InvalidOperationException("the replica cannot be read for " + database);
+            }
+
+            if (!replica && f.PrimaryItemReadFails.Contains(database))
+            {
+                throw new InvalidOperationException("the primary cannot be read for " + database);
             }
 
             var rows = ((replica ? f.ReplicaRowsByDb : f.PrimaryRowsByDb).GetValueOrDefault(database) ?? [])
