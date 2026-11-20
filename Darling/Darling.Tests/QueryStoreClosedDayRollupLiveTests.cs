@@ -34,20 +34,20 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
 public sealed class QueryStoreClosedDayRollupLiveTests : IDisposable
 {
-    private const int ServerId = -9111283;
+    internal const int ServerId = -9111283;
     private const int Top = 50;
 
     /// <summary>The seed helper's own anchor; the bulk rows run from 30 days before it to 8 days after it.</summary>
     private static readonly DateTime Anchor = new(2026, 9, 15, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime DataStart = Anchor.AddDays(-30);
-    private static readonly DateTime DataEnd = DataStart.AddDays(38);
+    internal static readonly DateTime DataEnd = DataStart.AddDays(38);
 
     /// <summary>The tick's clock: two days after the last seeded day, so every seeded day is closed.</summary>
-    private static readonly DateTime TickNow = DataEnd.AddDays(2);
+    internal static readonly DateTime TickNow = DataEnd.AddDays(2);
 
-    private const int KeepEverything = 400;
+    internal const int KeepEverything = 400;
 
-    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    internal static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>The windows every comparison reads: label, start, end, database filter.</summary>
     private static readonly (string Label, DateTime Start, DateTime End, string[]? Databases)[] Windows =
@@ -98,7 +98,7 @@ CROSS JOIN generate_series(1, 60) AS q
 CROSS JOIN LATERAL (SELECT @data_start + make_interval(days => d, hours => h) AS starts) AS i
 CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS bigint) AS n) AS v;";
 
-    private sealed class Store : IAsyncDisposable
+    internal sealed class Store : IAsyncDisposable
     {
         public required ScratchPostgres Scratch { get; init; }
         public required NpgsqlConnection Connection { get; init; }
@@ -115,7 +115,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         }
     }
 
-    private static async Task<Store> SeedAsync(CancellationToken ct)
+    internal static async Task<Store> SeedAsync(CancellationToken ct)
     {
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -146,7 +146,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         };
     }
 
-    private static async Task<int> ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    internal static async Task<int> ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         foreach (var (name, value) in parameters)
@@ -157,7 +157,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         return await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    internal static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         foreach (var (name, value) in parameters)
@@ -214,7 +214,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
 
     /// <summary>Builds every due day at the tick's clock, then stamps the builds and the heartbeat at the store's own clock, which is what
     /// the reader's freshness tests compare with.</summary>
-    private static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
+    internal static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
     {
         var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
