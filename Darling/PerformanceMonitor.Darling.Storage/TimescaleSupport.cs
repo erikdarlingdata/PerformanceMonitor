@@ -4023,6 +4023,112 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %s (query_hash, bucket DESC)', v_mat_oid);
 END $$;";
 
+    /// <summary>The name of the covering (query_hash, bucket DESC) index on <see cref="QueryStatsIntervalHourlyView"/>'s materialization (#9149, V284).</summary>
+    public const string QueryStatsIntervalHourlyHashCoveringIndexName = "ix_query_stats_interval_hourly_hash_cov";
+
+    /// <summary>The name of the covering (query_hash, bucket DESC) index on <see cref="QueryStatsHourlyView"/>'s materialization (#9149, V284).</summary>
+    public const string QueryStatsHourlyHashCoveringIndexName = "ix_query_stats_hourly_hash_cov";
+
+    /// <summary>The columns <c>get_query_fleet_summary</c>'s plan cache arms read besides the hash and the bucket: the pair's keys and the three sums.</summary>
+    private const string PlanCacheFleetSummaryIncludeColumns = "server_id, database_name, execution_count_sum, worker_time_sum, elapsed_time_sum";
+
+    /// <summary>The columns the Query Store arm of <c>get_query_fleet_summary</c> reads besides the hash and the bucket.</summary>
+    private const string QueryStoreFleetSummaryIncludeColumns = "server_id, database_name, execution_count_sum, cpu_us_weighted_sum, duration_us_weighted_sum";
+
+    /// <summary>
+    /// #9149 (V284): one <c>DO</c> block that gives <paramref name="view"/>'s materialization the covering index
+    /// <c>(query_hash, bucket DESC) INCLUDE (<paramref name="includeColumns"/>)</c> under <paramref name="indexName"/>. The fleet summary filters on
+    /// the hash alone across every server, so it read one heap page per matching hourly row through a plain (query_hash, bucket) index. With the
+    /// columns it sums in the index, the planner answers from the index alone. The block is a catalog read when the covering index is already there
+    /// (an index with included columns, found by name, has more attributes than key attributes), and it asks for no lock then. Otherwise it builds
+    /// the covering index under a temporary name first, drops a narrow index of the same name (V246's, on the Query Store rollup), and renames the
+    /// new one, so the narrow index stays available to readers until the covering one is built and the exclusive lock of the DROP lasts only to the
+    /// commit. A store without TimescaleDB, or without the view, returns before touching anything.
+    /// </summary>
+    private static string FleetSummaryCoveringIndexBlock(string view, string indexName, string includeColumns) => $@"
+DO $$
+DECLARE
+    v_mat_oid regclass;
+    v_old regclass;
+    v_new regclass;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT format(''%I.%I'', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+             FROM timescaledb_information.continuous_aggregates
+             WHERE view_schema = ''collect'' AND view_name = ''{view}'''
+    INTO v_mat_oid;
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = v_mat_oid
+        AND   c.relname = '{indexName}'
+        AND   i.indnatts > i.indnkeyatts
+    ) THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format('CREATE INDEX IF NOT EXISTS {indexName}_new ON %s (query_hash, bucket DESC) INCLUDE ({includeColumns})', v_mat_oid);
+
+    SELECT i.indexrelid::regclass INTO v_old
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE i.indrelid = v_mat_oid AND c.relname = '{indexName}';
+
+    IF v_old IS NOT NULL THEN
+        EXECUTE format('DROP INDEX %s', v_old);
+    END IF;
+
+    SELECT i.indexrelid::regclass INTO v_new
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE i.indrelid = v_mat_oid AND c.relname = '{indexName}_new';
+
+    IF v_new IS NOT NULL THEN
+        EXECUTE format('ALTER INDEX %s RENAME TO {indexName}', v_new);
+    END IF;
+END $$;";
+
+    /// <summary>
+    /// #9149 (V284): the Query Store arm's covering hash index. It replaces V246's narrow <see cref="QueryStoreCorrectedHourlyHashIndexName"/> in
+    /// place (same name, so the Viewer's V246 sentinel and every reader of the name still hold) with
+    /// <c>(query_hash, bucket DESC) INCLUDE (server_id, database_name, execution_count_sum, cpu_us_weighted_sum, duration_us_weighted_sum)</c>. Run by
+    /// V284 on an upgraded store and by <see cref="QueryStoreRollupKeptIndexesSql"/> (after the view is created and on every convergence pass) in
+    /// place of V246's block, so a fresh store lands the same index and a store that rebuilt the view never gets the narrow one back. See
+    /// <see cref="FleetSummaryCoveringIndexBlock"/> for the lock behaviour.
+    /// </summary>
+    public static readonly string CreateQueryStoreCorrectedHourlyHashCoveringIndexSql =
+        "SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + "s';"
+        + FleetSummaryCoveringIndexBlock(QueryStoreStatsCorrectedHourlyView, QueryStoreCorrectedHourlyHashIndexName, QueryStoreFleetSummaryIncludeColumns);
+
+    /// <summary>
+    /// #9149 (V284): the covering hash indexes under the plan cache arms of <c>get_query_fleet_summary</c>, one per hourly rollup the read can
+    /// name (the interval-honest one, and the legacy one while the stitched read still reaches it). The planner reads the pair keys and the three sums
+    /// from the index, so the newest days, which the daily rollup cannot serve without changing the answer, no longer cost a heap page per row.
+    /// </summary>
+    public static readonly string CreateQueryStatsHourlyHashCoveringIndexesSql =
+        "SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + "s';"
+        + FleetSummaryCoveringIndexBlock(QueryStatsIntervalHourlyView, QueryStatsIntervalHourlyHashCoveringIndexName, PlanCacheFleetSummaryIncludeColumns)
+        + "\n" + FleetSummaryCoveringIndexBlock(QueryStatsHourlyView, QueryStatsHourlyHashCoveringIndexName, PlanCacheFleetSummaryIncludeColumns);
+
+    /// <summary>
+    /// #9149: the plan cache hourly rollups' covering hash indexes by view, run right after each view is created (a fresh store) and on every
+    /// convergence pass, next to <see cref="QueryStoreRollupKeptIndexesSql"/>. A catalog read when the index is there.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string> QueryStatsHourlyCoveringIndexSql = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [QueryStatsIntervalHourlyView] = FleetSummaryCoveringIndexBlock(QueryStatsIntervalHourlyView, QueryStatsIntervalHourlyHashCoveringIndexName, PlanCacheFleetSummaryIncludeColumns),
+        [QueryStatsHourlyView] = FleetSummaryCoveringIndexBlock(QueryStatsHourlyView, QueryStatsHourlyHashCoveringIndexName, PlanCacheFleetSummaryIncludeColumns),
+    };
+
     /// <summary>
     /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
     /// <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> at a 1-day bucket, sourced from L1 DIRECTLY.
@@ -7226,6 +7332,13 @@ WITH NO DATA";
                 {
                     using var keptIndexes = new NpgsqlCommand(keptIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
                     await keptIndexes.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                /* #9149: the plan cache hourly rollups' covering hash indexes, a catalog read when they are there. */
+                if (QueryStatsHourlyCoveringIndexSql.TryGetValue(view, out var coveringIndexSql))
+                {
+                    using var coveringIndex = new NpgsqlCommand(coveringIndexSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await coveringIndex.ExecuteNonQueryAsync(cancellationToken);
                 }
 
                 if (policyFor is null)
@@ -14382,7 +14495,7 @@ END $$;";
     public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
-        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashIndexSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashCoveringIndexSql,
         [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
         [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
         [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
