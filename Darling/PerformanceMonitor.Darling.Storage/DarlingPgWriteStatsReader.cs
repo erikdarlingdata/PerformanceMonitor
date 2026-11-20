@@ -135,7 +135,7 @@ public static class DarlingPgWriteStatsReader
                 {{PostmasterRestart.SpansSql}} AS restarted_here
             FROM pg_write_stats
             WHERE server_id = $1
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             WINDOW series AS (ORDER BY collection_time)
         ),

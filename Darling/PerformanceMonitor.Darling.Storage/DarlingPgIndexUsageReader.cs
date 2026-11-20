@@ -98,7 +98,7 @@ public static class DarlingPgIndexUsageReader
                            ORDER BY collection_time) AS fell
                 FROM pg_index_usage_stats
                 WHERE server_id = $1
-                AND   collection_time > $2
+                AND   collection_time >= $2
                 AND   collection_time <= $3
             ) AS ordered
             ORDER BY database_name, schema_name, table_name, index_name, collection_time ASC

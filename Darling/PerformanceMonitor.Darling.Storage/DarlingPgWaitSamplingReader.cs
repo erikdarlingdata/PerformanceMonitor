@@ -115,7 +115,7 @@ public static class DarlingPgWaitSamplingReader
                    event_type, event, query_id, sample_count
             FROM pg_wait_sampling
             WHERE server_id = $1
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             ORDER BY event_type, event, query_id, collection_time ASC
         ),

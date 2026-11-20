@@ -163,7 +163,7 @@ LEFT JOIN (
     SELECT DISTINCT ON (w.database_name, w.schema_name, w.table_name, w.column_name)
            w.database_name, w.schema_name, w.table_name, w.column_name, w.collection_time, w.last_value::text AS last_value
     FROM collect.identity_capacity AS w
-    WHERE w.server_id = $1 AND w.collection_time > $2 AND w.collection_time <= $3 AND w.column_name IS NOT NULL{databases.Clause("w.database_name", 4)}
+    WHERE w.server_id = $1 AND w.collection_time >= $2 AND w.collection_time <= $3 AND w.column_name IS NOT NULL{databases.Clause("w.database_name", 4)}
     ORDER BY w.database_name, w.schema_name, w.table_name, w.column_name, w.collection_time) AS f
   ON f.database_name = c.database_name AND f.schema_name = c.schema_name AND f.table_name = c.table_name AND f.column_name = c.column_name
 ORDER BY c.percent_used DESC NULLS LAST, n.database_name, c.schema_name, c.table_name, c.column_name";

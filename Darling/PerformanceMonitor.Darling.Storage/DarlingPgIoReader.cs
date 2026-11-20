@@ -133,7 +133,7 @@ public static class DarlingPgIoReader
                 (read_bytes IS NOT NULL) AS byte_counters_tracked
             FROM pg_io_stats
             WHERE server_id = $1
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             WINDOW series AS (
                 PARTITION BY backend_type, object_type, context

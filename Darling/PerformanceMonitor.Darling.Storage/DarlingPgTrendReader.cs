@@ -114,7 +114,7 @@ public static class DarlingPgTrendReader
             FROM pg_wait_sampling
             WHERE server_id = $1
             AND   event = $2
-            AND   collection_time > $3
+            AND   collection_time >= $3
             AND   collection_time <= $4
             GROUP BY collection_time
         ),
@@ -240,7 +240,7 @@ public static class DarlingPgTrendReader
             FROM pg_wait_sampling
             WHERE server_id = $1
             AND   event = $2
-            AND   collection_time > $3
+            AND   collection_time >= $3
             AND   collection_time <= $4
             GROUP BY collection_time
         ),
@@ -557,7 +557,7 @@ public static class DarlingPgTrendReader
             AND   event IS NOT NULL
             AND   coalesce(event_type, '') <> 'CPU'
             AND   NOT (event_type IS NOT DISTINCT FROM 'Extension' AND event IS NOT DISTINCT FROM 'Extension')
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY event, collection_time
         ),
@@ -1000,7 +1000,7 @@ public static class DarlingPgTrendReader
             WHERE server_id = $1
             AND   backend_type = $2
             AND   context = $3
-            AND   collection_time > $4
+            AND   collection_time >= $4
             AND   collection_time <= $5
         ),
         sampled AS (
@@ -1269,7 +1269,7 @@ public static class DarlingPgTrendReader
             FROM pg_database_stats
             WHERE server_id = $1
             AND   database_name IS NOT DISTINCT FROM $2
-            AND   collection_time > $3
+            AND   collection_time >= $3
             AND   collection_time <= $4
             WINDOW series AS (
                 ORDER BY collection_time
@@ -1434,7 +1434,7 @@ public static class DarlingPgTrendReader
             WHERE server_id = $1
             AND   backend_type IS NOT NULL
             AND   context IS NOT NULL
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($4::text IS NULL OR backend_type = $4)
             AND   ($5::text IS NULL OR context = $5)
@@ -1581,7 +1581,7 @@ public static class DarlingPgTrendReader
             FROM pg_database_stats
             WHERE server_id = $1
             AND   database_name IS NOT NULL
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             WINDOW series AS (
                 PARTITION BY database_name

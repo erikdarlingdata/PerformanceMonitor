@@ -103,7 +103,7 @@ public static class DarlingPgTableBloatReader
                 collection_time AS first_seen_at
             FROM pg_table_bloat_stats
             WHERE server_id = $1
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, collection_time ASC
         ),

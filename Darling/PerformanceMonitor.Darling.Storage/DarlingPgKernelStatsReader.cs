@@ -103,7 +103,7 @@ public static class DarlingPgKernelStatsReader
                    exec_read_bytes, exec_write_bytes, major_faults, stats_since
             FROM pg_kernel_stats
             WHERE server_id = $1
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             ORDER BY database_name, query_id, collection_time ASC
         ),

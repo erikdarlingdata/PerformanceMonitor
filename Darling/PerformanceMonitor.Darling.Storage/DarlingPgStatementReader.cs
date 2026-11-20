@@ -226,7 +226,7 @@ public static class DarlingPgStatementReader
                 p.wal_bytes
             FROM pg_statement_stats AS p
             WHERE p.server_id = $1
-            AND   p.collection_time < $2
+            AND   p.collection_time <= $2
             AND   p.collection_time >= $2 - {SeedLookbackSql}
             AND   EXISTS (SELECT 1
                           FROM in_window AS w
@@ -329,7 +329,7 @@ public static class DarlingPgStatementReader
                ON  t.server_id = $1
                AND t.queryid = differenced.queryid
         /* #7909: the seed rows are the baseline for the first in-window sample and are not samples of the window. */
-        WHERE differenced.collection_time >= $2
+        WHERE differenced.collection_time > $2
         GROUP BY differenced.queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         /* $5 = include the service's own statements. Change Watch passes false, so the sampler cannot take one of its top-N slots (#7567). */

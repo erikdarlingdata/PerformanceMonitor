@@ -160,7 +160,7 @@ public static class DarlingPgDatabaseReader
                  AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here
             FROM pg_database_stats
             WHERE server_id = $1
-            AND   collection_time > $2
+            AND   collection_time >= $2
             AND   collection_time <= $3
             WINDOW series AS (
                 PARTITION BY database_name

@@ -543,7 +543,7 @@ WITH pairs AS
         count(*) AS n,
         (count(deadlocks) = count(*) AND min(deadlocks) = max(deadlocks)) AS flat
     FROM pg_database_stats
-    WHERE collection_time > $1
+    WHERE collection_time >= $1
     AND   collection_time <= $2
     GROUP BY server_id, database_name
 ),
@@ -577,7 +577,7 @@ CROSS JOIN LATERAL
         FROM pg_database_stats
         WHERE (cardinality(s.ordered_names) > 0 OR s.ordered_null_name)
         AND   server_id = s.server_id
-        AND   collection_time > $1
+        AND   collection_time >= $1
         AND   collection_time <= $2
         AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
     ) AS sampled
