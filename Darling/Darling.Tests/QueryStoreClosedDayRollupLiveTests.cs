@@ -210,13 +210,14 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         }
     }
 
-    /// <summary>Builds every due day at the tick's clock, then stamps the builds at the store's own clock, which is what the
-    /// reader's freshness test compares with.</summary>
+    /// <summary>Builds every due day at the tick's clock, then stamps the builds and the heartbeat at the store's own clock, which is what
+    /// the reader's freshness tests compare with.</summary>
     private static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
     {
         var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
         await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC' WHERE NOT removed", ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = (now() AT TIME ZONE 'UTC') - interval '10 minutes'", ct);
         return result;
     }
 
@@ -343,7 +344,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
     }
 
     [Fact]
-    public async Task ALateRowAnOlderServiceWritesWithoutAMark_SendsTheReadToTheIntervalTable_UntilTheNextTickRebuildsItsDay()
+    public async Task ALateRowAnOlderServiceWritesWithoutAMark_IsReadFromTheIntervalTableOnceTheHeartbeatAges_AndTheNextTickRebuildsItsDay()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
         var ct = TestContext.Current.CancellationToken;
@@ -355,11 +356,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(window.Start, window.End), await ServedAsync(store, window.Start, window.End, ct));
         AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after the build");
 
-        /* The heartbeat is the first tick's clock less the margin, written though the tick built days. */
-        Assert.Equal(TickNow - QueryStoreClosedDayRollup.HeartbeatMargin, await ScalarAsync<DateTime>(store.Connection,
-            "SELECT ticked_at FROM collect.query_store_closed_day_tick WHERE server_id = @server_id", ct, ("server_id", ServerId)));
-
-        /* A late row written the old way: a plain INSERT into a built day, collected after the last tick, no mark. */
+        /* A late row written the old way: a plain INSERT into a built day, no mark. */
         var lateDay = DateOnly.FromDateTime(DataEnd.AddDays(-12));
         var lateCollected = TickNow.AddMinutes(5);
         await using (var tx = await store.Connection.BeginTransactionAsync(ct))
@@ -379,29 +376,31 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
 
         Assert.Equal(40L, await ScalarAsync<long>(store.Connection,
             "SELECT COUNT(*) FROM collect.query_store_interval_wide WHERE server_id = @server_id AND collection_time = @collected", ct, ("server_id", ServerId), ("collected", lateCollected)));
-
         Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
             "SELECT COUNT(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND rebuild_needed", ct, ("server_id", ServerId)));
 
-        /* The read sees the row: the run is not taken from the rollups, and every window equals what the interval table alone says. */
+        /* The older service ticks nothing, so the heartbeat ages past its limit, and the server is read from the interval table. */
+        var aged = TickNow - QueryStoreClosedDayRollup.HeartbeatMargin - TimeSpan.FromHours(3);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = @aged WHERE server_id = @server_id", ct, ("server_id", ServerId), ("aged", aged));
         Assert.Null(await ServedAsync(store, window.Start, window.End, ct));
-        var viaRollupsOff = await ReadWithoutHeartbeatAsync(store, ct);
-        Assert.False(expected["past 30 days / grid"].SequenceEqual(viaRollupsOff["past 30 days / grid"]), "the late rows changed nothing in the 30-day grid, so the test proves nothing");
-        AssertSame(viaRollupsOff, await ReadAllAsync(store.Viewer, ct), "with a late row no mark covers");
+        var viaRaw = await ReadWithoutHeartbeatAsync(store, ct);
+        Assert.False(expected["past 30 days / grid"].SequenceEqual(viaRaw["past 30 days / grid"]), "the late rows changed nothing in the 30-day grid, so the test proves nothing");
+        AssertSame(viaRaw, await ReadAllAsync(store.Viewer, ct), "with an aged heartbeat and a late row no mark covers");
 
-        /* The next tick marks the day from the row itself and builds it again; the window is served from the rollups once more. */
+        /* A current service's tick: the heartbeat had aged, so it marks the day from the row itself and builds it again. */
         var next = await TickAsync(store, KeepEverything, ct, TickNow.AddHours(1));
-        /* The late day, and the newest day that the hour's clock has just closed. */
         Assert.True(next.Built >= 1);
         Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
             "SELECT COUNT(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND rebuild_needed", ct, ("server_id", ServerId)));
         Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(window.Start, window.End), await ServedAsync(store, window.Start, window.End, ct));
-        AssertSame(viaRollupsOff, await ReadAllAsync(store.Viewer, ct), "after the tick rebuilt the late row's day");
+        AssertSame(viaRaw, await ReadAllAsync(store.Viewer, ct), "after the tick rebuilt the late row's day");
 
         /* A tick with nothing to build still moves the heartbeat. */
-        var idle = await TickAsync(store, KeepEverything, ct, TickNow.AddHours(2));
+        var idleNow = TickNow.AddHours(2);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = @before WHERE server_id = @server_id", ct, ("server_id", ServerId), ("before", idleNow.AddHours(-1)));
+        var idle = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, idleNow, KeepEverything, NullLogger.Instance, ct);
         Assert.Equal(0, idle.Built);
-        Assert.Equal(TickNow.AddHours(2) - QueryStoreClosedDayRollup.HeartbeatMargin, await ScalarAsync<DateTime>(store.Connection,
+        Assert.Equal(idleNow - QueryStoreClosedDayRollup.HeartbeatMargin, await ScalarAsync<DateTime>(store.Connection,
             "SELECT ticked_at FROM collect.query_store_closed_day_tick WHERE server_id = @server_id", ct, ("server_id", ServerId)));
     }
 
