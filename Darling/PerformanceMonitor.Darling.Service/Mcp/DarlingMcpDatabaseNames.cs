@@ -44,7 +44,7 @@ internal static class DarlingMcpDatabaseNames
     /// <summary>
     /// The names on a SQL Server's newest database list that equal <c>$3</c> ignoring case: no row when the server has no list newer
     /// than <c>$2</c>, one row with a NULL name when the list holds no such name. <c>$1</c> server_id. The newest stamp and the rows
-    /// at it both read <c>idx_database_states_time (server_id, collection_time)</c>; only the matching names leave the store,
+    /// at it both read <c>idx_database_states_server_time_cover (server_id, collection_time) INCLUDE (database_name)</c>; only the matching names leave the store,
     /// each with the time the list was taken.
     /// </summary>
     public const string CandidatesSql = @"
@@ -79,7 +79,7 @@ WHERE n.t IS NOT NULL";
     /// <summary>
     /// Whether one of a SQL Server's hourly database lists newer than <c>$2</c> holds the name <c>$3</c> exactly, for server
     /// <c>$1</c>. The hourly lists are the newest list at or before each of <c>$4</c> points one hour apart, counted forward
-    /// from <c>$2</c>. Each point is one backward probe of <c>idx_database_states_time</c> and each list one range read of it, so
+    /// from <c>$2</c>. Each point is one backward probe of <c>idx_database_states_server_time_cover</c> and each list one range read of it, so
     /// the cost is bounded by the points and the size of one list, not by how often the lists are collected.
     /// </summary>
     public const string SeenSql = @"
