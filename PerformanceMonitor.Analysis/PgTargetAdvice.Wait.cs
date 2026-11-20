@@ -359,6 +359,18 @@ public static partial class PgTargetAdvice
         return sb.ToString();
     }
 
+    /// <summary>
+    /// The buffer content-lock events as the target's own PostgreSQL major reports them (#9131): <c>BufferContent</c>
+    /// through 18, the three <c>Buffer</c>-type events from 19. With no registry major in the fact set, both.
+    /// </summary>
+    private static string BufferContentEvents(IReadOnlyDictionary<string, Fact> facts)
+    {
+        const string v19 = "BufferShared, BufferShareExclusive and BufferExclusive (wait type Buffer)";
+        if (!facts.TryGetValue(PgTargetFactKeys.ServerMajorVersion, out var registry) || registry.Value < 1)
+            return "BufferContent (PostgreSQL 18 and below) or " + v19 + " (PostgreSQL 19)";
+        return registry.Value >= 19 ? v19 : "BufferContent";
+    }
+
     private static void AppendCoFire(StringBuilder sb, IReadOnlyDictionary<string, Fact> facts, string key, string sentence)
     {
         if (facts.TryGetValue(key, out var other) && other.BaseSeverity > 0)
@@ -394,7 +406,7 @@ public static partial class PgTargetAdvice
         else if (key == PgTargetFactKeys.WaitKey("LWLock", null))
         {
             sb.Append("Read the named LWLock standouts for this window (get_pg_wait_stats or get_pg_wait_sampling, by event): WALWrite " +
-                      "and WALInsert point at the WAL path; BufferMapping and BufferContent at one hot page or a buffer cache too small " +
+                      "and WALInsert point at the WAL path; BufferMapping and " + BufferContentEvents(facts) + " at one hot page or a buffer cache too small " +
                       "for the working set (size shared_buffers to the working set, counter-objective: memory taken from the page cache " +
                       "and from work_mem); LockManager at transactions touching more than sixteen relations, where the fix is fewer " +
                       "partitions touched per statement or fewer relations per transaction (counter-objective: a schema change, not a " +
