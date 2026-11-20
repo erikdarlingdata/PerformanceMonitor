@@ -134,13 +134,13 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "allowFrom": { "type": "array", "items": { "type": "string", "pattern": "^[^/\\s]+/[0-9]{1,3}$" } },
         "serviceMonitor": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
-            "interval": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" },
+            "interval": { "type": "string", "minLength": 1, "pattern": "^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$" },
             "labels": { "type": "object", "additionalProperties": { "type": "string" } }
           }
         }

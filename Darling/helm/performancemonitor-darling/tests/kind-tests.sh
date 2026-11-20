@@ -526,7 +526,7 @@ YAML
   not_ready_never_restarted "${p}" "${STABLE_SECONDS}"
 }
 
-# metrics_attempt <expected status> [<bearer token>]: one scrape of /metrics through its own port-forward (a port-forward dies on
+# metrics_attempt <pod> [<bearer token>]: one scrape of /metrics through its own port-forward (a port-forward dies on
 # its first refused connection, so each attempt starts one); leaves the status in ${WORK}/metrics.status and the body in
 # ${WORK}/metrics.body.
 metrics_attempt() {

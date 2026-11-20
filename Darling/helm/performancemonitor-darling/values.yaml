@@ -269,12 +269,14 @@ metrics:
   # web.port and mcp.port, whether or not web and MCP are on (Darling compares the ports either way, and the
   # control plane can turn those surfaces on later without a restart).
   port: 5155
-  # Addresses allowed to scrape the port (CIDRs). Empty adds no allowFrom to darling.json; network.allowFrom never applies to metrics.
+  # Addresses allowed to scrape the port: CIDRs with a prefix length (10.0.0.5/32 for one address; an entry without one fails the
+  # render). Empty adds no allowFrom to darling.json; network.allowFrom never applies to metrics.
   allowFrom: []
   serviceMonitor:
     # Create a Prometheus Operator ServiceMonitor for the metrics Service, scraping with the chart's token. Needs metrics.enabled and the ServiceMonitor CRD where you apply it. Off by default.
     enabled: false
-    # Scrape interval of the ServiceMonitor, such as 30s or 1m.
+    # Scrape interval of the ServiceMonitor: a Prometheus duration such as 30s, 1m or 1m30s.
     interval: 60s
-    # Extra labels of the ServiceMonitor, for example the one your Prometheus selects on (release: kube-prometheus-stack).
+    # Extra labels of the ServiceMonitor, for example the one your Prometheus selects on (release: kube-prometheus-stack). A key the
+    # chart also sets (app.kubernetes.io/name, ...) takes the value given here; the ServiceMonitor's selector keeps the chart's labels.
     labels: {}

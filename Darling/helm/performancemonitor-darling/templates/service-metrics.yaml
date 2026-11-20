@@ -21,10 +21,8 @@ kind: ServiceMonitor
 metadata:
   name: {{ include "performancemonitor-darling.surfaceName" (dict "ctx" . "surface" "metrics") }}
   labels:
-    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
-    {{- with .Values.metrics.serviceMonitor.labels }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
+    {{- /* One map, so a label the chart also sets is written once, with the value from serviceMonitor.labels. */}}
+    {{- merge (deepCopy .Values.metrics.serviceMonitor.labels) (include "performancemonitor-darling.labels" . | fromYaml) | toYaml | nindent 4 }}
 spec:
   selector:
     matchLabels:

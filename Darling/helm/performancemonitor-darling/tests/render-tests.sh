@@ -804,7 +804,11 @@ assert_eq "$(dq '[.spec.template.spec.volumes[] | select(.name == "store-logins"
 
 t metrics_off_by_default
 render
-assert_eq "$(config_json '.metrics')" '{"enabled":false,"port":5155}' "metrics off"
+# Off writes no metrics block at all: darling.json, and so the pod's checksum/config, stay as they were before the chart had metrics.
+assert_eq "$(config_json 'has("metrics")')" "false" "no metrics block while off"
+render --set metrics.port=9100 --set 'metrics.allowFrom={10.0.0.0/8}'
+assert_eq "$(config_json 'has("metrics")')" "false" "no metrics block while off, other metrics values set"
+render
 assert_eq "$(dq '[.spec.template.spec.containers[0].ports[] | select(.name == "metrics")] | length')" "0" "no metrics container port"
 case ",$(secret_items)," in *,metrics-token=*) echo "the metrics token is mounted while metrics is off" >&2; exit 1 ;; esac
 
@@ -859,6 +863,17 @@ t metrics_schema
 assert_fails "metrics" --set metrics.port=x
 assert_fails "metrics" --set metrics.bogus=1
 assert_fails "interval" --set metrics.serviceMonitor.interval=1minute
+assert_fails "interval" --set metrics.serviceMonitor.interval=90
+# Any duration the ServiceMonitor CRD accepts, compound ones included.
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set metrics.serviceMonitor.interval=1m30s
+assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.spec.endpoints[0].interval')" "1m30s" "compound interval"
+render --set metrics.serviceMonitor.interval=1h
+render --set metrics.serviceMonitor.interval=500ms
+# Darling turns the port off for an allowFrom entry without a prefix length, so the render refuses it.
+assert_fails "metrics.allowFrom" --set metrics.enabled=true --set 'metrics.allowFrom={10.0.0.1}'
+assert_fails "metrics.allowFrom" --set metrics.enabled=true --set 'metrics.allowFrom={10.0.0.0/8,10.0.0.1}'
+render --set metrics.enabled=true --set 'metrics.allowFrom={10.0.0.1/32,fd00::/8}'
+assert_eq "$(config_json '.metrics.allowFrom')" '["10.0.0.1/32","fd00::/8"]' "CIDRs with a prefix length"
 
 t metrics_service
 render
@@ -881,6 +896,19 @@ render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --se
 assert_eq "$(sm '.spec.endpoints[0].authorization.credentials.name')" '"s"' "existing Secret name"
 assert_eq "$(sm '.spec.endpoints[0].interval')" '"30s"' "interval reaches the endpoint"
 assert_eq "$(sm '.metadata.labels.release')" '"kps"' "extra label"
+# With existingSecret the pod mounts the metrics token key from that Secret.
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "secrets") | .secret.secretName')" '"s"' "secrets volume reads the existing Secret"
+assert_eq "$(secret_items)" "metrics-token=metrics-token,web-token=web-token" "metrics token mounted from the existing Secret"
+
+t service_monitor_labels_replace_chart_labels
+# A label the chart also sets is written once, with the user's value: a repeated key is invalid YAML to a strict parser.
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+  --set 'metrics.serviceMonitor.labels.app\.kubernetes\.io/name=custom' --set 'metrics.serviceMonitor.labels.helm\.sh/chart=x'
+sm_doc="$(awk '/^kind: ServiceMonitor/{f=1} f && /^---/{exit} f' "${OUT}")"
+assert_eq "$(grep -c '^    app.kubernetes.io/name:' <<<"${sm_doc}")" "1" "app.kubernetes.io/name once in the ServiceMonitor labels"
+assert_eq "$(grep -c '^    helm.sh/chart:' <<<"${sm_doc}")" "1" "helm.sh/chart once in the ServiceMonitor labels"
+assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.metadata.labels."app.kubernetes.io/name"')" "custom" "the user's value wins"
+assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.spec.selector.matchLabels."app.kubernetes.io/name"')" "performancemonitor-darling" "the selector keeps the chart's labels"
 
 t service_monitor_off
 render --set metrics.enabled=true

@@ -227,15 +227,19 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- toJson $block -}}
 {{- end -}}
 
-{{/* The owned metrics block of darling.json. Darling's own check, while metrics is on, refuses a metrics port that clashes with the health, web or
-MCP port whether or not web and MCP are enabled (the chart always writes both ports), so the chart refuses it first. network.allowFrom never applies here: metrics has its own allowFrom. */}}
+{{/* The owned metrics block of darling.json, or {} while metrics is off: Darling reads a missing block as off, and writing none keeps
+darling.json (and so the pod's checksum/config) as it was for a release that never turns metrics on. Darling's own check, while metrics is
+on, refuses a metrics port that clashes with the health, web or MCP port whether or not web and MCP are enabled (the chart always writes
+both ports), so the chart refuses it first. network.allowFrom never applies here: metrics has its own allowFrom. */}}
 {{- define "performancemonitor-darling.metricsJson" -}}
 {{- $m := .Values.metrics -}}
-{{- $block := dict "enabled" $m.enabled "port" (int $m.port) -}}
+{{- $block := dict -}}
 {{- if and $m.serviceMonitor.enabled (not $m.enabled) -}}
 {{- fail "metrics.serviceMonitor.enabled needs metrics.enabled=true" -}}
 {{- end -}}
 {{- if $m.enabled -}}
+{{- $_ := set $block "enabled" true -}}
+{{- $_ := set $block "port" (int $m.port) -}}
 {{- if eq (int $m.port) 5154 -}}
 {{- fail "metrics.port (5154) is the health port: give the metrics listener its own port" -}}
 {{- end -}}
@@ -286,7 +290,11 @@ MCP port whether or not web and MCP are enabled (the chart always writes both po
 {{- fail (printf "%s.port must not be 5154: that port is fixed for the health endpoint the probes use, and Darling refuses a health port that clashes with the web or MCP port" $surface) -}}
 {{- end -}}
 {{- end -}}
-{{- $owned := dict "health" (dict "enabled" true "port" 5154 "listen" "0.0.0.0") "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) "metrics" (include "performancemonitor-darling.metricsJson" . | fromJson) -}}
+{{- $owned := dict "health" (dict "enabled" true "port" 5154 "listen" "0.0.0.0") "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
+{{- $metrics := include "performancemonitor-darling.metricsJson" . | fromJson -}}
+{{- if $metrics -}}
+{{- $_ := set $owned "metrics" $metrics -}}
+{{- end -}}
 {{- if .Values.passwordKey.existingSecret -}}
 {{- if eq .Values.passwordKey.source "env" -}}
 {{- $_ := set $owned "passwordKey" "env:DARLING_PASSWORD_KEY" -}}
