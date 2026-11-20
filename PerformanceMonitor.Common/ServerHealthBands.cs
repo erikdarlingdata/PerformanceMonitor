@@ -931,8 +931,8 @@ namespace PerformanceMonitor.Common
         /// Lite's window shows for the same setting (<c>ServerCardStatus.Disabled</c>).</summary>
         public const string DisabledServerStatus = "Disabled";
 
-        /// <summary>The <c>reason</c> of that row (#9087): collection is off, and the other tools answer only for the servers listed with another status.</summary>
-        public const string DisabledServerReason = "Data collection is turned off for this server. The other tools answer only for the servers listed with another status.";
+        /// <summary>The <c>reason</c> of that row (#9087): collection is off, and the tools that read collected data answer only for the servers listed with another status.</summary>
+        public const string DisabledServerReason = "Data collection is turned off for this server, so the tools that read collected data answer only for the servers listed with another status.";
 
         /// <summary>
         /// What Collection Health says while a server's connect has failed (#7590): collection is waiting on the connection, since when,
