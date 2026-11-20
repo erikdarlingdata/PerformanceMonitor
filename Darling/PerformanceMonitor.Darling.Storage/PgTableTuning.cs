@@ -413,6 +413,20 @@ public static class PgTableTuning
     private static string GuardedDrop(string indexName) =>
         Guarded(DropLockTimeoutSeconds, "DROP INDEX IF EXISTS collect." + indexName);
 
+    /// <summary>The replacement index when <paramref name="statement"/> is the guarded drop of an index in <see cref="s_replacedBy"/>, else null.</summary>
+    private static string? ReplacedIndexOf(string statement)
+    {
+        foreach (var (old, replacement) in s_replacedBy)
+        {
+            if (statement == GuardedDrop(old))
+            {
+                return replacement;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// The #3573 covering index's name, and the columns it carries in key-then-INCLUDE order. Exposed so the
     /// pin (<c>ForcePlanFailuresAccessPathTests</c>) can hold the read's column references against THIS list
@@ -446,6 +460,25 @@ public static class PgTableTuning
 
     /// <summary>#9172: the covering index for the 24 hour CPU window, on <c>collect.cpu_utilization_stats</c> (a hypertable or a plain table).</summary>
     public const string CpuWindowCoverIndexName = "idx_cpu_utilization_stats_window_cover";
+
+    /// <summary>
+    /// #9171: the covering index for the dropped-database read (<c>QueryStoreBackfillState.LastSeenPerDatabaseSql</c>, run by
+    /// <c>CurrentDatabaseScope.ReadDroppedAsync</c> for the top-queries reads): <c>(server_id, collection_time) INCLUDE (database_name)</c>.
+    /// </summary>
+    public const string DatabaseStatesNameCoverIndexName = "idx_database_states_server_time_cover";
+
+    /// <summary>#9171: the narrow <c>database_states</c> index the cover replaces. It was created by migration rung 49.</summary>
+    public const string DatabaseStatesNarrowIndexName = "idx_database_states_time";
+
+    /// <summary>
+    /// #9171: an index that a covering one replaces, mapped to the replacement. The drop of the old index runs only when the
+    /// replacement exists and is valid, so a build that gave up (lock timeout, a start that built another index first) never
+    /// leaves the table with neither.
+    /// </summary>
+    private static readonly Dictionary<string, string> s_replacedBy = new(StringComparer.Ordinal)
+    {
+        [DatabaseStatesNarrowIndexName] = DatabaseStatesNameCoverIndexName,
+    };
 
     /// <summary>
     /// #7147, #7152: the indexes built only while the table they are on (the <c>ON</c> table of their statement) is a plain
@@ -874,6 +907,18 @@ public static class PgTableTuning
            window only ever touches the two newest day chunks, which are uncompressed, so the compressed chunks cost the
            index nothing (their heaps are empty). */
         "CREATE INDEX IF NOT EXISTS " + CpuWindowCoverIndexName + " ON collect.cpu_utilization_stats (collection_time) INCLUDE (server_id, sqlserver_cpu_utilization)",
+        /* #9171: the dropped-database read behind the top-queries reads (QueryStoreBackfillState.LastSeenPerDatabaseSql: server_id and
+           collection_time to filter, database_name to group) fetched the heap row of every snapshot row in the window, because the only
+           index was (server_id, collection_time). With database_name INCLUDEd the read is an Index Only Scan with the same rows. Not
+           plain-table-only: the newest day of a TimescaleDB store is uncompressed and takes the same scan. The snapshots are one row per
+           database per cycle, so the write cost is small. Measured on a test store (1,500 databases, 5-minute snapshots, the read's
+           statement, EXPLAIN (ANALYZE, BUFFERS)): plain tables 24 h window 6,157 buffers before and 2,150 after, 7 days 30,159 before and
+           14,919 after (the 7-day plan takes the index at random_page_cost 1.1 and stays a sequential scan at the default 4);
+           TimescaleDB 24 h 5,818 before and 3,856 after, 7 days unchanged because the older chunks are compressed. The narrow index
+           it replaces is dropped on the next line once this one is valid: every reader of the narrow one (MAX(collection_time) probes,
+           the database-name lists) is served by the cover, which carries the same two key columns. */
+        "CREATE INDEX IF NOT EXISTS " + DatabaseStatesNameCoverIndexName + " ON collect.database_states (server_id, collection_time) INCLUDE (database_name)",
+        GuardedDrop(DatabaseStatesNarrowIndexName),
     };
 
     /// <summary>
@@ -995,6 +1040,16 @@ public static class PgTableTuning
                     buildIssued |= oneBuildPerStart;
                     buildStartedAt = Stopwatch.GetTimestamp();
                     sql = GuardedCreate(statement);
+                }
+                else if (ReplacedIndexOf(statement) is { } replacement)
+                {
+                    /* #9171: a drop of an index a covering one replaces waits for the replacement to exist and be valid. */
+                    using var replacementProbe = new NpgsqlCommand(IndexValidSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    replacementProbe.Parameters.AddWithValue(replacement);
+                    if (await replacementProbe.ExecuteScalarAsync(cancellationToken) is not true)
+                    {
+                        continue;
+                    }
                 }
                 else if (statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal))
                 {
