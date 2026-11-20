@@ -405,7 +405,7 @@ internal static class DarlingQueryHeatmapReader
                     delta_execution_count
                 FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time < $7
                 AND   collection_time <= $3
                 AND   ($4::text[] IS NULL OR database_name = ANY($4))
@@ -433,7 +433,7 @@ internal static class DarlingQueryHeatmapReader
                 FROM query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $8
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($4::text[] IS NULL OR database_name = ANY($4))
                 AND   delta_execution_count > 0
