@@ -203,6 +203,8 @@ public sealed class StoreHealthPageBehaviourTests
         Assert.Equal("Invalid", rows[0][0]);
         Assert.Equal("Larger than its table", rows[1][0]);
         Assert.Contains(rows, r => r.Any(c => c.Contains("Table not analyzed", StringComparison.Ordinal)));
+        /* The Not Estimated cell shows the short word first and carries the full sentence in its disclosure. */
+        Assert.Contains(rows, r => r.Any(c => c.StartsWith("Not a btree index", StringComparison.Ordinal)));
         Assert.DoesNotContain(rows, r => r.Any(c => c.Contains("reltuples", StringComparison.Ordinal)));
         var coverage = Rows(after.GetProperty("coverageRows"));
         Assert.Single(coverage);
