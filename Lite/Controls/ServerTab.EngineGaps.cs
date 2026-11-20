@@ -300,11 +300,11 @@ public partial class ServerTab : UserControl
     /// What such a collector logged before the gate existed (an Amazon RDS Web or Express server's SESSION_MISSING runs for <c>attention</c>)
     /// stays in the window and bands FAILING, and a collector that does not run can never replace it. An engine not read yet makes no claim.
     /// </summary>
-    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, AwsRdsKind awsRdsKind)
+    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, AwsRdsKind awsRdsKind, int sqlMajorVersion = 0)
     {
         foreach (var row in health)
         {
-            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind);
+            var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, row.CollectorName, awsRdsKind, sqlMajorVersion: sqlMajorVersion);
             row.EngineGated = message is not null;
             row.EngineNotCollectedMessage = message;
         }

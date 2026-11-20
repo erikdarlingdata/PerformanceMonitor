@@ -497,9 +497,10 @@ public partial class ServerTab : UserControl
             /* #7241: a collector this server's engine does not run is never counted, the rule the grid and Darling's badge follow. */
             var engineEdition = _engineEdition;
             var awsRdsKind = _awsRdsKind;
+            var sqlMajorVersion = _sqlMajorVersion;
             var displayName = _server.DisplayName;
             var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId,
-                name => CollectorEngineCapability.NotCollectedMessage(displayName, engineEdition, engineKind: null, name, awsRdsKind) is not null));
+                name => CollectorEngineCapability.NotCollectedMessage(displayName, engineEdition, engineKind: null, name, awsRdsKind, sqlMajorVersion: sqlMajorVersion) is not null));
             CollectionHealthTab.Header = denied > 0
                 ? $"Collection Health ({denied} no permission)"
                 : "Collection Health";
@@ -1468,7 +1469,7 @@ public partial class ServerTab : UserControl
                and the stamped one also holds when the display mode flips or another tab is selected first. */
             var tabClock = _serverClock;
             foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
-            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind);
+            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind, _sqlMajorVersion);
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";
