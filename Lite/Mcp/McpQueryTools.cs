@@ -1620,6 +1620,35 @@ public sealed class McpQueryTools
             requestedStart, windowEnd, table, emptyAnswer: emptyAnswer);
 
     /// <summary>
+    /// <see cref="EventWindowNoticeAsync"/> for every length a page of events can be cut to for the response budget: element <c>n</c> is
+    /// the notice for the page's first <c>n</c> events (element 0 is unused), so a cut page names the floor of the events it kept. The
+    /// whole page reads the coverage probe. Lite's probe also reads the stored event times, so on its own it names the store's oldest
+    /// event in the window, which a cut can have left out: a shorter page of a newest-first list (<paramref name="newestFirst"/>) probes
+    /// with its newest event as the only event side, an event every cut of the page keeps, and the earlier-of with the oldest event kept
+    /// then names that event when nothing proves more. Each probe is read once, however many lengths there are.
+    /// </summary>
+    internal static async Task<McpWindowNotice[]> EventWindowNoticePrefixesAsync(
+        LocalDataService dataService, QueryWindowRelation relation, int serverId, IReadOnlyList<DateTime?> eventTimes,
+        DateTime requestedStart, DateTime windowEnd, string table, bool newestFirst = true)
+    {
+        var coverageProbe = new Lazy<Task<DateTime?>>(() => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd));
+        var newest = eventTimes.Max();
+        var servedProbe = newestFirst && newest != null
+            ? new Lazy<Task<DateTime?>>(() => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd, rowsNotBeforeUtc: newest))
+            : coverageProbe;
+        var notices = new McpWindowNotice[eventTimes.Count + 1];
+        DateTime? oldest = null;
+        for (var shown = 1; shown <= eventTimes.Count; shown++)
+        {
+            oldest = LocalDataService.EarlierCoverageFloor(oldest, eventTimes[shown - 1]);
+            var probe = shown < eventTimes.Count ? servedProbe : coverageProbe;
+            notices[shown] = await EventWindowNoticeAsync(() => probe.Value, oldest, requestedStart, windowEnd, table);
+        }
+
+        return notices;
+    }
+
+    /// <summary>
     /// #7005: the window notice of an EMPTY answer over one window-floor relation, including the aged-out case. The probe's floor
     /// is the first row or logged run of the relation's collector inside the window; null means the store holds neither there.
     /// Null is then one of two things: the window ENDS before the first row the store kept and the collector was storing rows

@@ -59,11 +59,11 @@ public sealed class McpBlockingTools
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
             /* #4966: where this server's deadlocks data starts for the window. An event list, so the floor is the
-               earlier of the coverage probe and the oldest event the page shows. */
+               earlier of the coverage probe and the oldest event the page shows. The response budget can leave the oldest
+               deadlocks off the page, so a notice is read for every length it can be cut to. */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = await McpQueryTools.EventWindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, resolved.ServerId, requestedStart, windowEnd),
-                page.Min(r => r.DeadlockTime), requestedStart, windowEnd, "deadlocks");
+            var notices = await McpQueryTools.EventWindowNoticePrefixesAsync(
+                dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, page.Select(r => r.DeadlockTime).ToList(), requestedStart, windowEnd, "deadlocks");
 
             var result = page.Select(r => new
             {
@@ -74,30 +74,46 @@ public sealed class McpBlockingTools
                 victim_sql_text = McpHelpers.TruncateStatement(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
                 has_deadlock_xml = r.HasDeadlockXml
-            });
+            }).ToList();
 
             /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
-            return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
+            var lossRuns = await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, requestedStart, windowEnd);
+
+            /* The newest deadlocks that fit the response budget: rows are left off the end whole, never cut, and every field that describes
+               the page (the count, the span, the window notice) is that of the rows it kept. `truncated` is true for either cut, the row limit or the
+               budget; budget_truncated is the budget alone, as on Darling's twin. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: where the store's data starts, always present (false and null when the store covered the
-                   window). The floor is the earlier of the coverage probe and the oldest event this page shows: a
-                   first run of the collector can store events from before itself. No effective_hours_back: this
-                   payload carries a page `truncated`, and the census holds that key apart for the window floor. */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #3541 A3: the page described as a page, on Darling's field names. The ORDER BY is
-                   deadlock_time, so the bounds are on that stamp; Min/Max over DateTime? skip a null. */
-                deadlocks_returned = page.Count,
-                truncated,
-                oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.DeadlockTime)),
-                newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.DeadlockTime)),
-                order = "deadlock_time_desc",
-                separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
-                deadlocks = result
-            }, McpHelpers.JsonOptions), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, requestedStart, windowEnd));
+                var notice = notices[kept];
+                return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
+                {
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: where the store's data starts, always present (false and null when the store covered the
+                       window). The floor is the earlier of the coverage probe and the oldest event this page shows: a
+                       first run of the collector can store events from before itself. No effective_hours_back: this
+                       payload carries a page `truncated`, and the census holds that key apart for the window floor. */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #3541 A3: the page described as a page, on Darling's field names. The ORDER BY is
+                       deadlock_time, so the bounds are on that stamp; Min/Max over DateTime? skip a null. */
+                    deadlocks_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "deadlocks",
+                            "Pass as_of at oldest_returned_deadlock_time to read on from there, or narrow the window with hours_back.")
+                        : null,
+                    oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.DeadlockTime)),
+                    newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.DeadlockTime)),
+                    order = "deadlock_time_desc",
+                    separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
+                    deadlocks = result.Take(kept)
+                }, McpHelpers.JsonOptions), lossRuns);
+            }
+
+            return McpResponseBudget.FitPrefix(page.Count, Reply).Json;
         }
         catch (Exception ex)
         {
@@ -265,11 +281,11 @@ public sealed class McpBlockingTools
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
             /* #4966: where this server's blocked_process_report data starts for the window. An event list, so the floor is the
-               earlier of the coverage probe and the oldest event the page shows. */
+               earlier of the coverage probe and the oldest event the page shows. The response budget can leave the oldest
+               reports off the page, so a notice is read for every length it can be cut to. */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = await McpQueryTools.EventWindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd),
-                page.Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
+            var notices = await McpQueryTools.EventWindowNoticePrefixesAsync(
+                dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, page.Select(r => r.EventTime).ToList(), requestedStart, windowEnd, "blocked_process_report");
 
             var result = page.Select(r => new
             {
@@ -318,35 +334,51 @@ public sealed class McpBlockingTools
                 blocking_tran_log_bytes_used = r.BlockingTranLogBytesUsed,
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority
-            });
+            }).ToList();
 
             /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
-            return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
+            var lossRuns = await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, requestedStart, windowEnd);
+
+            /* The newest reports that fit the response budget: rows are left off the end whole, never cut, and every field that describes
+               the page (the count, the span, the window notice) is that of the rows it kept. `truncated` is true for either cut, the row limit or the
+               budget; budget_truncated is the budget alone, as on Darling's twin. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
-                hours_back,
-                /* #4966: where the store's data starts, always present (false and null when the store covered the
-                   window). The floor is the earlier of the coverage probe and the oldest event this page shows: a
-                   first run of the collector can store events from before itself. No effective_hours_back: this
-                   payload carries a page `truncated`, and the census holds that key apart for the window floor. */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #5244: the database the page is limited to, null for all; after the three notice keys, as on Darling's twin. */
-                database_name = database,
-                /* #3541 A3: the page described as a page, on the names Darling's get_blocking uses. Newest-first
-                   makes the page a contiguous slice of the window's tail, so oldest_returned_event_time IS the
-                   reach of this read — the #3287 figure, and the field a caller has to read before believing
-                   that a quiet page describes a quiet window. */
-                reports_returned = page.Count,
-                truncated,
-                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
-                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
-                order = "event_time_desc",
-                separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
-                reports = result
-            }, McpHelpers.JsonOptions), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, requestedStart, windowEnd), database != null);
+                var notice = notices[kept];
+                return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
+                {
+                    server = resolved.DisplayName,
+                    /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
+                    hours_back,
+                    /* #4966: where the store's data starts, always present (false and null when the store covered the
+                       window). The floor is the earlier of the coverage probe and the oldest event this page shows: a
+                       first run of the collector can store events from before itself. No effective_hours_back: this
+                       payload carries a page `truncated`, and the census holds that key apart for the window floor. */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #5244: the database the page is limited to, null for all; after the three notice keys, as on Darling's twin. */
+                    database_name = database,
+                    /* #3541 A3: the page described as a page, on the names Darling's get_blocking uses. Newest-first
+                       makes the page a contiguous slice of the window's tail, so oldest_returned_event_time IS the
+                       reach of this read — the #3287 figure, and the field a caller has to read before believing
+                       that a quiet page describes a quiet window. */
+                    reports_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "blocked process reports",
+                            "Pass as_of at oldest_returned_event_time to read on from there, or narrow the page with database_name or a smaller hours_back.")
+                        : null,
+                    oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.EventTime)),
+                    newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.EventTime)),
+                    order = "event_time_desc",
+                    separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
+                    reports = result.Take(kept)
+                }, McpHelpers.JsonOptions), lossRuns, database != null);
+            }
+
+            return McpResponseBudget.FitPrefix(page.Count, Reply).Json;
         }
         catch (Exception ex)
         {

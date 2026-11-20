@@ -125,38 +125,51 @@ public sealed class McpPlanCorrectionTools
                 revert_action_initiated_time = r.RevertActionInitiatedTime?.ToString("o"),
                 query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, QueryTextPreviewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
-            });
+            }).ToList();
 
-            return JsonSerializer.Serialize(new
+            /* The newest capture rows that fit the response budget: rows are left off the end whole, never cut, and every field that describes
+               the page (the count and the span) is that of the rows it kept. `truncated` is true for either cut, the row limit or the
+               budget; budget_truncated is the budget alone, as on Darling's twin. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: always present (false and null when the store covered the window). No effective_hours_back: this payload
-                   carries a page `truncated`, and the census holds that key apart for the window floor. */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #5244: which database the page is limited to: the name for one, null for all (the twin of Darling's database_name echo). */
-                database_name = database,
-                automatic_tuning = tuning.Select(t => new
+                return JsonSerializer.Serialize(new
                 {
-                    database_name = t.DatabaseName,
-                    force_last_good_plan_desired_state = t.DesiredState,
-                    force_last_good_plan_actual_state = t.ActualState,
-                    force_last_good_plan_reason = t.Reason,
-                    as_of = t.CollectionTime.ToString("o"),
-                }),
-                /* #3541 A3: the page described as a page, on Darling's names. Newest-capture-first makes it a
-                   contiguous slice of the window's tail, so the oldest stamp IS the reach; null when the window
-                   held no recommendation rows and only the tuning snapshot answered. */
-                recommendations_returned = page.Count,
-                truncated,
-                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
-                order = "collection_time_desc",
-                recommendations,
-            }, McpHelpers.JsonOptions);
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: always present (false and null when the store covered the window). No effective_hours_back: this payload
+                       carries a page `truncated`, and the census holds that key apart for the window floor. */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #5244: which database the page is limited to: the name for one, null for all (the twin of Darling's database_name echo). */
+                    database_name = database,
+                    automatic_tuning = tuning.Select(t => new
+                    {
+                        database_name = t.DatabaseName,
+                        force_last_good_plan_desired_state = t.DesiredState,
+                        force_last_good_plan_actual_state = t.ActualState,
+                        force_last_good_plan_reason = t.Reason,
+                        as_of = t.CollectionTime.ToString("o"),
+                    }),
+                    /* #3541 A3: the page described as a page, on Darling's names. Newest-capture-first makes it a
+                       contiguous slice of the window's tail, so the oldest stamp IS the reach; null when the window
+                       held no recommendation rows and only the tuning snapshot answered. */
+                    recommendations_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest capture first", "recommendation rows",
+                            "Pass as_of at oldest_returned_collection_time to read on from there, or narrow the page with database_name.")
+                        : null,
+                    /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
+                    oldest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.CollectionTime)),
+                    newest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.CollectionTime)),
+                    order = "collection_time_desc",
+                    recommendations = recommendations.Take(kept),
+                }, McpHelpers.JsonOptions);
+            }
+
+            return McpResponseBudget.FitPrefix(page.Count, Reply).Json;
         }
         catch (Exception ex)
         {

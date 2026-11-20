@@ -181,7 +181,31 @@ public sealed class McpSessionTools
                 }
             }
 
-            return activePayload.ToJsonString(McpHelpers.JsonOptions);
+            /* The newest snapshot rows that fit the response budget: rows are left off the end whole, never cut, and every field that
+               describes the page (the count, the span, each victim's blocker_not_shown) is that of the rows it kept. `truncated` is true
+               for either cut, the row limit or the budget; budget_truncated is the budget alone, as on Darling's twin. */
+            return McpResponseBudget.CapArray(
+                activePayload, "queries", "newest capture first", "snapshot rows",
+                _ => "Pass as_of at oldest_returned_collection_time to read on from there, or narrow the page with database_name, wait_type or blocking_only.",
+                McpResponseBudget.DefaultBytes, "budget_truncated", "budget_note",
+                (kept, count) =>
+                {
+                    kept["snapshots_returned"] = count;
+                    kept["truncated"] = truncated || count < shown.Count;
+                    kept["oldest_returned_collection_time"] = McpHelpers.FormatEffectiveStart(shown[count - 1].CollectionTime);
+                    kept["newest_returned_collection_time"] = McpHelpers.FormatEffectiveStart(shown[0].CollectionTime);
+
+                    /* A victim whose blocker was cut from the page says past_page, not nothing. */
+                    var keptOnPage = new HashSet<(DateTime, int)>(shown.Take(count).Select(r => (r.CollectionTime, r.SessionId)));
+                    if (kept["queries"] is System.Text.Json.Nodes.JsonArray keptRows)
+                    {
+                        for (var i = 0; i < keptRows.Count && i < shown.Count; i++)
+                        {
+                            if (keptRows[i] is System.Text.Json.Nodes.JsonObject keptRow && BlockerNotShown(shown[i], keptOnPage) is { } reason)
+                                keptRow["blocker_not_shown"] = reason;
+                        }
+                    }
+                });
         }
         catch (Exception ex)
         {
