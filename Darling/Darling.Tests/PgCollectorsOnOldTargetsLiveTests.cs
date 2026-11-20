@@ -45,7 +45,7 @@ namespace Darling.Tests;
 public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
 {
     /// <summary>The majors CI starts as targets. A major added to <c>start-test-pg.ps1 -Majors</c> is added here too.</summary>
-    public static IEnumerable<TheoryDataRow<int>> ExpectedMajors() => new[] { 10, 13, 14, 16, 17 }.Select(major => new TheoryDataRow<int>(major));
+    public static IEnumerable<TheoryDataRow<int>> ExpectedMajors() => new[] { 10, 13, 14, 16, 17, 18, 19 }.Select(major => new TheoryDataRow<int>(major));
 
     /// <summary>
     /// Collectors that do not run against a target started by <c>start-test-pg.ps1</c>, each with the reason. A collector
@@ -61,7 +61,36 @@ public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
         ["pg_predicate_stats"] = "reads pg_qualstats, which the EDB zip does not carry: the runner raises the #6888 precondition (42P01, extension not created) on every major. Measured on run 41158907025.",
     };
 
-    private static bool TargetsRequired => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG_TARGETS_REQUIRED"));
+    /// <summary>
+    /// True when <paramref name="major"/> must have a target. <c>DARLING_TEST_PG_TARGETS_REQUIRED</c> makes every expected major
+    /// required, except the ones <c>DARLING_TEST_PG_TARGETS_OPTIONAL</c> names (a comma list such as <c>18,19</c>). The PR leg
+    /// names the newest majors there so its wall time does not grow; the nightly leg names none and runs all of them (#9132).
+    /// </summary>
+    internal static bool IsTargetRequired(string? requiredSetting, string? optionalSetting, int major)
+    {
+        if (string.IsNullOrEmpty(requiredSetting))
+        {
+            return false;
+        }
+
+        var optional = (optionalSetting ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(entry => int.TryParse(entry, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : -1);
+        return !optional.Contains(major);
+    }
+
+    [Theory]
+    [InlineData("1", null, 17, true)]
+    [InlineData("1", "", 19, true)]
+    [InlineData("1", "18,19", 19, false)]
+    [InlineData("1", "18, 19", 18, false)]
+    [InlineData("1", "18,19", 17, true)]
+    [InlineData(null, null, 17, false)]
+    [InlineData("", "18", 17, false)]
+    public void IsTargetRequired_RequiresEveryMajorExceptTheOptionalOnes(string? required, string? optional, int major, bool expected)
+    {
+        Assert.Equal(expected, IsTargetRequired(required, optional, major));
+    }
 
     [Fact]
     public void ExclusionsNameCatalogDefinitions()
@@ -81,7 +110,7 @@ public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
         var variable = $"DARLING_TEST_PG_TARGET_{major}";
         var targetConnectionString = Environment.GetEnvironmentVariable(variable);
         var storeConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        if (string.IsNullOrEmpty(targetConnectionString) && TargetsRequired)
+        if (string.IsNullOrEmpty(targetConnectionString) && IsTargetRequired(Environment.GetEnvironmentVariable("DARLING_TEST_PG_TARGETS_REQUIRED"), Environment.GetEnvironmentVariable("DARLING_TEST_PG_TARGETS_OPTIONAL"), major))
         {
             Assert.Fail($"{variable} is not set but DARLING_TEST_PG_TARGETS_REQUIRED is: the old-target clusters were not started, so no collector ran against PostgreSQL {major}. Run start-test-pg.ps1 -Mode StartTargets -Majors {major}.");
         }

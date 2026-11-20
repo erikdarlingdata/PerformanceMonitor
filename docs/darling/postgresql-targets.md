@@ -99,7 +99,7 @@ Cadences and retention are the shared defaults, with no knobs, exactly as for SQ
 
 Darling has three support tiers for a PostgreSQL target.
 
-- Supported: PostgreSQL 14 to 18, the versions the PostgreSQL project still fixes, plus Amazon RDS, Aurora and Azure Database for PostgreSQL.
+- Supported: PostgreSQL 14 to 19, plus Amazon RDS, Aurora and Azure Database for PostgreSQL. The PostgreSQL project still fixes PostgreSQL 15 to 19. PostgreSQL 14 left community support in November 2026, and Darling still supports it.
 - Best effort: PostgreSQL 10 to 13. The collectors change their queries to fit the version, and a column that the version does not have is stored as NULL. Bugs on these versions are fixed when they are reported.
 - Not supported: PostgreSQL below 10.
 
