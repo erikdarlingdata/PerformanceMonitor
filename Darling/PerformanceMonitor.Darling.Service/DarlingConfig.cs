@@ -2502,8 +2502,26 @@ public sealed class MetricsConfig
 /// <summary>
 /// #9013: the outcome of <see cref="MetricsConfig.Check"/>. <see cref="Token"/> is the resolved token, set only when there are no
 /// <see cref="Problems"/>; <see cref="AllowList"/> is <c>default</c> (Count 0, no address filter) when <c>allowFrom</c> is blank.
+/// A class, not a record, so no generated <c>ToString</c> can print the resolved token into a log line.
 /// </summary>
-internal sealed record MetricsCheck(IReadOnlyList<string> Problems, string? Token, CidrAllowList AllowList, bool TokenIsLiteral);
+internal sealed class MetricsCheck
+{
+    internal MetricsCheck(IReadOnlyList<string> problems, string? token, CidrAllowList allowList, bool tokenIsLiteral)
+    {
+        Problems = problems;
+        Token = token;
+        AllowList = allowList;
+        TokenIsLiteral = tokenIsLiteral;
+    }
+
+    internal IReadOnlyList<string> Problems { get; }
+
+    internal string? Token { get; }
+
+    internal CidrAllowList AllowList { get; }
+
+    internal bool TokenIsLiteral { get; }
+}
 
 /// <summary>
 /// Opt-in NETWORK exposure for the embedded web dashboard (#1562), the twin of <see cref="McpNetworkConfig"/>.

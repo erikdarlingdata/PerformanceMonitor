@@ -167,6 +167,17 @@ public class MetricsConfigTests
         }
     }
 
+    /// <summary>#9013: the check holds the resolved token, so its string form must not print it into a log line or a failed
+    /// assertion.</summary>
+    [Fact]
+    public void Check_ToString_DoesNotCarryTheToken()
+    {
+        var check = MetricsConfig.Check(new MetricsConfig { Enabled = true, Token = GoodToken, AllowFrom = "10.0.0.0/8" }, 5100, 5200, null);
+        Assert.Equal(GoodToken, check.Token);
+
+        Assert.DoesNotContain(GoodToken, check.ToString() ?? "", StringComparison.Ordinal);
+    }
+
     [Fact]
     public void LiteralTokenWithBlankAllowFrom_IsLiteralWithNoAddressFilter()
     {
