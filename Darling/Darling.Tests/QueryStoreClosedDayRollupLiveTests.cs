@@ -218,7 +218,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
     {
         var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
-        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC' WHERE NOT removed", ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC', clutter_built_at = CASE WHEN clutter_built_at = built_at THEN now() AT TIME ZONE 'UTC' END WHERE NOT removed", ct);
         await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = (now() AT TIME ZONE 'UTC') - interval '10 minutes'", ct);
         return result;
     }
@@ -333,7 +333,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
             "the late rows changed nothing in the 30-day window, so the rebuild would prove nothing");
 
         /* Marked days are left to the interval table until they are rebuilt. */
-        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC' WHERE NOT removed", ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC', clutter_built_at = CASE WHEN clutter_built_at = built_at THEN now() AT TIME ZONE 'UTC' END WHERE NOT removed", ct);
         Assert.NotNull(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
         AssertSame(expectedAfterLate, await ReadAllAsync(store.Viewer, ct), "with the late rows' days marked");
 
