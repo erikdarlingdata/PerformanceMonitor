@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
 
@@ -69,11 +70,12 @@ internal static class DarlingWebFailureLog
     /// out of the message-text-matching trap <c>PgBaselineProvider.IsCommandTimeout</c>'s own doc warns against.
     ///
     /// <para>A client-side Npgsql <c>CommandTimeout</c> (the <see cref="NpgsqlException"/>/<see
-    /// cref="TimeoutException"/> arm of <see cref="IsStatementTimeout(Exception)"/>) carries no SQLSTATE and so
-    /// is NOT matched here — it falls through to the generic 500. Accepted: <c>McpCommandDeadlines</c>'s own
-    /// comment says the store's statement_timeout deliberately fires first on an MCP/web read, so a tool-caught
-    /// timeout reaches this classifier as a real 57014 in practice (the shape <c>McpReadCommandTimeoutTests</c>
-    /// pins), not as the client-side race.</para>
+    /// cref="TimeoutException"/> arm of <see cref="IsStatementTimeout(Exception)"/>) carries no SQLSTATE, and on an
+    /// MCP/web read it is the timeout that fires FIRST: <c>McpCommandDeadlines.ReadSeconds</c> (30 s) sits under the
+    /// viewer and mcp roles' <c>statement_timeout</c> (60 s), so the store logs a user cancel and never a 57014 (#8570).
+    /// <c>McpHelpers.ErrorSentence</c> therefore puts <see cref="McpHelpers.CommandTimeoutToken"/> where the SQLSTATE
+    /// would sit, and this matcher takes either token, so a tool-caught client timeout answers 503 with the timeout
+    /// body like a store-side one.</para>
     ///
     /// <para>Anchored to a known prefix, not a bare word-boundary (#4283 L1): a word boundary alone still lets
     /// <c>57014</c> match anywhere in the tail text — a repeated value, a port number, an identifier that merely
@@ -84,7 +86,7 @@ internal static class DarlingWebFailureLog
     /// <see cref="Mcp.DarlingServerResolver.RegistryReadFaultPrefix"/>) means the token can only match where a
     /// real SQLSTATE sits, not wherever the digits happen to recur later in the same sentence.</para>
     /// </summary>
-    private static readonly Regex s_sentenceTimeoutToken = SentenceTokenRegex("57014");
+    private static readonly Regex s_sentenceTimeoutToken = SentenceTokenRegex("(?:57014|" + Regex.Escape(McpHelpers.CommandTimeoutToken) + ")");
 
     internal static bool IsStatementTimeoutSentence(string sentence) =>
         sentence is not null && s_sentenceTimeoutToken.IsMatch(sentence);
