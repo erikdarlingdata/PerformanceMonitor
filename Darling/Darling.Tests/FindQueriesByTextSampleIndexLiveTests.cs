@@ -241,6 +241,12 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         var tracker = new QueryTextTrigramIndexTracker();
         tracker.Configure(true);
         Assert.True((await DigestsOfAsync(data, "dbo.Orders_", ct)).Length > ProbeDigestCap(), "the fixture's pattern must match more texts than the cap");
+        /* #9150: the join runs a span at a time, and a span of a store nobody has analyzed yet is planned as a few rows, which the planner joins to the matched texts one text at a time. */
+        await using (var c = await data.OpenConnectionAsync(ct))
+        {
+            await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE collect.query_text_dim");
+            await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE query_stats");
+        }
 
         var reply = JsonDocument.Parse(await RunTool(data, "dbo.Orders_", tracker, DarlingMcpFindQueriesByTextTools.MaxLimit, ct)).RootElement;
 
