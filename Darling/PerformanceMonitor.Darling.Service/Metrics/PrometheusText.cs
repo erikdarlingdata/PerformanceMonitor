@@ -71,7 +71,8 @@ internal static class PrometheusText
             foreach (var stamp in scrape.Snapshot.LastCollections)
             {
                 var label = new[] { new KeyValuePair<string, string>(DarlingMetricCatalog.ServerLabel, stamp.Server) };
-                Add(new MetricSample(CollectionAge, label, (nowUtc - stamp.LastCollectionUtc).TotalSeconds));
+                /* #9013: clamped at 0 like the snapshot age, so a clock step or a collection stamped ahead never reads as negative. */
+                Add(new MetricSample(CollectionAge, label, Math.Max(0d, (nowUtc - stamp.LastCollectionUtc).TotalSeconds)));
             }
         }
 

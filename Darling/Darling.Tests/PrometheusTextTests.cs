@@ -61,6 +61,22 @@ public class PrometheusTextTests
         Assert.Contains("darling_cpu_sql_percent{server=\"a\"} 12.5", Lines(body));
     }
 
+    /// <summary>#9013: a wall clock that stepped back (or a collection stamped ahead of this host's clock) never reads as a negative
+    /// age: the snapshot age and each collection age are clamped at 0.</summary>
+    [Fact]
+    public void AgesInTheFuture_AreClampedAtZero()
+    {
+        var snapshot = new MetricsSnapshot(
+            Now.AddSeconds(30),
+            new[] { new MetricSample("darling_cpu_sql_percent", Server("a"), 12.5) },
+            new[] { new ServerCollectionStamp("a", Now.AddSeconds(45)) });
+
+        var body = PrometheusText.Write(Scrape(snapshot), Now);
+
+        Assert.Contains("darling_metrics_snapshot_age_seconds 0", Lines(body));
+        Assert.Contains("darling_server_last_collection_age_seconds{server=\"a\"} 0", Lines(body));
+    }
+
     [Fact]
     public void StaleSnapshot_DropsServerSeries_KeepsMeta()
     {
