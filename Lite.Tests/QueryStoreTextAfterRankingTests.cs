@@ -363,8 +363,9 @@ WHERE {presence}";
 
     /// <summary>
     /// The regressions fallback (a key whose latest kept row has no text) walks the window one UTC day at a time, newest
-    /// first, and stops at the first day with a text, instead of one MAX over every file of the window. Both window ends
-    /// are inclusive, including a row collected exactly at either.
+    /// first, and stops at the first day with a text, instead of one MAX over every file of the window. The window is
+    /// open at its start and closed at its end: a row collected exactly on the start belongs to the window before, and a
+    /// row collected exactly on the end is read.
     /// </summary>
     [Fact]
     public async Task WindowTextFallback_WalksTheWindowNewestUtcDayFirst()
@@ -385,7 +386,8 @@ WHERE {presence}";
         using var read = await new LocalDataService(duckDb).OpenConnectionAsync();
         var from = _anchor.AddDays(-3);
         Assert.Equal("aaa newer", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 910, from, _anchor));
-        Assert.Equal("edge start 911", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from, _anchor));
+        Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from, _anchor));
+        Assert.Equal("edge start 911", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from.AddDays(-1), from));
         Assert.Equal("edge end 912", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 912, from, _anchor));
         Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 910, from.AddDays(2), _anchor.AddDays(-1)));
         Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 913, from, _anchor));

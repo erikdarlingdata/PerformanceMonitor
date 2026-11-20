@@ -66,14 +66,15 @@ public partial class LocalDataService
 
     /// <summary>
     /// The by-key text statement for the given ids: $1 server, $2 and $3 the time bounds. The bounds sit beside the ids so
-    /// a parquet row group is skipped on either. Ids are BIGINTs read back from the store and formatted by hand: no
-    /// user text reaches this IN list.
+    /// a parquet row group is skipped on either. They are the earliest and the latest stamp of the named rows themselves,
+    /// not a window, so both are inclusive: the row stamped on either is one of the rows asked for. Ids are BIGINTs read
+    /// back from the store and formatted by hand: no user text reaches this IN list.
     /// </summary>
     internal static string TextByRowSql(IEnumerable<long> collectionIds) => @"
 SELECT collection_id, collection_time, query_text
 FROM v_query_store_stats
 WHERE server_id = $1
-AND   collection_time > $2
+AND   collection_time >= $2
 AND   collection_time <= $3
 AND   collection_id IN (" + string.Join(",", collectionIds.Select(id => id.ToString(CultureInfo.InvariantCulture))) + ")";
 
@@ -168,6 +169,8 @@ LIMIT 1", "query_store_stats", relation);
 
     /// <summary>
     /// The greatest non-null <c>query_text</c> one (database, query_id) has inside a collection_time window, or null.
+    /// The window is open at its start and closed at its end, (start, end], and the days it is read in leave no gap: each
+    /// day's statement starts where the day before it ended, so a row stamped on a UTC midnight is read with its own day.
     /// The by-key reads' fallback for a key whose latest kept row carried no text. One statement per UTC day of the
     /// window, newest day first, stopping at the first day that has a text: a single day's text is in memory at a time,
     /// and a query that has text anywhere recent never touches the older days (the review of #5396).
@@ -177,8 +180,10 @@ LIMIT 1", "query_store_stats", relation);
     {
         for (var day = windowEnd.Date; day >= windowStart.Date; day = day.AddDays(-1))
         {
-            /* DuckDB's TIMESTAMP has microsecond precision: a tick-sized step back from midnight would round up to it. */
-            var from = day > windowStart ? day : windowStart;
+            /* DuckDB's TIMESTAMP has microsecond precision: a tick-sized step back from midnight would round up to it.
+               The statement's start is exclusive, so a day starts a microsecond before its midnight, where the day before ended. */
+            var dayStart = day.AddTicks(-10);
+            var from = dayStart > windowStart ? dayStart : windowStart;
             var dayEnd = day.AddDays(1).AddTicks(-10);
             var to = dayEnd < windowEnd ? dayEnd : windowEnd;
             using var command = connection.CreateCommand();
