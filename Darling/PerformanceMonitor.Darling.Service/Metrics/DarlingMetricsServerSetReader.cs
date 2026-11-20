@@ -138,7 +138,7 @@ CROSS JOIN LATERAL
             CASE WHEN bool_or(p.instance_name = '_Total')
                  THEN SUM(p.delta_cntr_value) FILTER (WHERE p.instance_name = '_Total')
                  ELSE SUM(p.delta_cntr_value) END AS delta_cntr_value,
-            MAX(p.sample_interval_seconds) AS interval_seconds
+            NULLIF(MAX(p.sample_interval_seconds), 0) AS interval_seconds
         FROM v_perfmon_stats AS p
         WHERE p.server_id = s.server_id
         AND   p.collection_time = latest.collection_time
@@ -271,10 +271,10 @@ CROSS JOIN LATERAL
         CASE WHEN f.database_name = 'tempdb' THEN 'tempdb' ELSE 'user' END AS scope,
         CAST(SUM(f.delta_stall_read_ms) AS double precision) / NULLIF(SUM(f.delta_reads), 0) AS read_latency_ms,
         CAST(SUM(f.delta_stall_write_ms) AS double precision) / NULLIF(SUM(f.delta_writes), 0) AS write_latency_ms,
-        CAST(SUM(f.delta_read_bytes) AS double precision) / 1048576 / MAX(f.sample_interval_seconds) AS read_mb_per_second,
-        CAST(SUM(f.delta_write_bytes) AS double precision) / 1048576 / MAX(f.sample_interval_seconds) AS write_mb_per_second,
-        CAST(SUM(f.delta_reads) AS double precision) / MAX(f.sample_interval_seconds) AS reads_per_second,
-        CAST(SUM(f.delta_writes) AS double precision) / MAX(f.sample_interval_seconds) AS writes_per_second
+        CAST(SUM(f.delta_read_bytes) AS double precision) / 1048576 / NULLIF(MAX(f.sample_interval_seconds), 0) AS read_mb_per_second,
+        CAST(SUM(f.delta_write_bytes) AS double precision) / 1048576 / NULLIF(MAX(f.sample_interval_seconds), 0) AS write_mb_per_second,
+        CAST(SUM(f.delta_reads) AS double precision) / NULLIF(MAX(f.sample_interval_seconds), 0) AS reads_per_second,
+        CAST(SUM(f.delta_writes) AS double precision) / NULLIF(MAX(f.sample_interval_seconds), 0) AS writes_per_second
     FROM v_file_io_stats AS f
     WHERE f.server_id = s.server_id
     AND   f.collection_time = latest.collection_time
@@ -361,7 +361,7 @@ CROSS JOIN LATERAL
         'darling_wait_ms_per_second' AS metric,
         'category' AS label1_key,
         w.category AS label1_value,
-        CAST(SUM(w.delta_wait_time_ms) AS double precision) / MAX(w.sample_interval_seconds) AS value
+        CAST(SUM(w.delta_wait_time_ms) AS double precision) / NULLIF(MAX(w.sample_interval_seconds), 0) AS value
     FROM w
     GROUP BY w.category
     UNION ALL
