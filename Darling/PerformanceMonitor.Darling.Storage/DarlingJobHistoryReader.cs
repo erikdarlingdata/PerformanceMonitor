@@ -189,6 +189,19 @@ public static class DarlingJobHistoryReader
         JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
         var rollup = await RollupTablesExistAsync(dataSource, commandTimeoutSeconds, cancellationToken);
+        return await ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup, cancellationToken);
+    }
+
+    /// <summary>The read of <see cref="GetAsync"/> with the daily summary left out (#9110): the statement that reads <c>job_history</c> alone, so a test can compare the two.</summary>
+    internal static Task<List<DarlingJobHistoryRow>> GetWithoutSummaryAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        JobHistoryFilter? filter = null, CancellationToken cancellationToken = default) =>
+        ReadAsync(dataSource, sinceUtc, serverId, limit, commandTimeoutSeconds, filter, rollup: false, cancellationToken);
+
+    private static async Task<List<DarlingJobHistoryRow>> ReadAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        JobHistoryFilter? filter, bool rollup, CancellationToken cancellationToken)
+    {
         var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter), rollup: rollup);
         var clocks = await DarlingServerClocksReader.GetAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
 
