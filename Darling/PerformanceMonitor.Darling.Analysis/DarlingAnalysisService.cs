@@ -563,10 +563,22 @@ public sealed class DarlingAnalysisService
                 WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count, retention);
                 WindowEmptyRemovedByRetention = retention?.RemovedWindow(context.TimeRangeEnd) == true;
 
-                _logger?.LogWarning(
-                    "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
-                    "despite {Span:F1}h of total history: collection may be down ({FactCount} point-in-time fact(s) only)",
-                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
+                /* #9152: the same check that words the MCP answer words the log line. A window retention removed is not a
+                   collector that is down, so it is Information and says so; a Warning here would send the reader to
+                   collection health for a replay that was always going to be empty. */
+                if (retention is not null && WindowEmptyRemovedByRetention)
+                {
+                    _logger?.LogInformation(
+                        "[DarlingAnalysisService] No collection in the analysis window for {Server} ({Start} to {End}) because retention removed it, not because collection is down ({FactCount} point-in-time fact(s) only). {Retention}",
+                        context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, facts.Count, retention.Describe());
+                }
+                else
+                {
+                    _logger?.LogWarning(
+                        "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
+                        "despite {Span:F1}h of total history: collection may be down ({FactCount} point-in-time fact(s) only)",
+                        context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
+                }
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];

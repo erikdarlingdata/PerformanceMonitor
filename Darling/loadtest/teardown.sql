@@ -104,6 +104,10 @@ BEGIN
         'collect.plan_regression_daily_built',
         'collect.query_store_top_daily',
         'collect.query_store_top_daily_built',
+        'collect.query_store_grid_daily',
+        'collect.query_store_slicer_hourly',
+        'collect.query_store_closed_day_built',
+        'collect.query_store_closed_day_tick',
         'collect.query_store_compose_stamp',
         'collect.query_store_compose_stamp_built'
     ]

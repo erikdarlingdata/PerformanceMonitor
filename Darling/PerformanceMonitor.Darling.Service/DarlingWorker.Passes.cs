@@ -1248,6 +1248,18 @@ public sealed partial class DarlingWorker
         {
             _logger.LogWarning("Job outcome daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+
+        /* #9111: the closed-day rollups the Query Store grid and its slicer read whole UTC days from. It reads the interval table the
+           daily summary above reads and writes its own three tables, so it has its own catch and a failure leaves the passes above standing. */
+        try
+        {
+            await QueryStoreClosedDayRollup.RunTickAsync(
+                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query Store closed-day rollups could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
     }
 
     /// <summary>
