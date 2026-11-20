@@ -516,7 +516,7 @@ All 29, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_lock_stats` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
 | `pg_deadlocks` | 5 min | 5 min | the first deadlock reported — an event log, not a counter |
-| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
+| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set (on PostgreSQL 19 and later that covers vacuum runs only: automatic analyze runs need `log_autoanalyze_min_duration` as well), and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
 | `pg_cpu_utilization` | 5 min | 5 min | 5 min (Performance Insights backfills the 1-minute points) |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
@@ -589,12 +589,12 @@ them; more than 30 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_top_queries` | top query shapes by total time, wherever `pg_stat_statements` is installed; Aurora adds the storage-vs-cache I/O split and per-statement peak memory |
 | `get_pg_plans` | captured execution plans from `auto_explain`, grouped by plan shape, literals redacted before storage |
 | `get_pg_plan_capture_readiness` | whether the target can capture plans at all, facet by facet in causal order, with the remedy for each unmet step |
-| `get_pg_logging_audit` | whether the target's logging settings (`log_lock_waits`, `log_temp_files`, `log_autovacuum_min_duration`, `log_checkpoints`, `log_connections`/`log_disconnections`, `log_min_duration_statement`) are producing the lines they could — per setting: verdict, what it unlocks, the recommended value with its cost, and the remedy in your hosting flavour's syntax; judged from the stored `pg_server_config` snapshot, so it answers once `pg_server_config` has its first snapshot (step 7: 60 min) |
+| `get_pg_logging_audit` | whether the target's logging settings (`log_lock_waits`, `log_temp_files`, `log_autovacuum_min_duration` (with `log_autoanalyze_min_duration` on PostgreSQL 19 and later), `log_checkpoints`, `log_connections`/`log_disconnections`, `log_min_duration_statement`) are producing the lines they could — per setting: verdict, what it unlocks, the recommended value with its cost, and the remedy in your hosting flavour's syntax; judged from the stored `pg_server_config` snapshot, so it answers once `pg_server_config` has its first snapshot (step 7: 60 min) |
 | `get_pg_wraparound_risk` | XID and MultiXact freeze headroom — how close to a write outage |
 | `get_pg_xmin_horizon` | *why* vacuum is reclaiming nothing, attributed to the specific holder |
 | `get_pg_replication_slots` | slot health, and whether retained WAL is still growing |
 | `get_pg_replication_stats` | the CONNECTED replicas: send/replay lag, with the window's worst beside the latest |
-| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs` — what its automatic vacuums and analyzes cost, from the `log_autovacuum_min_duration` reports in `pg_log_events` (#3603) |
+| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs` — what its automatic vacuums and analyzes cost, from the `log_autovacuum_min_duration` reports in `pg_log_events` (#3603; `log_autoanalyze_min_duration` supplies the analyze reports on PostgreSQL 19 and later) |
 | `get_pg_io_stats` | I/O by (backend type, object, context) — who, what, and why (PostgreSQL 16+) |
 | `get_pg_io_trend` | one (backend type, context) pair's rates and hit ratio over time |
 | `get_pg_cpu_utilization` | instance CPU from AWS Performance Insights (Aurora/RDS only) |

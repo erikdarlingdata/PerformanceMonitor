@@ -210,7 +210,8 @@ public sealed class PgTempFileEventParser : IPgLogFamilyParser
 
 /// <summary>
 /// The <c>autovacuum</c> family (#3603): the completion report <c>log_autovacuum_min_duration</c> writes
-/// for every automatic vacuum and analyze that ran at least that long — per run, what it COST, which is
+/// for every automatic vacuum and analyze that ran at least that long (on PostgreSQL 19 and later that setting
+/// writes the vacuum runs only and <c>log_autoanalyze_min_duration</c> writes the analyze runs) — per run, what it COST, which is
 /// the question <c>get_pg_autovacuum_health</c>'s catalog sample (dead tuples, last-run stamps, counts)
 /// cannot answer.
 ///
