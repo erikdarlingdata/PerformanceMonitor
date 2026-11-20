@@ -557,7 +557,7 @@ FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
             await InsertRowAsync(connection, s.AddSeconds(-1), 9101, ct);          // last second of the first edge: read
             await InsertRowAsync(connection, s, 9102, ct);                         // exactly S: inside the summary's first day, missed
             await InsertRowAsync(connection, new DateTime(2026, 1, 14, 0, 0, 0), 9103, ct); // exactly E: the trailing edge, read
-            await InsertRowAsync(connection, End, 9104, ct);                       // exactly $3, inclusive: read
+            await InsertRowAsync(connection, End, 9104, ct);                       // exactly $3, exclusive: in neither
             await InsertRowAsync(connection, End.AddSeconds(1), 9105, ct);         // past $3: in neither
             await InsertRowAsync(connection, End.AddHours(-72).AddSeconds(-1), 9106, ct); // before ReadStart: in neither
 
@@ -575,16 +575,17 @@ FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
             Assert.Contains(9101L, ids);
             Assert.DoesNotContain(9102L, ids);
             Assert.Contains(9103L, ids);
-            Assert.Contains(9104L, ids);
+            Assert.DoesNotContain(9104L, ids);
             Assert.DoesNotContain(9105L, ids);
             Assert.DoesNotContain(9106L, ids);
             Assert.Contains(9107L, ids);
             Assert.Contains(9108L, ids);
 
-            /* Today's read has everything the window holds except the two outside it. */
+            /* Today's read has everything the window holds except the three outside it. */
             var today = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, route.Table!.Value.ReadStart, End, null, null, null, null, ct))
                 .Select(v => (long)v[1]!).ToHashSet();
             Assert.Contains(9102L, today);
+            Assert.DoesNotContain(9104L, today);
             Assert.DoesNotContain(9105L, today);
             Assert.DoesNotContain(9106L, today);
             Assert.Contains(9107L, today);

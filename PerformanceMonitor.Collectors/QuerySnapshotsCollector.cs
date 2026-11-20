@@ -416,6 +416,14 @@ DROP TABLE #req;
         => !target.IsAzureSqlDb
            && (target.SqlMajorVersion >= 13 || target.SqlMajorVersion == 0 || target.IsAzureManagedInstance);
 
+    /// <summary>
+    /// Whole-collector version floor (#9099): the SQL below reads columns or objects that SQL Server 2014 and older do not have
+    /// (dm_exec_requests.dop and parallel_worker_count), so on a target below the supported floor the collector does not run and reads as not collected, instead of failing
+    /// every cycle. Unknown version (0) assumes newest, and Azure SQL Database and Managed Instance are never version-gated.
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
+
     public override string Name => "query_snapshots";
 
     public override string TargetTable => "query_snapshots";

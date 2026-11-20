@@ -86,7 +86,7 @@ public sealed class McpSessionTools
                         notice.AsHints()), requestedStart);
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_snapshots")
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd,
                         McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."), notice.AsHints()), requestedStart);
             }

@@ -852,7 +852,7 @@ public sealed class McpHealthTools
                 servers.Add(new CollectorFleetLiveness.ServerFacts(
                     id, s.ServerName, string.IsNullOrWhiteSpace(s.DisplayName) ? null : s.DisplayName,
                     await McpEngineCapability.EngineEditionAsync(dataService, id), null,
-                    McpEngineCapability.AwsRdsKindOf(serverManager, id)));
+                    McpEngineCapability.AwsRdsKindOf(serverManager, id), McpEngineCapability.SqlMajorVersionOf(serverManager, id)));
             }
 
             var runs = await dataService.GetCollectorFleetLivenessAsync(collector, windowStart, windowEnd);

@@ -62,6 +62,16 @@ out.noOldest = text(windowFloorStrip({ truncated: true, order: "collection_time_
 out.serverNoteWins = text(windowFloorStrip({ ...active, ...serverCapped }, { viz: "table" }));
 out.ownNote = text(windowFloorStrip(active, { viz: "table", noteKey: "truncation_note" }));
 
+/* #9116: the heat map's cut-window note says where its data starts, in the page's words; a descriptor without `floorSpan` draws the note alone. */
+const heatNote = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+const heatCut = { window_truncated: true, effective_start: "2026-11-12T00:00:00.0000000", window_end: "2026-11-16T00:00:00.0000000Z", truncation_note: heatNote };
+const heatDesc = { viz: "table", floorSpan: { subject: "The heat map", endKey: "window_end" } };
+out.heatmapFloor = text(windowFloorStrip(heatCut, heatDesc));
+out.heatmapFloorShortSpan = text(windowFloorStrip({ ...heatCut, effective_start: "2026-11-15T18:00:00.0000000" }, heatDesc));
+out.heatmapNoSubject = text(windowFloorStrip(heatCut, { viz: "table" }));
+out.heatmapNoEnd = text(windowFloorStrip({ ...heatCut, window_end: undefined }, heatDesc));
+out.heatmapNotCut = text(windowFloorStrip({ ...heatCut, window_truncated: false }, heatDesc));
+
 /* #6654: the left-out note, drawn on an empty answer only for a grid that names it */
 const leftOutNote = "These databases were left out of this read because the server's newest database snapshot no longer lists them.";
 out.leftOutNamed = text(leftOutStrip({ databases_left_out_note: leftOutNote }, { viz: "table", noteKey: "databases_left_out_note" }));

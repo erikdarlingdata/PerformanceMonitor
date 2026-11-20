@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the daily summary's approximate ones.</para>
 ///
 /// <para>Rows are grouped by (database, query_id, query_hash), so a query's plans, replica roles and outcome rows fold into one
-/// line. $1 server_id, $2 window start, $3 window end (naive UTC), $4 row cap, $5 databases (<c>text[]</c>, NULL for all).</para>
+/// line. $1 server_id, $2 window start, $3 window end (naive UTC; the window is <c>[$2, $3)</c> by the interval's start, so the interval that starts at $3 belongs to the next window), $4 row cap, $5 databases (<c>text[]</c>, NULL for all).</para>
 /// </summary>
 internal static class DarlingQueryStoreAbortsReader
 {
@@ -54,7 +54,7 @@ internal static class DarlingQueryStoreAbortsReader
             /* #7814: placed by the interval's start and bounded by collection_time for chunk exclusion only, as the top read's raw dedupe is
                (DarlingDataReader.QueryStoreTopSql), so this read and get_query_store_top list the same intervals for one window. */
             AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
             AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -71,7 +71,7 @@ internal static class DarlingQueryStoreAbortsReader
             WHERE server_id = $1
             /* #7814: placed by the interval's start, as the top read's table head is (DarlingDataReader.QueryStoreTopTablePrefix). */
             AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))

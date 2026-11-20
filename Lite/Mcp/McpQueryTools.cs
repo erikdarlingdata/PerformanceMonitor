@@ -142,7 +142,7 @@ public sealed class McpQueryTools
                 /* #6226 (Darling's twin): the collector looked and nothing ran. query_stats stores only what executed since its
                    watermark, so a window in which it ran successfully and stored no row is a measurement (empty), not a gap
                    (unavailable). After not_collected, which names an engine that never runs the collector. */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_stats", hours_back, asOfUtc: windowEnd),
                         "query_stats", hours_back, "executed statements", database_name)
@@ -351,7 +351,7 @@ public sealed class McpQueryTools
             {
                 /* #7724: the collector's no-run answers are unavailable, which WithEmptyWindowNoticeAsync leaves alone. For a server that is offline
                    by the SUCCESS-run rule the offline lead goes in front of them (Darling's twin does the same). */
-                var emptyPage = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
+                var emptyPage = await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "procedure_stats")
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
                         hours_back, leftOut?.Count ?? 0);
@@ -592,7 +592,7 @@ public sealed class McpQueryTools
                             window_truncated = truncated
                         });
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
                        read had no way to find out. The store has known all along — query_store_health
                        records actual_state per database every hour for exactly this purpose. Asking it turns
@@ -1281,7 +1281,7 @@ public sealed class McpQueryTools
                 /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
                    because THIS trend does; Darling's probes the base table because ITS trend does. Each
                    probe follows its own read — what the caller sees is one sentence, not two. */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1361,7 +1361,7 @@ public sealed class McpQueryTools
                asked about here, the question Darling's read answers itself. A filtered read already returns no points. */
             if (points.Count == 0 || (database == null && !await dataService.HasProcedureStatInWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd)))
             {
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "procedure_stats"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1417,7 +1417,7 @@ public sealed class McpQueryTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_store"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -2363,7 +2363,7 @@ public sealed class McpQueryTools
             {
                 /* #7005: the empty answer says whether the store holds the window. */
                 return await WithEmptyWindowNoticeAsync(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats")
                         ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' with{McpHelpers.InTheLast($"{hours_back} hours")}."),
                     dataService, QueryWindowRelation.QueryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "query_stats");
             }
