@@ -272,21 +272,39 @@ ORDER BY collection_time DESC, database_name, client_app_name
 
     /// <summary>The top <see cref="TopCount"/> statement fingerprints by sampled events (count ties break by name in binary order,
     /// <c>COLLATE "C"</c>, which PostgreSQL honors and DuckDB's default already is, so both stores list the same fifth entry), each with the newest non-NULL sample
-    /// text (ties on collection_time and event_time break on the unique id, so the pick is stable). Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
+    /// text, read for the five winners only (#9148: the text is never read for the rows that lose; ties on collection_time and event_time break on the unique id, so the pick is stable). Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
     /// text) are not a statement.</summary>
     public static string TopStatements(string eventsRelation, bool bounded = false) => $"""
+WITH winners AS (
+    SELECT
+        statement_fingerprint AS fingerprint,
+        CAST(COUNT(*) AS BIGINT) AS samples
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   {SpanFloor(bounded)}{Ceiling(bounded)}
+    AND   event_kind = '{KindSample}'
+    AND   statement_fingerprint IS NOT NULL
+    GROUP BY statement_fingerprint
+    ORDER BY COUNT(*) DESC, statement_fingerprint COLLATE "C"
+    LIMIT {TopCount}
+)
 SELECT
-    statement_fingerprint,
-    CAST(COUNT(*) AS BIGINT) AS samples,
-    (array_agg(statement_text ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC) FILTER (WHERE statement_text IS NOT NULL))[1] AS sample_text
-FROM {eventsRelation}
-WHERE server_id = $1
-AND   {SpanFloor(bounded)}{Ceiling(bounded)}
-AND   event_kind = '{KindSample}'
-AND   statement_fingerprint IS NOT NULL
-GROUP BY statement_fingerprint
-ORDER BY COUNT(*) DESC, statement_fingerprint COLLATE "C"
-LIMIT {TopCount}
+    w.fingerprint AS statement_fingerprint,
+    w.samples,
+    x.statement_text AS sample_text
+FROM winners AS w
+LEFT JOIN LATERAL (
+    SELECT statement_text
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   {SpanFloor(bounded)}{Ceiling(bounded)}
+    AND   event_kind = '{KindSample}'
+    AND   statement_fingerprint = w.fingerprint
+    AND   statement_text IS NOT NULL
+    ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC
+    LIMIT 1
+) AS x ON TRUE
+ORDER BY w.samples DESC, w.fingerprint COLLATE "C"
 """;
 
     /// <summary>The top <see cref="TopCount"/> values of <paramref name="column"/> (database_name or client_app_name) by
