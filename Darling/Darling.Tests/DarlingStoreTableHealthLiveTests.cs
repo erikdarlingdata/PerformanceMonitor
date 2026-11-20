@@ -183,7 +183,9 @@ INSERT INTO collect.zz_vis SELECT g, repeat('x', 100) FROM generate_series(1, 60
         Assert.True(afterVacuum.RelPages > 100);
         Assert.NotNull(afterVacuum.PctAllVisible);
         Assert.True(afterVacuum.PctAllVisible >= 90, $"pct all visible after vacuum {afterVacuum.PctAllVisible}");
-        Assert.Equal(afterVacuum.RelPages, afterVacuum.RelAllVisible);
+        /* A plain VACUUM passes over a page whose buffer another process holds pinned at that moment, and leaves it unmarked, so on a busy
+           runner one page can stay off the map (1034 of 1035 seen in CI). The reader still has to report the map's own count. */
+        Assert.InRange(afterVacuum.RelAllVisible, afterVacuum.RelPages - 2, afterVacuum.RelPages);
 
         await ExecAsync(connection, "UPDATE collect.zz_vis SET payload = payload || 'y'", ct);
         await FlushThenAsync(connection, new[] { "ANALYZE collect.zz_vis" }, ct);
