@@ -245,10 +245,19 @@ AND   {CollectionRunSql.SuccessfulCollectorRun}";
     /// twice the interval <c>cpu_utilization</c> is scheduled at on this server, read the way the scheduler reads it
     /// (<see cref="CollectorFrequencyMinutes"/>, the per-server schedule else the global one, else the shipped
     /// default). The twin of Darling's <c>CpuReadingFreshnessSql.Cutoff</c>.
+    ///
+    /// <para>#9139: when <c>cpu_utilization</c> is switched off for the server (<see cref="CollectorEnabled"/>), no newer
+    /// reading is coming, so the bound is the floor alone and the last reading does not stay current for twice its
+    /// last interval. A collector the schedule cannot answer for is read as enabled.</para>
     /// </summary>
     internal TimeSpan CpuFreshnessBound(int serverId)
     {
         const string collector = "cpu_utilization";
+        if (CollectorEnabled?.Invoke(serverId, collector) == false)
+        {
+            return CpuFreshnessFloor;
+        }
+
         var scheduled = CollectorFrequencyMinutes?.Invoke(serverId, collector);
         var minutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
             CollectorScheduleDefaults.ResolveFrequencyMinutes(collector, scheduled, fleetOverride: null));
