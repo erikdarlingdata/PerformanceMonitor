@@ -288,11 +288,19 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         Assert.Empty(old.Except(routed));
         Assert.Empty(routed.Except(old));
 
-        /* The tool's reply, end to end. */
+        /* The tool's reply, end to end. The tool refuses an as_of after the real clock, and the pinned-clock job pins this class to an instant
+           up to a day AHEAD of it (23:30 and 00:30 UTC), where the window's end is still to come. The routes above ran for that instant; the
+           tool's own call cannot, and it plans on the real clock anyway, so it is compared only for a window that has already ended. */
+        if (t.End > DateTime.UtcNow)
+        {
+            return plan;
+        }
+
         var json = await DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, Hash, t.HoursBack,
             as_of: t.End.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) + "Z", limit: 200, cancellationToken: ct);
         using var doc = JsonDocument.Parse(json);
         Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
+        Assert.True(doc.RootElement.TryGetProperty("servers", out _), json);
         var reply = doc.RootElement.GetProperty("servers").EnumerateArray()
             .Select(r => (r.GetProperty("server_name").GetString(), r.GetProperty("database_name").GetString(), r.GetProperty("execution_count").GetInt64(),
                 r.GetProperty("cpu_ms").GetDouble(), r.GetProperty("elapsed_ms").GetDouble(),
