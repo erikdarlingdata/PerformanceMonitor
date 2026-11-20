@@ -73,8 +73,22 @@ public sealed class QueryStoreWindowEndIsExclusiveTests : IClassFixture<SharedDu
         Assert.Equal(WindowStart, point.CollectionTime);
     }
 
+    [Fact]
+    public async Task TheItemTimeline_PlotsOnlyTheIntervalStartedBeforeTheEnd()
+    {
+        /* One query and plan, an interval at the window's start and one at its end. */
+        await SeedAsync((7L, WindowStart), (7L, AsOf));
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreItemTimelineAsync(ServerId, Db, 7, 7, hoursBack: 1, fromDate: WindowStart, toDate: AsOf);
+
+        var point = Assert.Single(points);
+        Assert.Equal(WindowStart, point.PointTime);
+    }
+
     /// <summary>One interval at each of the window's start, its end and an hour past it, each collected half an hour after it starts.</summary>
-    private async Task SeedAsync()
+    private Task SeedAsync() => SeedAsync((1L, AsOf.AddHours(-1)), (2L, AsOf), (3L, AsOf.AddHours(1)));
+
+    private async Task SeedAsync(params (long Query, DateTime Started)[] intervals)
     {
         using var readLock = _duckDb.AcquireReadLock();
         _seedConn ??= _duckDb.CreateConnection();
@@ -84,7 +98,7 @@ public sealed class QueryStoreWindowEndIsExclusiveTests : IClassFixture<SharedDu
         }
 
         long id = 1;
-        foreach (var (query, started) in new[] { (1L, AsOf.AddHours(-1)), (2L, AsOf), (3L, AsOf.AddHours(1)) })
+        foreach (var (query, started) in intervals)
         {
             using var cmd = _seedConn.CreateCommand();
             cmd.CommandText = @"
@@ -95,7 +109,7 @@ INSERT INTO query_store_stats
      avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
      query_plan_hash, is_forced_plan, force_failure_count,
      runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc)
-VALUES ($1, $2, $3, 'EndSrv', $4, $5, $5, 'Regular', $6, $7, $8, $9, 10, 100, 1000, 5, 0, 0, $10, false, 0, $5, $11, $12)";
+VALUES ($1, $2, $3, 'EndSrv', $4, $5, $5, 'Regular', $6, $7, $8, $9, 10, 100, 1000, 5, 0, 0, $10, false, 0, $1, $11, $12)";
             cmd.Parameters.Add(new DuckDBParameter { Value = id++ });
             cmd.Parameters.Add(new DuckDBParameter { Value = started.AddMinutes(30) });
             cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });

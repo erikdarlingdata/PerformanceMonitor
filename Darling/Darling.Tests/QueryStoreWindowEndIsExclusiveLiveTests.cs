@@ -222,6 +222,41 @@ public sealed class QueryStoreWindowEndIsExclusiveLiveTests
         Assert.Equal(WindowStart, point.CollectionTime);
     }
 
+    [Fact]
+    public async Task TheViewerItemTimeline_PlotsOnlyTheIntervalStartedBeforeTheEnd_AndKeepsTheWindowStart()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9100 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* One query and plan, an interval at the window's start and one at its end. */
+        const long query = 7;
+        var interval = 1;
+        foreach (var started in new[] { WindowStart, AsOf })
+        {
+            await ExecAsync(connection, $"""
+                INSERT INTO collect.query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+                    execution_type_desc, first_execution_time, module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us,
+                    max_duration_us, max_cpu_time_us, replica_role, runtime_stats_interval_id, interval_start_time_utc, last_execution_time)
+                VALUES ({interval}, timestamp '{started.AddMinutes(30):yyyy-MM-dd HH:mm}', {ServerId}, '{ServerName}', 'db0', {query}, {query}, 'Regular',
+                        timestamp '{started.AddMinutes(5):yyyy-MM-dd HH:mm}', 'mod', md5('h{query}'), 10, 500, 300, 900, 700, NULL, {interval},
+                        timestamp '{started:yyyy-MM-dd HH:mm}', timestamp '{started.AddMinutes(25):yyyy-MM-dd HH:mm}')
+                """, ct);
+            interval++;
+        }
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var points = await viewer.GetQueryStoreItemTimelineAsync(ServerId, "db0", query, query, WindowStart, AsOf, ct);
+
+        var point = Assert.Single(points);
+        Assert.Equal(WindowStart, point.PointTime);
+    }
+
     /// <summary>One interval at the window's start, one at <c>as_of</c> and one an hour after it, each collected half an hour
     /// after it starts, as a closed interval is.</summary>
     private static (long Query, DateTime Started)[] Intervals() =>
