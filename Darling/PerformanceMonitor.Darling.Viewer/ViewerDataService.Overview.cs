@@ -1349,9 +1349,12 @@ public sealed class ServerSummaryItem
     /// <para>With no collection to show, "None retained" only for a server registered before the collection log's
     /// retention horizon (#3967, <see cref="HistoryAgedOut"/>): it had time to collect before everything the store
     /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
+    ///
+    /// <para>#9094: the card's Last Collect line wraps, so the Server Time offset keeps "UTC" and its sign together
+    /// (<see cref="ZoneLabelText.KeepWhole"/>) and moves to the next line whole. <see cref="LastCollectLabelled"/> stays plain.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), WordingNowUtc)
+        ? ZoneLabelText.KeepWhole(LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), WordingNowUtc))
         : HistoryAgedOut(RegisteredAt, WordingNowUtc) ? "None retained" : "Never";
 
     /* #8722, #8464: the instant this card's Last Collect wording reads. It is the clock ApplyFreshness banded the card on, so the band

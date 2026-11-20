@@ -188,7 +188,7 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 - `helm uninstall` leaves the hook Job in place, as Helm does for hooks; delete it with `kubectl delete job <fullname>-store-roles`.
 - The script revokes `PUBLIC`'s `CONNECT` on the database on every run, so any other login that connects to the store needs its own `GRANT CONNECT ON DATABASE`.
 
-**Timing.** Helm waits for a hook Job inside `--timeout` (5 minutes by default), and the Job's `activeDeadlineSeconds` is `waitSeconds + 300`. A release that migrates for a long time needs `helm upgrade --timeout` to cover `waitSeconds` (default 900). Without `--wait`, the Job starts as soon as the manifests are applied and waits for the new pod to migrate the store.
+**Timing.** Helm waits for a hook Job inside `--timeout` (5 minutes by default), and the Job's `activeDeadlineSeconds` is `waitSeconds + 300`. A release that migrates for a long time needs `helm upgrade --timeout` to cover `waitSeconds` (default 900). One migration step can run for up to 30 minutes on a large store, and the pod's log names that step when it starts. For an upgrade that large, set `store.provisionRoles.waitSeconds` above 1800. Without `--wait`, the Job starts as soon as the manifests are applied and waits for the new pod to migrate the store.
 
 **Tested versions.** PostgreSQL 18.6 (the live tests); PostgreSQL 17 and 15 (the kind cases `external_provision_roles` and `provision_roles_fails_the_release`).
 

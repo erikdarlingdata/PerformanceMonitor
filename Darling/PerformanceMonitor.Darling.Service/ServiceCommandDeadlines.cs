@@ -278,7 +278,7 @@ public static class ServiceCommandDeadlines
     /// shutdown or its own post-<c>pg_upgrade</c> statistics pass.</para>
     ///
     /// <para><b>BELOW the budget the same startup path gives its heaviest statements.</b>
-    /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> is 300 s per rung, and its lock wait is five
+    /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> is 300 s per rung by default, and its lock wait is seven
     /// multiples of that. Those bound data-MOVING DDL on a cold busy store. The sites here are catalog
     /// reads, single-row <c>config</c> seeds, one <c>count(*)</c>, one idempotent grant batch and the
     /// first start's <c>CREATE DATABASE</c> (a copy of the few-megabyte <c>template1</c>, measured at

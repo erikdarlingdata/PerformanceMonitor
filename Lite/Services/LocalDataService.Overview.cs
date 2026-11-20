@@ -628,7 +628,7 @@ public class ServerSummaryItem
     {
         get
         {
-            if (IsOffline || CpuIsStale || !CpuPercent.HasValue) return "--";
+            if (ShowsNoLiveFigures || CpuIsStale || !CpuPercent.HasValue) return "--";
             return CpuFigure;
         }
     }
@@ -644,13 +644,13 @@ public class ServerSummaryItem
     /// (stale, or never measured) or the server cannot report the other-process figure (#7682). #8465: an offline card's row says
     /// when the server was last collected instead (<see cref="StaleDetail"/>), the Darling card's rule.</summary>
     public string CpuDetail =>
-        IsOffline ? StaleDetail
+        ShowsNoLiveFigures ? StaleDetail
         : CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
 
     /* #8465: an offline card shows no measurement at all. Its memory figure is from before the server went dark, and a calm
        "32.0 GB" under a red Offline reads as live health, so Memory reads "--" as CPU, Blocking and Deadlocks do: the Darling
        card's rule. The figure stays on the item, because the alert engine reads it. */
-    public string MemoryDisplay => MemoryMb.HasValue && !IsOffline ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+    public string MemoryDisplay => MemoryMb.HasValue && !ShowsNoLiveFigures ? $"{MemoryMb / 1024.0:F1} GB" : "--";
 
     /// <summary>#8465: the detail an offline card's CPU row carries in place of a reading, in the Darling card's words: when the
     /// server was last collected ("last collected 3d ago", <see cref="MinutesAgoText"/>), or "no recent collection" when nothing
@@ -662,8 +662,8 @@ public class ServerSummaryItem
     /* #8304: an offline card has no hour counts to show. Its stored counts are from before the server went dark, and a green
        "0" under a red Offline reads as a healthy server, so Blocking and Deadlocks read "--" in the card's unknown grey, as
        CPU does for a reading it cannot show. The counts themselves stay on the item: the alert engine reads them. */
-    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
-    public string DeadlockDisplay => IsOffline ? "--" : DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
+    public string BlockingDisplay => ShowsNoLiveFigures ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    public string DeadlockDisplay => ShowsNoLiveFigures ? "--" : DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
 
     /// <summary>
     /// How old the newest collection_log row for this server is, banded by the SHARED
@@ -741,9 +741,13 @@ public class ServerSummaryItem
             /* #3967, #8464: with nothing to show, "None retained" only for a server added before the archive's oldest retained
                instant: it collected before everything the archive keeps. Every other such card reads "Never", whatever its band. */
             if (!LastCollectionTime.HasValue)
-                return HistoryAgedOut ? "None retained (stopped)" : "Never";
+                return HistoryAgedOut && CardStatus != ServerCardStatus.Disabled ? "None retained (stopped)" : "Never";
 
-            var stamp = FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow);
+            var stamp = ZoneLabelText.KeepWhole(FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow));
+            /* #9094: a Disabled card shows the stored time bare. Collection is off on purpose, so no stale or stopped word. */
+            if (CardStatus == ServerCardStatus.Disabled)
+                return stamp;
+
             return CollectionFreshness switch
             {
                 ServerFreshness.Stale => $"{stamp} (stale)",
@@ -760,7 +764,7 @@ public class ServerSummaryItem
     /// report chasing a phantom scheduler bug on the viewer side (see
     /// <see cref="ServerFreshness.NeverCollected"/>). An unclassified band gets the card's unknown grey.
     /// </summary>
-    public SolidColorBrush LastCollectionBrush => MakeBrush(CollectionFreshness switch
+    public SolidColorBrush LastCollectionBrush => MakeBrush(CardStatus == ServerCardStatus.Disabled ? "#888888" : CollectionFreshness switch
     {
         ServerFreshness.Fresh => "#81C784",
         ServerFreshness.Stale => "#FFB74D",
@@ -781,7 +785,9 @@ public class ServerSummaryItem
     /// <para>The thresholds are read from <see cref="ServerHealthThresholds"/> rather than typed, so the
     /// sentence cannot come to disagree with the band it is explaining.</para>
     /// </summary>
-    public string? CollectionFreshnessTooltip => CollectionFreshness switch
+    public string? CollectionFreshnessTooltip => CardStatus == ServerCardStatus.Disabled
+        ? "Data collection is off for this server, so Last Collect is the last collection before it was turned off, if there was one."
+        : CollectionFreshness switch
     {
         ServerFreshness.Fresh =>
             $"Collection is current: something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
@@ -830,6 +836,12 @@ public class ServerSummaryItem
     });
     public bool IsOffline => CardStatus == ServerCardStatus.Offline;
 
+    /// <summary>#9094: true when nothing on the card is a current reading, so the measurement rows read "--" with the unknown grey
+    /// dot. An Offline server's figures are from before it went dark; a Disabled server (#9084) is not queried at all, so its
+    /// figures are from before collection was turned off, and a calm "0" with a green dot under the word Disabled read as live
+    /// health. Read off <see cref="CardStatus"/>, the one discriminant every rendering uses, never off the raw flags.</summary>
+    public bool ShowsNoLiveFigures => CardStatus is ServerCardStatus.Offline or ServerCardStatus.Disabled;
+
     /* ── Per-row concern gates ───────────────────────────────────────────────────────────────────────
        Each metric row's "this is not green" test, evaluated ONCE. The row's own brush reads it and so does
        StatusReason, which is what makes the tooltip incapable of naming a metric whose row is green — or of
@@ -848,6 +860,7 @@ public class ServerSummaryItem
     /// them it is the row's OWN "not green" test, so the border, the row brush and the tooltip cannot come
     /// to disagree about whether this card's collection is in trouble.</summary>
     public bool CollectionIsNotFresh =>
+        CardStatus != ServerCardStatus.Disabled && /* #9094: collection is off on purpose, so "not fresh" is no fault to flag */
         CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
 
     /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
@@ -855,11 +868,11 @@ public class ServerSummaryItem
        CPU row reads "--" too, and takes the same grey whatever its last reading was, as Blocking and Deadlocks do. The reading
        stays inside CpuFreshnessBound for at least fifteen minutes after a server goes dark, so without this arm the "--" and its
        dot were painted in the colour of a figure the card no longer shows. */
-    public SolidColorBrush CpuBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
+    public SolidColorBrush CpuBrush => ShowsNoLiveFigures ? MakeBrush("#888888") : MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
     /* #8304: on a dark server the Blocking and Deadlocks rows read "--", so their dots take the same unknown grey as a CPU row
        with no shown figure; the gates below are read only for a reachable server, by the brush and the reason alike. */
-    public SolidColorBrush BlockingBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
-    public SolidColorBrush DeadlockBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
+    public SolidColorBrush BlockingBrush => ShowsNoLiveFigures ? MakeBrush("#888888") : MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
+    public SolidColorBrush DeadlockBrush => ShowsNoLiveFigures ? MakeBrush("#888888") : MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
        the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
        unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
@@ -867,7 +880,10 @@ public class ServerSummaryItem
     {
         get
         {
+            /* #9094: nothing on a Disabled card is current, so no band applies: not the metric bands (they read figures the card shows
+               as "--") and not the amber collection-silence arm (collection is off on purpose). */
             var band =
+        CardStatus == ServerCardStatus.Disabled ? null :
         CardStatus == ServerCardStatus.Offline ? "#E57373" :
         DeadlocksAreElevated ? "#E57373" :
         BlockingIsElevated ? "#FFB74D" :
@@ -961,7 +977,7 @@ public class ServerSummaryItem
             }
 
             /* #8304: a dark server's Blocking and Deadlocks rows read "--", so the reason names neither; it quotes the rows as they read. */
-            if (!IsOffline)
+            if (!ShowsNoLiveFigures)
             {
                 if (BlockingIsElevated)
                 {
