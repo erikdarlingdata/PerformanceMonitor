@@ -216,7 +216,7 @@ public sealed class TopTextLookupFillTests
         Assert.Equal(2, Regex.Matches(reader, @"TopFill\.FinalCandidates\(top\)").Count);
         Assert.Equal(2, Regex.Matches(reader, @"TopFill\.RunAsync\(top,").Count);   /* raw and hourly Top Queries */
         var viewer = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStats.cs"));
-        Assert.Single(Regex.Matches(viewer, @"TopFill\.RunAsync\(top,"));
+        Assert.Equal(2, Regex.Matches(viewer, @"TopFill\.RunAsync\(top,").Count);   /* raw and hourly Top Queries (#9164) */
         var viewerQs = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs"));
         Assert.Empty(Regex.Matches(viewerQs, @"TopFill\.RunAsync\(top,"));
         Assert.Equal(2, Regex.Matches(viewerQs, @"TopFill\.FinalCandidates\(top\)").Count);   /* #5815: raw and interval table, one run each */

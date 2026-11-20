@@ -68,6 +68,54 @@ public sealed class CollectionLogWatermarkCoveringIndexLiveTests
 
     private static string? Watermark(List<string> indexes) => indexes.SingleOrDefault(i => i.StartsWith(IndexName + "#", StringComparison.Ordinal));
 
+    /// <summary>One line per index on a chunk of collection_log whose key columns are the watermark keys: "chunk#compressed#natts/nkeyatts#included columns".
+    /// A chunk with no such index has no line, so a missing index shows as a missing chunk.</summary>
+    private static async Task<List<string>> ChunkWatermarkIndexesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var list = new List<string>();
+        await using var command = new NpgsqlCommand(
+            @"SELECT ch.relname || '#' || (SELECT COALESCE(bool_or(k.is_compressed), false) FROM timescaledb_information.chunks k WHERE k.chunk_name = ch.relname)
+                     || '#' || i.indnatts || '/' || i.indnkeyatts || '#'
+                     || COALESCE((SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                                  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum WHERE k.ord > i.indnkeyatts), '')
+              FROM pg_inherits h
+              JOIN pg_class ch ON ch.oid = h.inhrelid
+              JOIN pg_index i ON i.indrelid = ch.oid
+              WHERE h.inhparent = 'collect.collection_log'::regclass
+              AND   (SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum WHERE k.ord <= i.indnkeyatts) = 'server_id,collector_name,collection_time'
+              ORDER BY ch.relname, i.indexrelid", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(reader.GetString(0));
+        }
+
+        return list;
+    }
+
+    /// <summary>Every index relation in the collect schema whose name carries the build suffix, chunks' indexes included.</summary>
+    private static async Task<long> BuildNameIndexCountAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            @"SELECT count(*) FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE strpos(c.relname, 'watermark_new') > 0", connection);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>One row per six hours for four days, so the table has several chunks, then the chunks older than two days are compressed.</summary>
+    private static async Task<int> SeedChunksAndCompressAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await DarlingMcpTestData.RegisterServerAsync(connection, 1, "srv1", ct);
+        await ExecAsync(connection,
+            @"INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+              SELECT row_number() OVER (ORDER BY t.ct), 1, 'srv1', '" + Collector + @"', t.ct, 20, 'SUCCESS', 10
+              FROM generate_series(timezone('utc', now()) - interval '4 days', timezone('utc', now()), interval '6 hours') AS t(ct)", ct);
+        await using var compress = new NpgsqlCommand(
+            @"SELECT count(compress_chunk(c, if_not_compressed => true))
+              FROM show_chunks('collect.collection_log', older_than => timezone('utc', now()) - interval '2 days') AS c", connection) { CommandTimeout = 300 };
+        return Convert.ToInt32(await compress.ExecuteScalarAsync(ct));
+    }
+
     private static async Task DowngradeToNarrowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await ExecAsync(connection, "DROP INDEX IF EXISTS collect." + IndexName, ct);
@@ -155,11 +203,23 @@ public sealed class CollectionLogWatermarkCoveringIndexLiveTests
         try
         {
             await using var connection = await OpenAsync(scratch, ct);
+            var compressedChunks = await SeedChunksAndCompressAsync(connection, ct);
+            Assert.True(compressedChunks >= 1, "the store needs a compressed chunk, so TimescaleDB must be installed on the test server");
             await DowngradeToNarrowAsync(connection, ct);
             var narrowStore = await IndexesAsync(connection, ct);
+            var narrowChunks = await ChunkWatermarkIndexesAsync(connection, ct);
+            Assert.All(narrowChunks, i => Assert.EndsWith("#", i));
+            Assert.Contains(narrowChunks, i => i.Contains("#true#", StringComparison.Ordinal));
+            Assert.Contains(narrowChunks, i => i.Contains("#false#", StringComparison.Ordinal));
 
             await RunV288Async(connection, ct);
             var afterFirst = await IndexesAsync(connection, ct);
+            /* every chunk, compressed ones included, ends with exactly one index on the keys, with the included column, and no build-name index is left */
+            var coveredChunks = await ChunkWatermarkIndexesAsync(connection, ct);
+            Assert.Equal(narrowChunks.Count, coveredChunks.Count);
+            Assert.All(coveredChunks, i => Assert.EndsWith("#4/3#rows_collected", i));
+            Assert.Equal(narrowChunks.Select(i => i.Split('#')[0]).OrderBy(i => i), coveredChunks.Select(i => i.Split('#')[0]).OrderBy(i => i));
+            Assert.Equal(0, await BuildNameIndexCountAsync(connection, ct));
             Assert.EndsWith("#rows_collected", Watermark(afterFirst));
             /* the narrow index is gone (one index of the name, now covering), the build name is gone, and no other index moved */
             Assert.Equal(narrowStore.Count, afterFirst.Count);
@@ -170,6 +230,7 @@ public sealed class CollectionLogWatermarkCoveringIndexLiveTests
 
             await RunV288Async(connection, ct);
             Assert.Equal(afterFirst, await IndexesAsync(connection, ct));
+            Assert.Equal(coveredChunks, await ChunkWatermarkIndexesAsync(connection, ct));
             bodySucceeded = true;
         }
         finally

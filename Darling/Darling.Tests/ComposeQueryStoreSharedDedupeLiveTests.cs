@@ -30,15 +30,15 @@ public sealed class ComposeQueryStoreSharedDedupeLiveTests
 {
     private const string SkipMessage = "Set DARLING_TEST_PG to a Postgres connection string to run the #9151 shared dedupe live tests.";
 
-    internal static readonly DateTime WindowStart = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
-    internal static readonly DateTime WindowEnd = WindowStart.AddHours(4);
+    private static readonly DateTime WindowStart = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime WindowEnd = WindowStart.AddHours(4);
 
     /// <summary>Three servers; every query id exists on each. One collection every 5 minutes over the window and 30 minutes before it.
     /// A query's interval is the hour, re-read each collection with a growing count, as the collector re-reads the open interval.
     /// module_name is NULL for a fifth of the queries (the NULL-module case), 'usp_Order%' for a quarter (the narrow filter), and the six tie_* modules
     /// carry identical measures larger than any other, so a top-4 cuts through a six-way tie. The edge rows below each need a
     /// key column of the dedupe to keep their rows apart (the role, the interval id) or the dedupe's pick (a mid-window rename).</summary>
-    internal const string Seed = @"
+    private const string Seed = @"
 INSERT INTO collect.query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
     execution_type_desc, first_execution_time, module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us,
     max_duration_us, max_cpu_time_us, replica_role, runtime_stats_interval_id, interval_start_time_utc)
@@ -93,17 +93,17 @@ ANALYZE collect.query_store_stats;";
         ("qs_executions", "sum"), ("qs_avg_cpu_us", ""),
     };
 
-    internal static string PanelJson(string measure, string aggregate, string[] groups, int topN, bool includeOther, string? filters) =>
+    private static string PanelJson(string measure, string aggregate, string[] groups, int topN, bool includeOther, string? filters) =>
         "{\"source\":\"query_store_stats\",\"" + (aggregate.Length == 0 ? "ratio" : "measure") + "\":\"" + measure + "\""
         + (aggregate.Length == 0 ? string.Empty : ",\"aggregate\":\"" + aggregate + "\"")
         + ",\"timeBucket\":\"hour\",\"topN\":" + topN.ToString(CultureInfo.InvariantCulture)
         + ",\"groupBy\":[" + string.Join(",", groups.Select(g => "\"" + g + "\"")) + "],\"viz\":\"line\""
         + (includeOther ? ",\"includeOther\":true" : string.Empty) + (filters is null ? string.Empty : ",\"filters\":" + filters) + "}";
 
-    internal static ComposeRunContext Context(IReadOnlyList<string>? servers) =>
+    private static ComposeRunContext Context(IReadOnlyList<string>? servers) =>
         new(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.None, WindowEnd, RollupCoverage.Unknown, QueryStoreWideEligible: false);
 
-    internal static ComposeCompiled Compile(string panel, ComposeRunContext context, bool shared)
+    private static ComposeCompiled Compile(string panel, ComposeRunContext context, bool shared)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panel)!, Array.Empty<string>());
         Assert.True(parseError is null, parseError);
@@ -112,7 +112,7 @@ ANALYZE collect.query_store_stats;";
         return compiled!;
     }
 
-    internal static async Task<NpgsqlConnection> OpenSeededAsync(ScratchPostgres scratch, CancellationToken ct)
+    private static async Task<NpgsqlConnection> OpenSeededAsync(ScratchPostgres scratch, CancellationToken ct)
     {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
@@ -150,7 +150,7 @@ ANALYZE collect.query_store_stats;";
     }
 
     /// <summary>The rows exactly as returned: every column of every row, in order.</summary>
-    internal static async Task<List<string>> RowsAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
+    private static async Task<List<string>> RowsAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
     {
         var rows = new List<string>();
         await using var command = Command(connection, compiled.Sql, compiled);
@@ -167,7 +167,7 @@ ANALYZE collect.query_store_stats;";
     /// <summary>Null when the two result sets are the same rows in the same order. The statement orders by bucket alone (its final
     /// ORDER BY), so the rows of one bucket come out in the aggregate's own order, which no statement text promises: the buckets
     /// must come out in the same sequence and each bucket must hold the same rows.</summary>
-    internal static string? Difference(List<string> rows, List<string> oldRows)
+    private static string? Difference(List<string> rows, List<string> oldRows)
     {
         if (rows.Count != oldRows.Count)
         {
@@ -314,7 +314,7 @@ ANALYZE collect.query_store_stats;";
     }
 
     /// <summary>The blocks the statement reads (the second, warm run: the first rebuilds catalog caches).</summary>
-    internal static async Task<long> DataPagesAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
+    private static async Task<long> DataPagesAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
     {
         long pages = 0;
         for (var run = 0; run < 2; run++)

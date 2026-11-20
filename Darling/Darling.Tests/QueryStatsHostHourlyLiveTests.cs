@@ -50,9 +50,8 @@ public sealed class QueryStatsHostHourlyLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, null, ct);
 
-        var rung = PgMigrations.Scripts[^1];
-        Assert.Equal(QueryStatsHostHourly.Version, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
+        /* Found by its version, not as the newest rung, so a later rung does not break this test. */
+        var rung = PgMigrations.Scripts.Single(s => s.Version == QueryStatsHostHourly.Version);
 
         await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.query_stats_host_hourly; DROP TABLE IF EXISTS collect.query_stats_host_hourly_built;", ct);
         await ExecuteAsync(connection, rung.Sql, ct);
