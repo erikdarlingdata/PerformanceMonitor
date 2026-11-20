@@ -147,6 +147,68 @@ public sealed class ViewerSlowLoadPhasesTests
         }
     }
 
+    private static long ReadMs(string line, string read)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(line, System.Text.RegularExpressions.Regex.Escape(read) + @" (\d+) ms");
+        Assert.True(m.Success, line);
+        return long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [Fact]
+    public void CpuTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
+    {
+        /* #9112: a CPU refresh logged its whole read time as "client work after the last read" because none of its reads was handed to
+           the load's clock. The tab's reads here take known time (the scheduler pair runs side by side). */
+        const int utilizationMs = 1500;
+        const int trendMs = 1000;
+        const int snapshotMs = 700;
+        string? line = null;
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(ClosedStore(FreePort())),
+                new DarlingServer(1, "cpu-slow-load", "cpu-slow-load", true, null));
+            tab.CpuReadsOverride = new ViewerServerTab.CpuTabReads(
+                async (_, _) =>
+                {
+                    await Task.Delay(utilizationMs);
+                    return new List<CpuUtilizationSample>();
+                },
+                async (_, _) =>
+                {
+                    await Task.Delay(trendMs);
+                    return new List<CpuSchedulerTrendPoint>();
+                },
+                async (_, _) =>
+                {
+                    await Task.Delay(snapshotMs);
+                    return null;
+                });
+            tab.SlowLoadSink = text => line = text;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var inner = (TabControl)tab.FindName("InnerTabs");
+                var index = inner.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, "CPU"));
+                Assert.True(index >= 0);
+                await tab.LoadInnerTabAsync(index, new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.NotNull(line);
+        Assert.True(ReadMs(line, "CPU read") >= utilizationMs - 100, line);
+        Assert.True(ReadMs(line, "CPU scheduler trend read") >= trendMs - 100, line);
+        Assert.True(ReadMs(line, "CPU scheduler snapshot read") >= snapshotMs - 100, line);
+        Assert.Contains("CPU chart draw", line, StringComparison.Ordinal);
+        /* Untimed, the 3.2 s of reads would all sit here. Only the draws after the last read remain. */
+        Assert.True(ClientWorkMs(line) < 1000, line);
+    }
+
     /// <summary>A phase is booked by a watcher that finishes just after the read's own awaiter, so wait for the last one.</summary>
     private static async Task<List<string>> PhasesAsync(ViewerLoadTimer timer, int expected)
     {

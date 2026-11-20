@@ -135,22 +135,37 @@ public partial class ViewerServerTab : IDisposable
         OverviewLanes.ReapplyTheme();
     }
 
-    /// <summary>Loads the CPU tab: raw per-sample CPU utilization over the window.</summary>
-    private async Task LoadCpuAsync()
+    /// <summary>#9112: the CPU tab's three store reads, so a test can hand the tab reads that take a known time. The product uses the data service's.</summary>
+    internal sealed record CpuTabReads(
+        Func<DateTime, DateTime, Task<List<CpuUtilizationSample>>> Utilization,
+        Func<DateTime, DateTime, Task<List<CpuSchedulerTrendPoint>>> SchedulerTrend,
+        Func<DateTime, DateTime, Task<CpuSchedulerSnapshot?>> SchedulerSnapshot);
+
+    /// <summary>A test's stand-in for the CPU tab's reads; null in the product.</summary>
+    internal CpuTabReads? CpuReadsOverride { get; set; }
+
+    private CpuTabReads CpuReads => CpuReadsOverride ?? new CpuTabReads(
+        (startUtc, endUtc) => _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetCpuSchedulerTrendAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetCpuSchedulerSnapshotAsync(_server.ServerId, startUtc, endUtc));
+
+    /// <summary>Loads the CPU tab: raw per-sample CPU utilization over the window. #9112: each read is named on the load's clock and the
+    /// draw is a named client step, so a slow CPU refresh says which one it was instead of logging the reads as client work.</summary>
+    private async Task LoadCpuAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc);
+        var samples = await Timed(timer, "CPU read", CpuReads.Utilization(startUtc, endUtc));
         /* The read is start-only server-side; bound the end for a custom range so a window that ends in
            the past doesn't trail to the newest sample. sample_time is de-skewed to naive UTC (matching endUtc). */
         if (IsCustomRange)
         {
             samples = samples.Where(s => s.SampleTime <= endUtc).ToList();
         }
-        RenderCpuChart(samples, startUtc, endUtc);
+        ClientStep(timer, "CPU chart draw", () => RenderCpuChart(samples, startUtc, endUtc));
 
         /* The CPU tab is a sub-TabControl (CPU Utilization + CPU Scheduler); load the scheduler sub-tab in
            the same pass — the CPU tab's full-refresh branch, mirroring the Memory tab's all-sub-tabs load. */
-        await LoadCpuSchedulerAsync();
+        await LoadCpuSchedulerAsync(timer);
     }
 
     /// <summary>Loads the tempdb tab: usage/size trend and per-file I/O latency, read concurrently.</summary>

@@ -623,7 +623,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadHealthAsync(timer);
                     break;
                 case CpuInnerTabIndex:
-                    await LoadCpuAsync();
+                    await LoadCpuAsync(timer);
                     break;
                 case MemoryInnerTabIndex:
                     await LoadMemoryAsync();
