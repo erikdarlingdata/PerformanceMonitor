@@ -332,6 +332,91 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #9104: <c>get_analysis_facts</c> over a window retention removed answers the same thing in its message and in
+    /// <c>hints.truncation_note</c>: retention removed it and collection did not break, with no pointer at collection health. A window
+    /// retention did not remove (inside the retained span, before a young store's first row, before a stalled purge's oldest row)
+    /// keeps the collection wording in the hint.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFacts_AWindowOlderThanRetention_HintAgreesWithTheMessage_AndOtherEmptyWindowsKeepTheCollectionHint()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live window-empty analysis test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            var service = new DarlingAnalysisService(postgres);
+
+            int retentionDays;
+            using (var days = new NpgsqlCommand("SELECT " + DarlingRetentionHorizons.FleetRetentionDaysSql("wait_stats"), connection))
+                retentionDays = Convert.ToInt32(await days.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+
+            var now = DateTime.UtcNow;
+            string AsOf(double daysAgo) => now.AddDays(-daysAgo).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+            async Task<(string Message, string Note)> FactsAsync(double daysAgo, int hoursBack)
+            {
+                var json = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: hoursBack, as_of: AsOf(daysAgo));
+                using var doc = JsonDocument.Parse(json);
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                return (
+                    doc.RootElement.GetProperty("message").GetString()!,
+                    doc.RootElement.GetProperty("hints").GetProperty("truncation_note").GetString()!);
+            }
+
+            /* The store as retention leaves it: its oldest row at the horizon, and a recent one that keeps the span over the gate. */
+            await PlantWaitAsync(connection, Naive(now.AddDays(-(retentionDays + 1))), StaleWait, 60_000L, ct);
+            await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
+
+            var removed = await FactsAsync(retentionDays + 10, 48);
+            Assert.Contains("Retention removed it, and collection did not break.", removed.Message, StringComparison.Ordinal);
+            Assert.Contains("Retention removed it, and collection did not break.", removed.Note, StringComparison.Ordinal);
+            Assert.Contains("wait_stats", removed.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("collection may have stopped", removed.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("get_collection_health", removed.Note, StringComparison.Ordinal);
+
+            /* A window inside the retained span that holds no rows: collection may well have missed it. */
+            var inside = await FactsAsync(retentionDays / 2.0, 4);
+            Assert.DoesNotContain("Retention removed it", inside.Message, StringComparison.Ordinal);
+            Assert.Contains("collection may have stopped; get_collection_health shows which.", inside.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("Retention removed it", inside.Note, StringComparison.Ordinal);
+
+            /* A young store: its first row is five days old, so a window ten days back was never held. */
+            await DeleteWaitRowsAsync(connection, ct);
+            await PlantWaitAsync(connection, Naive(now.AddDays(-5)), StaleWait, 60_000L, ct);
+            await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
+            var young = await FactsAsync(10, 48);
+            Assert.Contains("collection may have stopped; get_collection_health shows which.", young.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("Retention removed it", young.Note, StringComparison.Ordinal);
+
+            /* A stalled purge: the oldest row sits far before the horizon, so retention is not claimed. */
+            await DeleteWaitRowsAsync(connection, ct);
+            await PlantWaitAsync(connection, Naive(now.AddDays(-(retentionDays + 10))), StaleWait, 60_000L, ct);
+            await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
+            var stalled = await FactsAsync(retentionDays + 20, 48);
+            Assert.Contains("collection may have stopped; get_collection_health shows which.", stalled.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("Retention removed it", stalled.Note, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>Naive-UTC, the Kind every timestamp column in this store is bound with.</summary>
     private static DateTime Naive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
