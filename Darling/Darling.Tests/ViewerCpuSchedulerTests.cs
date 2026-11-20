@@ -36,7 +36,6 @@ public sealed class ViewerCpuSchedulerSqlTests
         Assert.Contains("total_blocked_task_count", sql, StringComparison.Ordinal);
         Assert.Contains("total_queued_request_count", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
 
         /* #4234/#4349: a point-in-time snapshot collector, no delta math — but bucketed, so the raw

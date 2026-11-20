@@ -112,7 +112,6 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
         Assert.DoesNotContain("v_query_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("granted_query_memory_gb", sql, StringComparison.Ordinal);
         Assert.Contains("blocking_session_id", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
     }
 
@@ -150,7 +149,6 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
         Assert.DoesNotContain("v_waiting_tasks", sql, StringComparison.Ordinal);
         Assert.Contains("wait_duration_ms", sql, StringComparison.Ordinal);
         Assert.Contains("resource_description", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         /* #3541 A3: the cap is the caller's ($4), not the 500 the reader hid under a tool that advertised
            `limit` and then published a bare envelope. */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);

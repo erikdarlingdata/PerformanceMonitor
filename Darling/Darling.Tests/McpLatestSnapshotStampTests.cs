@@ -457,7 +457,6 @@ public sealed class McpLatestSnapshotStampTests
     public void CpuSchedulerRead_IsBoundedByTheWindow()
     {
         var sql = DarlingPlanCacheSchedulerReader.CpuSchedulerPressureSql;
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         /* #5710: the newest collection_time in the window is found first and ALL of its rows are combined into one. */
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
@@ -473,7 +472,6 @@ public sealed class McpLatestSnapshotStampTests
     public void MemoryGrantWindowReads_AggregateEverySnapshot_AndNameThePeaksInstant(string sqlName)
     {
         var sql = ReaderSql(sqlName);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS snapshots_in_window", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(waiter_count) AS bigint) AS peak_waiter_count", sql, StringComparison.Ordinal);

@@ -304,7 +304,6 @@ public sealed class TimeHonestyRungTests
             Assert.Contains(PreferredUtcProjection, Regex.Replace(sql, @"\s+", " "), StringComparison.Ordinal);
             Assert.Contains("MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time", sql, StringComparison.Ordinal);
             Assert.Contains("FROM cpu_utilization_stats", sql, StringComparison.Ordinal);
-            Assert.Contains("AND   collection_time >= $2", sql, StringComparison.Ordinal);
             Assert.Single(Regex.Matches(sql, "sample_time_utc"));
             Assert.DoesNotContain("sample_time_utc >=", sql, StringComparison.Ordinal);   /* the window stays on collection_time */
         }

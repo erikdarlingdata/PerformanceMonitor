@@ -177,7 +177,7 @@ public sealed class PgServerConfigTests
             "WITH ordered AS ( SELECT c.collection_time, c.name, c.setting, c.unit, c.context, c.source, c.short_desc, "
             + "LAG(c.setting) OVER (PARTITION BY c.name ORDER BY c.collection_time) AS prev_setting, "
             + "LAG(c.collection_time) OVER (PARTITION BY c.name ORDER BY c.collection_time) AS prev_time "
-            + "FROM pg_server_config AS c WHERE c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time <= $3 "
+            + "FROM pg_server_config AS c WHERE c.server_id = $1 AND c.collection_time > $2 AND c.collection_time <= $3 "
             + "AND coalesce(c.source, '') NOT IN ('client', 'session', 'override') "
             + "AND c.database_name IS NULL AND c.role_name IS NULL ) "
             + "SELECT collection_time, name, prev_setting, setting, unit, context, source, short_desc FROM ordered "

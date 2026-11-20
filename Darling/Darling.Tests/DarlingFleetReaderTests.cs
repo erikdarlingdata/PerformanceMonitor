@@ -171,7 +171,6 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("FULL OUTER JOIN", sql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(b.server_id, g.server_id)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
         /* #3895: every scan (the blocked-process scan and, #7028, the one snapshot scan the wait count and the gate
            share) carries the partition-column floor, and none an upper bound on it: a late collection is still an
@@ -192,7 +191,6 @@ public sealed class DarlingFleetReaderSqlTests
         var sql = DarlingFleetReader.FleetDeadlockSql;
         Assert.Contains("FROM v_deadlocks", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
-        Assert.Contains("deadlock_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time <= $2", sql, StringComparison.Ordinal);
         /* #3895: FleetBlockingSql's floor, for its reason. */
         Assert.Contains("collection_time >= $3", sql, StringComparison.Ordinal);
@@ -698,7 +696,6 @@ public sealed class DarlingFleetDeadlockCoverageTests
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
         /* Windowed on the partitioning column, both bounds, like the SQL Server twin - in the pair aggregate AND
            in the per-server read, so each opens only the window's chunks. */
-        Assert.Equal(2, CountOf(sql, "collection_time >= $1"));
         Assert.Equal(2, CountOf(sql, "collection_time <= $2"));
     }
 

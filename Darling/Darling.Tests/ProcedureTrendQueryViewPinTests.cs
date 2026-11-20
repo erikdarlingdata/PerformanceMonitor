@@ -28,16 +28,16 @@ namespace Darling.Tests;
 public sealed class ProcedureTrendQueryViewPinTests
 {
     /// <summary>The unfiltered statement (the MCP reader's text before the viewer's database filter, #5244).</summary>
-    private const string QueryStatsBucketedUnfilteredSha256 = "18640D9E28246623298D4207224715FF405855A81F0B375F6B61AFDD07F9A77D";
+    private const string QueryStatsBucketedUnfilteredSha256 = "3D4EBE0D0B4B3C5955066B585A9AA7934DD3BDFFD6A1F70FAE1FC7931FFCD1F2";
 
     /// <summary>The filtered statement (the viewer's chart and the MCP reader's filtered text).</summary>
-    private const string QueryStatsBucketedFilteredSha256 = "27609439E97C27D1177AF232097D6FE3AEE43E43698265B625CF8B689A1645C9";
+    private const string QueryStatsBucketedFilteredSha256 = "3D88F208DF2224098FD2432F742A98EF77BCE51BBDDB07AF204A955D601EBE68";
 
     /// <summary>The per-collection CTE alone (<c>RawCollectionsCte</c>'s query branch), unfiltered.</summary>
-    private const string QueryStatsCollectionsCteUnfilteredSha256 = "32D4C7C32D847E12DD5C52060370D5022DBC9BFAAA0EBDBC969219E8E5AFBA35";
+    private const string QueryStatsCollectionsCteUnfilteredSha256 = "B2DC435EA3EAA654F12673D839A54DF09E1CFAD41A212A89BC3F2A5971555BBE";
 
     /// <summary>The per-collection CTE alone, filtered.</summary>
-    private const string QueryStatsCollectionsCteFilteredSha256 = "531DEDF2157A716BA51FA8A3A07C0D76112AB0AE13A488E00F4FD2B8F3CFD051";
+    private const string QueryStatsCollectionsCteFilteredSha256 = "9C3D09BF7B57E2DEC1E639A549B06BEB697C97BB6708EA3DD7777B1A60F2D3F2";
 
     [Fact]
     public void QueryStatsRawTrend_IsUnchangedByTheProcedureRunModel()

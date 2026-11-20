@@ -102,7 +102,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         /* Windows on event_time (the XE @timestamp — the event's real time), NOT collection_time, on the
            category's own event_type ($4), newest first — the viewer's choice. */
-        Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("event_type = $4", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);

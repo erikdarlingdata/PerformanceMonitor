@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -23,6 +24,13 @@ namespace Darling.Tests;
 /// read that sums its rows then answers the same total for the whole window as its two halves add up to. This runs that rule across
 /// every read the MCP server lists that takes a server, <c>hours_back</c> and <c>as_of</c> (<see cref="McpEveryReadStore"/>).
 ///
+/// <para>Which edge a window keeps follows from what the read places a row by. A read that places a row by an instant (when it was
+/// collected, when the event happened) counts the rows after its start up to and including its end, so the row at the whole
+/// window's start is left out, the row where the halves meet belongs to the first half and the row at the end to the second. A read
+/// that places a row by the start of an aligned interval (<see cref="s_placedByIntervalStart"/>) counts from its start up to and not
+/// including its end, so the row at the start is counted, the row where the halves meet belongs to the second half and the row at
+/// the end is left out. Each of the three windows is held to the rows its kind counts.</para>
+///
 /// <para>A window counts a row when its answer for the server that holds the row differs from its answer for the server that holds
 /// nothing in the window; the two servers are otherwise the same. A read whose whole window counts the row where the halves meet
 /// reads the seeded rows, so it is held to the rule.</para>
@@ -33,7 +41,8 @@ namespace Darling.Tests;
 /// on that count; and a read where a row outside a window still changes more than a time stamp keeps its finding.</para>
 ///
 /// <para>A read built by design from rows before its window too (<see cref="s_readsBackBeforeItsWindow"/>) is reported as not held, with
-/// what it takes from before, and is held only to a row after a window's end not changing the answer for it. No other read is left out by name. A read the seed does not reach is reported with the reason, taken from its own answer, and
+/// what it takes from before, and is held only to a row after a window's end not changing the answer for it. So is a read whose
+/// window is judged whole (<see cref="s_judgedWhole"/>). No other read is left out by name. A read the seed does not reach is reported with the reason, taken from its own answer, and
 /// <see cref="HeldShare"/> holds a floor under the share of windowed reads the rule was applied to, so the test cannot go quiet by
 /// reads dropping out of it. The output lists, for every read held, which of the three rows each window counts.</para>
 /// </summary>
@@ -52,7 +61,35 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
     ];
 
     private const string ChangeIsADifference = "a change is the difference between two captures, so the read takes the capture before the window as its baseline";
-    private const string ComparesWithHistory = "it sets the window against a baseline of the history before it and against the newest capture of each setting";
+    private const string JudgedWhole = "an analysis window is judged whole, never summed with its neighbour";
+    private const string ByIntervalStart = "a Query Store row is placed by the start of its runtime-statistics interval";
+
+    /// <summary>The rows a window counts, by what the read places a row by: (whole, first half, second half).</summary>
+    private static readonly (string Whole, string First, string Second) s_byInstant = ("bc", "b", "c");
+    private static readonly (string Whole, string First, string Second) s_byIntervalStart = ("ab", "a", "b");
+
+    /// <summary>
+    /// The reads that place a row by the start of an aligned interval, each with what the interval is. Every other read places a
+    /// row by an instant. A name here is held to the rows an interval read counts, so it fails once its read counts otherwise.
+    /// </summary>
+    private static readonly Dictionary<string, string> s_placedByIntervalStart = new(StringComparer.Ordinal)
+    {
+        ["get_query_store_aborts"] = ByIntervalStart,
+        ["get_query_store_duration_trend"] = ByIntervalStart,
+        ["get_query_store_top"] = ByIntervalStart,
+    };
+
+    /// <summary>
+    /// The reads whose window is judged as one piece: its answer is a verdict on the whole window, set against the history before
+    /// it, and no caller adds it to the answer for the window next to it. Such a read is reported as not held, with this reason, and
+    /// is still held to one thing: a row after a window's end does not change the answer for it.
+    /// </summary>
+    private static readonly Dictionary<string, string> s_judgedWhole = new(StringComparer.Ordinal)
+    {
+        ["analyze_server"] = JudgedWhole,
+        ["compare_analysis"] = JudgedWhole,
+        ["get_analysis_facts"] = JudgedWhole,
+    };
 
     /// <summary>
     /// The reads whose answer is built, by design, from rows before the window asked for as well as the rows in it, each with what
@@ -62,8 +99,6 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
     /// </summary>
     private static readonly Dictionary<string, string> s_readsBackBeforeItsWindow = new(StringComparer.Ordinal)
     {
-        ["analyze_server"] = ComparesWithHistory,
-        ["compare_analysis"] = ComparesWithHistory,
         ["get_database_config_changes"] = ChangeIsADifference,
         ["get_server_config_changes"] = ChangeIsADifference,
         ["get_trace_flag_changes"] = ChangeIsADifference,
@@ -166,6 +201,18 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
                     }
                 }
 
+                if (s_judgedWhole.TryGetValue(tool.Name, out var whyWhole))
+                {
+                    reason = whyWhole;
+                    if (inFirst.Contains('c'))
+                    {
+                        broken.Add($"{tool.Name} ({engine}): the row at the whole window's end changes its answer for the first half, which ends before that row [first half {Shown(inFirst)}]: "
+                            + FirstDifference(await AnswerAsync(first, McpEveryReadStore.End), await AnswerAsync(first, McpEveryReadStore.Prior)));
+                    }
+
+                    break;
+                }
+
                 if (s_readsBackBeforeItsWindow.TryGetValue(tool.Name, out var fromBefore))
                 {
                     if (inSecond.Contains('a'))
@@ -173,7 +220,8 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
                         reason = "it reads back before its window by design: " + fromBefore;
                         if (inFirst.Contains('c'))
                         {
-                            broken.Add($"{tool.Name} ({engine}): the row at the whole window's end changes its answer for the first half, which ends before that row [first half {Shown(inFirst)}]");
+                            broken.Add($"{tool.Name} ({engine}): the row at the whole window's end changes its answer for the first half, which ends before that row [first half {Shown(inFirst)}]: "
+                            + FirstDifference(await AnswerAsync(first, McpEveryReadStore.End), await AnswerAsync(first, McpEveryReadStore.Prior)));
                         }
 
                         break;
@@ -200,6 +248,17 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
                     if (problem is not null) broken.Add($"{tool.Name} ({engine}): the row {where} {problem} [{placement}]");
                 }
 
+                var byInterval = s_placedByIntervalStart.TryGetValue(tool.Name, out var interval);
+                var counts = byInterval ? s_byIntervalStart : s_byInstant;
+                var kind = byInterval ? "the start of an interval (" + interval + ")" : "an instant";
+                foreach (var (window, counted, expected) in new[] { ("the whole window", inWhole, counts.Whole), ("the first half", inFirst, counts.First), ("the second half", inSecond, counts.Second) })
+                {
+                    if (counted != expected)
+                    {
+                        broken.Add($"{tool.Name} ({engine}): {window} counts {Shown(counted)}, and a read that places a row by {kind} counts {expected} [{placement}]");
+                    }
+                }
+
                 break;
             }
 
@@ -217,7 +276,7 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
             + string.Join(Environment.NewLine, _store.UnseededTables.Select(t => t.Key + ": " + t.Value)));
 
         Assert.True(broken.Count == 0,
-            $"{broken.Count} finding(s) on {broken.Select(b => b[..b.IndexOf(' ')]).Distinct().Count()} read(s): the two halves of a window do not count each row the whole window counts exactly once:"
+            $"{broken.Count} finding(s) on {broken.Select(b => b[..b.IndexOf(' ')]).Distinct().Count()} read(s): the two halves of a window do not count each row the whole window counts exactly once, or a window does not count the rows its kind of read counts:"
             + Environment.NewLine + string.Join(Environment.NewLine, broken));
         Assert.True(windowed.Count > 0 && held >= windowed.Count * HeldShare,
             $"The rule was applied to only {held} of the {windowed.Count} windowed reads, under the floor of {HeldShare:P0}. Not held:"
@@ -225,6 +284,65 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
     }
 
     private static string Shown(string counted) => counted.Length == 0 ? "none" : counted;
+
+    /// <summary>Where the answer with a row first parts from the answer without it, as a short excerpt of each.</summary>
+    /// <summary>
+    /// A caller that hands a stored row's own time back as its window keeps that row. <c>get_active_queries</c> lists a snapshot with its
+    /// <c>collection_time</c>, and asked for that <c>collection_time</c> it answers the snapshot's rows: the window it reads starts one
+    /// microsecond before the instant, because a window leaves out the row at its own start.
+    /// </summary>
+    [Fact]
+    public async Task ASnapshotAskedForByTheCollectionTimeTheReadReturned_IsAnswered()
+    {
+        Assert.SkipWhen(!_store.Available, McpEveryReadStore.SkipReason);
+
+        var server = McpEveryReadStore.ServerName(McpEveryReadStore.SqlServer, McpEveryReadStore.Mid);
+        var listed = await _store.CallAsync("get_active_queries", new Dictionary<string, object?>
+        {
+            ["server_name"] = server,
+            ["hours_back"] = McpEveryReadStore.WindowHours,
+            ["as_of"] = McpEveryReadStore.AsOfText(_store.WindowEnd),
+        });
+        Assert.False(listed.IsError, listed.Text);
+        var stamps = CollectionTimes(listed.Text);
+        Assert.NotEmpty(stamps);
+
+        var asked = stamps[0];
+        var one = await _store.CallAsync("get_active_queries", new Dictionary<string, object?>
+        {
+            ["server_name"] = server,
+            ["collection_time"] = asked,
+        });
+        Assert.False(one.IsError, one.Text);
+        var answered = CollectionTimes(one.Text);
+        Assert.NotEmpty(answered);
+        Assert.All(answered, stamp => Assert.Equal(asked, stamp));
+    }
+
+    /// <summary>The <c>collection_time</c> of each row under <c>queries</c> in a <c>get_active_queries</c> reply, as the reply printed it.</summary>
+    private static List<string> CollectionTimes(string reply)
+    {
+        using var document = JsonDocument.Parse(reply);
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || !document.RootElement.TryGetProperty("queries", out var queries)
+            || queries.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return queries.EnumerateArray()
+            .Select(row => row.TryGetProperty("collection_time", out var stamp) ? stamp.GetString() : null)
+            .OfType<string>()
+            .ToList();
+    }
+
+    private static string FirstDifference(string with, string without)
+    {
+        var at = 0;
+        while (at < with.Length && at < without.Length && with[at] == without[at]) at++;
+        var from = Math.Max(0, at - 80);
+        return $"with the row ...{with[from..Math.Min(with.Length, at + 80)]}... and without it ...{without[from..Math.Min(without.Length, at + 80)]}...";
+    }
 
     private static string AsWritten(string answer) => answer;
 }
