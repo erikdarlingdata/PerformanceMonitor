@@ -253,6 +253,103 @@ public sealed class DurationTrendCollectionSummaryLiveTests
             Assert.Equal(2, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId} AND sum_elapsed = -1"));
         }, Cleanup);
 
+    private static Task PlantRateRowAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string hash, long executions, long elapsedUs, int? interval) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO query_stats
+                  (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                   query_text, query_text_digest, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                   delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                   min_dop, max_dop, sample_interval_seconds)
+              VALUES ($1, $2, $3, $4, $5, $6, '0xP', '0xS', '0xL', 'SELECT 1', decode('00', 'hex'), $7, $8, $8, 100, 0, 0, 1, $8, 1, $8, 1, 1, $9)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(at), serverId, serverName, A, hash, executions, elapsedUs, (object?)interval ?? DBNull.Value);
+
+    /// <summary>
+    /// #9147, and the behaviour the two text tests on the duration and execution-count statements stood for: both trends rate a collection over
+    /// its gap to the previous collection (capped at the collector's 3600 s, never the stored interval of any one query), keep the stored
+    /// interval only for the first collection read, leave a restart (every row 0) and a gap past the cap unrated, sum the elapsed time for the
+    /// duration series, and count only executions for the execution series. Proved with fixed numbers on both routes: the summary with the raw
+    /// rows still stored, the raw rows alone (the summary rows removed), and the summary alone. The viewer reads a short window (one point per
+    /// collection) and the MCP reader reads a window that also holds a collection after a two hour gap.
+    /// </summary>
+    [Fact]
+    public Task BothTrends_RateOverTheGapToThePreviousCollection_OnTheRawRoute_AndTheSummaryRoute() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-rates", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            var t1 = DarlingMcpTestData.TruncateToSeconds(now.AddHours(-5));
+            var t0 = t1.AddHours(-2);       /* before the hour the LAG reads, so the first collection read has no previous one; it holds the summary floor */
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+            var t4 = t3.AddMinutes(5);
+            var t5 = t4.AddHours(2);        /* past the 3600 s cap */
+            var all = new[] { t0, t1, t2, t3, t4, t5 };
+
+            async Task PlantCollectionAsync(DateTime at)
+            {
+                if (at == t0) { await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ0", 3, 30_000, 600); }
+                if (at == t1)
+                {
+                    await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ1", 40, 800_000, 900);
+                    await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ2", 5, 100_000, 300);
+                }
+
+                if (at == t2) { await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ1", 30, 600_000, null); }
+                if (at == t3) { await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ1", 0, 0, 0); }
+                if (at == t4)
+                {
+                    await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ1", 24, 1_200_000, 120);
+                    await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xNEW", 0, 0, 0);
+                }
+
+                if (at == t5) { await PlantRateRowAsync(connection, ct, serverId, serverName, at, "0xQ1", 12, 600_000, 60); }
+            }
+
+            async Task CheckAsync(string route)
+            {
+                /* The viewer: a point per collection with a rate; t3 (restart) is dropped. Seconds: t1 the stored 900 (no previous collection
+                   read), t2 and t4 the 300 s gaps (t4's stored 120 s is not used). */
+                await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!);
+                var viewerEnd = t4.AddMinutes(1);
+                var duration = await viewer.GetQueryDurationTrendAsync(serverId, t1.AddMinutes(-1), viewerEnd, nowUtc: viewerEnd, cancellationToken: ct);
+                Assert.Equal(RetentionTier.Raw, duration.Tier);
+                Assert.True(new[] { t1, t2, t4 }.SequenceEqual(duration.Points.Select(p => p.CollectionTime)), route);
+                Assert.True(new[] { 1.0, 2.0, 4.0 }.SequenceEqual(duration.Points.Select(p => Math.Round(p.Value, 6))), route);      /* elapsed ms / seconds: 900/900, 600/300, 1200/300 */
+                var executions = await viewer.GetExecutionCountTrendAsync(serverId, t1.AddMinutes(-1), viewerEnd, nowUtc: viewerEnd, cancellationToken: ct);
+                Assert.True(new[] { t1, t2, t4 }.SequenceEqual(executions.Points.Select(p => p.CollectionTime)), route);
+                Assert.True(new[] { 0.05, 0.1, 0.08 }.SequenceEqual(executions.Points.Select(p => Math.Round(p.Value, 6))), route); /* executions / seconds: 45/900, 30/300, 24/300 */
+
+                /* The MCP reader, one-minute buckets: every collection is a point; the restart (t3) and the collection after the two hour gap (t5)
+                   are unrated points, not zeros. */
+                var start = t1.AddMinutes(-1);
+                var end = t5.AddMinutes(1);
+                var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
+                var tierRoute = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, rollups.Item1, rollups.Item2, windowEndUtc: end);
+                Assert.Equal(RetentionTier.Raw, tierRoute.Tier);
+                var points = (await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, tierRoute, 1, DatabaseFilter.All, ct)).Points;
+                Assert.Equal(5, points.Count);
+                Assert.True(new double?[] { 1.0, 2.0, null, 4.0, null }.SequenceEqual(points.Select(p => p.Value.HasValue ? Math.Round(p.Value.Value, 6) : (double?)null)), route);
+                Assert.True(new double?[] { 0.05, 0.1, null, 0.08, null }.SequenceEqual(points.Select(p => p.ExecutionsPerSecond.HasValue ? Math.Round(p.ExecutionsPerSecond.Value, 6) : (double?)null)), route);
+            }
+
+            foreach (var at in all)
+            {
+                await PlantCollectionAsync(at);
+                await WriteSummaryAsync(connection, ct, serverId, at);
+            }
+
+            await CheckAsync("summary, raw rows still stored");
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1", serverId);
+            await CheckAsync("raw, no summary");
+
+            foreach (var at in all)
+            {
+                await WriteSummaryAsync(connection, ct, serverId, at);
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", serverId);
+            await CheckAsync("summary alone");
+        }, Cleanup);
+
     [Fact]
     public Task TheSummaryRoute_ReadsFewerBuffersThanTheRawRoute() =>
         DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-buffers", async (connection, postgres, serverId, serverName, now, ct) =>
