@@ -891,6 +891,10 @@ DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
 DROP TABLE IF EXISTS collect.query_store_slicer_hourly;
 DROP TABLE IF EXISTS collect.query_store_closed_day_built;
 DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
+        // V287 (#9164): the hourly host rollup's two tables. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V287
+        // creates them empty and the service builds the hours again. Safe on a store that never had them.
+        new(287, "hasQueryStatsHostHourly", @"DROP TABLE IF EXISTS collect.query_stats_host_hourly;
+DROP TABLE IF EXISTS collect.query_stats_host_hourly_built;"),
     ];
 
     /// <summary>

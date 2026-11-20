@@ -3732,6 +3732,10 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V283 (#9111): the closed-day rollups the Query Store grid and its slicer read whole UTC days from, and the table that says which days
            are built. Three new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(QueryStoreClosedDayRollup.Version, "query-store-closed-day-rollups", QueryStoreClosedDayRollup.CreateSql),
+        /* V287 (#9164): the hourly host rollup the top-queries read ranks whole hours from, and the table that says which hours are built.
+           Two new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. V284 to V286 are taken
+           by other open changes, so the ladder has a gap here until they land. */
+        new Migration(QueryStatsHostHourly.Version, "query-stats-host-hourly", QueryStatsHostHourly.CreateSql),
     };
 
     /// <summary>

@@ -227,16 +227,14 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         QueryStoreClosedDayRollup.ResolveServedDaysAsync(store.Connection, null, ServerId, start, end, 30, ct);
 
     /// <summary>
-    /// The rung is the newest on a dense ladder, makes its four tables empty, runs twice, and the store probe maps a store that holds
-    /// them to this version and a store without one of them to the version below.
+    /// The rung is on the ladder, makes its four tables empty, runs twice, and the store probe maps a store that holds them to this
+    /// version and a store without one of them to the version below. A rung above it (V287, #9164) is dropped first, so the probe's
+    /// newest sentinel is not the one this test reads.
     /// </summary>
     [Fact]
-    public async Task TheRungIsTheNewestOnADenseLadder_MakesItsTablesEmpty_RunsTwice_AndTheStoreProbeSeesThem()
+    public async Task TheRung_MakesItsTablesEmpty_RunsTwice_AndTheStoreProbeSeesThem()
     {
-        var rung = PgMigrations.Scripts[^1];
-        Assert.Equal(QueryStoreClosedDayRollup.Version, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
-        Assert.Equal(rung.Version - 1, PgMigrations.Scripts[^2].Version);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == QueryStoreClosedDayRollup.Version);
 
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
         var ct = TestContext.Current.CancellationToken;
@@ -260,8 +258,12 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
 
+        /* Rungs above this one have newer sentinels: drop them so this rung's own sentinel is the newest the probe finds. */
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, QueryStoreClosedDayRollup.Version, ct);
+        Assert.Equal(QueryStoreClosedDayRollup.Version, await viewer.GetStoreSchemaVersionAsync(ct));
+
         await ExecuteAsync(connection, "DROP TABLE collect.query_store_closed_day_built", ct);
-        Assert.Equal(StorageVersion.SchemaVersion - 1, await viewer.GetStoreSchemaVersionAsync(ct));
+        Assert.Equal(QueryStoreClosedDayRollup.Version - 1, await viewer.GetStoreSchemaVersionAsync(ct));
     }
 
     [Fact]
