@@ -3357,7 +3357,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// materializations keep their own group indexes, which other readers use.
     ///
     /// <para><b>Cost.</b> One build per materialization, under a SHARE lock that blocks the refresh's writes and not reads, with the lock timeout
-    /// of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
+    /// of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). On the Query Store rollup the drop of V246's narrow index (a non-concurrent <c>DROP INDEX</c>) takes
+    /// ACCESS EXCLUSIVE on the materialization until the rung commits, so for that short tail reads wait too and the rung must get past open readers
+    /// inside the same lock timeout. A compressed chunk's index is an empty shell, so the build time follows
     /// the uncompressed chunks (the newest days). The statement is a catalog read on a store that already has the indexes, and a store without
     /// TimescaleDB or without the views returns before touching anything. A fresh store gets the same indexes right after each view is created.
     /// Additive for an older build: it ignores the indexes, and no GRANT is needed for an index.</para>
@@ -3395,6 +3397,50 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         + QueryStoreTextSeen.BackfillSql + "\n"
         + QueryStoreTextSeen.PrimaryKeySql + "\n"
         + QueryStoreTextSeen.ForeignKeySql;
+
+    /// <summary>
+    /// V288 (#9151): <c>idx_collection_log_watermark</c> (V150) gains <c>INCLUDE (rows_collected)</c>. The Fleet Custom View panels that read the
+    /// collector estimate count the rows each collector last wrote, and with only the three key columns in the index that read took one heap page per
+    /// log row it passed (3,673 buffers on the measured store, 236 with the column in the index). The newest-row lookups that end in <c>LIMIT 1</c>
+    /// read the same leading keys, so they keep their plan.
+    ///
+    /// <para><b>How it builds.</b> The rung builds the covering index under <c>idx_collection_log_watermark_new</c>, drops the narrow one and
+    /// renames the new one to the old name, so a reader that runs after the rung's commit always has an index (the viewer's V150 sentinel and every
+    /// reader of the name still hold). The build holds a SHARE lock on <c>collect.collection_log</c> (collector writes wait, reads do not) under the
+    /// lock timeout of V152 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). The <c>DROP INDEX</c> that follows is not concurrent: it takes ACCESS
+    /// EXCLUSIVE on the table (and on each chunk whose index it drops) until the rung commits, so for that short tail reads wait too, and the rung must
+    /// get past open readers inside the same lock timeout. On a TimescaleDB store the build makes one index per chunk, and a
+    /// compressed chunk gets an empty 8 KB index, so the build time follows the uncompressed chunks of a table that holds one row per collector
+    /// run. A store that already has the covering index (found by name with more attributes than key attributes) is a catalog read, so running
+    /// the rung twice changes nothing. A fresh store runs V150 and then this rung on an empty table. Additive for an older build: it ignores the
+    /// extra column, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private static readonly string V288Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_table regclass := to_regclass('collect.collection_log');
+BEGIN
+    IF v_table IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = v_table
+        AND   c.relname = 'idx_collection_log_watermark'
+        AND   i.indnatts > i.indnkeyatts
+    ) THEN
+        RETURN;
+    END IF;
+
+    CREATE INDEX IF NOT EXISTS idx_collection_log_watermark_new
+        ON collect.collection_log (server_id, collector_name, collection_time DESC) INCLUDE (rows_collected);
+    DROP INDEX IF EXISTS collect.idx_collection_log_watermark;
+    ALTER INDEX collect.idx_collection_log_watermark_new RENAME TO idx_collection_log_watermark;
+END $$;";
 
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
@@ -3765,6 +3811,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V287 (#9164): the hourly host rollup the top-queries read ranks whole hours from, and the table that says which hours are built.
            Two new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(QueryStatsHostHourly.Version, "query-stats-host-hourly", QueryStatsHostHourly.CreateSql),
+        /* V288 (#9151): idx_collection_log_watermark gains INCLUDE (rows_collected), so the collector estimate over the log answers from the index.
+           The index is replaced in place under its own name, built under a temporary name first. An older build ignores the change. */
+        new Migration(288, "collection-log-watermark-covering-index", V288Sql),
     };
 
     /// <summary>
