@@ -436,7 +436,10 @@ public static class DurationTrendRouting
         /* #9147: query_stats has a per-collection summary (QueryStatsCollectionSummary, V286). The collections are read from it, in place of the
            rows, when the summary covers the whole window for this server: its oldest row is at or before $2, so every collection after $2 has a
            summary row, and so does the one before it that the LAG needs (the first collection after $2 finds its previous collection at or after
-           the oldest summary row). A server with no summary row (a store fresh from V286, or a server first collected after it) has no floor and
+           the oldest summary row). The cover also needs the other end: no raw collection of the server lies after the newest summary row and
+           at or before $3. A build older than V286 that ran after a rollback writes raw rows with no summary row, and until the next batch
+           moves the floor up (FloorMoveSql) the summary would drop them from a window that ends after them. The probe is one look at the
+           (server_id, collection_time) index past the newest summary row and normally finds nothing. A server with no summary row (a store fresh from V286, or a server first collected after it) has no floor and
            reads the rows, as does a window that starts before the oldest summary row. Both arms carry the same one-time test, so only one of
            them runs. A summary row stands for the rows of one (collection, database): its sums add, its n adds to the filtered row count and
            its max_interval maxes, which is what the aggregates below take over the rows. */
@@ -444,9 +447,21 @@ public static class DurationTrendRouting
         var coverCte = fromSummary ? $"""
         summary_cover AS
         (
-            SELECT COALESCE(MIN(collection_time) <= $2, false) AS covered
-            FROM {QueryStatsCollectionSummary.Table}
-            WHERE server_id = $1
+            SELECT COALESCE(s.oldest <= $2, false)
+                   AND NOT EXISTS
+                       (
+                           SELECT 1
+                           FROM {rawTable} AS q
+                           WHERE q.server_id = $1
+                           AND   q.collection_time > s.newest
+                           AND   q.collection_time <= $3
+                       ) AS covered
+            FROM
+            (
+                SELECT MIN(collection_time) AS oldest, MAX(collection_time) AS newest
+                FROM {QueryStatsCollectionSummary.Table}
+                WHERE server_id = $1
+            ) AS s
         ),
         """ : "";
         var coverFilter = fromSummary ? "AND   NOT (SELECT covered FROM summary_cover)" : "";

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -171,6 +172,85 @@ public sealed class DurationTrendCollectionSummaryLiveTests
 
             Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId}"));
             Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId} AND collection_time = '{Stamp(t3)}'"));
+        }, Cleanup);
+
+    [Fact]
+    public Task ARolledBackServiceThatLeftRawCollectionsNewerThanTheSummary_ReadsRaw_AndKeepsThoseCollections() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-newer-raw", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            /* The summary is whole up to T (the seed's last collection). Then an older build wrote raw collections after T with no summary
+               row, and no batch of this build has run since, so the floor has not moved. A window that ends after T must still show them. */
+            await SeedAsync(connection, ct, serverId, serverName, now);
+            await PlantAsync(connection, ct, serverId, serverName, now.AddMinutes(-90), A, "0xQ1", 4_000);
+            await PlantAsync(connection, ct, serverId, serverName, now.AddMinutes(-30), A, "0xQ1", 5_000);
+            await PlantAsync(connection, ct, serverId, serverName, now.AddMinutes(-30), B, "0xQ4", 6_000);
+
+            var filters = new[] { DatabaseFilter.All, DatabaseFilter.One(A), DatabaseFilter.One(B) };
+            var withSummary = new List<string>();
+            foreach (var filter in filters)
+            {
+                withSummary.Add(await ReadAsync(postgres, serverId, now, filter, ct));
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1", serverId);
+            for (var i = 0; i < filters.Length; i++)
+            {
+                Assert.Equal(await ReadAsync(postgres, serverId, now, filters[i], ct), withSummary[i]);
+            }
+        }, Cleanup);
+
+    [Fact]
+    public Task TheWritersDatabaseLimit_SetsOnlyTheBatchsDatabases_ThroughTheRunnersOwnNameList() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-writer-database-limit", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            var at = DarlingMcpTestData.TruncateToSeconds(now.AddHours(-2));
+
+            static List<QueryStatsCollector.Row> RowsOf(params string?[] databases) =>
+                databases.Select(static database => new QueryStatsCollector.Row { DatabaseName = database }).ToList();
+
+            async Task WriteBatchAsync(List<QueryStatsCollector.Row> rows)
+            {
+                await using var transaction = await connection.BeginTransactionAsync(ct);
+                await QueryStatsCollectionSummary.UpsertBatchAsync(
+                    connection, transaction, serverId, at, rows.Count, 30, QueryStatsCollectionSummary.DatabaseNamesOf(rows), ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            /* The rows the first batch stored: two named databases and the NULL database, a tie inside A. */
+            await PlantAsync(connection, ct, serverId, serverName, at, A, "0xQ1", 100);
+            await PlantAsync(connection, ct, serverId, serverName, at, A, "0xQ2", 200);
+            await PlantAsync(connection, ct, serverId, serverName, at, B, "0xQ4", 300);
+            await PlantAsync(connection, ct, serverId, serverName, at, null, "0xQ3", 400);
+            await WriteBatchAsync(RowsOf(A, A, B, null));
+
+            /* Every summary row equals GROUP BY over the raw rows of the collection (NULL-safe on the database). */
+            var mismatch = $@"SELECT count(*) FROM
+                (
+                    (SELECT database_name, count(*), sum(delta_elapsed_time)::bigint, sum(delta_execution_count)::bigint, max(sample_interval_seconds)
+                     FROM query_stats WHERE server_id = {serverId} AND collection_time = '{Stamp(at)}' GROUP BY database_name
+                     EXCEPT
+                     SELECT database_name, n, sum_elapsed, sum_exec, max_interval
+                     FROM collect.query_stats_collection WHERE server_id = {serverId} AND collection_time = '{Stamp(at)}')
+                    UNION ALL
+                    (SELECT database_name, n, sum_elapsed, sum_exec, max_interval
+                     FROM collect.query_stats_collection WHERE server_id = {serverId} AND collection_time = '{Stamp(at)}'
+                     EXCEPT
+                     SELECT database_name, count(*), sum(delta_elapsed_time)::bigint, sum(delta_execution_count)::bigint, max(sample_interval_seconds)
+                     FROM query_stats WHERE server_id = {serverId} AND collection_time = '{Stamp(at)}' GROUP BY database_name)
+                ) AS d";
+            Assert.Equal(0, await ScalarAsync(connection, ct, mismatch));
+            Assert.Equal(3, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId}"));
+
+            /* A second batch at the same collection time holds one database only. B's and the NULL database's summary rows are set aside
+               to a marker value: only a batch that reads them back would move them. A's row follows its new raw row. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE collect.query_stats_collection SET sum_elapsed = -1 WHERE server_id = $1 AND database_name IS DISTINCT FROM $2", serverId, A);
+            await PlantAsync(connection, ct, serverId, serverName, at, A, "0xQ5", 50);
+            await WriteBatchAsync(RowsOf(A));
+
+            Assert.Equal(3, await ScalarAsync(connection, ct, $"SELECT n FROM collect.query_stats_collection WHERE server_id = {serverId} AND database_name = '{A}'"));
+            Assert.Equal(350, await ScalarAsync(connection, ct, $"SELECT sum_elapsed FROM collect.query_stats_collection WHERE server_id = {serverId} AND database_name = '{A}'"));
+            Assert.Equal(2, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId} AND sum_elapsed = -1"));
         }, Cleanup);
 
     [Fact]

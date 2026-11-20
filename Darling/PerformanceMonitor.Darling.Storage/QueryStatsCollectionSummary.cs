@@ -42,7 +42,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// exact: every collection from the oldest summary row onward has a summary row, so the first collection after the window start
 /// finds its previous collection (the gap the rate divides by) in the summary, as raw would give it. A rollback that ran an older
 /// build writes raw rows with no summary row, which would be a hole after the oldest row, so <see cref="FloorMoveSql"/> moves the
-/// oldest row up to the batch that finds the hole. The read then goes to raw until the summary again covers a window.</para>
+/// oldest row up to the batch that finds the hole. The read then goes to raw until the summary again covers a window. Until that next
+/// batch runs, the hole is raw collections newer than the summary's newest row, so the read also needs the other end: it takes the summary only
+/// when no raw collection of the server lies after the summary's newest row and at or before the window end.</para>
 ///
 /// <para><b>A plain table, on both store kinds,</b> like the hour ledger (V164) and the procedure totals (V176): not a collector,
 /// not in <c>CollectorCatalog.All</c>, not a hypertable, about one row per database per collection. It sits in the
