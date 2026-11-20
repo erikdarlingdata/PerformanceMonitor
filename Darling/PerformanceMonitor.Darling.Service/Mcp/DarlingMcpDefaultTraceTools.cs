@@ -101,6 +101,13 @@ public sealed class DarlingMcpDefaultTraceTools
                     databases.Describe());
                 if (notCollected is not null)
                     return notCollected;
+
+                /* #9107: a server whose default trace is turned off needs setup: the capability gap above wins, then this. */
+                var needsSetup = McpHelpers.WithDatabase(
+                    await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "default_trace_events", cancellationToken),
+                    databases.Describe());
+                if (needsSetup is not null)
+                    return needsSetup;
             }
 
             /* Taken from every significant row, before the page limit applies: the read has no SQL cap, so the store really reaches that

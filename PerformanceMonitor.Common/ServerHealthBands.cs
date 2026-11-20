@@ -2814,6 +2814,78 @@ namespace PerformanceMonitor.Common
                 ? Warning
                 : band;
 
+        /// <summary>
+        /// Whether the window's successes all stored nothing and every run since the newest of them is
+        /// <see cref="ExtensionMissing"/> (#9101). Such a window is the absent extension alone: the collector
+        /// has never read anything here, and the successes are runs that found nothing to read.
+        ///
+        /// <para><b>The reading this ends.</b> A collector can record SUCCESS with zero rows while its extension
+        /// is absent, and later record the named skip for the same state. Its window then holds successes, so the
+        /// <see cref="ExtensionMissing"/> arm of <see cref="Classify"/> (gated on no success) is unreachable, and
+        /// the success clock bands it FAILING once the newest of them is a day old, until they leave the
+        /// window.</para>
+        ///
+        /// <para><b>Exact from what every health read already selects.</b> Three counts and three instants:
+        /// the window holds nothing but successes and extension-missing runs
+        /// (<paramref name="totalRuns"/> is their sum), no run stored a row
+        /// (<paramref name="lastProductiveTimeUtc"/> is null), and the newest run is later than the newest run
+        /// that was not a named skip. With only those two kinds in the window the newest non-skip run is the
+        /// newest success, so every run after it is extension-missing. A window that also holds an error, a
+        /// refusal, an abandoned or a yielded run keeps the ordinary ladder.</para>
+        ///
+        /// <para><b>Disjoint from both regressions.</b> <see cref="RegressedFromProductive"/> and
+        /// <see cref="ProducedThenStopped"/> need a productive run inside the window and this needs none, so a
+        /// collector that stored rows and then lost its extension keeps its band. A success after the skips is
+        /// the newest non-skip run, so it counts as a success.</para>
+        /// </summary>
+        /// <param name="totalRuns">Every run in the window.</param>
+        /// <param name="successCount">Runs recorded SUCCESS.</param>
+        /// <param name="extensionMissingCount">Runs recorded <c>EXTENSION_MISSING</c>.</param>
+        /// <param name="lastRunTimeUtc">The newest run of any status (<c>last_run_time</c>).</param>
+        /// <param name="lastNonSkipTimeUtc">The newest run that was not a named skip (<c>last_non_skip_time</c>).</param>
+        /// <param name="lastProductiveTimeUtc">The newest run that stored rows (<c>last_productive_time</c>).</param>
+        public static bool EmptySuccessesBeforeExtensionMissing(
+            long totalRuns,
+            long successCount,
+            long extensionMissingCount,
+            DateTime? lastRunTimeUtc,
+            DateTime? lastNonSkipTimeUtc,
+            DateTime? lastProductiveTimeUtc)
+        {
+            if (successCount <= 0 || extensionMissingCount <= 0 || totalRuns != successCount + extensionMissingCount)
+            {
+                return false;
+            }
+
+            if (lastProductiveTimeUtc is not null || lastRunTimeUtc is null || lastNonSkipTimeUtc is null)
+            {
+                return false;
+            }
+
+            /* Strictly later, as RegressedFromProductive is: equal instants mean the newest run is the success. */
+            return lastRunTimeUtc.Value > lastNonSkipTimeUtc.Value;
+        }
+
+        /// <summary>
+        /// The success count <see cref="Classify"/> is given (#9101): zero when
+        /// <see cref="EmptySuccessesBeforeExtensionMissing"/> holds, so the ladder reads the window as the skip
+        /// alone and returns <see cref="ExtensionMissing"/>, and <paramref name="successCount"/> otherwise.
+        /// Resolved by the caller, like the cadence, so the ladder stays a function of run-class counts. Every
+        /// surface passes this to <see cref="Classify"/> and <see cref="RecoveryCouldChangeBand"/>, and keeps
+        /// reporting the raw count.
+        /// </summary>
+        public static long SuccessCountForLadder(
+            long totalRuns,
+            long successCount,
+            long extensionMissingCount,
+            DateTime? lastRunTimeUtc,
+            DateTime? lastNonSkipTimeUtc,
+            DateTime? lastProductiveTimeUtc) =>
+            EmptySuccessesBeforeExtensionMissing(
+                totalRuns, successCount, extensionMissingCount, lastRunTimeUtc, lastNonSkipTimeUtc, lastProductiveTimeUtc)
+                ? 0
+                : successCount;
+
         /// <summary>True for the two Always On collectors. On a SQL Server without Always On they run, find nothing and log HEALTHY
         /// with zero rows (#6828, click-through 5).</summary>
         public static bool IsAlwaysOnCollector(string? collectorName) =>
@@ -3365,6 +3437,15 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
+                /* #9107: the default trace is turned off on the server. The run is a SUCCESS (so the row bands by its runs, not as a
+                   failure or a denial) and the count alone does not say what to do, so the sentence names the setup step. */
+                if (DefaultTraceOffNote.TryParse(lastNote))
+                {
+                    return noteCount >= totalRuns && totalRuns > 0
+                        ? "latest run: " + DefaultTraceOffNote.Sentence + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", DefaultTraceOffNote.Sentence, lastNote, noteCount, totalRuns);
+                }
+
                 /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
                 /* #8146: the same for ring-buffer loss; when a note carries both, truncation reads first. */
                 var truncationSentence = RingBufferTruncationNote.Describe(lastNote);
