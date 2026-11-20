@@ -104,7 +104,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_hash = $3
-        AND   collection_time >= $4
+        AND   collection_time > $4
         AND   collection_time <= $5
         ORDER BY collection_time
         """;
@@ -230,7 +230,7 @@ public sealed partial class ViewerDataService
         AND   database_name = $2
         AND   schema_name = $3
         AND   object_name = $4
-        AND   collection_time >= $5
+        AND   collection_time > $5
         AND   collection_time <= $6
         ORDER BY collection_time
         """;
@@ -310,7 +310,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collector_name = 'procedure_stats'
         AND   status = 'SUCCESS'
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time
         """;
@@ -429,7 +429,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_id = $3
-        AND   collection_time >= $4
+        AND   collection_time > $4
         AND   collection_time <= $5
         ORDER BY collection_time
         """;

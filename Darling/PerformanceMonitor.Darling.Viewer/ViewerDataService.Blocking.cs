@@ -200,7 +200,7 @@ public sealed partial class ViewerDataService
             blocking_open_transaction_count
         FROM blocked_process_reports
         WHERE server_id = $1
-        AND   event_time >= $2
+        AND   event_time > $2
         AND   event_time <= $3
         AND   collection_time >= $5
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
@@ -244,7 +244,7 @@ public sealed partial class ViewerDataService
             blocking_tran_log_bytes_used
         FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ORDER BY event_time DESC
@@ -336,7 +336,7 @@ public sealed partial class ViewerDataService
         SELECT EXISTS (
             SELECT 1
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -469,13 +469,13 @@ public sealed partial class ViewerDataService
                  ELSE (SELECT c.collection_time
                        FROM collect.collection_log AS c
                        WHERE c.server_id = $1 AND c.collector_name = 'blocked_process_report'
-                       AND   c.collection_time >= $2 AND c.collection_time <= $3
+                       AND   c.collection_time > $2 AND c.collection_time <= $3
                        ORDER BY c.collection_time
                        LIMIT 1)
             END,
             (SELECT MIN(b.event_time)
              FROM v_blocked_process_reports AS b
-             WHERE b.server_id = $1 AND b.event_time >= $2 AND b.event_time <= $3
+             WHERE b.server_id = $1 AND b.event_time > $2 AND b.event_time <= $3
              AND   b.collection_time >= $5
              AND   ($4::text[] IS NULL OR b.database_name = ANY($4)))
         """;

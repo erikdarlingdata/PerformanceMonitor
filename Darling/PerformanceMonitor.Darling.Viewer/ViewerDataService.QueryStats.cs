@@ -282,7 +282,7 @@ public sealed partial class ViewerDataService
                 host_object_name AS win_host_object_name
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
            {DatabaseFilter.ExcludeClause("database_name", 7)}
@@ -374,14 +374,14 @@ public sealed partial class ViewerDataService
             (
                 SELECT * FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   query_hash IN (SELECT win_query_hash FROM winners)
                 UNION ALL
                 SELECT * FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   query_hash IS NULL
@@ -453,7 +453,7 @@ public sealed partial class ViewerDataService
                     AND q.query_hash IS NOT DISTINCT FROM o.query_hash
                     AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                 WHERE q.server_id = $1
-                AND   q.collection_time >= $2
+                AND   q.collection_time > $2
                 AND   q.collection_time <= $3
                 AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
@@ -948,7 +948,7 @@ public sealed partial class ViewerDataService
             SELECT query_hash, database_name
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2 AND collection_time <= $3
+            AND   collection_time > $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
             AND   delta_execution_count > 0
             GROUP BY query_hash, database_name
@@ -959,7 +959,7 @@ public sealed partial class ViewerDataService
             SELECT query_hash, database_name
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $4 AND collection_time <= $5
+            AND   collection_time > $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
             AND   delta_execution_count > 0
             GROUP BY query_hash, database_name
@@ -991,7 +991,7 @@ public sealed partial class ViewerDataService
                        MAX(qs.query_text) AS query_text
                 FROM v_query_stats qs
                 WHERE qs.server_id = $1
-                AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+                AND   qs.collection_time > $2 AND qs.collection_time <= $3
                 AND   ($6::text[] IS NULL OR qs.database_name = ANY($6))
                 AND   qs.delta_execution_count > 0
                 GROUP BY qs.database_name, qs.query_hash
@@ -1014,7 +1014,7 @@ public sealed partial class ViewerDataService
                        MAX(qs.query_text) AS query_text
                 FROM v_query_stats qs
                 WHERE qs.server_id = $1
-                AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+                AND   qs.collection_time > $4 AND qs.collection_time <= $5
                 AND   ($6::text[] IS NULL OR qs.database_name = ANY($6))
                 AND   qs.delta_execution_count > 0
                 GROUP BY qs.database_name, qs.query_hash
@@ -1096,7 +1096,7 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(delta_physical_reads), 0) AS total_physical_reads
         FROM query_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         GROUP BY 1

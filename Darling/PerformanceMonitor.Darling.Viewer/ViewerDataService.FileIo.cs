@@ -82,7 +82,7 @@ public sealed partial class ViewerDataService
                 COALESCE(SUM(delta_writes), 0) AS total_writes
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   (delta_reads > 0 OR delta_writes > 0)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -135,7 +135,7 @@ public sealed partial class ViewerDataService
             FROM v_file_io_stats f
             JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
             WHERE f.server_id = $1
-            AND   f.collection_time >= $2
+            AND   f.collection_time > $2
             AND   f.collection_time <= $3
         )
         """;
@@ -256,7 +256,7 @@ public sealed partial class ViewerDataService
             SELECT database_name, file_name
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -284,7 +284,7 @@ public sealed partial class ViewerDataService
             FROM v_file_io_stats f
             JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
             WHERE f.server_id = $1
-            AND   f.collection_time >= $2
+            AND   f.collection_time > $2
             AND   f.collection_time <= $3
         ),
         rated AS (

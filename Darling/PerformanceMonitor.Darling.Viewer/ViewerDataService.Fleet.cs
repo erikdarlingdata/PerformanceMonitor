@@ -138,13 +138,13 @@ WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3", new[] { "server_id" }) + @"
 SELECT
@@ -179,13 +179,13 @@ SELECT
         FROM collection_log AS l
         WHERE " + DarlingPgBlockingReader.PgBlockingCaptureFilter + @"
         AND   l.rows_collected > 0
-        AND   l.collection_time >= $1
+        AND   l.collection_time > $1
         AND   l.collection_time <= $2
     ) AS total_blocking_events,
     (
         SELECT COUNT(*)
         FROM v_deadlocks
-        WHERE deadlock_time >= $1
+        WHERE deadlock_time > $1
         AND   deadlock_time <= $2
         AND   collection_time >= $3
     )
@@ -204,7 +204,7 @@ SELECT
                     server_id,
                     database_name
                 FROM pg_database_stats
-                WHERE collection_time >= $1
+                WHERE collection_time > $1
                 AND   collection_time <= $2
                 GROUP BY server_id, database_name
                 HAVING min(deadlocks) <> max(deadlocks)
@@ -219,7 +219,7 @@ SELECT
                 SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
                 FROM pg_database_stats
                 WHERE server_id = s.server_id
-                AND   collection_time >= $1
+                AND   collection_time > $1
                 AND   collection_time <= $2
                 AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
             ) AS sampled

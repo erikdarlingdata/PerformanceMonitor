@@ -188,14 +188,14 @@ WHERE s.is_enabled
 WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4") + "," + BlockingWaits.WaitsCteSql(
+    WHERE server_id = $1 AND event_time > $2 AND event_time <= $3 AND collection_time >= $4") + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4") + @"
+    WHERE server_id = $1 AND event_time > $2 AND event_time <= $3 AND collection_time >= $4") + @"
 SELECT
     (SELECT COUNT(*) FROM xe_waits),
     (SELECT COUNT(*) FROM dmv_waits),
-    (SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND collection_time >= $4)";
+    (SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3 AND collection_time >= $4)";
 
     /// <summary>
     /// What the fleet totals over-count for the Azure SQL Database masters that have separately monitored

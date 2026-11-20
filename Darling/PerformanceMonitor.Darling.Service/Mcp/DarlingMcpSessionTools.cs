@@ -215,10 +215,11 @@ public sealed class DarlingMcpSessionTools
             if (snapshotsOnly)
                 return await SnapshotListAsync(postgres, resolved, hours_back, now, limit, databases, blocking_only, waitFilter, tagFilter, filter, includeMonitor, cancellationToken);
 
-            /* #6302: one snapshot is the window [instant, instant]: collection_time is stored to the microsecond and the string it
-               was read as carries that, so the equality holds, and every filter still rides the same statement. */
+            /* #6302: one snapshot is the window (instant less one microsecond, instant]: collection_time is stored to the microsecond
+               and the string it was read as carries that, so the window holds that capture alone, and every filter still rides the
+               same statement. */
             var page = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, snapshotAt ?? now.AddHours(-hours_back), snapshotAt ?? now, limit + 1, databases, blocking_only, waitFilter, tagFilter, includeMonitor, cancellationToken);
+                postgres, resolved.ServerId, snapshotAt?.AddTicks(-TimeSpan.TicksPerMicrosecond) ?? now.AddHours(-hours_back), snapshotAt ?? now, limit + 1, databases, blocking_only, waitFilter, tagFilter, includeMonitor, cancellationToken);
             var rows = page.Rows;
 
             if (snapshotAt != null && rows.Count == 0)

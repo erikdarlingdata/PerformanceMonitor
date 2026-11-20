@@ -65,7 +65,7 @@ public sealed partial class ViewerDataService
                 SUM(delta_wait_time_ms) AS total_delta
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY wait_type
         ) AS per_spelling
@@ -136,7 +136,7 @@ public sealed partial class ViewerDataService
                     END AS interval_seconds
                 FROM v_wait_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   wait_type IN ({{typeParams}})
             ),

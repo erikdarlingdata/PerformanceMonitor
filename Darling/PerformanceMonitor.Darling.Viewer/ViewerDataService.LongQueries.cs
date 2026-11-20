@@ -100,7 +100,7 @@ public sealed partial class ViewerDataService
             object_name
         FROM long_query_completions
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   ($5::boolean OR client_app_name IS NULL OR client_app_name NOT ILIKE '{{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}}')

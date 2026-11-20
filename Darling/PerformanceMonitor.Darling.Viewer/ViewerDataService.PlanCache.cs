@@ -79,7 +79,7 @@ public sealed partial class ViewerDataService
             SELECT MAX(collection_time) AS mx
             FROM v_plan_cache_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -115,7 +115,7 @@ public sealed partial class ViewerDataService
             SELECT MAX(collection_time) AS mx
             FROM v_plan_cache_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
