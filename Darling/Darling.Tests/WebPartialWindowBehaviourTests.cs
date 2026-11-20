@@ -73,6 +73,18 @@ public sealed class WebPartialWindowBehaviourTests
     }
 
     [Fact]
+    public void AHeatMapCutWindowStrip_SaysWhereTheDataStarts_AndNamesNoStoreTable()
+    {
+        var r = Run();
+        const string Tail = "The window reaches further back than this server's raw query statistics retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        Assert.Equal("The heat map covers the last 4 days, not the whole time range. " + Tail, S(r, "heatmapFloor"));
+        Assert.Equal("The heat map covers the last 6 hours, not the whole time range. " + Tail, S(r, "heatmapFloorShortSpan"));
+        Assert.Equal(Tail, S(r, "heatmapNoSubject"));
+        Assert.Equal(Tail, S(r, "heatmapNoEnd"));
+        Assert.Null(S(r, "heatmapNotCut"));
+    }
+
+    [Fact]
     public void AChart_DoesNotDrawADataStartNote_BecauseItsAxisShowsTheEmptySpan()
     {
         var r = Run();

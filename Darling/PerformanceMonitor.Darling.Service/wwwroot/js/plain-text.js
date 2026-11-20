@@ -386,6 +386,8 @@ export function plainText(text) {
      a text with no value beside it. `raw query_store_stats` is the store table the raw statistics sit in, which the page calls the raw query statistics. */
   t = t.replace(/\braw query_store_stats\b/g, "raw query statistics");
   t = t.replace(/\bquery_store_stats\b/g, "the raw query statistics");
+  /* #9116: the heat map's cut-window sentence names the raw stats table the same way (`raw query_stats`). Only the prefixed form: a bare `query_stats` is also the tail of a real object name. */
+  t = t.replace(/\braw query_stats\b/g, "raw query statistics");
   t = t.replace(/\beffective_hours_back\b/g, "only the part of the time range it holds");
   t = t.replace(/\bbaseline_hours_back\b/g, "the baseline range");
   t = t.replace(/\btrend_hours_back\b/g, "the trend range");

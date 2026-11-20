@@ -141,6 +141,20 @@ public sealed class WebPlainTextTests
     }
 
     [Fact]
+    public void TheRawQueryStatsTable_IsSaidInWords_AndABareNameInsideAnObjectIsKept()
+    {
+        // #9116: the heat map's cut-window sentence says `raw query_stats`; the page calls it the raw query statistics.
+        var o = Run(
+        [
+            "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that).",
+            "sys.dm_exec_query_stats and collect.query_stats are object names.",
+        ], out _);
+        Assert.Contains("this server's raw query statistics retains", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats", o[0], StringComparison.Ordinal);
+        Assert.Contains("sys.dm_exec_query_stats and collect.query_stats", o[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AnErrorCellThatQuotesTheTable_OrAPrefixedField_KeepsTheName_WhileTheStripSaysItInWords()
     {
         // #8929: a Last Error or collector Error cell reads plainTextNamed, and a real error quotes the relation or column it failed on.

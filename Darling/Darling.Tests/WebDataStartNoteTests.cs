@@ -1055,13 +1055,15 @@ public sealed class WebDataStartNoteTests
     [Fact]
     public void AQueriesNoteThatNamesNoInstant_IsDrawnAsSent()
     {
-        const string Note = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        const string Sent = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        /* #9116: the page says the raw statistics table in its own words (plain-text.js); the rest of the sentence is drawn as sent. */
+        const string Note = "The window reaches further back than this server's raw query statistics retains (or this server has been monitored for less time than that), so the older part of it was not read.";
         var answer = new JsonObject
         {
             ["queries"] = new JsonArray(new JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" }),
             ["window_truncated"] = true,
             ["effective_start"] = "2026-01-02T00:00:00.0000000",
-            ["truncation_note"] = Note,
+            ["truncation_note"] = Sent,
         };
 
         foreach (var scenario in new[] { "queryStoreLocal", "topQueriesLocal" })
