@@ -326,6 +326,7 @@ public static class PgTableTuning
         ProcedureStatsRestartRowIndexName,
         ProcedureStatsNameIndex.IndexName,
         WaitStatsDailyCoverIndexName,
+        CpuWindowCoverIndexName,
     };
 
     /// <summary>True for an index that shares the one-build-per-start budget.</summary>
@@ -456,6 +457,9 @@ public static class PgTableTuning
 
     /// <summary>#7147: the covering index for the Daily Summary's per-day wait sums, on a store where <c>collect.wait_stats</c> is a plain table.</summary>
     public const string WaitStatsDailyCoverIndexName = "idx_wait_stats_daily_cover";
+
+    /// <summary>#9172: the covering index for the 24 hour CPU window, on <c>collect.cpu_utilization_stats</c> (a hypertable or a plain table).</summary>
+    public const string CpuWindowCoverIndexName = "idx_cpu_utilization_stats_window_cover";
 
     /// <summary>
     /// #9171: the covering index for the dropped-database read (<c>QueryStoreBackfillState.LastSeenPerDatabaseSql</c>, run by
@@ -890,6 +894,21 @@ public static class PgTableTuning
            about the newest day of the month sits in compressed chunks, where a heap btree index on the hypertable cannot serve
            the read, and the index would still cost every insert. */
         "CREATE INDEX IF NOT EXISTS " + WaitStatsDailyCoverIndexName + " ON collect.wait_stats (server_id, collection_time) INCLUDE (wait_type, delta_wait_time_ms)",
+        /* #9172: the Server Inventory's 24 hour CPU window (DarlingFinOpsInventoryReader.CpuCtes) reads three columns of every
+           row in the window: server_id and sqlserver_cpu_utilization, filtered on collection_time. With only the
+           collection_time index it was an Index Scan with a heap fetch per row (or a Seq Scan of the day's whole chunk when
+           random_page_cost is the stock 4), so a cold first call paid a disk wait for each of about 650 pages. This index is
+           covering for exactly that read, so each of the window's chunks is an Index Only Scan over its own time range.
+           Time leads, so a new row lands at the right edge of the index, and the index does not scatter page images through
+           the WAL as the #4247 random-key indexes did. On a hypertable store that is the same place as the default
+           collection_time index TimescaleDB creates; on a plain store this is the first time-leading index the table has
+           (the table's own idx_cpu_utilization_stats_time leads with server_id). Measured
+           on a rig with the store's random_page_cost of 1.1, 39 servers sampled once a minute for 30 days (1.68 M rows,
+           chunks older than a day compressed), the window is 55,700 rows: EXPLAIN (ANALYZE, BUFFERS) after a PostgreSQL
+           restart reads 654 execution pages and 104 planning pages before, 221 and 111 after, with identical rows. The
+           window only ever touches the two newest day chunks, which are uncompressed, so the compressed chunks cost the
+           index nothing (their heaps are empty). */
+        "CREATE INDEX IF NOT EXISTS " + CpuWindowCoverIndexName + " ON collect.cpu_utilization_stats (collection_time) INCLUDE (server_id, sqlserver_cpu_utilization)",
         /* #9171: the dropped-database read behind the top-queries reads (QueryStoreBackfillState.LastSeenPerDatabaseSql: server_id and
            collection_time to filter, database_name to group) fetched the heap row of every snapshot row in the window, because the only
            index was (server_id, collection_time). With database_name INCLUDEd the read is an Index Only Scan with the same rows. Not
