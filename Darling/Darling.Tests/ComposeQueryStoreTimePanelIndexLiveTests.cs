@@ -72,8 +72,9 @@ public sealed class ComposeQueryStoreTimePanelIndexLiveTests
         return (await command.ExecuteScalarAsync(ct)) is true;
     }
 
-    /// <summary>The plan's heap fetches on the panel index, scanning every chunk (the index is built per chunk).</summary>
-    private static async Task<long?> HeapFetchesAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
+    /// <summary>Every scan of the table in the panel statement's plan that is not an Index Only Scan on the panel index with no heap fetches, as text.
+    /// Empty when every scan of the table is one. The statement scans the table twice (the keys, then the rows), so both are checked.</summary>
+    private static async Task<(string Problems, int Scans)> ScanProblemsAsync(NpgsqlConnection connection, ComposeCompiled compiled, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + compiled.Sql, connection) { CommandTimeout = 300 };
         foreach (var p in compiled.Parameters)
@@ -82,41 +83,33 @@ public sealed class ComposeQueryStoreTimePanelIndexLiveTests
         }
 
         using var document = JsonDocument.Parse((string)(await command.ExecuteScalarAsync(ct))!);
-        LastPlanShape = PlanShape(document.RootElement[0].GetProperty("Plan"));
-        return PanelIndexHeapFetchesByChunk(document.RootElement[0].GetProperty("Plan"));
+        var problems = new List<string>();
+        var scans = 0;
+        CollectScanProblems(document.RootElement[0].GetProperty("Plan"), problems, ref scans);
+        return (string.Join("; ", problems), scans);
     }
 
-    private static string LastPlanShape = string.Empty;
-
-    private static string PlanShape(JsonElement node)
+    private static void CollectScanProblems(JsonElement node, List<string> problems, ref int scans)
     {
-        var text = node.GetProperty("Node Type").GetString() + (node.TryGetProperty("Index Name", out var n) ? "(" + n.GetString() + ")" : node.TryGetProperty("Relation Name", out var rn) ? "(" + rn.GetString() + ")" + (node.TryGetProperty("Filter", out var fl) ? "{" + fl.GetString() + "}" : string.Empty) : string.Empty);
-        return node.TryGetProperty("Plans", out var children) ? text + "[" + string.Join(", ", children.EnumerateArray().Select(PlanShape)) + "]" : text;
-    }
-
-    /// <summary>The chunk indexes carry the hypertable index's name inside a longer one, so the match is by suffix.</summary>
-    private static long? PanelIndexHeapFetchesByChunk(JsonElement node)
-    {
-        long? total = null;
-        if (node.TryGetProperty("Node Type", out var type) && type.GetString() == "Index Only Scan"
-            && node.TryGetProperty("Index Name", out var name) && (name.GetString() ?? string.Empty).EndsWith(PgTableTuning.QueryStoreTimePanelIndexName, StringComparison.Ordinal))
+        if (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() == "query_store_stats")
         {
-            total = node.GetProperty("Heap Fetches").GetInt64();
+            scans++;
+            var type = node.GetProperty("Node Type").GetString();
+            var index = node.TryGetProperty("Index Name", out var name) ? name.GetString() : null;
+            var fetches = node.TryGetProperty("Heap Fetches", out var heap) ? heap.GetInt64() : -1;
+            if (type != "Index Only Scan" || index != PgTableTuning.QueryStoreTimePanelIndexName || fetches != 0)
+            {
+                problems.Add($"{type} on {index ?? "the heap"} with {fetches} heap fetches");
+            }
         }
 
         if (node.TryGetProperty("Plans", out var children))
         {
             foreach (var child in children.EnumerateArray())
             {
-                var sub = PanelIndexHeapFetchesByChunk(child);
-                if (sub is not null)
-                {
-                    total = (total ?? 0) + sub.Value;
-                }
+                CollectScanProblems(child, problems, ref scans);
             }
         }
-
-        return total;
     }
 
     /// <summary>A start builds at most one large missing index, so a store missing several builds the panel index at a later start. Returns the indexes once it exists.</summary>
@@ -214,9 +207,9 @@ public sealed class ComposeQueryStoreTimePanelIndexLiveTests
                 {
                     var panel = ComposeQueryStoreSharedDedupeLiveTests.PanelJson(measure, aggregate, groups, 10, true, NarrowFilter);
                     var compiled = ComposeQueryStoreSharedDedupeLiveTests.Compile(panel, context, shared: true);
-                    var fetches = await HeapFetchesAsync(connection, compiled, ct);
-                    Assert.True(fetches is not null, $"{measure} by {string.Join(",", groups)}: the plan has no Index Only Scan on the panel index: " + LastPlanShape);
-                    Assert.True(fetches == 0, $"{measure} by {string.Join(",", groups)}: {fetches} heap fetches, so a column the panel reads is not in the index");
+                    var (problems, scans) = await ScanProblemsAsync(connection, compiled, ct);
+                    Assert.True(scans > 0, $"{measure} by {string.Join(",", groups)}: the plan has no scan of the table");
+                    Assert.True(problems.Length == 0, $"{measure} by {string.Join(",", groups)}: a column the panel reads is not in the index, or the index cannot serve the scan: {problems}");
                 }
             }
 
