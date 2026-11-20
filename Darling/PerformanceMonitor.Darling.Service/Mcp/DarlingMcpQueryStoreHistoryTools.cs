@@ -184,6 +184,13 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             }).ToList();
 
     /// <summary>
+    /// A millisecond figure as the answer writes it: three places, which is the whole microseconds Query Store stores. A stored
+    /// row's average passes through unchanged, and an execution-weighted average or a total, which is a quotient or a sum of
+    /// doubles, loses the digits past the microsecond that binary floating point adds.
+    /// </summary>
+    internal static double? WholeMicroseconds(double? milliseconds) => milliseconds is double value ? Math.Round(value, 3) : null;
+
+    /// <summary>
     /// The series for the plans the answer lists (#5300): rows of any other plan are dropped BEFORE the points are built,
     /// so a plan the answer cuts never uses up the point cap, and the points come out in one fixed order.
     /// </summary>
@@ -191,7 +198,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     {
         var kept = keptPlanIds.ToHashSet();
         return FoldPoints(rows.Where(r => kept.Contains(r.PlanId)))
-            .Select(r => new HistoryPoint(r.CollectionTime.ToString("o", CultureInfo.InvariantCulture), r.PlanId, r.ExecutionCount, r.AvgDurationMs, r.AvgCpuMs))
+            .Select(r => new HistoryPoint(r.CollectionTime.ToString("o", CultureInfo.InvariantCulture), r.PlanId, r.ExecutionCount, WholeMicroseconds(r.AvgDurationMs), WholeMicroseconds(r.AvgCpuMs)))
             .ToList();
     }
 
@@ -425,10 +432,10 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                 {
                     plan_id = p.PlanId,
                     execution_count = p.ExecutionCount,
-                    avg_duration_ms = p.AvgDurationMs,
-                    total_duration_ms = p.TotalDurationMs,
-                    avg_cpu_ms = p.AvgCpuMs,
-                    total_cpu_ms = p.TotalCpuMs,
+                    avg_duration_ms = WholeMicroseconds(p.AvgDurationMs),
+                    total_duration_ms = WholeMicroseconds(p.TotalDurationMs),
+                    avg_cpu_ms = WholeMicroseconds(p.AvgCpuMs),
+                    total_cpu_ms = WholeMicroseconds(p.TotalCpuMs),
                     first_execution_time = p.FirstExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     last_execution_time = p.LastExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     is_forced_plan = IsForced(p.IsForcedPlan, forcedById.GetValueOrDefault(p.PlanId)),
