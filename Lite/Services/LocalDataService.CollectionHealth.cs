@@ -856,6 +856,26 @@ GROUP BY collector_name";
     /// </summary>
     internal static Func<int, string, int?>? DefaultCollectorFrequencyMinutes { get; set; }
 
+    private Func<int, string, bool?>? _collectorEnabled;
+
+    /// <summary>
+    /// #9139: whether one collector is switched on for a server (<c>ScheduleManager.IsCollectorEnabledForStorageServer</c>),
+    /// keyed by the storage server id, or null for an unknown server or collector. Null means the schedule cannot say, which
+    /// every reader takes as enabled. Laid out like <see cref="CollectorFrequencyMinutes"/>: an instance's own value wins,
+    /// else <see cref="DefaultCollectorEnabled"/>.
+    /// </summary>
+    internal Func<int, string, bool?>? CollectorEnabled
+    {
+        get => _collectorEnabled ?? DefaultCollectorEnabled;
+        set => _collectorEnabled = value;
+    }
+
+    /// <summary>
+    /// #9139: the schedule store's enabled answer for every <see cref="LocalDataService"/> in the process, set once at startup
+    /// beside <see cref="DefaultCollectorFrequencyMinutes"/>. Process-wide, so a test that sets it runs alone.
+    /// </summary>
+    internal static Func<int, string, bool?>? DefaultCollectorEnabled { get; set; }
+
     /// <summary>
     /// #4999: stamps each catalog collector's row with the interval it is scheduled at on
     /// <paramref name="serverId"/>: the schedule store's answer through
