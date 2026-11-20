@@ -114,7 +114,7 @@ public sealed class DarlingMcpPlanCorrectionTools
         try
         {
             var now = windowEnd;
-            var tuning = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, resolved.ServerId, databaseFilter, cancellationToken);
+            var tuning = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, resolved.ServerId, databaseFilter, now, cancellationToken);
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 200 over per-cycle re-captures gave every window the same ~16-hour
                reach, and `total_recommendations` published that page as the window's count. */

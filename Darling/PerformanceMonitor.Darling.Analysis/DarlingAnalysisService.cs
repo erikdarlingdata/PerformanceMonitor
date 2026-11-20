@@ -442,7 +442,7 @@ public sealed class DarlingAnalysisService
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.CancellationToken);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.TimeRangeEnd, context.CancellationToken);
             if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
                 InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
@@ -1158,15 +1158,18 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
-    /// Lite's data-span query VERBATIM — EXTRACT(EPOCH FROM ...) is shared dialect and runs
+    /// Lite's data-span arithmetic — EXTRACT(EPOCH FROM ...) is shared dialect and runs
     /// unchanged on Postgres. Reads the raw wait_stats table (not the view) like Lite, with
     /// Lite's multi-server server_id filter (the Dashboard twin is single-server and drops it).
+    /// $2 is the end of the analysis window: the span is the history the server had by then, so a
+    /// pass replayed for an earlier as_of measures the history that existed at that as_of.
     /// Exposed const so Darling.Tests can pin the dialect ungated. The SQL Server engine set's gate.
     /// </summary>
     public const string TotalDataSpanSql = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM wait_stats
-WHERE server_id = $1";
+WHERE server_id = $1
+AND   collection_time <= $2";
 
     /// <summary>
     /// The table that proves a SQL Server target is being collected: the one <see cref="TotalDataSpanSql"/> measures and
@@ -1242,7 +1245,8 @@ WHERE server_id = $1";
     public const string PgTargetDataSpanSql = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM pg_database_stats
-WHERE server_id = $1";
+WHERE server_id = $1
+AND   collection_time <= $2";
 
     /// <summary>
     /// The <c>server_config</c> snapshots the config-change attribution diffs (#3653 A10, Q2): every capture
@@ -1767,13 +1771,13 @@ WHERE server_id = $1";
         MonitoredEngineKind.IsPostgres(engineKind) ? _pgTargetEngine : _sqlServerEngine;
 
     /// <summary>
-    /// Returns the total span of collected data for a server (no time range filter), measured on the
+    /// Returns the total span of data collected for a server up to <paramref name="windowEndUtc"/>, measured on the
     /// resolved engine's own series (<see cref="AnalysisEngineSet.DataSpanSql"/>).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// </summary>
-    private async Task<double> GetTotalDataSpanHoursAsync(AnalysisEngineSet engine, int serverId, CancellationToken cancellationToken)
+    private async Task<double> GetTotalDataSpanHoursAsync(AnalysisEngineSet engine, int serverId, DateTime windowEndUtc, CancellationToken cancellationToken)
     {
         try
         {
@@ -1781,6 +1785,7 @@ WHERE server_id = $1";
 
             using var cmd = new NpgsqlCommand(engine.DataSpanSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
+            cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)

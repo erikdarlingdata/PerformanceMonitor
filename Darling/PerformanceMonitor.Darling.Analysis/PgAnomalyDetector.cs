@@ -544,7 +544,7 @@ GROUP BY local_hour
 ORDER BY local_hour";
 
     public const string ObjectGrowthSql = @"
-WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
+WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 AND collection_time <= $4 ORDER BY collection_time DESC LIMIT 2),
 latest AS (SELECT MAX(collection_time) t FROM snaps),
 prior AS (SELECT MIN(collection_time) t FROM snaps),
 cur AS (SELECT database_name, object_id, MAX(schema_name) schema_name, MAX(table_name) table_name, SUM(reserved_mb) mb
@@ -562,7 +562,7 @@ AND   (prv.mb <= 0 OR (cur.mb - prv.mb) * 100.0 / NULLIF(prv.mb, 0) >= $3)
 ORDER BY growth_mb DESC LIMIT 1";
 
     public const string ObjectContentionSql = @"
-WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
+WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 AND collection_time <= $3 ORDER BY collection_time DESC LIMIT 2),
 latest AS (SELECT MAX(collection_time) t FROM snaps),
 prior AS (SELECT MIN(collection_time) t FROM snaps),
 cur AS (SELECT database_name, object_id, index_id, schema_name, table_name, index_name,
@@ -582,7 +582,9 @@ ORDER BY ms_delta DESC LIMIT 1";
 
     /// <summary>
     /// Day-over-day object/index detection (delta-based, not stddev-baseline) since the
-    /// index_object_stats collector runs daily and its counters are cumulative.
+    /// index_object_stats collector runs daily and its counters are cumulative. The two snapshots compared are
+    /// the newest two at or before the analysis window's end, so a pass as of a past instant compares the
+    /// snapshots that existed then.
     /// Emits ANOMALY_OBJECT_GROWTH for the biggest table grower over threshold and
     /// ANOMALY_OBJECT_CONTENTION for the index with the largest new lock-wait time.
     /// </summary>
@@ -598,6 +600,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectGrowthMbThreshold);
                 cmd.Parameters.AddWithValue(ObjectGrowthPctThreshold);
+                cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
                 /* #5558: object sizes (reserved_mb) mirror the primary, so a secondary copy's growth is the primary's to
                    report. Only this growth query is filtered; the contention anomaly stays node-local. */
                 PgSecondaryReplicaScope.Apply(cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name");
@@ -646,6 +649,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             {
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectLockWaitMsDeltaThreshold);
+                cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
