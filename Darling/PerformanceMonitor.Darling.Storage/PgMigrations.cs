@@ -3347,6 +3347,25 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     WHERE recommendation_name IS NOT NULL;";
 
     /// <summary>
+    /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
+    /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
+    /// the answer), and read one heap page per matching hourly row through a plain (query_hash, bucket) index. The rung gives
+    /// <c>query_stats_interval_hourly</c> and <c>query_stats_hourly</c> a <c>(query_hash, bucket DESC) INCLUDE (server_id, database_name,
+    /// execution_count_sum, worker_time_sum, elapsed_time_sum)</c> index, and replaces V246's index on <c>query_store_stats_corrected_hourly</c>
+    /// with one that also includes <c>server_id, database_name, execution_count_sum, cpu_us_weighted_sum, duration_us_weighted_sum</c> (same name,
+    /// built under a temporary name first and renamed after the old one is dropped, so readers keep an index throughout). The plan cache
+    /// materializations keep their own group indexes, which other readers use.
+    ///
+    /// <para><b>Cost.</b> One build per materialization, under a SHARE lock that blocks the refresh's writes and not reads, with the lock timeout
+    /// of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
+    /// the uncompressed chunks (the newest days). The statement is a catalog read on a store that already has the indexes, and a store without
+    /// TimescaleDB or without the views returns before touching anything. A fresh store gets the same indexes right after each view is created.
+    /// Additive for an older build: it ignores the indexes, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private static readonly string V284Sql =
+        TimescaleSupport.CreateQueryStoreCorrectedHourlyHashCoveringIndexSql + "\n" + TimescaleSupport.CreateQueryStatsHourlyHashCoveringIndexesSql;
+
+    /// <summary>
     /// V281 (#9043): <c>collect.query_store_text_seen</c>, the narrow table that holds the Query Store text liveness stamp
     /// (<see cref="QueryStoreTextSeen"/>), so the touch that runs every collection writes a 60-byte row instead of a new copy
     /// of a text row and its trigrams.
@@ -3732,6 +3751,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V283 (#9111): the closed-day rollups the Query Store grid and its slicer read whole UTC days from, and the table that says which days
            are built. Three new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(QueryStoreClosedDayRollup.Version, "query-store-closed-day-rollups", QueryStoreClosedDayRollup.CreateSql),
+        /* V284 (#9149): covering hash indexes on the hourly rollups the fleet summary reads (plan cache and Query Store), so the read answers from the index
+           instead of one heap page per row. Catalog-only for the data: no row moves. An older build ignores the indexes. */
+        new Migration(284, "fleet-summary-covering-indexes", V284Sql),
     };
 
     /// <summary>
