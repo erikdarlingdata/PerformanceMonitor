@@ -108,6 +108,8 @@ BEGIN
         'collect.query_store_slicer_hourly',
         'collect.query_store_closed_day_built',
         'collect.query_store_closed_day_tick',
+        'collect.query_store_clutter_plan_daily',
+        'collect.query_store_clutter_collections_daily',
         'collect.query_stats_host_hourly',
         'collect.query_stats_host_hourly_built',
         'collect.query_store_compose_stamp',
