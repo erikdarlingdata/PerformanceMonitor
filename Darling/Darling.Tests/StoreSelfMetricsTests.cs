@@ -394,6 +394,8 @@ public sealed class StoreSelfMetricsTests
             ["collect.query_store_grid_daily"] = "the closed-day rollup the Query Store grid reads whole days from, rebuilt from the interval table (V283 doc)",
             ["collect.query_store_slicer_hourly"] = "the closed-day rollup the Query Store slicer reads whole days from, rebuilt from the interval table (V283 doc)",
             ["collect.query_store_closed_day_built"] = "per-day build bookkeeping for the closed-day rollups, bytes too small to matter (V283 doc)",
+            ["collect.query_stats_host_hourly"] = "the hourly rollup of query_stats the top-queries read ranks whole hours from, one row per server, hour, database, query hash and host object, pruned to query_stats retention and derived from query_stats rather than collected (V287 doc)",
+            ["collect.query_stats_host_hourly_built"] = "per-hour build bookkeeping for the hourly host rollup, bytes too small to matter (V287 doc)",
             ["collect.query_store_closed_day_tick"] = "one heartbeat row per server for the closed-day rollups, bytes too small to matter (V283 doc)",
             ["collect.query_store_clutter_plan_daily"] = "the closed-day rollup the Query Store clutter read takes whole days of plan sightings from, rebuilt from raw (V285 doc)",
             ["collect.query_store_clutter_collections_daily"] = "the closed-day rollup the Query Store clutter read takes whole days of collection counts from, rebuilt from raw (V285 doc)",

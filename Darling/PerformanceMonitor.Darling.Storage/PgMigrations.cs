@@ -3762,6 +3762,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
            no data moves and nothing backfills, so the upgrade stays fast and the read stays on raw until the summary covers a window. An older
            build ignores the table and keeps writing raw rows, which the next V286 batch notices (QueryStatsCollectionSummary.FloorMoveSql). */
         new Migration(QueryStatsCollectionSummary.RungVersion, "query-stats-collection-summary", QueryStatsCollectionSummary.CreateSql),
+        /* V287 (#9164): the hourly host rollup the top-queries read ranks whole hours from, and the table that says which hours are built.
+           Two new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
+        new Migration(QueryStatsHostHourly.Version, "query-stats-host-hourly", QueryStatsHostHourly.CreateSql),
     };
 
     /// <summary>

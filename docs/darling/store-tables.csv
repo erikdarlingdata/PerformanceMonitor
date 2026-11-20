@@ -121,6 +121,8 @@ query_stats_db_daily,derived,derived,rollup view
 query_stats_db_hourly,derived,derived,rollup view
 query_stats_db_interval_daily,derived,derived,rollup view
 query_stats_db_interval_hourly,derived,derived,rollup view
+query_stats_host_hourly,derived,derived,hourly query stats by host object
+query_stats_host_hourly_built,internal,no,which hours are built
 query_stats_hour_ledger,internal,no,hours already folded into the rollup
 query_stats_hour_ledger_state,internal,no,ledger progress
 query_stats_hourly,derived,derived,rollup view
