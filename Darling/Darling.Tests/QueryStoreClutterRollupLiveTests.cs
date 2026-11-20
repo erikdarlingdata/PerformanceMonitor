@@ -13,6 +13,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -270,6 +272,73 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
         Assert.Equal(raw, Lines(await ReadAsync(store, fleet, w, ct)));
         Assert.Equal(1L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
             "SELECT count(*) FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day AND plan_id = 77770", ct, ("server_id", A), ("day", lateDay)));
+    }
+
+    /// <summary>
+    /// The collector's own write path marks a built day that a backfilled batch lands in, and a live batch marks nothing. The batch goes in through
+    /// <see cref="DarlingCollectorRunner.WriteBackfillBatchAsync{TRow}"/>, the runner's write for Query Store rows, so the call site that sends
+    /// the mark is the one under test, not the mark's own method.
+    /// </summary>
+    [Fact]
+    public async Task TheRunnersWritePath_MarksABuiltDayThatABackfilledBatchLandsIn_AndALiveBatchMarksNothing()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedServerAsync(store, A, E.AddDays(-10), 10, 4, 30, true, ct);
+        await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct);
+
+        const string MarkedSql = "SELECT count(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND rebuild_needed";
+        Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection, MarkedSql, ct, ("server_id", A)));
+
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "clutter-late", Host = "clutter-late-host" },
+            ConnectionString = "Server=clutter-late-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "clutter-late-host",
+            ServerId = A,
+            EngineEdition = 3,
+        };
+
+        async Task WriteAsync(DateTime collectionTime, long queryId, DateTime lastExecution)
+        {
+            var context = new CollectorContext { ServerId = A, ServerName = server.StorageName, CollectionTime = collectionTime, Deltas = new CollectorDeltaCalculator() };
+            var row = new QueryStoreCollector.Row
+            {
+                DatabaseName = "dbA",
+                QueryId = queryId,
+                PlanId = queryId * 10,
+                ExecutionTypeDesc = "Regular",
+                FirstExecutionTime = lastExecution,
+                LastExecutionTime = lastExecution,
+                QueryHash = "0x" + queryId.ToString("X8", System.Globalization.CultureInfo.InvariantCulture),
+                QueryPlanHash = "0x" + (queryId * 10).ToString("X8", System.Globalization.CultureInfo.InvariantCulture),
+                ExecutionCount = 1,
+                AvgCpuTimeUs = 10,
+                AvgDurationUs = 20,
+                RuntimeStatsIntervalId = queryId,
+                IntervalStartTimeUtc = lastExecution,
+                IntervalEndTimeUtc = lastExecution.AddHours(1),
+            };
+            Assert.Equal(1, await store.Runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, collectionTime, context, ct));
+        }
+
+        /* A live batch is stamped now: its day is today, which is never late. */
+        var now = DateTime.UtcNow;
+        await WriteAsync(now, 9160001, now.AddMinutes(-1));
+        Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection, MarkedSql, ct, ("server_id", A)));
+
+        /* A backfilled batch stamped in a built day marks that day, and only that day. */
+        var lateDay = E.AddDays(-4);
+        var lateAt = lateDay.AddHours(10).AddMinutes(33);
+        /* The row's interval is today's: the wide interval table's apply marks the days of the rows' intervals (collection_time only when a row has
+           none), so a row whose interval sat in the late day would be marked by that apply and the mark under test would add nothing. Only the
+           batch's collection_time sits in the built day. */
+        await WriteAsync(lateAt, 9160002, now.AddMinutes(-1));
+        Assert.Equal(1L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection, MarkedSql, ct, ("server_id", A)));
+        Assert.Equal(1L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
+            MarkedSql + " AND day_utc = @day", ct, ("server_id", A), ("day", lateDay)));
     }
 
     [Fact]
