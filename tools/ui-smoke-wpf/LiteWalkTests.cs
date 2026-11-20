@@ -127,15 +127,16 @@ public sealed class LiteWalkTests : WalkBase
             System.Threading.Thread.Sleep(2000);
             Shot("14-overview-disabled-server");
 
-            // The rail shows only dots. Open the pane the way a person would, then give the connection check time to finish,
-            // so the Offline server's dot has its colour and the Disabled one's row is named beside its dot.
+            // The rail shows only dots. Open the pane the way a person would, so the Disabled server's row is named beside its dot.
+            // No wait for the Offline server's connection check: its dot can still be grey here, and a fixed wait for it would add
+            // a minute to every smoke run.
             Step("open the sidebar", () =>
             {
                 var toggle = Find(main, "SidebarToggleButton");
                 toggle.AsButton().Invoke();
                 return true;
             });
-            System.Threading.Thread.Sleep(60000);
+            System.Threading.Thread.Sleep(2000);
             Shot("15-sidebar-open-disabled-server");
         });
     }
