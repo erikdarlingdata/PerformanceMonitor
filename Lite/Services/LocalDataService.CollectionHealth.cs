@@ -1691,6 +1691,14 @@ public class CollectorHealthRow
     internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
+    /// #9101: the success count the ladder reads (<see cref="CollectorHealthClassifier.SuccessCountForLadder"/>):
+    /// zero when the window's successes all stored nothing and every run since is EXTENSION_MISSING, so the row
+    /// bands EXTENSION_MISSING, and <see cref="SuccessCount"/> otherwise.
+    /// </summary>
+    internal long LadderSuccessCount => CollectorHealthClassifier.SuccessCountForLadder(
+        TotalRuns, SuccessCount, ExtensionMissingCount, LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else.
@@ -1705,7 +1713,7 @@ public class CollectorHealthRow
     /// </summary>
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
-            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            TotalRuns, LadderSuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
