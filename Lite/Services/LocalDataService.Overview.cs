@@ -743,7 +743,7 @@ public class ServerSummaryItem
             if (!LastCollectionTime.HasValue)
                 return HistoryAgedOut && CardStatus != ServerCardStatus.Disabled ? "None retained (stopped)" : "Never";
 
-            var stamp = KeepZoneLabelWhole(FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow));
+            var stamp = ZoneLabelText.KeepWhole(FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow));
             /* #9094: a Disabled card shows the stored time bare. Collection is off on purpose, so no stale or stopped word. */
             if (CardStatus == ServerCardStatus.Disabled)
                 return stamp;
@@ -756,13 +756,6 @@ public class ServerSummaryItem
             };
         }
     }
-
-    /// <summary>#9094: the Last Collect row wraps (a dated stamp with its state word is wider than the room beside the label), and
-    /// a narrow card broke the Server Time offset in two, "(UTC" on one line and "+00:00)" on the next. A word joiner between "UTC"
-    /// and the sign removes that break point, so the offset moves to the next line whole. The card's own text only:
-    /// <see cref="FormatLastCollect"/> and the shared time formatter keep their plain text.</summary>
-    internal static string KeepZoneLabelWhole(string text) =>
-        text.Replace("UTC+", "UTC\u2060+", StringComparison.Ordinal).Replace("UTC-", "UTC\u2060-", StringComparison.Ordinal);
 
     /// <summary>
     /// The Last Collect row's band brush — the row's own palette, alongside CPU / Blocking / Deadlocks,
