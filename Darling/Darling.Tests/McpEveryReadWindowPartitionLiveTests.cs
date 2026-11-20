@@ -42,7 +42,8 @@ namespace Darling.Tests;
 ///
 /// <para>A read built by design from rows before its window too (<see cref="s_readsBackBeforeItsWindow"/>) is reported as not held, with
 /// what it takes from before, and is held only to a row after a window's end not changing the answer for it. So is a read whose
-/// window is judged whole (<see cref="s_judgedWhole"/>). No other read is left out by name. A read the seed does not reach is reported with the reason, taken from its own answer, and
+/// window is judged whole (<see cref="s_judgedWhole"/>). No other read is left out by name. A read that differences a counter as it reads
+/// (<see cref="s_differencedAtReadTime"/>) is held to the rows it answers from, the row on its start among them. A read the seed does not reach is reported with the reason, taken from its own answer, and
 /// <see cref="HeldShare"/> holds a floor under the share of windowed reads the rule was applied to, so the test cannot go quiet by
 /// reads dropping out of it. The output lists, for every read held, which of the three rows each window counts.</para>
 /// </summary>
@@ -63,10 +64,13 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
     private const string ChangeIsADifference = "a change is the difference between two captures, so the read takes the capture before the window as its baseline";
     private const string JudgedWhole = "an analysis window is judged whole, never summed with its neighbour";
     private const string ByIntervalStart = "a Query Store row is placed by the start of its runtime-statistics interval";
+    private const string RegressionJudgedWhole = "a regression window is judged whole against the baseline before it, never summed with its neighbour";
+    private const string BaselineOnTheStart = "the row stamped on a window's start is the baseline its first delta is measured from";
 
     /// <summary>The rows a window counts, by what the read places a row by: (whole, first half, second half).</summary>
     private static readonly (string Whole, string First, string Second) s_byInstant = ("bc", "b", "c");
     private static readonly (string Whole, string First, string Second) s_byIntervalStart = ("ab", "a", "b");
+    private static readonly (string Whole, string First, string Second) s_byBaseline = ("abc", "ab", "bc");
 
     /// <summary>
     /// The reads that place a row by the start of an aligned interval, each with what the interval is. Every other read places a
@@ -89,6 +93,18 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
         ["analyze_server"] = JudgedWhole,
         ["compare_analysis"] = JudgedWhole,
         ["get_analysis_facts"] = JudgedWhole,
+        ["get_query_store_regressions"] = RegressionJudgedWhole,
+    };
+
+    /// <summary>
+    /// The reads that difference a counter as they read it. The row stamped exactly on a window's start is the baseline the first
+    /// delta is measured from, so it changes the answer and no delta of its own is counted. A name here is held to the rows such a
+    /// read answers from: the row on its start, the rows inside it and the row on its end, and none before its start or after its
+    /// end. It fails once its read answers from other rows.
+    /// </summary>
+    private static readonly Dictionary<string, string> s_differencedAtReadTime = new(StringComparer.Ordinal)
+    {
+        ["get_pg_write_stats"] = BaselineOnTheStart,
     };
 
     /// <summary>
@@ -235,8 +251,11 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
                 if (!placements.TryGetValue(placement, out var reads)) placements[placement] = reads = [];
                 reads.Add(tool.Name);
 
+                var byBaseline = s_differencedAtReadTime.TryGetValue(tool.Name, out var baseline);
                 foreach (var (_, letter, where) in s_rows)
                 {
+                    /* A baseline row changes the answer of the window it starts and is counted by the window it ends. */
+                    if (byBaseline) break;
                     var halves = (inFirst.Contains(letter) ? 1 : 0) + (inSecond.Contains(letter) ? 1 : 0);
                     var problem = (inWhole.Contains(letter), halves) switch
                     {
@@ -249,8 +268,8 @@ public sealed class McpEveryReadWindowPartitionLiveTests : IClassFixture<McpEver
                 }
 
                 var byInterval = s_placedByIntervalStart.TryGetValue(tool.Name, out var interval);
-                var counts = byInterval ? s_byIntervalStart : s_byInstant;
-                var kind = byInterval ? "the start of an interval (" + interval + ")" : "an instant";
+                var counts = byInterval ? s_byIntervalStart : byBaseline ? s_byBaseline : s_byInstant;
+                var kind = byInterval ? "the start of an interval (" + interval + ")" : byBaseline ? "an instant and differences a counter as it reads (" + baseline + ")" : "an instant";
                 foreach (var (window, counted, expected) in new[] { ("the whole window", inWhole, counts.Whole), ("the first half", inFirst, counts.First), ("the second half", inSecond, counts.Second) })
                 {
                     if (counted != expected)
