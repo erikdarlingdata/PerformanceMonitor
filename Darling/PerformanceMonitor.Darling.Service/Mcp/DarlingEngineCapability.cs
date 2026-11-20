@@ -54,7 +54,7 @@ internal static class DarlingEngineCapability
     /// columns are always there for it.</para>
     /// </summary>
     public const string ServerEngineSql = @"
-SELECT sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
+SELECT sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
 FROM servers
 WHERE server_id = $1";
 
@@ -77,9 +77,10 @@ WHERE server_id = $1";
         int engineEdition;
         string? engineKind;
         AwsRdsKind awsRdsKind;
+        int sqlMajorVersion;
         try
         {
-            (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            (engineEdition, engineKind, awsRdsKind, sqlMajorVersion) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -89,7 +90,7 @@ WHERE server_id = $1";
         /* #8913: an Aurora server's stored extension census says whether it offers the optional extension this collector reads. Asked only
            for the two collectors that can use the answer, on an Aurora target, so no other read pays for it. */
         var notOffered = await NotOfferedExtensionsAsync(postgres, serverId, engineKind, collectorName, cancellationToken);
-        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind, notOffered);
+        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName, awsRdsKind, notOffered, sqlMajorVersion);
         if (engineEnvelope is not null || !IsReadableSecondaryGated(collectorName))
         {
             return engineEnvelope;
@@ -121,7 +122,7 @@ WHERE server_id = $1";
     /// server ids.
     /// </summary>
     public const string ServersEngineSql = @"
-SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
+SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
 FROM servers
 WHERE server_id = ANY($1)";
 
@@ -158,7 +159,8 @@ WHERE server_id = ANY($1)";
                 var edition = reader.IsDBNull(1) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(1);
                 var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
                 var awsRdsKind = CollectorEngineCapability.AwsRdsKindOf(!reader.IsDBNull(3) && reader.GetBoolean(3), !reader.IsDBNull(4) && reader.GetBoolean(4));
-                if (NotCollectedMessage(names[serverId], edition, kind, collectorName, awsRdsKind) is { } message)
+                var sqlMajorVersion = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
+                if (NotCollectedMessage(names[serverId], edition, kind, collectorName, awsRdsKind, sqlMajorVersion: sqlMajorVersion) is { } message)
                 {
                     reasons[serverId] = message;
                 }
@@ -193,7 +195,7 @@ WHERE server_id = ANY($1)";
         string? engineKind;
         try
         {
-            (_, engineKind, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            (_, engineKind, _, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -250,9 +252,9 @@ WHERE server_id = ANY($1)";
     /// </summary>
     private static string? Envelope(
         string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind,
-        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null)
+        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null, int sqlMajorVersion = 0)
     {
-        var message = NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind, extensionsNotOffered);
+        var message = NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind, extensionsNotOffered, sqlMajorVersion);
         return message is null ? null : McpHelpers.Status("not_collected", message);
     }
 
@@ -278,9 +280,9 @@ WHERE server_id = ANY($1)";
     /// </summary>
     internal static string? NotCollectedMessage(
         string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind,
-        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null)
+        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null, int sqlMajorVersion = 0)
     {
-        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind, extensionsNotOffered);
+        var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind, extensionsNotOffered, sqlMajorVersion);
         return message is not null && MonitoredEngineKind.IsPostgres(engineKind) && PostgresReadFor.TryGetValue(collectorName, out var read)
             ? $"{message} For a PostgreSQL target, {read.Read} reads {read.Answers}."
             : message;
@@ -374,8 +376,8 @@ ORDER BY server_name";
             string? envelope;
             try
             {
-                var (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
-                envelope = NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind);
+                var (engineEdition, engineKind, awsRdsKind, sqlMajorVersion) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+                envelope = NotCollectedMessage(serverName, engineEdition, engineKind, collectorName, awsRdsKind, sqlMajorVersion: sqlMajorVersion);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -442,7 +444,7 @@ ORDER BY server_name";
     /// is the KIND that carries the fact. A NULL kind is a row no connect has stamped since V82 landed, which
     /// makes no claim on that axis and leaves the edition axis answering exactly as it did before (#2530).</para>
     /// </summary>
-    internal static async Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)> ReadServerEngineAsync(
+    internal static async Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind, int SqlMajorVersion)> ReadServerEngineAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken)
@@ -454,14 +456,17 @@ ORDER BY server_name";
 
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return (CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None);
+            return (CollectorEngineCapability.UnknownEngineEdition, null, AwsRdsKind.None, 0);
         }
 
         var edition = reader.IsDBNull(0) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(0);
         var kind = reader.IsDBNull(1) ? null : reader.GetString(1);
         var isAwsRds = !reader.IsDBNull(2) && reader.GetBoolean(2);
         var isAwsRdsWebOrExpress = !reader.IsDBNull(3) && reader.GetBoolean(3);
-        return (edition, kind, CollectorEngineCapability.AwsRdsKindOf(isAwsRds, isAwsRdsWebOrExpress));
+        /* #9099: the probed SQL Server major (0 when never probed, or a PostgreSQL target) is what lets a collector the server's version is too
+           old for say so, in the words the Lite twin uses, instead of reading as a failing collector. */
+        var sqlMajorVersion = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+        return (edition, kind, CollectorEngineCapability.AwsRdsKindOf(isAwsRds, isAwsRdsWebOrExpress), sqlMajorVersion);
     }
 
     /// <summary>
@@ -475,7 +480,7 @@ ORDER BY server_name";
         int serverId,
         CancellationToken cancellationToken)
     {
-        var (_, kind, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+        var (_, kind, _, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         return PerformanceMonitor.Darling.Analysis.DarlingAnalysisService.CoverageTableFor(kind);
     }
 

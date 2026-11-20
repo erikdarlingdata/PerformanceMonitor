@@ -2060,7 +2060,7 @@ public sealed class DarlingMcpDataTools
     /// <summary>The enabled servers and the engine facts the fleet liveness read needs to say which servers a collector does not apply to
     /// (the same columns <see cref="DarlingEngineCapability.ServerEngineSql"/> reads, for every enabled server at once).</summary>
     internal const string FleetServersSql = @"
-SELECT server_id, server_name, display_name, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
+SELECT server_id, server_name, display_name, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
 FROM servers
 WHERE is_enabled
 ORDER BY server_name";
@@ -2098,7 +2098,8 @@ ORDER BY server_name";
                         reader.IsDBNull(3) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(3),
                         reader.IsDBNull(4) ? null : reader.GetString(4),
                         CollectorEngineCapability.AwsRdsKindOf(
-                            !reader.IsDBNull(5) && reader.GetBoolean(5), !reader.IsDBNull(6) && reader.GetBoolean(6))));
+                            !reader.IsDBNull(5) && reader.GetBoolean(5), !reader.IsDBNull(6) && reader.GetBoolean(6)),
+                        reader.IsDBNull(7) ? 0 : reader.GetInt32(7)));
                 }
             }
 
@@ -2137,7 +2138,7 @@ ORDER BY server_name";
                 var ran = runs.Select(r => r.ServerId).ToHashSet();
                 var asked = servers
                     .Where(s => !ran.Contains(s.ServerId)
-                        && CollectorEngineCapability.NotCollectedMessage(s.ServerName, s.EngineEdition, s.EngineKind, collector, s.AwsRdsKind) is null)
+                        && CollectorEngineCapability.NotCollectedMessage(s.ServerName, s.EngineEdition, s.EngineKind, collector, s.AwsRdsKind, sqlMajorVersion: s.SqlMajorVersion) is null)
                     .ToList();
                 noRunReasons = await DarlingGatedCollectorRows.QueryStoreSecondaryFleetMessagesAsync(postgres, asked, cancellationToken);
             }

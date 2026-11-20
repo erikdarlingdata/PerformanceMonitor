@@ -2423,7 +2423,18 @@ internal sealed class DarlingSelfAlertEvaluator
     private Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)> ReadCaptureDownEngineFactsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => (CaptureDownEngineReadOverride ?? Mcp.DarlingEngineCapability.ReadServerEngineAsync)(postgres, serverId, token),
+            async token =>
+            {
+                if (CaptureDownEngineReadOverride is { } overridden)
+                {
+                    return await overridden(postgres, serverId, token);
+                }
+
+                /* The three captures (blocking, deadlock, client timeouts) are not version-floored collectors (#9099), so the probed major the
+                   read also returns is not needed here. */
+                var (edition, kind, awsRdsKind, _) = await Mcp.DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, token);
+                return (edition, kind, awsRdsKind);
+            },
             serverId, CaptureDownEngineReadName, cancellationToken);
 
     /// <summary>
