@@ -2272,6 +2272,28 @@ namespace PerformanceMonitor.Common
         public static bool IsZeroNormalCollector(string? collectorName) =>
             collectorName is not null && ZeroIsNormalCollectorNames.Contains(collectorName);
 
+        /// <summary>
+        /// #9086: a HEALTHY row whose only remark is a zero the finding explains - a collector whose zero-row window is its normal answer
+        /// (<see cref="IsZeroNormalCollector"/>, a trace-flag list with no flag set, a job snapshot with no job running) with runs behind
+        /// it, no error, denial, missing-session, missing-extension or abandoned run and no recorded note, so <see cref="FormatOutputFinding"/>
+        /// says it read and found nothing. It is not "a look": get_collection_health keeps it in the partial_detail shape so its
+        /// output_finding still shows, and counts it apart from the collectors that need one. An event collector is not here: it already
+        /// compacts. A zero a snapshot collector cannot explain is not here either: that one does need a look.
+        /// </summary>
+        public static bool IsExplainedZero(
+            string? healthStatus, string? collectorName, long rowsStored, long totalRuns, long errorCount, long sessionMissingCount,
+            long extensionMissingCount, long permissionDeniedCount, long abandonedCount, long noteCount) =>
+            string.Equals(healthStatus, Healthy, StringComparison.Ordinal)
+            && IsZeroNormalCollector(collectorName)
+            && rowsStored == 0
+            && totalRuns > 0
+            && errorCount == 0
+            && sessionMissingCount == 0
+            && extensionMissingCount == 0
+            && permissionDeniedCount == 0
+            && abandonedCount == 0
+            && noteCount == 0;
+
         /// <summary>The names in <see cref="ZeroIsNormalCollectorNames"/>, so both suites can pin them against the catalog.</summary>
         public static IReadOnlyCollection<string> ZeroIsNormalCollectorNamesForPinning => ZeroIsNormalCollectorNames;
 

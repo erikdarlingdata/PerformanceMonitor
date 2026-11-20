@@ -2309,7 +2309,10 @@ ORDER BY server_name";
                the response budget -- the weight is 30+ small fields times every row that needs a look, which
                previewing free text cannot touch -- so that row now gets PartialCollectionHealthRow instead,
                unless full_detail=true asks for everything. */
-            var partialCount = full_detail ? 0 : shownRows.Count - compactCount;
+            /* #9086: a HEALTHY row that stored nothing and says why is not a collector that needs a look. It keeps the partial shape (its
+               output_finding is the reason an agent should see) but the note counts it apart, so the counts agree with the rows. */
+            var explainedZeroCount = full_detail ? 0 : shownRows.Count(r => !IsCollectionHealthCompactEligible(r) && IsCollectionHealthExplainedZero(r));
+            var partialCount = full_detail ? 0 : shownRows.Count - compactCount - explainedZeroCount;
             var result = shownRows.Select(r =>
             {
                 runTimes.TryGetValue(r.CollectorName, out var runTime);
@@ -2739,7 +2742,7 @@ ORDER BY server_name";
                    describes what THIS response actually did instead of what the argument nominally requested. */
                 collector_detail_note = full_detail
                     ? CollectorDetailNote.FullDetail
-                    : CollectorDetailNote.Build(compactCount, shownRows.Count, partialCount, collectorRows.Count - shownRows.Count),
+                    : CollectorDetailNote.Build(compactCount, shownRows.Count, partialCount, collectorRows.Count - shownRows.Count, explainedZeroCount),
                 /* #6180: the response-size cut, observed (see healthReply above). Null note and false flag when every collector fit. */
                 truncated = collectorCount < collectorRows.Count,
                 collectors_returned = collectorCount,
@@ -2915,6 +2918,13 @@ ORDER BY server_name";
         && r.PermissionDeniedCount == 0
         && r.AbandonedCount == 0
         && (r.RowsStored > 0 || CollectorHealthClassifier.IsEventCollector(r.CollectorName));
+
+    /// <summary>#9086: the HEALTHY zero-row row whose output_finding explains the zero, so the note does not count it among the collectors that
+    /// need a look. Field-for-field the twin product's predicate over the one shared rule.</summary>
+    private static bool IsCollectionHealthExplainedZero(CollectorHealth r) =>
+        CollectorHealthClassifier.IsExplainedZero(
+            r.HealthStatus, r.CollectorName, r.RowsStored, r.TotalRuns, r.ErrorCount, r.SessionMissingCount,
+            r.ExtensionMissingCount, r.PermissionDeniedCount, r.AbandonedCount, r.NoteCount);
 
     /// <summary>The compact shape <see cref="IsCollectionHealthCompactEligible"/> rows get by default: enough
     /// to confirm the collector is fine and cheap (it ran, stored what it should, and did not cost much)
