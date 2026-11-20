@@ -619,6 +619,65 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
         }
     }
 
+    /// <summary>
+    /// #9152: a replay whose analysis time is older than now minus the retention. The clamp moves the window start up to the
+    /// horizon, which is past the window end, so the metric has no baseline. That is the expected answer for a replay past
+    /// retention: the map is empty, and nothing is logged at Warning or Error (it used to throw out of the local clock and log a
+    /// failed baseline). The same data under a clock inside the retention still yields the bucket, so the empty answer is the
+    /// replay's and not the data's.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    [InlineData("snapshot")]
+    public async Task Live_AReplayPastRetention_HasNoBaseline_AndLogsNoWarningOrError(string family)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live event-baseline coverage test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var (metric, collector, serverId) = Family(family);
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+        await ExecAsync(connection, ct, "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = $1", collector);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedQuietMonthAsync(connection, serverId, collector, ct);
+            await SeedEventAsync(connection, family, serverId, Tuesdays[4].AddMinutes(10), ct);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            /* Thirty-one days after the analysis time, at the default thirty-day retention: the horizon is a day past it. */
+            var pastRetention = new FixedClock(new DateTimeOffset(AnalysisTime.AddDays(31), TimeSpan.Zero));
+            var logger = new CapturingTestLogger();
+            var map = await new PgBaselineProvider(postgres, logger, timeProvider: pastRetention)
+                .GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+            Assert.Empty(map.Buckets);
+            Assert.Equal(0, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Equal(0, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Error));
+
+            /* The same rows under a clock inside the retention read as before, so the data was there to be found. */
+            var inside = await new PgBaselineProvider(postgres, timeProvider: Clock)
+                .GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+            Assert.True(inside.Buckets.ContainsKey((Hour, Tuesday)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await TearDownAsync(cleanup, serverId, cleanupCt);
+            });
+        }
+    }
+
     /// <summary>SUCCESS runs every 15 minutes from <paramref name="from"/> to <paramref name="to"/> with no rows, carrying <paramref name="errorMessage"/> when given.</summary>
     private static Task SeedRunsAsync(
         NpgsqlConnection connection, int serverId, string collector, DateTime from, DateTime to, string? errorMessage, int batch, CancellationToken ct) =>
