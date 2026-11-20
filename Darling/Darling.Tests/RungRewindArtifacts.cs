@@ -891,6 +891,11 @@ DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
 DROP TABLE IF EXISTS collect.query_store_slicer_hourly;
 DROP TABLE IF EXISTS collect.query_store_closed_day_built;
 DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
+        // V284 (#9149): the covering hash indexes on the two plan cache hourly rollups, and the covering one on the Query Store rollup. The interval one is the probe's
+        // newest sentinel until V285 (#9148) went on top. The rewind drops the two plan cache indexes by name, found by catalog (they live in the materialization's schema), and a no-op without them.
+        // The Query Store index keeps its V246 name, so it stays: the re-run of V284 finds it covering and builds the two plan cache ones again.
+        new(284, "hasFleetSummaryCoveringIndexes",
+            @"DO $$ DECLARE v regclass; BEGIN FOR v IN SELECT c.oid::regclass FROM pg_class c WHERE c.relkind = 'i' AND c.relname IN ('ix_query_stats_interval_hourly_hash_cov', 'ix_query_stats_hourly_hash_cov') LOOP EXECUTE format('DROP INDEX %s', v); END LOOP; END $$;"),
         // V285 (#9148): the Query Store clutter rollups' two tables and the built table's clutter_built_at. The two tables are the probe's newest
         // sentinel. The rewind drops them and the column, so a re-run of V285 creates them empty and the service builds the days again.
         new(285, "hasQueryStoreClutterDaily", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_daily;
