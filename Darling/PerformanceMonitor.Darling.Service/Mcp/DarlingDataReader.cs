@@ -2550,7 +2550,13 @@ internal static class DarlingDataReader
     /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopProceduresReadResult(
         List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null, bool RawForced = false,
-        string? RetentionNotice = null, bool IoRoute = false);
+        string? RetentionNotice = null, bool IoRoute = false)
+    {
+        /// <summary>#9147: true when the raw-tier page was served by the hourly mid statement, false when the raw statement served it
+        /// (no mid planned, a hole in the mid, or a winner with two object types). Internal: a test reads it, and neither the MCP tool
+        /// nor the web mirror carries it in a reply.</summary>
+        internal bool ServedByHourlyMid { get; init; }
+    }
 
     public static Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
@@ -2645,7 +2651,7 @@ internal static class DarlingDataReader
             var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken);
             if (midRows.Select(r => (r.DatabaseName, r.SchemaName, r.ObjectName)).Distinct().Count() == midRows.Count)
             {
-                return new TopProceduresReadResult(midRows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
+                return new TopProceduresReadResult(midRows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice) { ServedByHourlyMid = true };
             }
         }
 

@@ -49,10 +49,11 @@ public sealed class TopProceduresHourlyMidLiveTests
                 }
             }
 
-            var mid = new System.Collections.Generic.Dictionary<TopRanking, string>();
+            var mid = new System.Collections.Generic.Dictionary<TopRanking, Page>();
             foreach (var ranking in new[] { TopRanking.Cpu, TopRanking.Duration, TopRanking.Executions })
             {
                 mid[ranking] = await ReadAsync(scratch, ranking, start, end, ct);
+                Assert.True(mid[ranking].ServedByHourlyMid, $"{ranking}: the page was not served by the hourly mid statement");
             }
 
             await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalDailyView}");
@@ -60,10 +61,51 @@ public sealed class TopProceduresHourlyMidLiveTests
             foreach (var ranking in new[] { TopRanking.Cpu, TopRanking.Duration, TopRanking.Executions })
             {
                 var raw = await ReadAsync(scratch, ranking, start, end, ct);
-                Assert.Equal(raw, mid[ranking]);
-                Assert.NotEqual("[]", raw);
+                Assert.False(raw.ServedByHourlyMid);
+                Assert.Equal(raw.Json, mid[ranking].Json);
+                Assert.NotEqual("[]", raw.Json);
             }
         });
+
+    [Fact]
+    public Task MidRoute_CountsEveryRowOnAndAroundItsBoundsOnce() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            await using (var source = NpgsqlDataSource.Create(scratch.ConnectionString))
+            {
+                var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(source, ct);
+                var plan = DarlingDataReader.PlanProceduresHourlyMid(rollups, coverage, TopRanking.Cpu, start, end);
+                Assert.NotNull(plan);
+                Assert.Equal(BoundsMidStart(start), plan!.MidStart);
+                Assert.Equal(BoundsMidEnd(end), plan.MidEnd);
+            }
+
+            var mid = new System.Collections.Generic.Dictionary<TopRanking, Page>();
+            foreach (var ranking in new[] { TopRanking.Cpu, TopRanking.Duration })
+            {
+                mid[ranking] = await ReadAsync(scratch, ranking, start, end, ct);
+                Assert.True(mid[ranking].ServedByHourlyMid, $"{ranking}: the page was not served by the hourly mid statement");
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalDailyView}");
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}");
+            foreach (var ranking in new[] { TopRanking.Cpu, TopRanking.Duration })
+            {
+                var raw = await ReadAsync(scratch, ranking, start, end, ct);
+                Assert.Equal(raw.Json, mid[ranking].Json);
+
+                /* The oracle itself must show the layout the seed was built for, or the comparison proves nothing. */
+                foreach (var kept in new[] { "BEFORE_MID", "AT_MIDSTART_HEAVY", "BEFORE_MIDEND", "AT_MIDEND", "AT_END" })
+                {
+                    Assert.Contains(kept, raw.Objects);
+                }
+
+                foreach (var left in new[] { "AT_START", "AFTER_END", "AT_MIDSTART_LIGHT" })
+                {
+                    Assert.DoesNotContain(left, raw.Objects);
+                }
+            }
+        }, SeedShape.Bounds);
 
     [Fact]
     public Task MidRoute_ReadsFewerPagesThanTheRawStatement() =>
@@ -106,13 +148,14 @@ public sealed class TopProceduresHourlyMidLiveTests
         }
 
         var routed = await ReadAsync(scratch, TopRanking.Cpu, start, end, ct);
+        Assert.False(routed.ServedByHourlyMid, "the mid statement served a page the raw statement must serve");
 
         await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalDailyView}");
         await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}");
         var raw = await ReadAsync(scratch, TopRanking.Cpu, start, end, ct);
 
-        Assert.Equal(raw, routed);
-        Assert.NotEqual("[]", raw);
+        Assert.Equal(raw.Json, routed.Json);
+        Assert.NotEqual("[]", raw.Json);
     }
 
     private static async Task<object?> ExplainAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DarlingDataReader.HourlyMid? mid, CancellationToken ct)
@@ -133,22 +176,35 @@ public sealed class TopProceduresHourlyMidLiveTests
         return await command.ExecuteScalarAsync(ct);
     }
 
-    /// <summary>The routed read through a fresh data source (coverage is cached per source), as JSON so record fields compare whole.</summary>
-    private static async Task<string> ReadAsync(ScratchPostgres scratch, TopRanking ranking, DateTime start, DateTime end, CancellationToken ct)
+    /// <summary>A routed page: its rows as JSON so record fields compare whole, which statement served it, and its object names.</summary>
+    private sealed record Page(string Json, bool ServedByHourlyMid, string[] Objects);
+
+    /// <summary>The routed read through a fresh data source (coverage is cached per source).</summary>
+    private static async Task<Page> ReadAsync(ScratchPostgres scratch, TopRanking ranking, DateTime start, DateTime end, CancellationToken ct)
     {
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         var result = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(source, ServerId, start, end, Top, databaseName: null, ranking: ranking, cancellationToken: ct);
         Assert.Equal(RetentionTier.Raw, result.Tier);
-        return JsonSerializer.Serialize(result.Rows);
+        return new Page(JsonSerializer.Serialize(result.Rows), result.ServedByHourlyMid, result.Rows.Select(r => r.ObjectName).ToArray());
     }
 
+    /// <summary>The first whole hour after the window's start: the mid's first bucket (a bucket at the start itself would hold a row raw leaves out).</summary>
+    private static DateTime BoundsMidStart(DateTime start) =>
+        new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1);
+
+    /// <summary>The window's last whole hour: the mid ends where the end's own hour begins.</summary>
+    private static DateTime BoundsMidEnd(DateTime end) =>
+        new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0, DateTimeKind.Unspecified);
+
     /// <summary>Extra seed on top of the plain store: <see cref="TwoObjectTypes"/> gives one procedure a second object type, and
-    /// <see cref="MaterializationGap"/> leaves hours of the window out of the rollup's refresh.</summary>
+    /// <see cref="MaterializationGap"/> leaves hours of the window out of the rollup's refresh, and <see cref="Bounds"/> stamps single
+    /// rows on and beside every bound of the raw edges and the mid.</summary>
     private enum SeedShape
     {
         Plain,
         TwoObjectTypes,
         MaterializationGap,
+        Bounds,
     }
 
     /// <summary>
@@ -223,6 +279,29 @@ public sealed class TopProceduresHourlyMidLiveTests
                 FROM generate_series(10, 10) AS n
                 CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '5 minutes') AS t
                 """, start.AddHours(-2).AddMinutes(1), end.AddHours(1));
+        }
+
+        if (shape == SeedShape.Bounds)
+        {
+            /* One row per object, so an object's total is that row counted once, twice (a row on a bound that both an edge and the
+               mid would take) or not at all (a row on a bound neither takes). The plain objects total about 305,000 CPU, so the eighth
+               place sits near that. A HEAVY row (5,000,000) ranks first when counted and drops off the page when dropped. The LIGHT row
+               (200,000) is below the eighth place counted once and above it counted twice. Rows at the window start and just past its
+               end are left out. The row at the end, the rows on and beside the mid's two hours are each kept once. */
+            var midStart = BoundsMidStart(start);
+            var midEnd = BoundsMidEnd(end);
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
+                INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name,
+                                             object_type, delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+                VALUES (914730000001, $1, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AT_START', 'P', 1, 5000000, 5000000, 300),
+                       (914730000002, $2, {ServerId}, '{ServerName}', 'db0', 'dbo', 'BEFORE_MID', 'P', 1, 5000000, 5000000, 300),
+                       (914730000003, $3, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AT_MIDSTART_HEAVY', 'P', 1, 5000000, 5000000, 300),
+                       (914730000004, $3, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AT_MIDSTART_LIGHT', 'P', 1, 200000, 200000, 300),
+                       (914730000005, $4, {ServerId}, '{ServerName}', 'db0', 'dbo', 'BEFORE_MIDEND', 'P', 1, 5000000, 5000000, 300),
+                       (914730000006, $5, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AT_MIDEND', 'P', 1, 5000000, 5000000, 300),
+                       (914730000007, $6, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AT_END', 'P', 1, 5000000, 5000000, 300),
+                       (914730000008, $7, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AFTER_END', 'P', 1, 5000000, 5000000, 300)
+                """, start, midStart.AddMinutes(-1), midStart, midEnd.AddMinutes(-1), midEnd, end, end.AddSeconds(1));
         }
 
         if (shape == SeedShape.MaterializationGap)
