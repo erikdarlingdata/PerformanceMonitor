@@ -98,6 +98,7 @@ public sealed class McpEveryReadStore : IAsyncLifetime
 
     private static readonly Regex s_serverName = new(ServerPrefix + "[a-z]+-[a-z]+", RegexOptions.Compiled);
     private static readonly Regex s_serverId = new(@"-9170\d\d", RegexOptions.Compiled);
+    private static readonly Regex s_dateOrTime = new(@"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:\d{2}| UTC)?", RegexOptions.Compiled);
 
     private ScratchPostgres? _scratch;
     private NpgsqlDataSource? _postgres;
@@ -575,6 +576,9 @@ CROSS JOIN (SELECT DISTINCT at FROM seed_rows) t");
             return text;
         }
     }
+
+    /// <summary>A comparable answer with every date and time in it written as one word, so two answers that differ only in when compare equal.</summary>
+    public static string WithoutTimes(string comparable) => s_dateOrTime.Replace(comparable, "TIME");
 
     private static void Write(JsonNode? node, StringBuilder builder)
     {
