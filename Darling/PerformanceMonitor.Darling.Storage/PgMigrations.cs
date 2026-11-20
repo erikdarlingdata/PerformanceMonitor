@@ -3357,7 +3357,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// materializations keep their own group indexes, which other readers use.
     ///
     /// <para><b>Cost.</b> One build per materialization, under a SHARE lock that blocks the refresh's writes and not reads, with the lock timeout
-    /// of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
+    /// of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). On the Query Store rollup the drop of V246's narrow index (a non-concurrent <c>DROP INDEX</c>) takes
+    /// ACCESS EXCLUSIVE on the materialization until the rung commits, so for that short tail reads wait too and the rung must get past open readers
+    /// inside the same lock timeout. A compressed chunk's index is an empty shell, so the build time follows
     /// the uncompressed chunks (the newest days). The statement is a catalog read on a store that already has the indexes, and a store without
     /// TimescaleDB or without the views returns before touching anything. A fresh store gets the same indexes right after each view is created.
     /// Additive for an older build: it ignores the indexes, and no GRANT is needed for an index.</para>
@@ -3405,7 +3407,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// <para><b>How it builds.</b> The rung builds the covering index under <c>idx_collection_log_watermark_new</c>, drops the narrow one and
     /// renames the new one to the old name, so a reader that runs after the rung's commit always has an index (the viewer's V150 sentinel and every
     /// reader of the name still hold). The build holds a SHARE lock on <c>collect.collection_log</c> (collector writes wait, reads do not) under the
-    /// lock timeout of V152 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). On a TimescaleDB store the build makes one index per chunk, and a
+    /// lock timeout of V152 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). The <c>DROP INDEX</c> that follows is not concurrent: it takes ACCESS
+    /// EXCLUSIVE on the table (and on each chunk whose index it drops) until the rung commits, so for that short tail reads wait too, and the rung must
+    /// get past open readers inside the same lock timeout. On a TimescaleDB store the build makes one index per chunk, and a
     /// compressed chunk gets an empty 8 KB index, so the build time follows the uncompressed chunks of a table that holds one row per collector
     /// run. A store that already has the covering index (found by name with more attributes than key attributes) is a catalog read, so running
     /// the rung twice changes nothing. A fresh store runs V150 and then this rung on an empty table. Additive for an older build: it ignores the
