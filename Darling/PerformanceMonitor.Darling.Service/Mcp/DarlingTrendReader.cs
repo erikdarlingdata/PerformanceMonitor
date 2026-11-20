@@ -989,7 +989,7 @@ internal static class DarlingTrendReader
     public sealed record DurationTrendRoute(
         RetentionTier Tier, string RawTable, string HourlyView, bool HourlyAvailable, TierCoverage Coverage,
         bool RawRetentionApplies, DateTime ResolvedAtUtc, string? HourlyFromClause = null,
-        string? ProbeHourlyView = null)
+        string? ProbeHourlyView = null, DateTime? HourlyCeilingUtc = null)
     {
         /// <summary>The payload's <c>source</c> word: <c>raw</c> or <c>hourly</c>, get_query_trend's vocabulary
         /// — <see cref="DurationTrendRouting.SourceWord"/>, the one spelling the viewer's chart title also
@@ -1037,7 +1037,46 @@ internal static class DarlingTrendReader
     /// </summary>
     public sealed record DurationTrendResult(
         List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated,
-        bool StartOlderThanTier = false, int? TierKeepsDays = null);
+        bool StartOlderThanTier = false, int? TierKeepsDays = null, HourlyStitch? Stitch = null);
+
+    /// <summary>
+    /// #9147: the whole hours of a raw-tier window that were read from the hourly rollup, <c>[FromUtc, ToUtc)</c> (naive UTC,
+    /// both on the hour). Points inside it are one hour each; the window's edges (before <see cref="FromUtc"/> and from
+    /// <see cref="ToUtc"/>) are read from the raw rows at the requested width.
+    /// </summary>
+    public sealed record HourlyStitch(DateTime FromUtc, DateTime ToUtc);
+
+    /// <summary>The fewest whole hours a raw-tier duration trend takes from the hourly rollup (#9147): below it the raw read is cheap
+    /// and keeps every point at the requested width.</summary>
+    public const int StitchMinHours = 6;
+
+    /// <summary>
+    /// #9147: the whole hours of the window <paramref name="startUtc"/> (exclusive) to <paramref name="endUtc"/> (inclusive) that the
+    /// hourly rollup can serve for a raw-tier read, or null when the read stays raw. The rollup serves hour <c>h</c> for every collection
+    /// stamped in <c>[h, h + 1 hour)</c>, so the first hour is the one after the start's own (a collection stamped exactly on the start is
+    /// outside a raw window and inside its hour), and the last ends at or below the window's end and at or below the rollup's measured
+    /// end. The raw edges must tile on the hour, so the width must divide 60 minutes.
+    /// </summary>
+    internal static HourlyStitch? PlanHourlyStitch(
+        DateTime startUtc, DateTime endUtc, DurationTrendRoute route, int bucketMinutes)
+    {
+        if (route.Tier != RetentionTier.Raw || !route.HourlyAvailable || route.RawTable != "query_stats"
+            || route.HourlyCeilingUtc is not { } ceiling || route.Coverage.HourlyFloorUtc is not { } floor
+            || bucketMinutes <= 0 || bucketMinutes >= 60 || 60 % bucketMinutes != 0)
+        {
+            return null;
+        }
+
+        var from = new DateTime(startUtc.Year, startUtc.Month, startUtc.Day, startUtc.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1);
+        var windowEndHour = new DateTime(endUtc.Year, endUtc.Month, endUtc.Day, endUtc.Hour, 0, 0, DateTimeKind.Unspecified);
+        var to = windowEndHour < ceiling ? windowEndHour : ceiling;
+        if (floor > from || (to - from).TotalHours < StitchMinHours)
+        {
+            return null;
+        }
+
+        return new HourlyStitch(from, to);
+    }
 
     /// <summary>
     /// Resolves the route for the query-stats duration trend: raw <c>query_stats</c> or
@@ -1093,7 +1132,9 @@ internal static class DarlingTrendReader
                bare name for probes/logs, and this is StitchedRelationSql's splice-ready answer for the same
                window the tier above was decided over. */
             HourlyFromClause: coverage.StitchedRelationSql(hourlyView, "h", startUtc, RollupCoverage.StitchTier.Hourly),
-            ProbeHourlyView: probeHourlyView);
+            ProbeHourlyView: probeHourlyView,
+            /* #9147: the end of what the rollup has built, so a raw-tier window can take its whole hours from it. */
+            HourlyCeilingUtc: coverage.HourlyEndCeiling(hourlyView, startUtc));
     }
 
     /// <summary>
@@ -1433,6 +1474,37 @@ internal static class DarlingTrendReader
            route.HourlyFromClauseOrDefault (StitchedRelationSql's answer, "collect.<HourlyView> AS h" with no
            successor, byte-identical to the pre-stitch text) rather than the bare route.HourlyView, which stays
            reserved for probes and logs. */
+        /* #9147: a raw-tier window of several hours takes its whole hours from the hourly rollup and reads only its two edges raw.
+           The raw read walks every row of the window; the rollup holds one row per query per hour. Points inside the stitched span are
+           one hour each (their rate is the hour's summed work over 3,600 seconds and their peak is that hour's own rate), so the answer
+           is NOT the raw read's inside that span; HourlyStitch says where it is. An empty rollup read (the chosen databases have
+           nothing in the span) falls back to the raw read, which zero-fills quiet buckets. */
+        if (procedureFullName is null && PlanHourlyStitch(startUtc, endUtc, route, bucketMinutes) is { } stitch)
+        {
+            var head = await ReadRawSliceAsync(rawSql, postgres, serverId, startUtc, stitch.FromUtc.AddTicks(-10), bucketMinutes, databases, cancellationToken);
+            await using var hourlyCommand = postgres.CreateCommand(DurationTrendRouting.BuildBucketedHourlyTrendSql(
+                route.HourlyFromClauseOrDefault, withDatabaseFilter: true, coverIdleHours: false, withProcedureFilter: false));
+            hourlyCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddWindow(hourlyCommand, serverId, stitch.FromUtc, stitch.ToUtc);
+            hourlyCommand.Parameters.Add(databases.Parameter());
+            DarlingMcpReadParameters.AddInt(hourlyCommand, 60);
+            var hours = await ReadBucketedDurationPointsAsync(hourlyCommand, cancellationToken);
+            if (hours.Count > 0)
+            {
+                var tail = await ReadRawSliceAsync(rawSql, postgres, serverId, stitch.ToUtc.AddTicks(-10), endUtc, bucketMinutes, databases, cancellationToken);
+                var stitched = new List<QueryDurationTrendPoint>(head.Count + hours.Count + tail.Count);
+                stitched.AddRange(head);
+                stitched.AddRange(hours);
+                stitched.AddRange(tail);
+                var (stitchedStart, stitchedTruncated, stitchedOlder) = DurationTrendRouting.DescribeCoverage(
+                    stitched[0].FirstCollectionTime, startUtc,
+                    DurationTrendRouting.TierFloorUtc(route.Tier, route.RawRetentionApplies, route.ResolvedAtUtc));
+                return new DurationTrendResult(
+                    stitched, route, stitchedStart, stitchedTruncated, stitchedOlder,
+                    DurationTrendRouting.TierKeepsDays(route.Tier, route.RawRetentionApplies), stitch);
+            }
+        }
+
         await using var command = postgres.CreateCommand(
             route.Tier == RetentionTier.Raw
                 ? rawSql
@@ -1463,6 +1535,19 @@ internal static class DarlingTrendReader
         return new DurationTrendResult(
             points, route, effectiveStart, truncated, startOlderThanTier,
             DurationTrendRouting.TierKeepsDays(route.Tier, route.RawRetentionApplies));
+    }
+
+    /// <summary>#9147: the raw bucketed read over <c>(fromUtc, toUtc]</c>, the stitched read's edge.</summary>
+    private static async Task<List<QueryDurationTrendPoint>> ReadRawSliceAsync(
+        string rawSql, NpgsqlDataSource postgres, int serverId, DateTime fromUtc, DateTime toUtc, int bucketMinutes,
+        DatabaseFilter databases, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(rawSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, fromUtc, toUtc);
+        command.Parameters.Add(databases.Parameter());
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        return await ReadBucketedDurationPointsAsync(command, cancellationToken);
     }
 
     /// <summary>

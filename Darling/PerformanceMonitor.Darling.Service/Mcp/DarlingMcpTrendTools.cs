@@ -1098,6 +1098,13 @@ public sealed class DarlingMcpTrendTools
             ? TrendBuckets.AggregateNote(bucket.Minutes, bucket.Requested, bucket.AutoPoints)
             : HourlyAggregateNote(route, bucket);
 
+    /// <summary>#9147: the precision a raw-tier answer owes when its whole hours came from the hourly rollup.</summary>
+    private static string StitchNote(DarlingTrendReader.HourlyStitch? stitch) => stitch is null
+        ? string.Empty
+        : $" The hours from {stitch.FromUtc:yyyy-MM-dd HH:mm} to {stitch.ToUtc:yyyy-MM-dd HH:mm} UTC were read from the hourly rollup so the read stays fast: each point there is one hour's summed work divided by 3,600 seconds "
+          + "(an hour the collector covered only partly reads LOW), peak_elapsed_ms_per_second is that hour's own rate, and unrated_collections counts none of them. "
+          + "The window's two edges are read from the raw rows at the bucket width above.";
+
     /// <summary>The routed trio's disclosure, from the route and what the read returned.</summary>
     private static TrendDisclosure DescribeRoute(DarlingTrendReader.DurationTrendResult result, DateTime windowEndUtc, BucketChoice bucket) =>
         new(
@@ -1106,7 +1113,7 @@ public sealed class DarlingMcpTrendTools
             windowEndUtc,
             result.Truncated,
             TrendBuckets.Word(bucket.Minutes),
-            RoutedAggregateNote(result.Route, bucket),
+            RoutedAggregateNote(result.Route, bucket) + StitchNote(result.Stitch),
             BucketMinutes: bucket.Minutes,
             StartOlderThanTier: result.StartOlderThanTier,
             TierKeepsDays: result.TierKeepsDays);
