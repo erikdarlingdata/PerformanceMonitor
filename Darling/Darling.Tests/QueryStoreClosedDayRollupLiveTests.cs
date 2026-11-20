@@ -470,55 +470,43 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
     }
 
     /// <summary>
-    /// Gives the store a viewer role that is not the tables' owner, because row-level security reaches only such a role. One policy
-    /// makes a statement that names a rollup table sleep thirty seconds, once per transaction, when <paramref name="rollupSleeps"/>
-    /// is set. Another makes the interval table refuse a statement that reads its measure columns and names neither rollup table,
-    /// which is a read on the interval table alone (the gate's own statements read other columns), when <paramref name="intervalRefuses"/> is set.
+    /// Holds an exclusive lock on each of <paramref name="tables"/> (of the collect schema) in a transaction of its own, so a read of one
+    /// waits for the lock until the store's own deadline cancels it. It makes a read fail with no role: a role is cluster-wide, and
+    /// creating or dropping one takes locks on shared catalogs that other live classes running together also take (#9159).
     /// </summary>
-    private static async Task<(string ConnectionString, string Role)> GatedViewerRoleAsync(Store store, bool rollupSleeps, bool intervalRefuses, CancellationToken ct)
+    private static async Task<LockHolder> HoldLocksAsync(Store store, CancellationToken ct, params string[] tables)
     {
-        var role = "qs_roll_" + Guid.NewGuid().ToString("N")[..12];
-        await ExecuteAsync(store.Connection, "CREATE ROLE " + role + " LOGIN", ct);
-        await ExecuteAsync(store.Connection, "GRANT USAGE ON SCHEMA collect, config, public TO " + role, ct);
-        await ExecuteAsync(store.Connection, "GRANT SELECT ON ALL TABLES IN SCHEMA collect, config TO " + role, ct);
-        if (intervalRefuses)
+        var holder = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(store.Scratch.ConnectionString) { Pooling = false }.ConnectionString);
+        try
         {
-            await ExecuteAsync(store.Connection, @"CREATE FUNCTION public.qs_interval_gate() RETURNS boolean LANGUAGE plpgsql AS $$
-BEGIN
-    IF current_query() LIKE '%avg_cpu_time_us%' AND current_query() NOT LIKE '%query_store_grid_daily%' AND current_query() NOT LIKE '%query_store_slicer_hourly%' THEN
-        RAISE EXCEPTION 'interval table read refused';
-    END IF;
-    RETURN true;
-END $$", ct);
-            await ExecuteAsync(store.Connection, "ALTER TABLE collect.query_store_interval_wide ENABLE ROW LEVEL SECURITY", ct);
-            await ExecuteAsync(store.Connection, "CREATE POLICY qs_interval ON collect.query_store_interval_wide FOR SELECT TO " + role + " USING (public.qs_interval_gate())", ct);
-        }
-
-        if (rollupSleeps)
-        {
-            await ExecuteAsync(store.Connection, @"CREATE FUNCTION public.qs_rollup_gate() RETURNS boolean LANGUAGE plpgsql AS $$
-BEGIN
-    IF COALESCE(current_setting('qs.rolled', true), '') <> 'y' THEN
-        PERFORM set_config('qs.rolled', 'y', true);
-        PERFORM pg_sleep(30);
-    END IF;
-    RETURN true;
-END $$", ct);
-            foreach (var table in new[] { "query_store_grid_daily", "query_store_slicer_hourly" })
+            await holder.OpenAsync(ct);
+            var transaction = await holder.BeginTransactionAsync(ct);
+            foreach (var table in tables)
             {
-                await ExecuteAsync(store.Connection, $"ALTER TABLE collect.{table} ENABLE ROW LEVEL SECURITY", ct);
-                await ExecuteAsync(store.Connection, $"CREATE POLICY qs_rollup ON collect.{table} FOR SELECT TO {role} USING (public.qs_rollup_gate())", ct);
+                await ExecuteAsync(holder, "LOCK TABLE collect." + table + " IN ACCESS EXCLUSIVE MODE", ct);
             }
-        }
 
-        var connectionString = new NpgsqlConnectionStringBuilder(store.Scratch.ConnectionString) { Username = role, Password = null }.ConnectionString;
-        return (connectionString, role);
+            return new LockHolder(holder, transaction);
+        }
+        catch
+        {
+            await holder.DisposeAsync();
+            throw;
+        }
     }
 
-    private static async Task DropRoleAsync(Store store, string role)
+    /// <summary>The store's connection string with one session setting, which only the connection a read uses carries.</summary>
+    private static string WithSessionSetting(Store store, string setting) =>
+        new NpgsqlConnectionStringBuilder(store.Scratch.ConnectionString) { Options = "-c " + setting }.ConnectionString;
+
+    private sealed class LockHolder(NpgsqlConnection connection, NpgsqlTransaction transaction) : IAsyncDisposable
     {
-        await ExecuteAsync(store.Connection, "DROP OWNED BY " + role, CancellationToken.None);
-        await ExecuteAsync(store.Connection, "DROP ROLE IF EXISTS " + role, CancellationToken.None);
+        public async ValueTask DisposeAsync()
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            await transaction.DisposeAsync();
+            await connection.DisposeAsync();
+        }
     }
 
     /// <summary>
@@ -535,25 +523,18 @@ END $$", ct);
         await TickAsync(store, KeepEverything, ct);
         Assert.NotNull(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
 
-        var (connectionString, role) = await GatedViewerRoleAsync(store, rollupSleeps: true, intervalRefuses: false, ct);
-        try
-        {
-            await ExecuteAsync(store.Connection, "ALTER ROLE " + role + " SET statement_timeout = '2s'", ct);
-            ViewerLogger.Initialize(_logDir);
-            await using var viewer = new ViewerDataService(connectionString);
+        /* Both rollup tables are locked, so the grid's statement and the slicer's each wait on the lock until the connection's statement_timeout cancels them. */
+        await using var locks = await HoldLocksAsync(store, ct, "query_store_grid_daily", "query_store_slicer_hourly");
+        ViewerLogger.Initialize(_logDir);
+        await using var viewer = new ViewerDataService(WithSessionSetting(store, "statement_timeout=2000"));
 
-            var grid = await viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, DataEnd.AddDays(-30), DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
-            Assert.Null(grid.Plan);
-            await viewer.GetQueryStoreSlicerDataAsync(ServerId, DataEnd.AddDays(-30), DataEnd, null, ct);
+        var grid = await viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, DataEnd.AddDays(-30), DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+        Assert.Null(grid.Plan);
+        await viewer.GetQueryStoreSlicerDataAsync(ServerId, DataEnd.AddDays(-30), DataEnd, null, ct);
 
-            var log = LogText();
-            Assert.Equal(2, CountOf(log, TableFallbackMarker));
-            Assert.DoesNotContain(RollupRetryMarker, log, StringComparison.Ordinal);
-        }
-        finally
-        {
-            await DropRoleAsync(store, role);
-        }
+        var log = LogText();
+        Assert.Equal(2, CountOf(log, TableFallbackMarker));
+        Assert.DoesNotContain(RollupRetryMarker, log, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -568,24 +549,19 @@ END $$", ct);
         await using var store = await SeedAsync(ct);
         Assert.Null(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
 
-        var (connectionString, role) = await GatedViewerRoleAsync(store, rollupSleeps: false, intervalRefuses: true, ct);
-        try
-        {
-            ViewerLogger.Initialize(_logDir);
-            await using var viewer = new ViewerDataService(connectionString);
+        /* The interval table loses a measure column, so a statement that ranks its rows faults. The read-source decision names no measure
+           column and still runs, and the store is this test's own database. */
+        await ExecuteAsync(store.Connection, "ALTER TABLE collect.query_store_interval_wide RENAME COLUMN avg_cpu_time_us TO avg_cpu_time_us_gone", ct);
+        ViewerLogger.Initialize(_logDir);
+        await using var viewer = new ViewerDataService(store.Scratch.ConnectionString);
 
-            var grid = await viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, DataEnd.AddDays(-30), DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
-            Assert.Null(grid.Plan);
-            await viewer.GetQueryStoreSlicerDataAsync(ServerId, DataEnd.AddDays(-30), DataEnd, null, ct);
+        var grid = await viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, DataEnd.AddDays(-30), DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+        Assert.Null(grid.Plan);
+        await viewer.GetQueryStoreSlicerDataAsync(ServerId, DataEnd.AddDays(-30), DataEnd, null, ct);
 
-            var log = LogText();
-            Assert.Equal(2, CountOf(log, TableFallbackMarker));
-            Assert.DoesNotContain(RollupRetryMarker, log, StringComparison.Ordinal);
-        }
-        finally
-        {
-            await DropRoleAsync(store, role);
-        }
+        var log = LogText();
+        Assert.Equal(2, CountOf(log, TableFallbackMarker));
+        Assert.DoesNotContain(RollupRetryMarker, log, StringComparison.Ordinal);
     }
 
     private static int CountOf(string text, string marker)
