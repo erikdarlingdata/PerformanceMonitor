@@ -130,7 +130,7 @@ public sealed class DarlingAnalysisService
     private readonly NpgsqlDataSource _postgres;
     private readonly PgFindingStore _findingStore;
     private readonly FactScorer _scorer;
-    private readonly AnalysisEngineSet _sqlServerEngine;
+    private AnalysisEngineSet _sqlServerEngine;
     private readonly AnalysisEngineSet _pgTargetEngine;
     private readonly ILogger? _logger;
 
@@ -1787,6 +1787,11 @@ WHERE server_id = $1";
         var kind = await cmd.ExecuteScalarAsync(cancellationToken) as string;
         return (EngineFor(kind), kind);
     }
+
+    /// <summary>Test seam (#9149): wraps the SQL Server set's fact collector, so a test can watch the context a pass hands it
+    /// (how many family reads it lets run at once) without reading the store's facts.</summary>
+    internal void WrapSqlServerCollector(Func<IFactCollector, IFactCollector> wrap) =>
+        _sqlServerEngine = _sqlServerEngine with { Collector = wrap(_sqlServerEngine.Collector) };
 
     /// <summary>The set <see cref="ResolveEngineAsync"/> answers for a token, without a store — the mapping
     /// itself, exposed so the engine-routing pins can assert it on every token in <see cref="MonitoredEngineKind"/>.</summary>

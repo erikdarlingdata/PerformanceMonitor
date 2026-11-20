@@ -267,6 +267,112 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
         }
     }
 
+    private const int SwitchServerId = -914902;
+
+    /// <summary>
+    /// Stands in for the SQL Server fact collector and runs a handful of timed reads through the real family runner, with the
+    /// context the service built. It reports how many of them ran at once, which is what the service's choice of
+    /// <see cref="AnalysisContext.FamilyParallelism"/> decides.
+    /// </summary>
+    private sealed class OverlapProbeCollector : IFactCollector
+    {
+        public int Peak;
+
+        public async Task<List<Fact>> CollectFactsAsync(AnalysisContext context)
+        {
+            var running = 0;
+            var ceilingReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            async Task Hold(AnalysisContext _)
+            {
+                var now = Interlocked.Increment(ref running);
+                int seen;
+                do { seen = Volatile.Read(ref Peak); } while (now > seen && Interlocked.CompareExchange(ref Peak, now, seen) != seen);
+                if (now >= PgFactCollector.MaxFamilyParallelism)
+                    ceilingReached.TrySetResult();
+
+                /* A pass that overlaps gets the ceiling's worth running at once and moves on. A serial pass waits out the short
+                   delay for each read, so the probe stays quick. */
+                await Task.WhenAny(ceilingReached.Task, Task.Delay(150, context.CancellationToken));
+                Interlocked.Decrement(ref running);
+            }
+
+            var families = Enumerable.Range(0, 6).Select(_ => (Func<AnalysisContext, List<Fact>, Task>)((c, _) => Hold(c))).ToArray();
+            var facts = new List<Fact>();
+            await PgFactCollector.RunFamiliesAsync(context, facts, families);
+            return facts;
+        }
+    }
+
+    /// <summary>
+    /// The service decides which passes overlap their family reads: the on-demand reads (<c>analyze_server</c> and
+    /// <c>get_analysis_facts</c>) run them at once, the scheduled pass keeps them in series.
+    /// </summary>
+    [Fact]
+    public async Task OnDemandPasses_OverlapTheirFamilyReads_AndTheScheduledPassStaysSerial()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live family-overlap switch test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSwitchRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Two wait rows give the server some history, so the pass reaches its collector. */
+            var end = DateTime.UtcNow;
+            foreach (var time in new[] { end.AddHours(-2), end.AddMinutes(-5) })
+            {
+                using var plant = new NpgsqlCommand(@"
+INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
+VALUES ($1, $2, $3, $4, 'SOS_SCHEDULER_YIELD', 1, 1, 0)", connection);
+                plant.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                plant.Parameters.AddWithValue(time);
+                plant.Parameters.AddWithValue(SwitchServerId);
+                plant.Parameters.AddWithValue("family-overlap-switch");
+                await plant.ExecuteNonQueryAsync(ct);
+            }
+
+            async Task<int> PeakOfAsync(Func<DarlingAnalysisService, Task> run)
+            {
+                var probe = new OverlapProbeCollector();
+                var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
+                service.WrapSqlServerCollector(_ => probe);
+                await run(service);
+                return probe.Peak;
+            }
+
+            var onDemand = await PeakOfAsync(s => s.AnalyzeAsync(SwitchServerId, "family-overlap-switch", 4, ct, persistCollectionCaveats: false));
+            var scheduled = await PeakOfAsync(s => s.AnalyzeAsync(SwitchServerId, "family-overlap-switch", 4, ct, persistCollectionCaveats: true));
+            var facts = await PeakOfAsync(s => s.CollectAndScoreFactsAsync(SwitchServerId, "family-overlap-switch", 4, null, ct));
+
+            Assert.Equal(PgFactCollector.MaxFamilyParallelism, onDemand);
+            Assert.Equal(1, scheduled);
+            Assert.Equal(PgFactCollector.MaxFamilyParallelism, facts);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSwitchRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task DeleteSwitchRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM wait_stats WHERE server_id = {SwitchServerId}; DELETE FROM collect.analysis_collection_caveats WHERE server_id = {SwitchServerId};", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(

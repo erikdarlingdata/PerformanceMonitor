@@ -73,6 +73,82 @@ public sealed class FinOpsInventoryConcurrentReadsLiveTests
         Assert.Null(joined[4].IdleDbCount);
     }
 
+    /// <summary>
+    /// The routed form: a field store has the hourly rollups built, so the idle reads go through the stitched rollup
+    /// (<see cref="DarlingFinOpsInventoryReader.FleetQueriesFor"/>) and not through the raw fallback the first test covers. The four joined
+    /// reads must answer what the routed single statement (<see cref="DarlingFinOpsInventoryReader.ServerMetricsSqlFor"/>) answers, with the
+    /// same ties and NULLs, and the idle counts must come out of the routed reads (a database that is active only in the rollup, and one active only after the watermark).
+    /// </summary>
+    [Fact]
+    public async Task GetServerMetricsAsync_RoutedThroughTheRollups_JoinedAnswerEqualsTheRoutedSingleStatement()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #9149 routed equality test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The routed read needs TimescaleDB: the stitched rollup only exists once the continuous aggregates are built.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+        await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT _timescaledb_functions.stop_background_workers()");
+
+        /* A fixed instant, so the seed does not depend on the wall clock: the idle cutoff (now - 7 days) sits 27 minutes into 2020-06-01 07:00. */
+        var now = new DateTime(2020, 6, 8, 7, 33, 0, DateTimeKind.Unspecified);
+        var idleCutoff = now.AddDays(-7);
+        await SeedAsync(connection, now, ct);
+
+        /* Server 1 also has a database active only in the leading partial hour (raw), server 3 one active only after the watermark (raw tail). Both
+           have their size row beside the others', so they are known databases the routed reads have to find active. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, total_size_mb, used_size_mb) VALUES ($1, $2, 1, 'inv-a', 'DbLead', 10, 5), ($3, $4, 3, 'inv-c', 'DbTail', 10, 5)",
+            CollectionIdGenerator.Next(), now.AddHours(-3), CollectionIdGenerator.Next(), now.AddHours(-5));
+        await InsertActivityAsync(connection, 1, "inv-a", "DbLead", idleCutoff.AddMinutes(5), ct);
+        await InsertActivityAsync(connection, 3, "inv-c", "DbTail", now.AddMinutes(-20), ct);
+
+        var ready = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        Assert.True(ready > 0);
+
+        /* The legacy family covers the first days after the cutoff, the successor the days after that, up to a watermark an hour and a half short of now. */
+        var legacyFloor = new DateTime(2020, 6, 1, 8, 0, 0, DateTimeKind.Unspecified);
+        var successorFloor = new DateTime(2020, 6, 4, 0, 0, 0, DateTimeKind.Unspecified);
+        var watermarkTarget = new DateTime(2020, 6, 8, 6, 0, 0, DateTimeKind.Unspecified);
+        var disclosure = new RefreshDisclosure(message => Assert.Fail($"the refresh degraded unexpectedly: {message}"));
+        await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsDbHourlyView, legacyFloor, successorFloor, disclosure, ct);
+        await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsDbIntervalHourlyView, successorFloor, watermarkTarget, disclosure, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+        Assert.True(rollups.DbGrainHourly);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
+
+        var liveRelation = rollups.DbGrainIntervalHourly ? TimescaleSupport.QueryStatsDbIntervalHourlyView : TimescaleSupport.QueryStatsDbHourlyView;
+        var watermark = await RollupMaterializationWatermark.GetAsync(dataSource, liveRelation, TimescaleSupport.HourlyBucket, TimeoutSeconds, ct);
+        Assert.NotNull(watermark);
+
+        var joined = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(dataSource, rollups, coverage, TimeoutSeconds, now, ct);
+        var routedSql = DarlingFinOpsInventoryReader.ServerMetricsSqlFor(coverage, idleCutoff, watermark!.Value);
+        var single = await SingleStatementAsync(connection, now, ct, routedSql);
+
+        Assert.Equal(4, single.Count);
+        Assert.Equal(single.OrderBy(kv => kv.Key).ToList(), joined.OrderBy(kv => kv.Key).ToList());
+
+        /* The routed idle counts: server 1 keeps exactly one idle database (DbIdle) with DbBusy active in the rollup and DbLead in the leading edge,
+           server 3 has none (DbOnly in the rollup, DbTail after the watermark), server 4 has no coverage (NULL), server 2 has nothing at all. */
+        Assert.Equal(1, joined[1].IdleDbCount);
+        Assert.Null(joined[2].IdleDbCount);
+        Assert.Equal(0, joined[3].IdleDbCount);
+        Assert.Null(joined[4].IdleDbCount);
+        Assert.NotNull(joined[1].AvgCpuPct);
+        Assert.Null(joined[2].AvgCpuPct);
+        Assert.NotNull(joined[4].StorageTotalGb);
+    }
+
     [Fact]
     public async Task GetServerMetricsAsync_StartsItsInputsTogether_TwoReadsWaitOnTheirTablesAtOnce()
     {
@@ -128,9 +204,10 @@ public sealed class FinOpsInventoryConcurrentReadsLiveTests
     }
 
     /// <summary>The fleet read as the old single statement answers it, mapped by the same row readers the joined read uses.</summary>
-    private static async Task<Dictionary<int, ServerMetricsDto>> SingleStatementAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
+    private static async Task<Dictionary<int, ServerMetricsDto>> SingleStatementAsync(
+        NpgsqlConnection connection, DateTime now, CancellationToken ct, string? sql = null)
     {
-        await using var command = new NpgsqlCommand(DarlingFinOpsInventoryReader.ServerMetricsSql, connection);
+        await using var command = new NpgsqlCommand(sql ?? DarlingFinOpsInventoryReader.ServerMetricsSql, connection);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now.AddHours(-24), NpgsqlDbType = NpgsqlDbType.Timestamp });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now.AddDays(-7), NpgsqlDbType = NpgsqlDbType.Timestamp });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), NpgsqlDbType = NpgsqlDbType.Timestamp });
