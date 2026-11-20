@@ -13,6 +13,8 @@
 #   stopped_refused_config      a darling.json the service refuses: Running, not Ready, never restarted.
 #   stopped_root_owned_volume   an existingClaim whose credentials/ a root-run release wrote (#8141 D1): Running, not Ready,
 #                               never restarted, and the log says what to chown.
+#   metrics_scrape              metrics.enabled: the /metrics port answers 401 without a bearer token and with a wrong one, and
+#                               200 with the chart Secret's metrics-token, with the refresh and snapshot-age series.
 #
 # Usage: kind-tests.sh <image>   (repository:tag of the Darling image already loaded into the cluster)
 # Every kubectl and helm call names the context kind-darling (override with KIND_CONTEXT) and never uses another one.
@@ -524,6 +526,62 @@ YAML
   not_ready_never_restarted "${p}" "${STABLE_SECONDS}"
 }
 
+# metrics_attempt <expected status> [<bearer token>]: one scrape of /metrics through its own port-forward (a port-forward dies on
+# its first refused connection, so each attempt starts one); leaves the status in ${WORK}/metrics.status and the body in
+# ${WORK}/metrics.body.
+metrics_attempt() {
+  local pod_name="$1" auth=() code
+  shift
+  if [ "$#" -gt 0 ]; then
+    auth=(-H "Authorization: Bearer $1")
+  fi
+  k -n "${NS}" port-forward "pod/${pod_name}" 18155:5155 >"${WORK}/pf.log" 2>&1 &
+  PF_PID=$!
+  sleep 3
+  code="$(curl -s -m 20 -o "${WORK}/metrics.body" -w '%{http_code}' "${auth[@]}" http://127.0.0.1:18155/metrics || true)"
+  stop_port_forward
+  echo "${code}" >"${WORK}/metrics.status"
+}
+
+# metrics_expect_401 <pod> [<bearer token>]: 401 with an empty body, retried while the port-forward is not up yet.
+metrics_expect_401() {
+  local i
+  for i in $(seq 1 20); do
+    metrics_attempt "$@"
+    if [ "$(cat "${WORK}/metrics.status")" != "000" ]; then
+      break
+    fi
+  done
+  [ "$(cat "${WORK}/metrics.status")" = "401" ] || fail "/metrics answered $(cat "${WORK}/metrics.status"), expected 401"
+  [ ! -s "${WORK}/metrics.body" ] || fail "the 401 had a body: $(head -c 200 "${WORK}/metrics.body")"
+}
+
+case_metrics_scrape() {
+  local token i p
+  install --set metrics.enabled=true
+  p="$(wait_for_pod)"
+  wait_log "${p}" "Metrics port listening on"
+  token="$(k -n "${NS}" get secret "${FULL}" -o go-template='{{index .data "metrics-token"}}' | base64 -d)"
+  [ -n "${token}" ] || fail "the chart Secret has no metrics-token"
+  metrics_expect_401 "${p}"
+  metrics_expect_401 "${p}" "$(printf 'x%.0s' $(seq 1 40))"
+  # The first refresh needs the store, so the success series reads 1 and the snapshot age appears only after a while.
+  for i in $(seq 1 24); do
+    metrics_attempt "${p}" "${token}"
+    if [ "$(cat "${WORK}/metrics.status")" = "200" ] && grep -qF 'darling_metrics_last_refresh_success 1' "${WORK}/metrics.body" &&
+      grep -qF 'darling_metrics_snapshot_age_seconds' "${WORK}/metrics.body"; then
+      break
+    fi
+    sleep 5
+  done
+  [ "$(cat "${WORK}/metrics.status")" = "200" ] || fail "/metrics with the token answered $(cat "${WORK}/metrics.status"), expected 200"
+  grep -qF 'darling_metrics_last_refresh_success 1' "${WORK}/metrics.body" ||
+    fail "no darling_metrics_last_refresh_success 1 in: $(head -c 400 "${WORK}/metrics.body")"
+  grep -qF 'darling_metrics_snapshot_age_seconds' "${WORK}/metrics.body" ||
+    fail "no darling_metrics_snapshot_age_seconds in: $(head -c 400 "${WORK}/metrics.body")"
+  echo "  metrics scraped"
+}
+
 cases=(
   bundled_defaults
   external_plain_postgres
@@ -533,6 +591,7 @@ cases=(
   degraded_at_start
   stopped_refused_config
   stopped_root_owned_volume
+  metrics_scrape
 )
 if [ -n "${KIND_CASES:-}" ]; then
   read -r -a cases <<<"${KIND_CASES}"
