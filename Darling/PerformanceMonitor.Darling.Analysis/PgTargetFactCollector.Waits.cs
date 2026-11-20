@@ -302,7 +302,7 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
     {
         static bool IsBufferContent(WaitProfileRow r) =>
             r.TypeKey.Equals("buffer", StringComparison.Ordinal)
-            && r.EventKey is "buffershared" or "buffersharexclusive" or "bufferexclusive";
+            && r.EventKey is "buffershared" or "buffershareexclusive" or "bufferexclusive";
 
         if (!rows.Exists(IsBufferContent)) return rows;
 

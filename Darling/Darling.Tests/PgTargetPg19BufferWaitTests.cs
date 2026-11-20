@@ -52,7 +52,7 @@ public sealed class PgTargetPg19BufferWaitTests
         new("lock", "relation", 720_000, 100),
         new("lwlock", "walwrite", 144_000, 500),
         new("buffer", "buffershared", 5_040_000, 50_000),
-        new("buffer", "buffersharexclusive", 2_160_000, 25_000),
+        new("buffer", "buffershareexclusive", 2_160_000, 25_000),
         new("buffer", "bufferexclusive", 1_440_000, 15_000),
         new("lwlock", "lockmanager", 72_000, 40),
         new("io", "datafileread", 1_440_000, 9_000),
