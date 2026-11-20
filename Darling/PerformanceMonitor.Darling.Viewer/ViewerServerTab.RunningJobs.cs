@@ -28,7 +28,7 @@ public partial class ViewerServerTab
     /// msdb banner) fire concurrently — NpgsqlDataSource pools a connection for each — then the grid
     /// goes through the filter manager's UpdateData so any active column filter survives the refresh.
     /// </summary>
-    private async Task LoadRunningJobsAsync()
+    private async Task LoadRunningJobsAsync(ViewerLoadTimer? timer = null)
     {
         using var readFanOut = ViewerReadFanOut.Of(2);
         _ownNoDataText.TryAdd(RunningJobsNoDataMessage, RunningJobsNoDataMessage.Text); /* the words are kept for when the banner goes away */
@@ -36,8 +36,9 @@ public partial class ViewerServerTab
         string? status;
         try
         {
-            var jobsTask = _dataService.ReadRunningJobsAsync(_server.ServerId);
-            var statusTask = _dataService.GetLatestRunningJobsCollectorStatusAsync(_server.ServerId);
+            /* #9112: both reads are named on the load's clock. */
+            var jobsTask = Timed(timer, "Running Jobs read", _dataService.ReadRunningJobsAsync(_server.ServerId));
+            var statusTask = Timed(timer, "Running Jobs collector status read", _dataService.GetLatestRunningJobsCollectorStatusAsync(_server.ServerId));
             read = await jobsTask;
             status = await statusTask;
         }
@@ -57,11 +58,11 @@ public partial class ViewerServerTab
            priced against contention that has already finished. */
         readFanOut.Release();
 
-        _runningJobsFilterMgr!.UpdateData(jobs);
+        ClientStep(timer, "Running Jobs grid build", () => _runningJobsFilterMgr!.UpdateData(jobs));
         /* D20: an empty grid says no job is running, unless the collector was denied msdb (then the banner says why the grid is
            empty, and "no jobs running" would be a claim nobody checked) or the not-collected note applies. */
         var bannerShows = ShouldShowMsdbBanner(status);
-        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count, keepsOwnEmptyText: !bannerShows);
+        await Timed(timer, "Running Jobs engine gap read", ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count, keepsOwnEmptyText: !bannerShows));
 
         /* An empty grid whose collector has not collected within the freshness bound says that instead (the gap note and the banner win). */
         if (jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood

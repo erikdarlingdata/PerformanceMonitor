@@ -171,7 +171,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     {
         var tab = ViewerFile("ViewerServerTab.Blocking.cs");
 
-        Assert.Equal(1, Matches(tab, @"var dataStartTask = _dataService\.GetWaitingTasksDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(tab, @"var dataStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetWaitingTasksDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(tab,
             @"UpdateTruncationBanner\(CurrentWaitsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Current Waits""\),\s*startUtc\);"));
     }

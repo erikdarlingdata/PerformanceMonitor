@@ -69,7 +69,7 @@ public sealed class PgPanelTabOwnershipTests
         @"\b(?<name>LoadPg[A-Za-z]+Async)\b", RegexOptions.Compiled);
 
     private static readonly Regex DispatcherArm = new(
-        @"case\s+Pg(?<tab>\w+)InnerTabIndex:\s*\r?\n\s*await\s+LoadPg(?<loader>\w+)Async\(\);",
+        @"case\s+Pg(?<tab>\w+)InnerTabIndex:\s*\r?\n\s*await\s+LoadPg(?<loader>\w+)Async\((?:timer)?\);",
         RegexOptions.Compiled);
 
     /// <summary>

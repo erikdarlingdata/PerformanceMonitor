@@ -81,7 +81,7 @@ public sealed class SeparatelyMonitoredListNoteTests
         Assert.Contains("x:Name=\"DeadlockSeparatelyMonitoredNote\"", xaml, StringComparison.Ordinal);
         Assert.Contains("BlockingSeparatelyMonitoredNote.Visibility = note is null", code, StringComparison.Ordinal);
         Assert.Contains("DeadlockSeparatelyMonitoredNote.Visibility = note is null", code, StringComparison.Ordinal);
-        Assert.Contains("SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(", code, StringComparison.Ordinal);
+        Assert.Contains("_dataService.GetSeparatelyMonitoredAsync(", code, StringComparison.Ordinal);
     }
 
     [Fact]

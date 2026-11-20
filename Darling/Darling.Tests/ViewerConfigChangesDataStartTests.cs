@@ -108,9 +108,9 @@ public sealed class ViewerConfigChangesDataStartTests
         /* Three reads and the three probes beside them are six reads in flight, so the width declared to the deadline is six. */
         Assert.Equal(1, Matches(load, @"using var readFanOut = ViewerReadFanOut\.Of\(6\);"));
 
-        Assert.Equal(1, Matches(load, @"var serverStartTask = _dataService\.GetServerConfigChangesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
-        Assert.Equal(1, Matches(load, @"var databaseStartTask = _dataService\.GetDatabaseConfigChangesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
-        Assert.Equal(1, Matches(load, @"var traceFlagStartTask = _dataService\.GetTraceFlagChangesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(load, @"var serverStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetServerConfigChangesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
+        Assert.Equal(1, Matches(load, @"var databaseStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetDatabaseConfigChangesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
+        Assert.Equal(1, Matches(load, @"var traceFlagStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetTraceFlagChangesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
 
         /* The rows' change times, and no cap argument: the call ends at the row list. */
         Assert.Equal(1, Matches(load,

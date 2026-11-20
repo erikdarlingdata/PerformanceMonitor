@@ -44,26 +44,28 @@ public partial class ViewerServerTab
     /// totals read concurrently, then the chart and summary strip render. Called from
     /// <see cref="LoadMemoryAsync"/> (the Memory tab loads all its sub-tabs on activation).
     /// </summary>
-    private async Task LoadPlanCacheAsync()
+    private async Task LoadPlanCacheAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
+        var reads = MemoryReads;
 
         using var readFanOut = ViewerReadFanOut.Of(3);
 
-        var trendTask = _dataService.GetPlanCacheTrendAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: each read is named on the load's clock (Memory's, which calls this), the draws are named client steps. */
+        var trendTask = Timed(timer, "Plan Cache trend read", reads.PlanCacheTrend(startUtc, endUtc));
         /* #6388: Plan Cache by Type, the same read get_plan_cache_bloat serves as cache_types. */
-        var byTypeTask = _dataService.GetPlanCacheByTypeAsync(_server.ServerId, startUtc, endUtc);
+        var byTypeTask = Timed(timer, "Plan Cache by type read", reads.PlanCacheByType(startUtc, endUtc));
         /* The summary strip's totals come from a dedicated uncapped aggregate (not a capped grid),
            so "Total Plans" is exact (Dashboard parity). */
-        var summaryTask = _dataService.GetPlanCacheSummaryAsync(_server.ServerId, startUtc, endUtc);
+        var summaryTask = Timed(timer, "Plan Cache summary read", reads.PlanCacheSummary(startUtc, endUtc));
         await Task.WhenAll(trendTask, summaryTask, byTypeTask);
 
         /* The three reads are done; the by-type engine-gap probe below is a store read, so release or it is priced at this width. */
         readFanOut.Release();
 
-        RenderPlanCacheChart(trendTask.Result);
-        RenderPlanCacheSummary(summaryTask.Result);
-        await RenderPlanCacheByTypeAsync(byTypeTask.Result);
+        ClientStep(timer, "Plan Cache chart draw", () => RenderPlanCacheChart(trendTask.Result));
+        ClientStep(timer, "Plan Cache summary build", () => RenderPlanCacheSummary(summaryTask.Result));
+        await RenderPlanCacheByTypeAsync(byTypeTask.Result, timer);
     }
 
     private void RenderPlanCacheChart(List<PlanCacheTrendPoint> data)
