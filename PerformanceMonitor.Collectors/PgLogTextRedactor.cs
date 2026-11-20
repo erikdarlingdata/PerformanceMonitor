@@ -618,6 +618,10 @@ public static class PgLogTextRedactor
         "%s anahtarı (key) çoğaltılmış (duplicated).", // tr
         "Ключ %s дублюється.", // uk
         "键值%s重复了", // zh_CN
+        "键 %s 已存在。", // zh_CN, 18.7
+        "键值 %s 重复。", // zh_CN, 18.7
+        "鍵 %s 已存在。", // zh_TW, 18.7
+        "鍵值 %s 重複。", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>Key %s conflicts with existing key %s.</c> and <c>Key %s conflicts with key %s.</c>: an exclusion violation's DETAIL, both slots <c>(columns)=(values)</c> of the same index.</summary>
@@ -655,6 +659,10 @@ public static class PgLogTextRedactor
         "%s anahtarı,  %s anahtarı ile uyuşmuyor.", // tr
         "Ключ %s конфліктує з ключем %s.", // uk
         "键%s与另外一个键%s冲突", // zh_CN
+        "键 %s 与已有的键 %s 冲突。", // zh_CN, 18.7
+        "键 %s 与键 %s 冲突。", // zh_CN, 18.7
+        "索引鍵 %s 與既有的索引鍵 %s 衝突。", // zh_TW, 18.7
+        "索引鍵 %s 與索引鍵 %s 衝突。", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>Key (%s)=(%s) is not present in table "%s".</c> and <c>Key (%s)=(%s) is still referenced from table "%s".</c>: a foreign-key violation's DETAIL, the second slot the key's values.</summary>
@@ -698,6 +706,12 @@ public static class PgLogTextRedactor
         "На ключ (%s)=(%s) есть ссылки в таблице \"%s\".", // ru
         "Nyckeln (%s)=(%s) refereras från tabell \"%s\".", // sv
         "Ключ (%s)=(%s) посилається з таблиці \"%s\".", // uk
+        "表 \"%3$s\" 中不存在键 (%1$s)=(%2$s)。", // zh_CN, 18.7
+        "键 (%s)=(%s) 仍被表 \"%s\" 引用。", // zh_CN, 18.7
+        "键 (%s)=(%s) 被表 \"%s\" 引用。", // zh_CN, 18.7
+        "索引鍵 (%s)=(%s) 沒有出現在資料表 \"%s\"。", // zh_TW, 18.7
+        "索引鍵 (%s)=(%s) 仍被資料表 \"%s\" 參考。", // zh_TW, 18.7
+        "索引鍵 (%s)=(%s) 被資料表 \"%s\" 引用。", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>Key is not present in table "%s".</c> and <c>Key is still referenced from table "%s".</c>: the foreign-key DETAIL written when the role may not read the key's columns, which carries no value.</summary>
@@ -737,6 +751,12 @@ public static class PgLogTextRedactor
         "На ключ есть ссылки в таблице \"%s\".", // ru
         "Nyckel refereras från tabell \"%s\".", // sv
         "Ключ посилається з таблиці \"%s\".", // uk
+        "表 \"%s\" 中不存在键。", // zh_CN, 18.7
+        "键仍被表 \"%s\" 引用。", // zh_CN, 18.7
+        "键被表 \"%s\" 引用。", // zh_CN, 18.7
+        "資料表 \"%s\" 中不存在索引鍵。", // zh_TW, 18.7
+        "索引鍵仍被資料表 \"%s\" 引用。", // zh_TW, 18.7
+        "索引鍵被資料表 \"%s\" 引用。", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>Failing row contains %s.</c>: a NOT NULL or CHECK failure's DETAIL, its slot the whole row's <c>(values)</c>.</summary>
@@ -758,6 +778,8 @@ public static class PgLogTextRedactor
         "Hata veren satır %s içeriyor.", // tr
         "Помилковий рядок містить %s.", // uk
         "失败, 行包含%s.", // zh_CN
+        "出错的行包含 %s。", // zh_CN, 18.7
+        "出錯的資料列包含 %s。", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>Partition key of the failing row contains %s.</c>: a row no partition takes, its slot <c>(columns) = (values)</c>.</summary>
@@ -777,6 +799,8 @@ public static class PgLogTextRedactor
         "Başarısız olan satırda bölümleme anahtarı %s içeriyor.", // tr
         "Ключ секціонування для невідповідного рядка містить %s.", // uk
         "失败行的分区键包含%s.", // zh_CN
+        "出错行的分区键包含 %s。", // zh_CN, 18.7
+        "出錯資料列的分割索引鍵包含 %s。", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>COPY %s, line %llu: "%s"</c>: a COPY frame quoting the input line.</summary>
@@ -843,6 +867,8 @@ public static class PgLogTextRedactor
         "JSON-data, rad %d: %s%s%s", // sv
         "Дані JSON, рядок %d: %s%s%s", // uk
         "JSON数据, 行 %d: %s%s%s", // zh_CN
+        "JSON 数据，行 %d: %s%s%s", // zh_CN, 18.7
+        "JSON 資料, 第 %d 行: %s%s%s", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>invalid input syntax for type %s: "%s"</c>: an input function's message, its second slot the rejected value.</summary>
@@ -865,6 +891,8 @@ public static class PgLogTextRedactor
         "неприпустимий синтаксис для типу %s: \"%s\"", // uk
         "无效的类型 %s 输入语法: \"%s\"", // zh_CN
         "%s型の入力構文が不正です: \"%s\"", // ja
+        "类型 %s 的输入语法无效: \"%s\"", // zh_CN, 18.7
+        "型別 %s 的輸入語法無效: \"%s\"", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>invalid input syntax for type %s</c>: the JSON parser's message, which carries no value (its DETAIL and CONTEXT do).</summary>
@@ -885,6 +913,8 @@ public static class PgLogTextRedactor
         "%s tipi için geçersiz girdi sözdizimi", // tr
         "неприпустимий вхідний синтаксис для типу %s", // uk
         "类型%s的输入语法无效", // zh_CN
+        "类型 %s 的输入语法无效", // zh_CN, 18.7
+        "型別 %s 的輸入語法無效", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's message that quotes the value an input function or a range check rejected, the first
@@ -1084,6 +1114,29 @@ public static class PgLogTextRedactor
         "\"%s\" 超出双精度类型的范围", // zh_CN
         "有缺陷的范围字串:\"%s\"", // zh_CN
         "有缺陷的记录常量: \"%s\"", // zh_CN
+        "数组字面量格式错误: \"%s\"", // zh_CN, 18.7
+        "记录字面量格式错误: \"%s\"", // zh_CN, 18.7
+        "范围字面量格式错误: \"%s\"", // zh_CN, 18.7
+        "多范围字面量格式错误: \"%s\"", // zh_CN, 18.7
+        "\"%s\" 超出类型 double precision 的范围", // zh_CN, 18.7
+        "\"%s\" 超出类型 real 的范围", // zh_CN, 18.7
+        "日期/时间字段值超出范围: \"%s\"", // zh_CN, 18.7
+        "时间间隔字段值超出范围: \"%s\"", // zh_CN, 18.7
+        "时区偏移量超出范围: \"%s\"", // zh_CN, 18.7
+        "date 超出范围: \"%s\"", // zh_CN, 18.7
+        "timestamp 超出范围: \"%s\"", // zh_CN, 18.7
+        "陣列字面值格式錯誤: \"%s\"", // zh_TW, 18.7
+        "格式錯誤的記錄字面值: \"%s\"", // zh_TW, 18.7
+        "範圍字面值格式錯誤: \"%s\"", // zh_TW, 18.7
+        "多範圍字面值格式錯誤: \"%s\"", // zh_TW, 18.7
+        "值 \"%s\" 超出型別 %s 的範圍", // zh_TW, 18.7
+        "\"%s\" 超出 double precision 型別範圍", // zh_TW, 18.7
+        "\"%s\" 超出 real 型別範圍", // zh_TW, 18.7
+        "日期/時間欄位值超出範圍: \"%s\"", // zh_TW, 18.7
+        "interval 欄位值超出範圍: \"%s\"", // zh_TW, 18.7
+        "時區位移超出範圍: \"%s\"", // zh_TW, 18.7
+        "date 超出範圍: \"%s\"", // zh_TW, 18.7
+        "timestamp 超出範圍: \"%s\"", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>invalid input value for enum %s: "%s"</c>: the enum's name, then the rejected value.</summary>
@@ -1105,6 +1158,8 @@ public static class PgLogTextRedactor
         "%s enum tipi için geçersiz değer: \"%s\"", // tr
         "неприпустиме вхідне значення для переліку %s: \"%s\"", // uk
         "对于枚举%s的输入值无效: \"%s\"", // zh_CN
+        "枚举 %s 的输入值无效: \"%s\"", // zh_CN, 18.7
+        "列舉 %s 的輸入值無效: \"%s\"", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's DETAIL for a JSON parser error that quotes the token it stopped at (<c>Token "%s" is
@@ -1622,6 +1677,8 @@ public static class PgLogTextRedactor
         "%s la sau aproape de \"%s\"", // ro, plpgsql only
         "%s tại hoặc gần\"%s\"", // vi, plpgsql only
         "\"%2$s\" 附近發生 %1$s", // zh_TW, plpgsql only
+        "%s，位置在 \"%s\" 或其附近", // zh_CN, zh_CN, plpgsql, 18.7
+        "在 \"%2$s\" 或其附近發生 %1$s", // zh_TW, zh_TW, plpgsql, 18.7
     ];
 
     /// <summary>Every catalogue's <c>%s at or near "%s" of jsonpath input</c> (#4006). Its token is jsonpath, not
@@ -1643,6 +1700,8 @@ public static class PgLogTextRedactor
         "jsonpath girdisinin \"%2$s\" kısmında veya yakınında %1$s", // tr
         "%s в або біля \"%s\" введення jsonpath", // uk
         "%s位于或靠近jsonpath输入的 \"%s\"", // zh_CN
+        "%s，位置在 jsonpath 输入的 \"%s\" 或其附近", // zh_CN, 18.7
+        "%s，位置在 jsonpath 輸入的 \"%s\" 或其附近", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c>%s at end of input</c> and <c>%s at end of jsonpath input</c> (#4006): a syntax
@@ -1684,6 +1743,9 @@ public static class PgLogTextRedactor
         "%s la sfârşit de intrare", // ro, plpgsql only
         "%s tại nơi kết thúc đầu vào", // vi, plpgsql only
         "輸入結尾發生 %s", // zh_TW, plpgsql only
+        "%s，位置在输入末尾", // zh_CN, zh_CN, plpgsql, 18.7
+        "%s，位置在 jsonpath 输入末尾", // zh_CN, 18.7
+        "%s，位置在 jsonpath 輸入末尾", // zh_TW, 18.7
     ];
 
     /// <summary>Every catalogue's <c> at character %d</c> (#4006), which the server log appends to a message that
@@ -1707,6 +1769,7 @@ public static class PgLogTextRedactor
         " %d karakterinde ", // tr
         " символ %d", // uk
         " 第 %d 个字符处", // zh_CN
+        " 在第 %d 個字元處", // zh_TW, 18.7
     ];
 
     /// <summary>The scanner's six <c>unterminated ...</c> heads in every catalogue (#4006). An error under one quotes
@@ -1810,6 +1873,18 @@ public static class PgLogTextRedactor
         "未结束的16进制字符串常量",
         "未结束的引用标识符",
         "未结束的引用字符串",
+        "未终止的 /* 注释", // zh_CN, 18.7
+        "未终止的位串字面量", // zh_CN, 18.7
+        "未终止的美元引号字符串", // zh_CN, 18.7
+        "未终止的十六进制字符串字面量", // zh_CN, 18.7
+        "未终止的带引号标识符", // zh_CN, 18.7
+        "未终止的引号字符串", // zh_CN, 18.7
+        "未結束的 /* 註解", // zh_TW, 18.7
+        "未結束的位元字串字面值", // zh_TW, 18.7
+        "未結束的錢號引號字串", // zh_TW, 18.7
+        "未結束的十六進位字串字面值", // zh_TW, 18.7
+        "未結束的引號識別字", // zh_TW, 18.7
+        "未結束的引號字串", // zh_TW, 18.7
     ];
 
     /* A placeholder in a catalogue format: %s in order, or %1$s / %2$s where a catalogue reorders them. */

@@ -49,7 +49,7 @@ kubectl port-forward deployment/<fullname> 5153:5153
 
 `store.mode` is `bundled` (the default) or `external`.
 
-**Bundled** runs one TimescaleDB pod (a StatefulSet) with the release. It suits evaluation and small installs: one replica, no backups, no failover. The image is `timescale/timescaledb:2.32.0-pg17`, the image CI tests Darling against, with the same server settings as the compose file's store. Darling's connection string carries no password. The password reaches the Darling pod as `PGPASSWORD` from the `password` key of the store Secret, the same key the store pod reads. The chart generates that Secret (`<fullname>-store`) unless you name your own in `store.bundled.auth.existingSecret`.
+**Bundled** runs one TimescaleDB pod (a StatefulSet) with the release. It suits evaluation and small installs: one replica, no backups, no failover. The image is `timescale/timescaledb:2.32.1-pg17`, the image CI tests Darling against, with the same server settings as the compose file's store. Darling's connection string carries no password. The password reaches the Darling pod as `PGPASSWORD` from the `password` key of the store Secret, the same key the store pod reads. The chart generates that Secret (`<fullname>-store`) unless you name your own in `store.bundled.auth.existingSecret`.
 
 **External** connects to a PostgreSQL or TimescaleDB server you run, and the chart renders no store resources. `host`, `database` and `username` are required (they may not contain `;` or `=`). Pick one way to give the password:
 
@@ -190,7 +190,7 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 
 **Timing.** Helm waits for a hook Job inside `--timeout` (5 minutes by default), and the Job's `activeDeadlineSeconds` is `waitSeconds + 300`. A release that migrates for a long time needs `helm upgrade --timeout` to cover `waitSeconds` (default 900). One migration step can run for up to 30 minutes on a large store, and the pod's log names that step when it starts. For an upgrade that large, set `store.provisionRoles.waitSeconds` above 1800. Without `--wait`, the Job starts as soon as the manifests are applied and waits for the new pod to migrate the store.
 
-**Tested versions.** PostgreSQL 18.6 (the live tests); PostgreSQL 17 and 15 (the kind cases `external_provision_roles` and `provision_roles_fails_the_release`).
+**Tested versions.** PostgreSQL 18.7 (the live tests); PostgreSQL 17 and 15 (the kind cases `external_provision_roles` and `provision_roles_fails_the_release`).
 
 ## Values
 

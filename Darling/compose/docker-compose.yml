@@ -33,7 +33,7 @@ name: performancemonitor-darling
 
 services:
   store:
-    image: timescale/timescaledb:2.32.0-pg17
+    image: timescale/timescaledb:2.32.1-pg17
     restart: unless-stopped
     # #3899: pg_stat_statements, for the store's OWN statement statistics (get_store_query_stats: which of
     # the store's queries cost the most). The service collects as the darling login, and the web dashboard and
