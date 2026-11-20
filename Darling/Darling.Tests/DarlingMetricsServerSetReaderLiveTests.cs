@@ -51,6 +51,12 @@ public sealed class DarlingMetricsServerSetReaderLiveTests
     private const int UnscheduledWaitsId = -913_019;
     private const int FleetScheduledId = -913_020;
     private const int ServerRowWinsId = -913_021;
+    private const int DisabledOldId = -913_022;
+    private const int DisabledRecentId = -913_023;
+    private const int EnabledSlowId = -913_024;
+    private const int FleetDisabledNullServerId = -913_025;
+    private const int FleetDisabledServerEnabledId = -913_026;
+    private const int FleetDisabledOnlyId = -913_027;
 
     private const string SecretDb = "SECRET_DB_9013";
     private const string TopApp = "TOP_APP_9013";
@@ -60,7 +66,7 @@ public sealed class DarlingMetricsServerSetReaderLiveTests
     [
         CpuId, SchedulerId, PerfmonId, SessionsId, MemoryId, GrantsId, FileIoId, VolumeId, WaitsId, TempdbId,
         StaleId, VolumeFreshId, VolumeOldId, EmptyId, PostgresId, EverythingId, SlowWaitsRecentId, SlowWaitsOldId,
-        UnscheduledWaitsId,
+        UnscheduledWaitsId, DisabledOldId, DisabledRecentId, EnabledSlowId,
     ];
 
     private static readonly string[] Tables =
@@ -334,6 +340,65 @@ public sealed class DarlingMetricsServerSetReaderLiveTests
         Assert.Empty(await ReadForAsync(c, now, ServerRowWinsId, ct));
     }
 
+    /// <summary>
+    /// #9139: a collector that is switched off collects nothing more, so its last reading is bounded by the floor alone.
+    /// <c>database_size_stats</c> on a 360 minute schedule has a 3 hour floor and an 18 hour bound while enabled.
+    /// </summary>
+    [Fact]
+    public Task ADisabledServerSchedule_BoundsTheReadingByTheFloor_AnEnabledOneByThreeIntervals() => RunAsync(async (c, now, ct) =>
+    {
+        foreach (var id in new[] { DisabledOldId, DisabledRecentId, EnabledSlowId })
+        {
+            await InsertServerAsync(c, id, MonitoredEngineKind.SqlServer, ct);
+        }
+
+        await InsertScheduleRowAsync(c, DisabledOldId, "database_size_stats", 360, false, ct);
+        await InsertScheduleRowAsync(c, DisabledRecentId, "database_size_stats", 360, false, ct);
+        await InsertScheduleRowAsync(c, EnabledSlowId, "database_size_stats", 360, true, ct);
+        await InsertSizeAsync(c, DisabledOldId, now.AddHours(-4), "D:\\", @"D:\data\a.mdf", 1000, 400, ct);
+        await InsertSizeAsync(c, DisabledRecentId, now.AddHours(-2), "D:\\", @"D:\data\a.mdf", 1000, 400, ct);
+        await InsertSizeAsync(c, EnabledSlowId, now.AddHours(-4), "D:\\", @"D:\data\a.mdf", 1000, 400, ct);
+
+        Assert.Empty(await ReadForAsync(c, now, DisabledOldId, ct));
+        Assert.Equal(40, Single(await ReadForAsync(c, now, DisabledRecentId, ct), "darling_disk_volume_min_free_percent"), 6);
+        Assert.Equal(40, Single(await ReadForAsync(c, now, EnabledSlowId, ct), "darling_disk_volume_min_free_percent"), 6);
+    });
+
+    /// <summary>
+    /// #9139: <c>enabled</c> resolves as the scheduler resolves it, column by column: the server row, else the fleet row,
+    /// else the shipped default. A server row that sets only the interval (a NULL <c>enabled</c>) does not re-enable a
+    /// collector the fleet row switched off, and a server row that says enabled wins over a disabled fleet row.
+    /// </summary>
+    [Fact]
+    public async Task EnabledResolvesServerRowThenFleetRow_ColumnByColumn()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live metrics server-set tests.");
+
+        /* A fleet-wide row applies to every server on the shared store, so this fact mints its own scratch database. */
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+
+        var now = LiveClock.Now();
+        await InsertScheduleRowAsync(c, null, "database_size_stats", 360, false, ct);
+        foreach (var serverId in new[] { FleetDisabledNullServerId, FleetDisabledServerEnabledId, FleetDisabledOnlyId })
+        {
+            await InsertServerAsync(c, serverId, MonitoredEngineKind.SqlServer, ct);
+            await InsertSizeAsync(c, serverId, now.AddHours(-4), "D:\\", @"D:\data\a.mdf", 1000, 400, ct);
+        }
+
+        await InsertScheduleRowAsync(c, FleetDisabledNullServerId, "database_size_stats", 360, null, ct);
+        await InsertScheduleRowAsync(c, FleetDisabledServerEnabledId, "database_size_stats", 360, true, ct);
+
+        Assert.Empty(await ReadForAsync(c, now, FleetDisabledOnlyId, ct));
+        Assert.Empty(await ReadForAsync(c, now, FleetDisabledNullServerId, ct));
+        Assert.Equal(40, Single(await ReadForAsync(c, now, FleetDisabledServerEnabledId, ct), "darling_disk_volume_min_free_percent"), 6);
+    }
+
     [Fact]
     public Task ServerWithNoRows_ReturnsNothing_ForIt() => RunAsync(async (c, now, ct) =>
     {
@@ -541,6 +606,19 @@ VALUES ($1, $2, $3)", connection);
         command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         command.Parameters.AddWithValue(collectorName);
         command.Parameters.AddWithValue(frequencyMinutes);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertScheduleRowAsync(
+        NpgsqlConnection connection, int? serverId, string collectorName, int frequencyMinutes, bool? enabled, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, enabled)
+VALUES ($1, $2, $3, $4)", connection);
+        command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+        command.Parameters.AddWithValue(collectorName);
+        command.Parameters.AddWithValue(frequencyMinutes);
+        command.Parameters.Add(new NpgsqlParameter<bool?> { TypedValue = enabled, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
         await command.ExecuteNonQueryAsync(ct);
     }
 

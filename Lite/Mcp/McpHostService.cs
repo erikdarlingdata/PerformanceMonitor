@@ -79,6 +79,10 @@ public sealed class McpHostService : BackgroundService
         dataService.CollectorFrequencyMinutes = scheduleManager is null
             ? null
             : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);
+        /* #9139: the same schedule's enabled answer, so get_server_summary's CPU bound drops a switched-off collector's last reading at the floor. */
+        dataService.CollectorEnabled = scheduleManager is null
+            ? null
+            : (serverId, collector) => scheduleManager.IsCollectorEnabledForStorageServer(serverManager, serverId, collector);
     }
 
     /// <summary>

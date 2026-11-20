@@ -311,6 +311,9 @@ public partial class MainWindow : Window
            instance. Wired once here, beside the managers it answers from, and read by each instance where it is used. */
         LocalDataService.DefaultCollectorFrequencyMinutes = (serverId, collector) =>
             _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collector);
+        /* #9139: a collector that is switched off gets no newer reading, so the Overview CPU bound reads it. */
+        LocalDataService.DefaultCollectorEnabled = (serverId, collector) =>
+            _scheduleManager.IsCollectorEnabledForStorageServer(_serverManager, serverId, collector);
 
         // Status bar update timer
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };

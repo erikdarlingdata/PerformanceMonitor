@@ -23,6 +23,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// scheduler re-runs every <see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/>
 /// (<see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>), so 0 is bounded by that interval and
 /// not read as the floor. A server row of 0 wins over a fleet row, as it does in the scheduler.</para>
+///
+/// <para>A collector that is switched off collects nothing more, so no newer reading is coming and the multiple would
+/// only keep its last reading current for hours after it stopped (#9139). When the collector is disabled the cutoff is
+/// the floor alone. <c>enabled</c> resolves as <c>StoreConfigProvider.ResolveSchedule</c> resolves it, column by column:
+/// the server's row, else the fleet row, else <see cref="CollectorScheduleDefaults.Entry.DefaultEnabled"/>. A NULL
+/// <c>enabled</c> on the server row falls through to the fleet row, so a server row that sets only the interval does
+/// not re-enable a collector the fleet row switched off.</para>
 /// </summary>
 public static class CollectorFreshnessSql
 {
@@ -48,12 +55,20 @@ public static class CollectorFreshnessSql
         }
 
         var multiplier = intervalMultiplier.ToString(CultureInfo.InvariantCulture);
-        return $@"({nowParameter} - GREATEST({floorMinutesSql}, {multiplier} * COALESCE(NULLIF(COALESCE(
+        var defaultEnabled = CollectorScheduleDefaults.All[collectorName].DefaultEnabled ? "TRUE" : "FALSE";
+        return $@"({nowParameter} - (CASE WHEN COALESCE(
+        (SELECT enabled FROM config.config_collector_schedules
+         WHERE collector_name = '{collectorName}' AND server_id = {serverIdExpression}),
+        (SELECT enabled FROM config.config_collector_schedules
+         WHERE collector_name = '{collectorName}' AND server_id IS NULL),
+        {defaultEnabled})
+        THEN GREATEST({floorMinutesSql}, {multiplier} * COALESCE(NULLIF(COALESCE(
         (SELECT frequency_minutes FROM config.config_collector_schedules
          WHERE collector_name = '{collectorName}' AND server_id = {serverIdExpression}),
         (SELECT frequency_minutes FROM config.config_collector_schedules
          WHERE collector_name = '{collectorName}' AND server_id IS NULL),
         {CollectorScheduleDefaults.ResolveFrequencyMinutes(collectorName, null, null)}), 0),
-        {CollectorScheduleDefaults.OnLoadRecaptureMinutes})) * INTERVAL '1 minute')";
+        {CollectorScheduleDefaults.OnLoadRecaptureMinutes}))
+        ELSE {floorMinutesSql} END) * INTERVAL '1 minute')";
     }
 }
