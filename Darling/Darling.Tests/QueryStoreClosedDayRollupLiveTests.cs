@@ -219,6 +219,44 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
     private static Task<QueryStoreClosedDayRollup.ServedDays?> ServedAsync(Store store, DateTime start, DateTime end, CancellationToken ct) =>
         QueryStoreClosedDayRollup.ResolveServedDaysAsync(store.Connection, null, ServerId, start, end, 30, ct);
 
+    /// <summary>
+    /// The rung is the newest on a dense ladder, makes its three tables empty, runs twice, and the store probe maps a store that holds
+    /// them to this version and a store without one of them to the version below.
+    /// </summary>
+    [Fact]
+    public async Task TheRungIsTheNewestOnADenseLadder_MakesItsTablesEmpty_RunsTwice_AndTheStoreProbeSeesThem()
+    {
+        var rung = PgMigrations.Scripts[^1];
+        Assert.Equal(QueryStoreClosedDayRollup.Version, rung.Version);
+        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
+        Assert.Equal(rung.Version - 1, PgMigrations.Scripts[^2].Version);
+
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, null, ct);
+
+        var tables = new[] { "query_store_grid_daily", "query_store_slicer_hourly", "query_store_closed_day_built" };
+        foreach (var table in tables)
+        {
+            await ExecuteAsync(connection, $"DROP TABLE IF EXISTS collect.{table}", ct);
+        }
+        await ExecuteAsync(connection, rung.Sql, ct);
+        await ExecuteAsync(connection, rung.Sql, ct);
+        foreach (var table in tables)
+        {
+            Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{table}", ct));
+        }
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
+
+        await ExecuteAsync(connection, "DROP TABLE collect.query_store_closed_day_built", ct);
+        Assert.Equal(StorageVersion.SchemaVersion - 1, await viewer.GetStoreSchemaVersionAsync(ct));
+    }
+
     [Fact]
     public async Task BuiltDaysPlusEdges_EqualTheIntervalTable_ThroughALateRow_AnUnbuiltDay_AndStoppedBuilds()
     {
