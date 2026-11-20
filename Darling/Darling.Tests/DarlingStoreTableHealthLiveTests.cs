@@ -682,4 +682,93 @@ FROM rels AS r JOIN pg_class AS c ON c.oid = r.oid", connection);
 
         return names;
     }
+
+    /* The size read runs on several connections once a store has this many relations (#9170). The statement it feeds is
+       compared with the unsplit one, run on one connection, over every relation: hypertables with uncompressed, compressed
+       and dropped chunks, rows with out-of-line (TOAST) values, indexes, and a plain table. */
+    [Fact]
+    public async Task ASizedReadOnSeveralConnections_ReturnsTheSizesTheUnsplitStatementReturns()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9170 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        foreach (var name in new[] { "zz_sz_a", "zz_sz_b", "zz_sz_c" })
+        {
+            await ExecAsync(connection, $@"
+CREATE TABLE collect.{name} (collection_time timestamp NOT NULL, v integer, payload text);
+SELECT create_hypertable('collect.{name}', 'collection_time', chunk_time_interval => interval '1 day');
+ALTER TABLE collect.{name} SET (timescaledb.compress);
+CREATE INDEX ON collect.{name} (v);
+INSERT INTO collect.{name} SELECT timestamp '2020-01-01' + (d || ' days')::interval, d, 'x' FROM generate_series(0, 299) AS d;
+INSERT INTO collect.{name}
+    SELECT timestamp '2020-01-01' + (d || ' days')::interval + interval '1 hour', d,
+           (SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 200))
+    FROM generate_series(0, 19) AS d;
+SELECT compress_chunk(c) FROM show_chunks('collect.{name}', older_than => timestamp '2020-03-01') AS c;
+SELECT drop_chunks('collect.{name}', older_than => timestamp '2020-01-04', newer_than => timestamp '2020-01-01');", ct);
+        }
+
+        await ExecAsync(connection, @"
+CREATE TABLE collect.zz_sz_plain (id integer PRIMARY KEY, payload text);
+INSERT INTO collect.zz_sz_plain SELECT g, repeat('x', 200) FROM generate_series(1, 5000) AS g;", ct);
+
+        /* More relations than the read gives one connection each to, so it splits. */
+        await using (var count = new NpgsqlCommand(
+            "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name LIKE 'zz_sz_%'", connection))
+        {
+            Assert.True((long)(await count.ExecuteScalarAsync(ct))! > 800);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var reference = new System.Collections.Generic.Dictionary<string, (long Total, long Heap, long Index, long Toast, int Chunks)>(StringComparer.Ordinal);
+        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildSql(true), connection) { CommandTimeout = 300 })
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                reference[reader.GetString(0) + "." + reader.GetString(1)] =
+                    (reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt32(8));
+            }
+        }
+
+        var rows = await DarlingStoreTableHealthReader.GetAsync(dataSource, ct);
+        Assert.Equal(reference.Count, rows.Count);
+        foreach (var row in rows)
+        {
+            var expected = reference[row.SchemaName + "." + row.TableName];
+            Assert.Equal(expected, (row.TotalBytes, row.HeapBytes, row.IndexBytes, row.ToastBytes, row.ChunkCount));
+        }
+
+        var a = Assert.Single(rows, r => r.TableName == "zz_sz_a");
+        Assert.True(a.ToastBytes > 0);
+        Assert.True(a.ChunkCount > 250);
+
+        var indexReference = new System.Collections.Generic.Dictionary<string, (long Bytes, long Heap, int Count)>(StringComparer.Ordinal);
+        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildIndexSql(true), connection) { CommandTimeout = 300 })
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                indexReference[reader.GetString(0) + "." + reader.GetString(1) + "." + reader.GetString(3) + "." + reader.GetBoolean(4)] =
+                    (reader.GetInt64(7), reader.GetInt64(8), reader.GetInt32(5));
+            }
+        }
+
+        var indexes = await DarlingStoreTableHealthReader.GetIndexesAsync(dataSource, ct);
+        Assert.Equal(indexReference.Count, indexes.Count);
+        foreach (var index in indexes)
+        {
+            var expected = indexReference[index.SchemaName + "." + index.TableName + "." + index.IndexName + "." + index.OnCompressedData];
+            Assert.Equal(expected, (index.Bytes, index.HeapBytes, index.IndexCount));
+        }
+
+        Assert.Contains(indexes, i => i.TableName == "zz_sz_a" && i.IndexCount > 250 && i.Bytes > 0);
+    }
 }
