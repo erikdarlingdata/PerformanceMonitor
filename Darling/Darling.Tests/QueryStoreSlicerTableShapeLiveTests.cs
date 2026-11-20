@@ -53,7 +53,7 @@ public sealed class QueryStoreSlicerTableShapeLiveTests
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   COALESCE(interval_start_time_utc, collection_time) < $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))

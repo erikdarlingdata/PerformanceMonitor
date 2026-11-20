@@ -205,7 +205,7 @@ public sealed partial class ViewerDataService
            longest a row's collection trails its interval's start (QueryStoreIntervalWide.CollectionCeiling). They keep the
            (server_id, collection_time) index and the chunk pruning. */
         AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-        AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+        AND   COALESCE(interval_start_time_utc, collection_time) < $3
         AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
         AND   collection_time <= $3 + {{CollectionCeilingSql}}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -252,7 +252,7 @@ public sealed partial class ViewerDataService
                first_execution_time range below is what the btree serves; this is a residual filter, and no collection_time
                bound is added because none could drop a row here (an interval is collected after it starts). */
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) <= $3)
+            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) < $3)
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -1356,7 +1356,7 @@ public sealed partial class ViewerDataService
                window's own last interval -- whose closing fetch lands after the range ends -- was dropped
                entirely, which is the collection lag #1841 set out to remove showing up one layer down. */
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   COALESCE(interval_start_time_utc, collection_time) < $3
             /* Chunk-exclusion bounds, NOT filters: neither can exclude a row the predicate above keeps in
                any realistic store. They matter because query_store_stats is a hypertable partitioned on
                collection_time -- without bounds on that column TimescaleDB must open and decompress every
@@ -1446,7 +1446,7 @@ public sealed partial class ViewerDataService
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   COALESCE(interval_start_time_utc, collection_time) < $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))

@@ -431,7 +431,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("ROW_NUMBER() OVER", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc AS point_time", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("interval_start_time_utc <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_start_time_utc < $3", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc IS NOT NULL", sql, StringComparison.Ordinal);
 
         /* Arm 2: the legacy rows, split on the same column so the two arms partition with no overlap. */
