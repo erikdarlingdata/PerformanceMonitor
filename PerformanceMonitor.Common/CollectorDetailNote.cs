@@ -25,11 +25,18 @@ public static class CollectorDetailNote
     /// server are compacted, <paramref name="partialCount"/> need a look, and <paramref name="notCollectedCount"/> more rows below are
     /// collectors the server does not run, listed as not collected and counted in <c>collectors_total</c> but not here.
     /// </summary>
-    public static string Build(int compactCount, int shownCount, int partialCount, int notCollectedCount)
+    public static string Build(int compactCount, int shownCount, int partialCount, int notCollectedCount, int explainedZeroCount = 0)
     {
         var note =
             $"{compactCount} of {CountText.Plural(shownCount, "collector")} below {(compactCount == 1 ? "is" : "are")} HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and {(compactCount == 1 ? "is" : "are")} compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. "
             + $"{partialCount} {(partialCount == 1 ? "needs" : "need")} a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and {(partialCount == 1 ? "carries" : "carry")} a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present.";
+        /* #9086: a HEALTHY collector that stored nothing and says why is counted apart, so the "need a look" count agrees with the rows. It carries
+           the partial shape because its output_finding is the reason. Nothing is added when there is none, so the note reads as before. */
+        if (explainedZeroCount > 0)
+        {
+            note += $" {explainedZeroCount} {(explainedZeroCount == 1 ? "is" : "are")} HEALTHY and stored nothing ({(explainedZeroCount == 1 ? "the row says why in output_finding" : "each row says why in output_finding")}), so {(explainedZeroCount == 1 ? "it" : "they")} {(explainedZeroCount == 1 ? "is" : "are")} not counted as needing a look and {(explainedZeroCount == 1 ? "carries" : "carry")} the same partial_detail shape.";
+        }
+
         if (notCollectedCount > 0)
         {
             note += $" {CountText.Plural(notCollectedCount, "more row")} below {(notCollectedCount == 1 ? "is" : "are")} not collected on this server ({(notCollectedCount == 1 ? "the row says why" : "each row says why")}) and {(notCollectedCount == 1 ? "is" : "are")} counted in collectors_total but not above.";
