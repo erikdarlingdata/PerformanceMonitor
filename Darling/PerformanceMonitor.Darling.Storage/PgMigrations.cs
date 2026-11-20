@@ -3814,6 +3814,10 @@ END $$;";
         /* V288 (#9151): idx_collection_log_watermark gains INCLUDE (rows_collected), so the collector estimate over the log answers from the index.
            The index is replaced in place under its own name, built under a temporary name first. An older build ignores the change. */
         new Migration(288, "collection-log-watermark-covering-index", V288Sql),
+        /* V289 (#9173): the hourly Query Store clutter rollups a 24-hour read takes whole hours from, their built table, and the hour heartbeat column.
+           Three new plain tables created empty and a nullable column: no data moves, so the upgrade stays fast. The next ticks build the closed hours
+           inside raw's retention. An older build ignores them. */
+        new Migration(QueryStoreClutterHourly.Version, "query-store-clutter-hourly", QueryStoreClutterHourly.CreateSql),
     };
 
     /// <summary>
