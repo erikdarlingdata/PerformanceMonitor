@@ -576,8 +576,7 @@ public static class DarlingRetention
                     if (timescaleAvailable && !definition.StaysPlainTable)
                     {
                         var (outcome, dropped) = await DropChunksOneAsync(
-                            postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
-                            logger, cancellationToken);
+                            postgres, definition.TargetTable, retentionDays, logger, cancellationToken);
                         if (outcome == DropChunksOutcome.Dropped)
                         {
                             tablesPurged++;
@@ -964,8 +963,7 @@ public static class DarlingRetention
             if (timescaleAvailable)
             {
                 var (logOutcome, droppedLog) = await DropChunksOneAsync(
-                    postgres, "collection_log", DropChunksSqlFor("collection_log", CollectionLogRetentionDays),
-                    logger, cancellationToken);
+                    postgres, "collection_log", CollectionLogRetentionDays, logger, cancellationToken);
                 if (logOutcome == DropChunksOutcome.Dropped)
                 {
                     tablesPurged++;
@@ -2331,13 +2329,11 @@ WHERE NOT EXISTS
         => $"SELECT drop_chunks('{table}', older_than => make_interval(days => {retentionDays}))";
 
     /// <summary>
-    /// How long one <c>drop_chunks</c> waits for a lock before it gives way, in milliseconds (#9102). A read through a
-    /// hypertable holds AccessShare on its chunks, and <c>drop_chunks</c> takes AccessExclusive on each expired chunk in turn and
-    /// keeps the ones it has until it commits. A reader that holds one expired chunk and asks for another the drop already has
-    /// closes a lock cycle, and PostgreSQL cancels one of the two sessions once the first of them has waited
-    /// <c>deadlock_timeout</c> (one second by default). A wait that ends at half of that leaves before the detector runs: the
-    /// drop is undone, its locks are released and the reader goes on. A store whose <c>deadlock_timeout</c> is set below this
-    /// value can still pick the drop as the victim, which <see cref="ExecuteDropChunksWithDeadlockRetryAsync"/> retries.
+    /// How long one <c>drop_chunks</c> waits for a lock before it gives way, in milliseconds (#9102). The expired chunks' own
+    /// locks are taken without waiting (<see cref="DropChunksGivingWaySql"/>); this bounds the wait for any other lock the drop
+    /// needs while it holds them. It is half of PostgreSQL's default <c>deadlock_timeout</c> (one second), so a drop that is
+    /// the first to wait leaves before its deadlock check runs. A store whose <c>deadlock_timeout</c> is set below this value
+    /// can still pick the drop as the victim, which <see cref="ExecuteDropChunksWithDeadlockRetryAsync"/> retries.
     /// </summary>
     internal const int DropChunksLockTimeoutMilliseconds = 500;
 
@@ -2355,20 +2351,30 @@ WHERE NOT EXISTS
     private const string DropChunksAnswerSetting = "performance_monitor.drop_chunks";
 
     /// <summary>
-    /// <paramref name="dropChunksSql"/> (a <see cref="DropChunksSqlFor(string, int)"/> statement) under a
-    /// <see cref="DropChunksLockTimeoutMilliseconds"/> <c>lock_timeout</c>, as one command of two statements (#9102). The block
-    /// runs the drop and catches <c>lock_not_available</c>, which undoes the drop and releases every lock it took. The read
-    /// after it answers the number of chunks dropped (<c>drop_chunks</c> returns one row per chunk), or
-    /// <see cref="DropChunksGaveWay"/>. The timeout is caught in the block because giving way is not a failure, and an error
-    /// PL/pgSQL catches writes no ERROR to the store's own log. Every other error leaves the block as it would leave the bare
-    /// statement. Both settings are transaction-local, and the command is one implicit transaction.
+    /// One table's <c>drop_chunks</c> (<see cref="DropChunksSqlFor(string, int)"/>) as one command of two statements that gives
+    /// way to a lock holder instead of waiting behind it (#9102). A read through a hypertable holds AccessShare on its chunks,
+    /// and <c>drop_chunks</c> takes AccessExclusive on each expired chunk in turn and keeps the ones it has until it commits. A
+    /// drop that waits for one chunk while it holds another closes a lock cycle with a reader that holds the first and asks for
+    /// the second, and PostgreSQL cancels whichever of the two began waiting first. So the block takes AccessExclusive on every
+    /// expired chunk with <c>NOWAIT</c> before it drops any (<c>show_chunks</c> with the drop's own arguments names them): it
+    /// never waits for a chunk's lock, so it never waits for one while it holds another. Any other lock the drop needs is
+    /// waited for at most <see cref="DropChunksLockTimeoutMilliseconds"/>. Either refusal is <c>lock_not_available</c>, which the
+    /// block catches: that undoes the block and releases every lock it took. The read after it answers the number of chunks
+    /// dropped (<c>drop_chunks</c> returns one row per chunk), or <see cref="DropChunksGaveWay"/>. The refusal is caught in the
+    /// block because giving way is not a failure, and an error PL/pgSQL catches writes no ERROR to the store's own log. Every
+    /// other error leaves the block as it would leave the bare statement. Both settings are transaction-local, and the command
+    /// is one implicit transaction.
     /// </summary>
-    internal static string DropChunksGivingWaySql(string dropChunksSql) => $@"DO $do$
+    internal static string DropChunksGivingWaySql(string table, int retentionDays) => $@"DO $do$
 DECLARE
+    expired regclass;
     dropped integer;
 BEGIN
     PERFORM pg_catalog.set_config('lock_timeout', '{DropChunksLockTimeoutMilliseconds}ms', true);
-    SELECT count(*) INTO dropped FROM ({dropChunksSql}) AS chunk;
+    FOR expired IN SELECT show_chunks('{table}', older_than => make_interval(days => {retentionDays})) LOOP
+        EXECUTE pg_catalog.format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE NOWAIT', expired);
+    END LOOP;
+    SELECT count(*) INTO dropped FROM ({DropChunksSqlFor(table, retentionDays)}) AS chunk;
     PERFORM pg_catalog.set_config('{DropChunksAnswerSetting}', dropped::text, true);
 EXCEPTION WHEN lock_not_available THEN
     PERFORM pg_catalog.set_config('{DropChunksAnswerSetting}', '{DropChunksGaveWay}', true);
@@ -2382,7 +2388,7 @@ SELECT pg_catalog.current_setting('{DropChunksAnswerSetting}')::integer";
         /// <summary>The statement ran; the count is the chunks it dropped, zero when none had expired.</summary>
         Dropped,
 
-        /// <summary>Every try waited out its <c>lock_timeout</c> behind another session's lock (warned). Nothing was dropped.</summary>
+        /// <summary>Every try met a lock another session holds (warned). Nothing was dropped.</summary>
         GaveWay,
 
         /// <summary>The statement failed for any other reason (warned).</summary>
@@ -2431,8 +2437,8 @@ END
 $do$";
 
     /// <summary>
-    /// One table's drop_chunks, run through <see cref="DropChunksGivingWaySql"/> so it waits at most
-    /// <see cref="DropChunksLockTimeoutMilliseconds"/> for a lock (#9102). A try that gives way is tried again after
+    /// One table's drop_chunks, run through <see cref="DropChunksGivingWaySql"/> so it gives way to a lock holder instead of
+    /// waiting behind it (#9102). A try that gives way is tried again after
     /// <see cref="DropChunksLockRetryPause"/>, <see cref="DropChunksLockAttempts"/> tries in all; a reader's statement is over
     /// long before that. <see cref="DropChunksOutcome.Dropped"/> carries the number of chunks dropped.
     /// <see cref="DropChunksOutcome.GaveWay"/> means a session held its lock through every try: the caller leaves the table
@@ -2442,18 +2448,25 @@ $do$";
     private static async Task<(DropChunksOutcome Outcome, int ChunksDropped)> DropChunksOneAsync(
         NpgsqlDataSource postgres,
         string tableName,
-        string dropChunksSql,
+        int retentionDays,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
-        var givingWaySql = DropChunksGivingWaySql(dropChunksSql);
+        var givingWaySql = DropChunksGivingWaySql(tableName, retentionDays);
         for (var attempt = 1; ; attempt++)
         {
             var dropped = await ExecuteDropChunksWithDeadlockRetryAsync(async () =>
             {
                 await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
                 using var command = new NpgsqlCommand(givingWaySql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-                return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+                var answer = await command.ExecuteScalarAsync(cancellationToken);
+                if (answer is null or DBNull)
+                {
+                    /* No answer is not "dropped nothing": say it failed, so the caller does not count a drop that may not have run. */
+                    throw new InvalidOperationException("the drop_chunks command returned no answer.");
+                }
+
+                return Convert.ToInt32(answer, CultureInfo.InvariantCulture);
             }, tableName, logger);
 
             if (dropped is null)
@@ -2475,8 +2488,8 @@ $do$";
             }
 
             logger?.LogInformation(
-                "Retention purge (drop_chunks) for {Table} waited {Milliseconds} ms for a lock another session holds and gave way; try {Attempt} of {Attempts}, the next in {PauseMilliseconds} ms.",
-                tableName, DropChunksLockTimeoutMilliseconds, attempt, DropChunksLockAttempts, (int)DropChunksLockRetryPause.TotalMilliseconds);
+                "Retention purge (drop_chunks) for {Table} met a lock another session holds and gave way; try {Attempt} of {Attempts}, the next in {PauseMilliseconds} ms.",
+                tableName, attempt, DropChunksLockAttempts, (int)DropChunksLockRetryPause.TotalMilliseconds);
             await Task.Delay(DropChunksLockRetryPause, cancellationToken);
         }
     }
