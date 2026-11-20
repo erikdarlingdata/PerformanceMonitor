@@ -29,6 +29,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// with the five weighted sums the slicer adds up; the query stays in the key so the slicer's distinct query count is exact for any bin
 /// of whole hours. <c>collect.query_store_closed_day_built</c> says which (server, day) both tables hold.</para>
 ///
+/// <para><b>Clutter (#9148, <see cref="ClutterVersion"/>).</b> The same pass also builds two rollups of raw <c>collect.query_store_stats</c>
+/// for <c>get_query_store_clutter</c>'s plan-churn arm, placed by <c>collection_time</c> (<see cref="ClutterCreateSql"/>). They share
+/// the built row, its claim, its marks and the cleanup: a raw batch written into a closed day marks it
+/// (<see cref="TryMarkLateCollectionDayAsync"/>) as an interval row does, and a rebuild redoes all four tables.</para>
+///
 /// <para><b>Placement.</b> A row belongs to the day and hour of <c>COALESCE(interval_start_time_utc, collection_time)</c>, the
 /// expression the grid and the slicer place a row by, stored as naive UTC. A window is <c>[start, end)</c> on that expression, so a
 /// whole day inside the window is the same rows in the rollup and in the interval table.</para>
@@ -178,6 +183,50 @@ CREATE TABLE IF NOT EXISTS collect.query_store_closed_day_tick
     ticked_at timestamp NOT NULL
 );";
 
+    /// <summary>The migration that adds the Query Store clutter rollups (#9148) to the same closed-day pass.</summary>
+    public const int ClutterVersion = 285;
+
+    /// <summary>
+    /// #9148: the two closed-day rollups of raw <c>collect.query_store_stats</c> that <c>get_query_store_clutter</c>'s plan-churn arm reads
+    /// whole UTC days from. A row belongs to the day of its <c>collection_time</c>, the column the arm's window is on.
+    /// <c>query_store_clutter_plan_daily</c> holds one row per (server, day, database, query, plan) with the plan's first and last sighting
+    /// that day; <c>query_store_clutter_collections_daily</c> holds one row per (server, day, database) with the number of distinct
+    /// <c>collection_time</c> values. A collection belongs to exactly one day, so the daily counts add up to the window's count, and the
+    /// minimum of the daily first sightings and the maximum of the daily last sightings are the window's. <c>clutter_built_at</c> on the
+    /// built table says the day's clutter rows come from the build stamped <c>built_at</c>: a day built before this rung, or by a build
+    /// that does not know these tables, has a different value, so the reader leaves it to the raw table and the next tick builds it again.
+    /// Created empty, and idempotent.
+    /// </summary>
+    public const string ClutterCreateSql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_clutter_plan_daily
+(
+    server_id integer NOT NULL,
+    day_utc date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    first_seen timestamp NOT NULL,
+    last_seen timestamp NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_clutter_plan_daily
+ON collect.query_store_clutter_plan_daily (server_id, day_utc, database_name, query_id, plan_id)
+NULLS NOT DISTINCT;
+
+CREATE TABLE IF NOT EXISTS collect.query_store_clutter_collections_daily
+(
+    server_id integer NOT NULL,
+    day_utc date NOT NULL,
+    database_name text,
+    collections bigint NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_clutter_collections_daily
+ON collect.query_store_clutter_collections_daily (server_id, day_utc, database_name)
+NULLS NOT DISTINCT;
+
+ALTER TABLE collect.query_store_closed_day_built ADD COLUMN IF NOT EXISTS clutter_built_at timestamp;";
+
     /// <summary>A day is closed once its end plus this has passed: the longest interval a row can span plus the collector's longest
     /// catch-up, so no interval that starts in the day is still being written.</summary>
     public static readonly TimeSpan CloseAfter = QueryStoreTopDaily.FinalBuildAfter;
@@ -273,6 +322,51 @@ SELECT
 FROM collect.query_store_interval_wide AS w{DayRowsWhereSql}
 GROUP BY w.server_id, date_trunc('hour', COALESCE(w.interval_start_time_utc, w.collection_time)), w.database_name, w.query_id;";
 
+    /// <summary>#9148: clears one (server, day) of the clutter plan table. $1 server_id, $2 day.</summary>
+    public const string DeleteClutterPlanDaySql = @"
+DELETE FROM collect.query_store_clutter_plan_daily
+WHERE server_id = $1
+  AND day_utc = $2;";
+
+    /// <summary>#9148: clears one (server, day) of the clutter collections table. $1 server_id, $2 day.</summary>
+    public const string DeleteClutterCollectionsDaySql = @"
+DELETE FROM collect.query_store_clutter_collections_daily
+WHERE server_id = $1
+  AND day_utc = $2;";
+
+    /// <summary>#9148: fills one (server, day) of the clutter plan table from raw <c>query_store_stats</c>: each plan's first and last
+    /// <c>collection_time</c> in the day. The predicate is the clutter read's own columns, so the day is an index-only range. $1 server_id, $2 day.</summary>
+    public const string BuildClutterPlanDaySql = @"
+INSERT INTO collect.query_store_clutter_plan_daily (server_id, day_utc, database_name, query_id, plan_id, first_seen, last_seen)
+SELECT s.server_id, $2, s.database_name, s.query_id, s.plan_id, MIN(s.collection_time), MAX(s.collection_time)
+FROM collect.query_store_stats AS s
+WHERE s.server_id = $1
+  AND s.collection_time >= $2::timestamp
+  AND s.collection_time < $2::timestamp + interval '1 day'
+GROUP BY s.server_id, s.database_name, s.query_id, s.plan_id;";
+
+    /// <summary>#9148: fills one (server, day) of the clutter collections table: the distinct <c>collection_time</c> values per database
+    /// in the day. $1 server_id, $2 day.</summary>
+    public const string BuildClutterCollectionsDaySql = @"
+INSERT INTO collect.query_store_clutter_collections_daily (server_id, day_utc, database_name, collections)
+SELECT c.server_id, $2, c.database_name, COUNT(*)
+FROM
+(
+    SELECT DISTINCT s.server_id, s.database_name, s.collection_time
+    FROM collect.query_store_stats AS s
+    WHERE s.server_id = $1
+      AND s.collection_time >= $2::timestamp
+      AND s.collection_time < $2::timestamp + interval '1 day'
+) AS c
+GROUP BY c.server_id, c.database_name;";
+
+    /// <summary>#9148: says the day's clutter rows come from this build. $1 server_id, $2 day.</summary>
+    public const string RecordClutterBuiltSql = @"
+UPDATE collect.query_store_closed_day_built
+SET clutter_built_at = built_at
+WHERE server_id = $1
+  AND day_utc = $2;";
+
     /// <summary>Records how many interval rows the build read. $1 server_id, $2 day, $3 source_rows.</summary>
     public const string RecordSourceRowsSql = @"
 UPDATE collect.query_store_closed_day_built
@@ -324,12 +418,61 @@ WHERE NOT b.rebuild_needed
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>The savepoint <see cref="TryMarkLateCollectionDayAsync"/> runs behind.</summary>
+    public const string LateCollectionDaySavepointName = "clutter_late_day";
+
+    /// <summary>
+    /// #9148: marks the day of a raw <c>query_store_stats</c> batch's <c>collection_time</c> for a rebuild when that day may already be
+    /// built, in the batch's own transaction, so the clutter rollups do not serve a day without the rows the batch wrote into it. A live
+    /// batch is stamped now, so it is never late and sends nothing; a backfill or an import of an older collection marks its day. It runs
+    /// behind its own savepoint and never throws for a fault (the batch's rows must commit either way): a failed mark is logged, and the
+    /// day keeps its rollup until it is next built. A store below <see cref="ClutterVersion"/> has no rollup to mark. Returns whether it
+    /// marked.
+    /// </summary>
+    public static async Task<bool> TryMarkLateCollectionDayAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime collectionTime, DateTime nowUtc, int commandTimeoutSeconds,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        var lateDays = LateDays([DateOnly.FromDateTime(collectionTime)], nowUtc);
+        if (lateDays.Length == 0)
+        {
+            return false;
+        }
+
+        await transaction.SaveAsync(LateCollectionDaySavepointName, cancellationToken);
+        try
+        {
+            await using (var probe = new NpgsqlCommand(
+                "SELECT to_regclass('collect.query_store_clutter_plan_daily') IS NOT NULL", connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+            {
+                if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    await transaction.ReleaseAsync(LateCollectionDaySavepointName, cancellationToken);
+                    return false;
+                }
+            }
+
+            await MarkLateDaysAsync(connection, transaction, serverId, lateDays, nowUtc, commandTimeoutSeconds, cancellationToken);
+            await transaction.ReleaseAsync(LateCollectionDaySavepointName, cancellationToken);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await transaction.RollbackAsync(LateCollectionDaySavepointName, cancellationToken);
+            logger?.LogWarning(ex, "Query Store closed-day rollups: marking server {ServerId} day {Day:yyyy-MM-dd} for a rebuild failed; its clutter rollup stays as built until the day is next built: {Message}",
+                serverId, lateDays[0], ex.Message);
+            return false;
+        }
+    }
+
     /// <summary>
     /// The builds due now, newest day first, so the short windows are served within the first ticks after an upgrade and the older
     /// days follow. $1 now, $2 retention days, $3 <see cref="CloseAfter"/>, $4 the cap, $5 <see cref="GcMarginDays"/>. Servers are the
     /// enabled ones with an interval-table coverage claim, and a server's days start the day after its <c>filled_since</c>. Days run
     /// from the first day the cleanup keeps through the newest closed day, above the server's newest removed day. A day is due when
-    /// it has no built row or its row is marked.
+    /// it has no built row or its row is marked, or (#9148) its clutter rows do not come from its newest build.
     /// </summary>
     public const string PlanSql = @"
 SELECT s.server_id, d.day
@@ -349,7 +492,7 @@ LEFT JOIN collect.query_store_closed_day_built AS b
   ON b.server_id = s.server_id AND b.day_utc = d.day
 WHERE d.day >= s.filled_since::date + 1
   AND d.day > COALESCE((SELECT max(t.day_utc) FROM collect.query_store_closed_day_built AS t WHERE t.server_id = s.server_id AND t.removed), '-infinity'::date)
-  AND (b.server_id IS NULL OR b.rebuild_needed)
+  AND (b.server_id IS NULL OR b.rebuild_needed OR b.clutter_built_at IS DISTINCT FROM b.built_at)
 ORDER BY d.day DESC, s.server_id
 LIMIT $4;";
 
@@ -456,6 +599,23 @@ WHERE b.server_id = $1
       >= (now() AT TIME ZONE 'UTC') - $4
 ORDER BY b.day_utc;";
 
+    /// <summary>
+    /// #9148: <see cref="ServedDaysSql"/> for the clutter rollups: the same days, less any whose clutter rows do not come from the day's
+    /// newest build (a day built before <see cref="ClutterVersion"/>, or rebuilt by a build that does not fill the clutter tables).
+    /// </summary>
+    public const string ServedClutterDaysSql = @"
+SELECT b.day_utc
+FROM collect.query_store_closed_day_built AS b
+WHERE b.server_id = $1
+  AND b.day_utc >= $2
+  AND b.day_utc < $3
+  AND NOT b.rebuild_needed
+  AND NOT b.removed
+  AND b.clutter_built_at = b.built_at
+  AND (SELECT max(n.built_at) FROM collect.query_store_closed_day_built AS n WHERE n.server_id = $1 AND NOT n.removed)
+      >= (now() AT TIME ZONE 'UTC') - $4
+ORDER BY b.day_utc;";
+
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateOnly Day);
 
@@ -473,8 +633,20 @@ ORDER BY b.day_utc;";
     /// and any day that is not built) from the interval table. Run it on the read's own connection and transaction, on a store at
     /// <see cref="Version"/> or above.
     /// </summary>
-    public static async Task<ServedDays?> ResolveServedDaysAsync(
-        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    public static Task<ServedDays?> ResolveServedDaysAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        ResolveAsync(ServedDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+
+    /// <summary>
+    /// #9148: <see cref="ResolveServedDaysAsync"/> for the clutter rollups (<see cref="ServedClutterDaysSql"/>), on a store at
+    /// <see cref="ClutterVersion"/> or above. The run is of whole days inside <c>[readStart, end)</c>.
+    /// </summary>
+    public static Task<ServedDays?> ResolveServedClutterDaysAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        ResolveAsync(ServedClutterDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+
+    private static async Task<ServedDays?> ResolveAsync(
+        string servedSql, NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -491,7 +663,7 @@ ORDER BY b.day_utc;";
         }
 
         var days = new List<DateOnly>();
-        await using (var command = new NpgsqlCommand(ServedDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        await using (var command = new NpgsqlCommand(servedSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = first });
@@ -665,7 +837,7 @@ ORDER BY b.day_utc;";
     private static async Task DeleteDayAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateOnly day, CancellationToken cancellationToken)
     {
-        foreach (var sql in new[] { DeleteGridDaySql, DeleteSlicerDaySql })
+        foreach (var sql in new[] { DeleteGridDaySql, DeleteSlicerDaySql, DeleteClutterPlanDaySql, DeleteClutterCollectionsDaySql })
         {
             await using var delete = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -717,6 +889,16 @@ ORDER BY b.day_utc;";
             slicer.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
             slicer.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
             await slicer.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* #9148: the clutter rollups of raw query_store_stats, in the same transaction and under the same claim, so a late raw row marks
+           and rebuilds the day the way a late interval row does. */
+        foreach (var sql in new[] { BuildClutterPlanDaySql, BuildClutterCollectionsDaySql, RecordClutterBuiltSql })
+        {
+            await using var clutter = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            clutter.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            clutter.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            await clutter.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using (var record = new NpgsqlCommand(RecordSourceRowsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
