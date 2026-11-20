@@ -42,7 +42,15 @@ public sealed class QueryHeatmapRollupLiveTests
 
     private static Timeline NewTimeline()
     {
+        /* The reply tests send the window's end as as_of, and the product refuses an as_of after its own clock. A pinned test clock ahead of the
+           real clock (the 23:30 and 00:30 passes) would put that end in the future, so the timeline stands on the earlier of the two clocks. */
         var now = LiveClock.Now();
+        var real = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        if (real < now)
+        {
+            now = real;
+        }
+
         return new Timeline(new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-3));
     }
 
