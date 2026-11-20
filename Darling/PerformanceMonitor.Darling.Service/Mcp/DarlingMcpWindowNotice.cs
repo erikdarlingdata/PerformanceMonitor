@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -68,10 +69,13 @@ internal static class DarlingMcpWindowNotice
     /// <paramref name="tail"/> is one more sentence a truncated note carries. <paramref name="tailFor"/> (#6750) is the same
     /// sentence chosen by where the data starts: it is given the effective start, and its answer replaces
     /// <paramref name="tail"/>, so a tool whose closing sentence depends on that instant can choose it. Not read for a store subject.
+    /// <paramref name="retentionRemoved"/> (#9104) is the boundary of a window the store's retention removed: on an empty answer with no
+    /// floor, its sentence ("Retention removed it, and collection did not break.") closes the note in place of the pointer at collection
+    /// health, so the note says what the answer's message says. Read only for that note.
     /// </summary>
     internal static McpWindowNotice Build(
         DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false,
-        bool storeSubject = false, Func<DateTime, string?>? tailFor = null)
+        bool storeSubject = false, Func<DateTime, string?>? tailFor = null, RetentionBoundary? retentionRemoved = null)
     {
         if (storeSubject)
         {
@@ -94,7 +98,9 @@ internal static class DarlingMcpWindowNotice
                 null,
                 true,
                 $"The store holds no collection of {table} for this server in this window, so nothing was read, and this empty answer is not a report that nothing happened. "
-                    + "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.");
+                    + (retentionRemoved is null
+                        ? "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which."
+                        : retentionRemoved.Describe()));
         }
 
         var truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
@@ -148,13 +154,14 @@ internal static class DarlingMcpWindowNotice
     /// </summary>
     internal static async Task<McpWindowNotice> ReadAsync(
         Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false,
-        bool listOnly = false, Func<DateTime, string?>? tailFor = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+        bool listOnly = false, Func<DateTime, string?>? tailFor = null, RetentionBoundary? retentionRemoved = null, ILogger? logger = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(probe);
         try
         {
             var floor = emptyAnswer || listOnly || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
-            return Build(floor, requestedStart, table, tail, emptyAnswer, listOnly, tailFor: tailFor);
+            return Build(floor, requestedStart, table, tail, emptyAnswer, listOnly, tailFor: tailFor, retentionRemoved: retentionRemoved);
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {

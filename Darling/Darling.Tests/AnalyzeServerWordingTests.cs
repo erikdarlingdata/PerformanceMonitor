@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -157,6 +158,34 @@ public sealed class AnalyzeServerWordingTests
     }
 
     /// <summary>A Darling-shaped boundary: the horizon plus the slack above it, one chunk and one purge interval below it.</summary>
+    /// <summary>
+    /// #9104: the window notice an empty answer carries (<c>hints.truncation_note</c>) closes with the retention sentence when the window
+    /// is one retention removed, the same sentence the answer's message carries, and not with the pointer at collection health. With no
+    /// boundary, and with a floor the probe found, it reads as it did.
+    /// </summary>
+    [Fact]
+    public void TheEmptyWindowNotice_ForAWindowRetentionRemoved_SaysWhatTheMessageSays_AndOtherwiseKeepsItsText()
+    {
+        var horizon = End.AddDays(30);
+        var retention = Boundary(horizon.AddHours(-3), horizon);
+        var start = End.AddHours(-4);
+
+        var removed = DarlingMcpWindowNotice.Build(null, start, "wait_stats", emptyAnswer: true, retentionRemoved: retention);
+        Assert.True(removed.WindowTruncated);
+        Assert.Null(removed.EffectiveStart);
+        Assert.StartsWith("The store holds no collection of wait_stats for this server in this window, so nothing was read", removed.TruncationNote, StringComparison.Ordinal);
+        Assert.EndsWith(retention.Describe(), removed.TruncationNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("may have stopped", removed.TruncationNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("get_collection_health", removed.TruncationNote, StringComparison.Ordinal);
+
+        var collection = DarlingMcpWindowNotice.Build(null, start, "wait_stats", emptyAnswer: true);
+        Assert.EndsWith("or collection may have stopped; get_collection_health shows which.", collection.TruncationNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("Retention removed it", collection.TruncationNote, StringComparison.Ordinal);
+
+        var floored = DarlingMcpWindowNotice.Build(End.AddHours(-1), start, "wait_stats", emptyAnswer: true, retentionRemoved: retention);
+        Assert.DoesNotContain("Retention removed it", floored.TruncationNote, StringComparison.Ordinal);
+    }
+
     private static RetentionBoundary Boundary(DateTime oldest, DateTime horizon) => new(
         oldest, horizon, horizon + RetentionBoundary.HorizonSlack, horizon.AddDays(-(TimescaleSupport.ChunkIntervalDays + 1)), "wait_stats", "30 days of retention for wait_stats");
 
