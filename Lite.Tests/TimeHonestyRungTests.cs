@@ -234,8 +234,8 @@ public sealed class TimeHonestyRungTests
 
         /* The rows selected do not depend on the frame: the same per-arm predicate, and the raw rows only gain the twin. */
         const string predicate =
-            "WHERE server_id = $1 AND ( (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3) " +
-            "OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5) )";
+            "WHERE server_id = $1 AND ( (sample_time_utc IS NOT NULL AND sample_time_utc > $2 AND sample_time_utc <= $3) " +
+            "OR (sample_time_utc IS NULL AND sample_time > $4 AND sample_time <= $5) )";
         Assert.Contains(predicate, serverLocal, StringComparison.Ordinal);
         Assert.Contains(predicate, utc, StringComparison.Ordinal);
         Assert.Contains("SELECT sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization FROM v_cpu_utilization_stats", utc, StringComparison.Ordinal);
@@ -568,14 +568,15 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
     /// #4766: a custom range across a daylight saving change, on rows that carry no <c>sample_time_utc</c>. The
     /// server is on US Eastern time (EST until 02:00 on 8 March 2026, EDT after), the picker is in Server display,
     /// and the range is 12:00 on the 7th to 12:00 on the 9th in the server's own frame. Those rows are compared
-    /// on their local stamp against those local bounds, so the read returns them from exactly 12:00 to exactly
-    /// 12:00, every 15 minutes: 47 hours of real time, 189 rows. One offset for the whole window (the one in force
-    /// at its end) read every row before the change an hour late and dropped everything before 13:00 on the 7th.
+    /// on their local stamp against those local bounds, so the read returns them from after 12:00 through exactly
+    /// 12:00, every 15 minutes: 47 hours of real time, 188 rows, the first at 12:15 because the range is open at its
+    /// start. One offset for the whole window (the one in force at its end) read every row before the change an hour
+    /// late and dropped everything before 13:00 on the 7th.
     /// A decoy that HAS a UTC stamp outside the range stays out although its local stamp is inside it, because a
     /// row with a UTC stamp is judged on that stamp alone.
     /// </summary>
     [Fact]
-    public async Task TheCpuWindow_CustomRangeAcrossASpringForward_KeepsPreRungRowsFromTheFirstInstantToTheLast()
+    public async Task TheCpuWindow_CustomRangeAcrossASpringForward_KeepsPreRungRowsAfterTheFirstInstantThroughTheLast()
     {
         var clock = ServerClock.Resolve(EasternZone, -300);
 
@@ -590,8 +591,8 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var rows = await _dataService.GetCpuUtilizationAsync(
             _serverId, fromDate: clock.ToUtc(from), toDate: clock.ToUtc(to), serverClock: clock);
 
-        Assert.Equal(47 * 4 + 1, rows.Count);
-        Assert.Equal(from, rows[0].SampleTime);
+        Assert.Equal(47 * 4, rows.Count);
+        Assert.Equal(from.AddMinutes(15), rows[0].SampleTime);
         Assert.Equal(to, rows[^1].SampleTime);
         Assert.DoesNotContain(rows, r => r.SqlServerCpu == 99);
     }
@@ -600,9 +601,9 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
     /// #4766: the bucketed CPU read the MCP tool uses windows the same rows the same way. The window is the six
     /// hours back from 05:00 EDT on 8 March 2026 (09:00 UTC), so it opens at 22:00 EST on the 7th and crosses the
     /// spring-forward at 02:00. The rows carry no <c>sample_time_utc</c>; every 15 minutes in that window is a
-    /// row, 25 in all, and the hour the change skipped has none. Read at 15-minute buckets each row is its own
-    /// bucket, so the first bucket is 22:00 on the 7th and the last 05:00 on the 8th, where one offset for the
-    /// whole window dropped the four rows before 23:00.
+    /// row, 24 in all with the window open at its start, and the hour the change skipped has none. Read at 15-minute
+    /// buckets each row is its own bucket, so the first bucket is 22:15 on the 7th and the last 05:00 on the 8th,
+    /// where one offset for the whole window dropped the rows before 23:00.
     /// </summary>
     [Fact]
     public async Task TheCpuBuckets_WindowAcrossASpringForward_KeepPreRungRowsOnBothSidesOfTheChange()
@@ -614,9 +615,9 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
 
         var points = await _dataService.GetCpuBucketsAsync(_serverId, hoursBack: 6, asOfUtc: new DateTime(2026, 3, 8, 9, 0, 0), clock, bucketMinutes: 15);
 
-        Assert.Equal(6 * 4 + 1, points.Count);
+        Assert.Equal(6 * 4, points.Count);
         Assert.All(points, p => Assert.Equal(1, p.Samples));
-        Assert.Equal(new DateTime(2026, 3, 7, 22, 0, 0), points[0].BucketStart);
+        Assert.Equal(new DateTime(2026, 3, 7, 22, 15, 0), points[0].BucketStart);
         Assert.Equal(new DateTime(2026, 3, 8, 5, 0, 0), points[^1].BucketStart);
 
         /* The last bucket before the change is 01:45 EST and the next is 03:00 EDT: the skipped hour has no rows. */

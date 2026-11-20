@@ -104,7 +104,7 @@ internal static class DarlingAlertReader
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log a
 LEFT JOIN servers s ON s.server_id = a.server_id
-WHERE a.alert_time >= $1
+WHERE a.alert_time > $1
 AND   a.alert_time <= $2
 AND   a.server_id = $3
 AND   (a.dismissed = FALSE OR $5)
@@ -120,7 +120,7 @@ LIMIT $4";
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log a
 LEFT JOIN servers s ON s.server_id = a.server_id
-WHERE a.alert_time >= $1
+WHERE a.alert_time > $1
 AND   a.alert_time <= $2
 AND   (a.dismissed = FALSE OR $4)
 AND   ($5::text IS NULL OR lower(a.metric_name) = lower($5))
@@ -136,7 +136,7 @@ LIMIT $3";
     public const string DismissedAlertCountSql = @"
 SELECT COUNT(*)
 FROM config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time > $1
 AND   alert_time <= $2
 AND   server_id = $3
 AND   dismissed = TRUE
@@ -148,7 +148,7 @@ AND   TRUE /* family */";
     public const string DismissedAlertCountAllServersSql = @"
 SELECT COUNT(*)
 FROM config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time > $1
 AND   alert_time <= $2
 AND   dismissed = TRUE
 AND   ($3::text IS NULL OR lower(metric_name) = lower($3))
@@ -171,7 +171,7 @@ SELECT a.server_id,
        COUNT(*) AS alert_count,
        MAX(a.alert_time) AS latest_alert_time
 FROM config_alert_log a
-WHERE a.alert_time >= $1
+WHERE a.alert_time > $1
 AND   a.alert_time <= $2
 AND   a.muted = FALSE
 AND   a.dismissed = FALSE
@@ -279,7 +279,7 @@ GROUP BY a.server_id, a.metric_name, 3";
 SELECT a.server_id, a.metric_name, a.alert_time
 FROM unnest($1::int[], $2::text[]) AS p(server_id, metric_name)
 JOIN config_alert_log AS a ON a.server_id = p.server_id AND a.metric_name = p.metric_name
-WHERE a.alert_time >= $3
+WHERE a.alert_time > $3
 AND   a.alert_time <= $4";
 
     /// <summary>#6261: the streak of each row of <paramref name="page"/>, aligned with it, in one read for the whole page. Null on

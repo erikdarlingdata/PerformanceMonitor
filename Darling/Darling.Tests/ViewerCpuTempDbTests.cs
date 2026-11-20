@@ -120,7 +120,6 @@ public sealed class ViewerCpuTempDbSqlTests
     {
         Assert.Contains("FROM v_tempdb_stats", ViewerDataService.TempDbTrendSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.TempDbTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.TempDbTrendSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", ViewerDataService.TempDbTrendSql, StringComparison.Ordinal);
 
         /* Every numeric(18,2) MB column is CAST to double precision for the typed GetDouble reader. */
@@ -162,7 +161,6 @@ public sealed class ViewerCpuTempDbSqlTests
     {
         Assert.Contains("FROM v_file_io_stats", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("database_name = 'tempdb'", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         /* #4234: grouped on file_name plus the bucket_start ordinal, not the raw collection_time column

@@ -92,7 +92,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             (SELECT x.query_sql_text FROM query_store_text AS x WHERE x.server_id = $1 AND x.database_name = $2 AND x.query_id = $3),
             (SELECT s.query_text FROM query_store_stats AS s
               WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3
-              AND s.collection_time >= $4 AND s.collection_time <= $5 AND s.query_text IS NOT NULL
+              AND s.collection_time > $4 AND s.collection_time <= $5 AND s.query_text IS NOT NULL
               ORDER BY s.collection_time DESC, s.collection_id DESC LIMIT 1))
         """;
 
@@ -117,7 +117,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
     internal const string JobNamesSql = """
         SELECT DISTINCT job_name, step_name
         FROM job_history
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
         AND (job_name ~* '\mforc(e|es|ed|ing)\M' OR step_name ~* '\mforc(e|es|ed|ing)\M')
         ORDER BY job_name, step_name
         LIMIT 20

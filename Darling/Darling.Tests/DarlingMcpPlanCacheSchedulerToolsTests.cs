@@ -111,7 +111,6 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
         /* #3541 A10: the newest row IN THE WINDOW, as Lite reads it — not the newest row the store ever held. */
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 

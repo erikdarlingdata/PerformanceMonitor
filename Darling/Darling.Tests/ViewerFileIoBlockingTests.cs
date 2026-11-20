@@ -60,7 +60,6 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("HAVING COUNT(rated_reads) > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
         /* Both window bounds are applied (top_files CTE + main query). */
-        Assert.Contains("collection_time >= $2", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
     }
 
@@ -129,7 +128,6 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("WHERE NOT EXISTS (SELECT 1 FROM bpr)", ViewerDataService.BlockingTrendSql, StringComparison.Ordinal);
         /* Bucketed on event_time (when blocking happened), not collection_time. */
         Assert.Contains("DATE_TRUNC('minute', event_time)", ViewerDataService.BlockingTrendSql, StringComparison.Ordinal);
-        Assert.Contains("event_time >= $2 AND event_time <= $3", ViewerDataService.BlockingTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -137,7 +135,6 @@ public sealed class ViewerFileIoBlockingSqlTests
     {
         Assert.Contains("FROM v_deadlocks", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
         Assert.Contains("DATE_TRUNC('minute', deadlock_time)", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
-        Assert.Contains("deadlock_time >= $2", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time <= $3", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $4", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
     }

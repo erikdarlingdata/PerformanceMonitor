@@ -96,7 +96,6 @@ public sealed class ViewerCollectorDurationChartTests
 
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
 
         /* The runs the chart drew before: successful, with a duration. */

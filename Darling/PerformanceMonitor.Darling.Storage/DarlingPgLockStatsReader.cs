@@ -80,14 +80,14 @@ public static class DarlingPgLockStatsReader
             WHERE l.server_id = $1
             AND   l.collector_name = 'pg_lock_stats'
             AND   l.status = 'SUCCESS'
-            AND   l.collection_time >= $2
+            AND   l.collection_time > $2
             AND   l.collection_time <= $3
         ),
         seen AS (
             SELECT count(DISTINCT collection_time) AS total
             FROM pg_lock_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         captures AS (
@@ -110,7 +110,7 @@ public static class DarlingPgLockStatsReader
         FROM pg_lock_stats AS s
         CROSS JOIN captures AS c
         WHERE s.server_id = $1
-        AND   s.collection_time >= $2
+        AND   s.collection_time > $2
         AND   s.collection_time <= $3
         GROUP BY s.database_name, s.lock_type, s.mode, s.granted,
                  s.relation_oid, s.relation_name, c.total

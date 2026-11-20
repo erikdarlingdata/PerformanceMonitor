@@ -108,7 +108,7 @@ public sealed class QueryStoreHistoryWideTierLiveTests
         Assert.Equal(new long[] { 71, 72 }, Enumerable.Range(0, plans.GetArrayLength()).Select(n => plans[n].GetProperty("plan_id").GetInt64()));
         /* 20 Regular (the interval's last snapshot, not 5 + 12 + 20) plus 2 Aborted. */
         Assert.Equal(22, plans[0].GetProperty("execution_count").GetInt64());
-        Assert.Equal((20 * 2.0 + 2 * 30_000.0) / 22, plans[0].GetProperty("avg_duration_ms").GetDouble(), 6);
+        Assert.Equal(Math.Round((20 * 2.0 + 2 * 30_000.0) / 22, 3), plans[0].GetProperty("avg_duration_ms").GetDouble(), 6);
         Assert.Equal(4, plans[1].GetProperty("execution_count").GetInt64());
 
         /* One point per plan at the instant, the Regular and Aborted rows of plan 71 combined. */

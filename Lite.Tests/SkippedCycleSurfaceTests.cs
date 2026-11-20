@@ -93,12 +93,13 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
-    public async Task TheWindow_IsTwentyFourHours_InclusiveAtBothEnds()
+    public async Task TheWindow_IsTwentyFourHours_OpenAtItsStartAndClosedAtItsEnd()
     {
         var service = new LocalDataService(_duckDb);
 
         await SeedCycleAsync(ServerA, AsOf.AddHours(-24).AddSeconds(-1), slots: 100, step: "wait", stepMs: 1, totalMs: 1, message: "just outside");
-        await SeedCycleAsync(ServerA, AsOf.AddHours(-24), slots: 1, step: "wait", stepMs: 1, totalMs: 1, message: "on the lower edge");
+        await SeedCycleAsync(ServerA, AsOf.AddHours(-24), slots: 10, step: "wait", stepMs: 1, totalMs: 1, message: "on the lower edge");
+        await SeedCycleAsync(ServerA, AsOf.AddHours(-24).AddSeconds(1), slots: 1, step: "wait", stepMs: 1, totalMs: 1, message: "just inside");
         await SeedCycleAsync(ServerA, AsOf, slots: 2, step: "wait", stepMs: 1, totalMs: 1, message: "on the upper edge");
         await SeedCycleAsync(ServerA, AsOf.AddSeconds(1), slots: 1000, step: "wait", stepMs: 1, totalMs: 1, message: "after the as-of");
 

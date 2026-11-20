@@ -86,7 +86,7 @@ ORDER BY lower(counter_name), counter_name, instance_name";
 SELECT DISTINCT counter_name, lower(counter_name) AS name_key
 FROM v_perfmon_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 ORDER BY lower(counter_name), counter_name";
 
@@ -172,7 +172,7 @@ FROM (
     FROM v_perfmon_stats
     WHERE server_id = $1
     AND   counter_name = $2
-    AND   collection_time >= $3
+    AND   collection_time > $3
     AND   collection_time <= $4
     GROUP BY collection_time, object_name
 ) AS objects
@@ -300,7 +300,7 @@ FROM (
                     lead(cntr_value) OVER w AS next_value
                 FROM v_perfmon_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   counter_name IN ({nameParams})
                 WINDOW w AS (PARTITION BY object_name, counter_name, instance_name ORDER BY collection_time)

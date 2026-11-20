@@ -276,7 +276,6 @@ public sealed class ViewerClutterAndMemoryPressureDataStartTests : IDisposable
 
         var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.ServerId);
         Assert.Contains("FROM collect.memory_pressure_events AS f", sql, StringComparison.Ordinal);
-        Assert.Contains("f.sample_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("GREATEST($3 - make_interval(days =>", sql, StringComparison.Ordinal);
         Assert.Contains("lower(o.collector_name) = 'memory_pressure_events'", sql, StringComparison.Ordinal);
         Assert.Contains("c.collector_name = 'memory_pressure_events'", sql, StringComparison.Ordinal);

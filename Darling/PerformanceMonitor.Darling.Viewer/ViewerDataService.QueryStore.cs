@@ -584,7 +584,7 @@ public sealed partial class ViewerDataService
                                   can be collected after $3; a bare $3 left its inline-only text blank. The floor stays $2: a fact row's
                                   collection is never before its interval's start, and text only older than the window shows none. The Darling MCP copy of this tail (DarlingDataReader) keeps the bare window with its own
                                   collection_time window (#7814 is the twin). */
-                               AND   s.collection_time >= $2
+                               AND   s.collection_time > $2
                                AND   ($3::timestamp IS NULL OR s.collection_time <= $3 + {{CollectionCeilingSql}})
                                AND   s.query_text IS NOT NULL
                                ORDER BY s.collection_time DESC, s.collection_id DESC
@@ -1257,7 +1257,7 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2 AND collection_time <= $3
+            AND   collection_time > $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
             /*SELFKEY:stats*/
         ),
@@ -1280,7 +1280,7 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $4 AND collection_time <= $5
+            AND   collection_time > $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
             /*SELFKEY:stats*/
         ),

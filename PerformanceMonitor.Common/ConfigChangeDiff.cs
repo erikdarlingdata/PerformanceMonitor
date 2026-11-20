@@ -29,9 +29,9 @@ namespace PerformanceMonitor.Common;
 /// WINDOWING — every diff takes BOTH window edges (<paramref name="startUtc"/>, <paramref name="endUtc"/>) and
 /// applies them to the computed <c>change_time</c>, NOT to the snapshot read. Callers deliberately keep the
 /// snapshot immediately BEFORE the window as the diff baseline (the reads upper-bound at the window end but
-/// never lower-bound), so a change landing on the first in-window snapshot is still detected — mirroring the
-/// Dashboard, whose <c>report.*_changes</c> views LAG over the full history and then filter
-/// <c>change_time &gt;= @from AND change_time &lt;= @to</c>. The headless MCP tools, which read the full
+/// never lower-bound), so a change landing on the first in-window snapshot is still detected. A change belongs to
+/// the window when its <c>change_time</c> is after the start and at or before the end, so two windows that meet
+/// at an instant report a change at that instant once, in the earlier one. The headless MCP tools, which read the full
 /// unbounded history and only lower-bound, pass <see cref="DateTime.MaxValue"/> as the upper edge (a no-op)
 /// so this both-edges algorithm reproduces their prior lower-bound-only behavior exactly.
 /// </para>
@@ -154,7 +154,7 @@ public static class ConfigChangeDiff
     /// <summary>
     /// Diffs the sys.configurations snapshots into a change per (configuration_name) whose configured or in-use
     /// value moved between two consecutive captures (every config row is present in every snapshot, so a
-    /// per-name walk is the whole story). Emits changes whose newer capture falls in [<paramref name="startUtc"/>,
+    /// per-name walk is the whole story). Emits changes whose newer capture falls in (<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], newest first.
     /// </summary>
     public static List<ServerConfigChange> DiffServerConfigChanges(
@@ -168,7 +168,7 @@ public static class ConfigChangeDiff
             {
                 if (prev is not null
                     && (prev.ValueConfigured != cur.ValueConfigured || prev.ValueInUse != cur.ValueInUse)
-                    && cur.CaptureTime >= startUtc && cur.CaptureTime <= endUtc)
+                    && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
                 {
                     changes.Add(new ServerConfigChange(
                         cur.CaptureTime, cur.ConfigurationName, prev.ValueConfigured, cur.ValueConfigured,
@@ -185,7 +185,7 @@ public static class ConfigChangeDiff
     /// <summary>
     /// Diffs the sys.databases snapshots into a change per (database, setting) whose value moved between two
     /// consecutive captures — the WIDE row is UNPIVOTed against <see cref="DatabaseConfigChangeSettingNames"/> so
-    /// the setting_name is the literal column name. Emits changes in [<paramref name="startUtc"/>,
+    /// the setting_name is the literal column name. Emits changes in (<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], newest first.
     /// </summary>
     public static List<DatabaseConfigChange> DiffDatabaseConfigChanges(
@@ -197,7 +197,7 @@ public static class ConfigChangeDiff
             DatabaseConfigSnapshot? prev = null;
             foreach (var cur in dbGroup.OrderBy(s => s.CaptureTime))
             {
-                if (prev is not null && cur.CaptureTime >= startUtc && cur.CaptureTime <= endUtc)
+                if (prev is not null && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
                 {
                     for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)
                     {
@@ -275,7 +275,7 @@ public static class ConfigChangeDiff
         }
 
         return result
-            .Where(c => c.ChangeTime >= startUtc && c.ChangeTime <= endUtc)
+            .Where(c => c.ChangeTime > startUtc && c.ChangeTime <= endUtc)
             .OrderByDescending(c => c.ChangeTime)
             .ThenBy(c => c.DatabaseName, StringComparer.Ordinal)
             .ThenBy(c => c.SettingName, StringComparer.Ordinal)
@@ -285,7 +285,7 @@ public static class ConfigChangeDiff
     /// <summary>
     /// Set-diffs consecutive full trace-flag snapshots: a flag present in the newer capture but not the older =
     /// <c>enabled</c>; present in the older but not the newer = <c>disabled</c>; present in both with a changed
-    /// status/scope = <c>modified</c>. Emits changes in [<paramref name="startUtc"/>, <paramref name="endUtc"/>],
+    /// status/scope = <c>modified</c>. Emits changes in (<paramref name="startUtc"/>, <paramref name="endUtc"/>],
     /// newest first.
     /// </summary>
     public static List<TraceFlagChange> DiffTraceFlagChanges(
@@ -315,7 +315,7 @@ public static class ConfigChangeDiff
         for (var i = 1; i < byCapture.Count; i++)
         {
             var changeTime = byCapture[i].Key;
-            if (changeTime < startUtc || changeTime > endUtc)
+            if (changeTime <= startUtc || changeTime > endUtc)
             {
                 continue;
             }

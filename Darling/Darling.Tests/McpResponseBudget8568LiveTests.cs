@@ -201,11 +201,13 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
                     DBNull.Value, 1000L + (queries - i), (queries - i) * 1_000_000L, (queries - i) * 2_000_000L, 5000L, 1, 1);
             }
 
-            /* The default page: 20 rows, all of them, because 400 characters of text each fit where 2,000 did not. */
+            /* The default page: 20 rows, all of them, because 400 characters of text each fit where 2,000 did not. The window holds 100 more
+               queries than the page asked for, so `truncated` says the rank cap left rows off; the response budget cut nothing. */
             var root = AssertWithinBudget("get_top_queries_by_cpu", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, cancellationToken: ct));
             var rows = root.GetProperty("queries").EnumerateArray().ToList();
             Assert.Equal(20, rows.Count);
-            Assert.False(root.GetProperty("truncated").GetBoolean());
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.False(root.GetProperty("budget_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
             for (var i = 0; i < rows.Count; i++)
             {
@@ -223,6 +225,7 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
             var longerRows = longer.GetProperty("queries").EnumerateArray().ToList();
             Assert.InRange(longerRows.Count, 1, 19);
             Assert.True(longer.GetProperty("truncated").GetBoolean());
+            Assert.True(longer.GetProperty("budget_truncated").GetBoolean());
             Assert.Contains($"20 queries were read; only {longerRows.Count} fit", longer.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
             Assert.All(longerRows, r => Assert.InRange(r.GetProperty("query_text").GetString()!.Length, 1900, 2000 + "... (truncated)".Length));
 
@@ -231,6 +234,7 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
             var kept = wide.GetProperty("queries").EnumerateArray().ToList();
             Assert.InRange(kept.Count, 21, queries - 1);
             Assert.True(wide.GetProperty("truncated").GetBoolean());
+            Assert.True(wide.GetProperty("budget_truncated").GetBoolean());
             var note = wide.GetProperty("budget_note").GetString();
             Assert.Contains("32,768-byte response budget", note, StringComparison.Ordinal);
             Assert.Contains($"{queries} queries were read; only {kept.Count} fit", note, StringComparison.Ordinal);

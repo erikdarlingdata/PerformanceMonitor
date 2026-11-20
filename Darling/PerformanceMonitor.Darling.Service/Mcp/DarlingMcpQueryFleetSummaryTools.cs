@@ -89,7 +89,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                    MIN(date_trunc('hour', q.collection_time)) AS first_hour, MAX(date_trunc('hour', q.collection_time)) AS last_hour
             FROM query_stats AS q
             WHERE q.query_hash = $1
-            AND   q.collection_time >= $4
+            AND   q.collection_time > $4
             AND   q.collection_time <= $3
             AND   q.collection_time >= $2
             GROUP BY q.server_id, q.database_name
@@ -268,7 +268,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                    MIN(date_trunc('hour', q.collection_time)) AS first_hour, MAX(date_trunc('hour', q.collection_time)) AS last_hour
             FROM query_stats AS q
             WHERE q.query_hash = $1
-            AND   q.collection_time >= $4
+            AND   q.collection_time > $4
             AND   q.collection_time <= $3
             AND   q.collection_time >= $2
             GROUP BY q.server_id, q.database_name

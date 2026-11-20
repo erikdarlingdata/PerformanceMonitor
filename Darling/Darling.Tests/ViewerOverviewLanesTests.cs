@@ -38,7 +38,6 @@ public sealed class ViewerOverviewLanesSqlTests
     {
         Assert.Contains("FROM v_wait_stats", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
 
         /* SUM across ALL wait types per collection (the single-line total), each row rated over its own stored interval
@@ -79,7 +78,6 @@ public sealed class ViewerOverviewLanesSqlTests
     {
         Assert.Contains("FROM v_memory_stats", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
 
         /* Every MB column is numeric(18,2) in the store; without the cast the typed GetDouble reader

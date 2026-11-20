@@ -41,7 +41,7 @@ public static class TrendBucketSql
             CAST(SUM(granted_memory_mb) AS double precision) AS total_granted_mb
         FROM v_memory_grant_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY collection_time
         """;
@@ -88,7 +88,7 @@ public static class TrendBucketSql
                 CAST(SUM(forced_grant_count_delta) AS bigint) AS forced_grant_count_delta
             FROM v_memory_grant_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY collection_time, pool_id
         ),

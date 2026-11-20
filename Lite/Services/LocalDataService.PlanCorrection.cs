@@ -74,7 +74,7 @@ SELECT
     implementation_script
 FROM v_plan_correction
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   recommendation_name IS NOT NULL" + dbClause + @"
 ORDER BY collection_time DESC, score DESC, recommendation_name
@@ -136,15 +136,19 @@ LIMIT $4";
     /// NOT_SUPPORTED / AUTO_CONFIGURED) when it was not — that is the whole diagnostic value of the grid, so
     /// null-reason rows are kept.
     /// </summary>
-    public async Task<List<AutomaticTuningRow>> GetLatestAutomaticTuningAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<AutomaticTuningRow>> GetLatestAutomaticTuningAsync(int serverId, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of plan_correction.
-           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
-           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
-        var planCorrectionRelation = await HotTableHasServerAsync(connection, "plan_correction", serverId) ? "plan_correction" : "v_plan_correction";
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        /* #7216: the newest-snapshot lookup has no lower time bound, so through the v_ view it reads every archived row of
+           plan_correction. The hot table holds the newest snapshot of any server still being collected; the view is read only when
+           the hot table has no row to answer with: a server with no hot row at all (collection stopped and archival moved every row
+           out), which still shows the last values it had, or an asOfUtc older than every hot row, whose snapshot is in the archive. */
+        var planCorrectionRelation = await HotTableHasServerAsync(connection, "plan_correction", serverId, asOfUtc) ? "plan_correction" : "v_plan_correction";
+        /* asOfUtc, when given, is $2 and bounds the newest-capture anchor, so a read as of a past instant never shows a capture
+           taken after it; the optional database list follows it. */
+        var asOfClause = asOfUtc.HasValue ? " AND collection_time <= $2" : "";
+        var dbClause = BuildDbInClause(databaseNames, "database_name", asOfUtc.HasValue ? 3 : 2, out var dbValues);
         command.CommandText = $@"
 SELECT * FROM (
 SELECT DISTINCT
@@ -157,7 +161,7 @@ SELECT DISTINCT
     collection_time
 FROM {planCorrectionRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM {planCorrectionRelation} WHERE server_id = $1)" + dbClause + @"
+AND   collection_time = (SELECT MAX(collection_time) FROM {planCorrectionRelation} WHERE server_id = $1{asOfClause})" + dbClause + @"
 ) AS d
 /* #7699 item 2: tempdb is on the collector's list but sys.database_automatic_tuning_options has no row for it, so it
    came back as a name over empty states. A row with no state at all is left out. */
@@ -168,6 +172,8 @@ OR    d.drop_index_actual_state IS NOT NULL
 ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (asOfUtc is { } asOf)
+            command.Parameters.Add(new DuckDBParameter { Value = asOf });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 

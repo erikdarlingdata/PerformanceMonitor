@@ -193,7 +193,7 @@ public static class DarlingPgSessionStatesReader
                 reportable_sessions
             FROM pg_session_states
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         capture_shape AS (
@@ -392,7 +392,7 @@ public static class DarlingPgSessionStatesReader
         WHERE l.server_id = $1
         AND   l.collector_name = 'pg_session_states'
         AND   l.status = 'SUCCESS'
-        AND   l.collection_time >= $2
+        AND   l.collection_time > $2
         AND   l.collection_time <= $3
         """;
 

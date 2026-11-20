@@ -698,7 +698,7 @@ public partial class TimeRangeSlicerControl : UserControl
         var windowEnd = DateTime.SpecifyKind(DataEndUtc, DateTimeKind.Utc);
         if (startUtc < windowStart) startUtc = windowStart;
         if (endUtc > windowEnd) endUtc = windowEnd;
-        RangeChanged?.Invoke(this, new SlicerRangeEventArgs(startUtc, endUtc));
+        RangeChanged?.Invoke(this, new SlicerRangeEventArgs(startUtc, endUtc, SlicerRangeEventArgs.ReadStartFor(startUtc, windowStart)));
     }
 }
 
@@ -706,5 +706,23 @@ public class SlicerRangeEventArgs : EventArgs
 {
     public DateTime StartUtc { get; }
     public DateTime EndUtc { get; }
-    public SlicerRangeEventArgs(DateTime startUtc, DateTime endUtc) { StartUtc = startUtc; EndUtc = endUtc; }
+
+    /// <summary>
+    /// The start a read that places a row by an instant takes. Those reads take (start, end], and the first selected bar counts a
+    /// row stamped exactly on its left edge, so this is one microsecond (the store's resolution) before <see cref="StartUtc"/>:
+    /// the grid then holds every row the selected bars count. A range that begins at the loaded window's start keeps that start,
+    /// because the bars and the grid's own load read that same (start, end] window and neither holds a row on it.
+    /// </summary>
+    public DateTime ReadStartUtc { get; }
+
+    public SlicerRangeEventArgs(DateTime startUtc, DateTime endUtc, DateTime? readStartUtc = null)
+    {
+        StartUtc = startUtc;
+        EndUtc = endUtc;
+        ReadStartUtc = readStartUtc ?? startUtc;
+    }
+
+    /// <summary>The <see cref="ReadStartUtc"/> of a range starting at <paramref name="startUtc"/> in a strip loaded from <paramref name="windowStartUtc"/>.</summary>
+    public static DateTime ReadStartFor(DateTime startUtc, DateTime windowStartUtc)
+        => startUtc > windowStartUtc ? startUtc.AddTicks(-TimeSpan.TicksPerMicrosecond) : startUtc;
 }

@@ -31,7 +31,7 @@ WITH per_collection AS
         SUM(granted_memory_mb) AS total_granted_mb
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY collection_time
 )
@@ -132,7 +132,7 @@ WITH per_collection AS
         SUM(forced_grant_count_delta) AS forced_grant_count_delta
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY collection_time, pool_id
 ),
@@ -249,7 +249,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -322,7 +322,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -407,7 +407,7 @@ WITH windowed AS
         forced_grant_count_delta
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 ),
 agg AS
@@ -487,7 +487,7 @@ WITH per_snapshot AS
         SUM(forced_grant_count_delta) AS forced_grant_count_delta
     FROM v_memory_grant_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY collection_time, pool_id
 ),
