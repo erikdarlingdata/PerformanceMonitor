@@ -103,7 +103,7 @@ public sealed partial class ViewerDataService
     public static readonly string CpuSchedulerSnapshotSql = $"""
         WITH newest AS
         (
-            {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+            {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time > $2 AND collection_time <= $3", newestOnly: true)}
         )
         SELECT
             collection_time,

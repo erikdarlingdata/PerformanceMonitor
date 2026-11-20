@@ -298,7 +298,7 @@ internal static class DarlingBlockingReader
             blocking_open_transaction_count
         FROM blocked_process_reports
         WHERE server_id = $1
-        AND   event_time >= $2
+        AND   event_time > $2
         AND   event_time <= $3
         AND   collection_time >= $5
         """;
@@ -362,7 +362,7 @@ internal static class DarlingBlockingReader
             blocking_tran_log_bytes_used
         FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         {{DatabaseFilter.All.Clause("database_name", 5)}}
         ORDER BY event_time DESC
@@ -682,7 +682,7 @@ internal static class DarlingBlockingReader
             deadlock_id
         FROM deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $5
         """;

@@ -709,7 +709,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         await SeedServerPropertiesAsync(ServerId, engineEdition, storedCpuCount, storedPhysicalMemoryMb, vcoreCount);
 
         var read = typeof(DrillDownCollector).GetMethod("ReadServerMetadataForPlanAnalysisAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        var metadata = await (Task<ServerMetadata?>)read.Invoke(new DrillDownCollector(_fixture.DuckDb), [ServerId, CancellationToken.None])!;
+        var metadata = await (Task<ServerMetadata?>)read.Invoke(new DrillDownCollector(_fixture.DuckDb), [ServerId, _now, CancellationToken.None])!;
 
         Assert.NotNull(metadata);
         Assert.Equal(expectedCpuCount, metadata!.CpuCount);

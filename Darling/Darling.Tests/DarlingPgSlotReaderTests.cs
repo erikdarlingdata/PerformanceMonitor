@@ -53,7 +53,7 @@ public class DarlingPgSlotReaderTests
         Assert.Contains("JOIN earliest AS e ON e.slot_name = l.slot_name", Sql, StringComparison.Ordinal);
         /* #7878, #7910: the capture-window CTE reads the same window as the two branches, so three predicates, not two. */
         Assert.Equal(3, Sql.Split("server_id = $1").Length - 1);
-        Assert.Equal(3, Sql.Split("collection_time >= $2").Length - 1);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(Sql, @"collection_time >=? \$2").Count);
         Assert.Equal(3, Sql.Split("collection_time <= $3").Length - 1);
     }
 

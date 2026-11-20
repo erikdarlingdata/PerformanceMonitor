@@ -157,7 +157,7 @@ public static class DarlingPgLogEventReader
                 e.is_analyze
             FROM pg_log_events AS e
             WHERE e.server_id = $1
-            AND   e.occurred_at >= $2
+            AND   e.occurred_at > $2
             AND   e.occurred_at <= $3
             AND   e.collection_time >= $2
             AND   e.raw_line_hash IS NOT NULL
@@ -228,7 +228,7 @@ public static class DarlingPgLogEventReader
                 e.wal_bytes
             FROM pg_log_events AS e
             WHERE e.server_id = $1
-            AND   e.occurred_at >= $2
+            AND   e.occurred_at > $2
             AND   e.occurred_at <= $3
             AND   e.collection_time >= $2
             AND   e.family = 'autovacuum'

@@ -125,8 +125,9 @@ public sealed class QueryStoreTopBudgetLiveTests
 
     /// <summary>
     /// #6131: top 200 measured 177 KB with no field saying rows had been left out. The page is cut to the shared response
-    /// budget, heaviest rows kept, and <c>truncated</c> with the budget sentence say so; the window-floor flag keeps its own name.
-    /// A page that fits says <c>truncated: false</c>.
+    /// budget, heaviest rows kept, and <c>budget_truncated</c> with the budget sentence say so, and <c>truncated</c> is true for it; the
+    /// window-floor flag keeps its own name. A page that fits the budget says <c>budget_truncated: false</c> with no budget note, and its
+    /// <c>truncated</c> is true only while the window held more queries than top.
     /// </summary>
     [Fact]
     public async Task Top200_IsCutUnderTheResponseBudget_AndSaysSo()
@@ -158,6 +159,7 @@ public sealed class QueryStoreTopBudgetLiveTests
             var returned = root.GetProperty("queries").GetArrayLength();
             Assert.InRange(returned, 1, Asked - 1);
             Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.True(root.GetProperty("budget_truncated").GetBoolean());
             var note = root.GetProperty("budget_note").GetString();
             Assert.Contains("response budget", note, StringComparison.Ordinal);
             Assert.Contains($"only {returned}", note, StringComparison.Ordinal);
@@ -169,7 +171,8 @@ public sealed class QueryStoreTopBudgetLiveTests
 
             var small = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, top: 5);
             using var smallDoc = JsonDocument.Parse(small);
-            Assert.False(smallDoc.RootElement.GetProperty("truncated").GetBoolean());
+            Assert.True(smallDoc.RootElement.GetProperty("truncated").GetBoolean());
+            Assert.False(smallDoc.RootElement.GetProperty("budget_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, smallDoc.RootElement.GetProperty("budget_note").ValueKind);
             Assert.Equal(5, smallDoc.RootElement.GetProperty("queries").GetArrayLength());
 

@@ -86,7 +86,7 @@ public sealed partial class ViewerDataService
                 CAST(log_used_mb AS double precision) AS log_used_mb
             FROM v_tempdb_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -139,7 +139,7 @@ public sealed partial class ViewerDataService
                 CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(delta_stall_write_ms AS double precision) END AS rated_stall_write_ms
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   database_name = 'tempdb'
         )
@@ -243,7 +243,7 @@ public sealed partial class ViewerDataService
             log_truncation_holdup_reason
         FROM v_tempdb_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time DESC
         LIMIT 1

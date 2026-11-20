@@ -79,7 +79,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice), cancellationToken, windowStart);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime), UpperEdge(as_of, windowEndNaive)), emptyNotice), cancellationToken, windowStart);
             }
 
             var notice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -181,7 +181,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.WithDatabase(
-                    NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases)),
+                    NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime), UpperEdge(as_of, windowEndNaive)), emptyNotice, DatabaseScopeText(databases)),
                     databases.Describe())!, cancellationToken, windowStart);
             }
 
@@ -264,7 +264,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 /* #5633 item 19: a successful run that stored zero rows IS the collector saying no flag is on; only a collector that has not
                    run (or stored rows) really has "fewer than two snapshots". */
                 var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, windowEndNaive, cancellationToken);
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts), cancellationToken, windowStart);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime), UpperEdge(as_of, windowEndNaive)), emptyNotice, runFacts), cancellationToken, windowStart);
             }
 
             var notice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -462,9 +462,10 @@ public sealed class DarlingMcpConfigHistoryTools
 
     /// <summary>The number of distinct config CAPTURES (capture_time values) among the snapshot rows — the
     /// reads return one row per setting/database/flag per capture, so a raw row count would never hit the
-    /// "fewer than two snapshots" branch on a freshly-connected server.</summary>
-    private static int DistinctCaptures(IEnumerable<DateTime> captureTimes) =>
-        captureTimes.Distinct().Count();
+    /// "fewer than two snapshots" branch on a freshly-connected server. Only captures at or before
+    /// <paramref name="upperEdge"/> count, so an answer as of a past instant counts the captures that existed then.</summary>
+    private static int DistinctCaptures(IEnumerable<DateTime> captureTimes, DateTime upperEdge) =>
+        captureTimes.Where(t => t <= upperEdge).Distinct().Count();
 
     /// <summary>The "empty" miss for a change tool — distinguishes "no snapshots collected yet" from "snapshots
     /// exist but nothing changed", so a caller understands why the history is empty (the on-connect cadence).</summary>

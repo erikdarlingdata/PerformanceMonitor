@@ -176,7 +176,7 @@ CROSS JOIN LATERAL generate_series(1, d.queries) AS q;", ct);
         await ExecAsync(connection, $"ANALYZE {Wide.Parent}", ct);
         var before = await ExplainAsync(connection, "force_custom_plan", ct);
         var rowsBefore = await RowsAsync(connection, ct);
-        Assert.Equal(25, rowsBefore.Count); /* one row per hourly interval of query 42 collected in the window, both ends inclusive */
+        Assert.Equal(24, rowsBefore.Count); /* one row per hourly interval of query 42 collected in the window: after its start, up to and including its end */
 
         /* After: the new index, built the way the service builds it (the partitioned path, leaf by leaf). */
         await QueryStoreBackgroundIndexes.EnsureAsync(connection, QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExec, NullLogger.Instance, ct);

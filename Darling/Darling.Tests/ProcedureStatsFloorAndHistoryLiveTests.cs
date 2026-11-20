@@ -201,11 +201,12 @@ public sealed class ProcedureStatsFloorAndHistoryLiveTests
     }
 
     [Fact]
-    public void QueryViewFloors_AreByteIdenticalToTheirPreviousText()
+    public void QueryViewFloors_AreByteIdenticalToTheirPinnedText()
     {
-        /* #5449 changed procedure_stats' floor only. SHA-256 of the previous text (line endings normalised). */
-        Assert.Equal("391564b3c3941545b1bcd0bd052f60720f4356915743c8317e556a14c9646da2", Sha(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStats)));
-        Assert.Equal("aee6e54cd891717a2b8bafb6c0214cb9846d130b954917ba903a1674cb7f1073", Sha(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats)));
+        /* procedure_stats has its own floor (#5449); the two query views keep one text, the table name its only difference.
+           SHA-256 of each view's text (line endings normalised), whose existence check reads the window as (start, end]. */
+        Assert.Equal("9876caf85e416db122a97fc1143d43433a5216222a028d5a76d9d871ac7ca761", Sha(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStats)));
+        Assert.Equal("f74e210e5c62998e310675cfe49bbc7a4038541d9a7a9d5369917ff2c13dbc6a", Sha(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats)));
     }
 
     private static string Sha(string text) =>

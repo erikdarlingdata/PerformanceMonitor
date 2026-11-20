@@ -665,7 +665,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
     /// <summary>
     /// #4279: OnXSlicerChanged (ServerTab.Slicers.cs) passes <c>e.StartUtc</c>/<c>e.EndUtc</c> to the banner
-    /// untouched, and the grid read beside it takes the SAME bounds as they are
+    /// untouched, and the grid read beside it takes the selection's bounds with no conversion either (its start
+    /// is <c>e.ReadStartUtc</c>, the same instant less a microsecond for a selection that begins inside the strip)
     /// (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>'s custom-range branch; #4766 took out the
     /// server-local round trip that used to sit between them). This pins that the banner's UTC bounds equal what
     /// the grid actually reads, without mutating the process-global <c>ServerTimeHelper.UtcOffsetMinutes</c>,
@@ -677,7 +678,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var startUtc = new DateTime(2026, 1, 15, 8, 0, 0, DateTimeKind.Unspecified);
         var endUtc = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
 
-        /* The slicer hands e.StartUtc/e.EndUtc to the grid read as they are (#4766): no conversion either way. */
+        /* The slicer hands its UTC bounds to the grid read as they are (#4766): no conversion either way. */
         var (gridStartUtc, gridEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, startUtc, endUtc);
 
         Assert.Equal(startUtc, gridStartUtc);

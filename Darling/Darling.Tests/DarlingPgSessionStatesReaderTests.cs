@@ -218,7 +218,7 @@ public class DarlingPgSessionStatesReaderTests
     public void ScopesToOneServerAndOneWindow()
     {
         Assert.Contains("server_id = $1", Sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", Sql, StringComparison.Ordinal);
+        Assert.Matches(@"collection_time >=? \$2", Sql);
         Assert.Contains("collection_time <= $3", Sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", Sql, StringComparison.Ordinal);
     }
@@ -390,7 +390,7 @@ public class DarlingPgSessionStatesReaderTests
     public void TheDenominatorIsScopedToTheSameServerAndWindow()
     {
         Assert.Contains("l.server_id = $1", CountsSql, StringComparison.Ordinal);
-        Assert.Contains("l.collection_time >= $2", CountsSql, StringComparison.Ordinal);
+        Assert.Matches(@"l\.collection_time >=? \$2", CountsSql);
         Assert.Contains("l.collection_time <= $3", CountsSql, StringComparison.Ordinal);
     }
 

@@ -44,7 +44,7 @@ WITH top_latches AS
     SELECT latch_class
     FROM v_latch_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY latch_class
     ORDER BY SUM(delta_wait_time_ms) DESC
@@ -64,6 +64,8 @@ raw AS
         END AS interval_seconds
     FROM v_latch_stats
     WHERE server_id = $1
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   latch_class IN (SELECT latch_class FROM top_latches)
@@ -73,6 +75,7 @@ SELECT
     collection_time,
     CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
 FROM raw
+WHERE collection_time > $2
 ORDER BY latch_class, collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -130,7 +133,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_latch_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -196,7 +199,7 @@ WITH top_spinlocks AS
     SELECT spinlock_name
     FROM v_spinlock_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY spinlock_name
     ORDER BY SUM(delta_collisions) DESC
@@ -216,6 +219,8 @@ raw AS
         END AS interval_seconds
     FROM v_spinlock_stats
     WHERE server_id = $1
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   spinlock_name IN (SELECT spinlock_name FROM top_spinlocks)
@@ -225,6 +230,7 @@ SELECT
     collection_time,
     CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds END AS collisions_per_second
 FROM raw
+WHERE collection_time > $2
 ORDER BY spinlock_name, collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -274,7 +280,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_spinlock_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT

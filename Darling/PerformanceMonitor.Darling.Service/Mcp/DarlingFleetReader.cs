@@ -404,7 +404,7 @@ AND   {SqlServerCollectedTargetSql}";
 WITH xe_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3
     AND   " + BlockingWaits.NotSelfWaitSql + serverWhere + xeWhere + @"
@@ -419,7 +419,7 @@ dmv_src AS (
 dmv_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
     FROM dmv_src
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   " + BlockingWaits.NotSelfWaitSql + @"
 )," + BlockingWaits.WaitsCteSql(
@@ -459,7 +459,7 @@ FULL OUTER JOIN snapshot_gated AS g ON b.server_id = g.server_id";
     public const string FleetDeadlockSql = @"
 SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
-WHERE deadlock_time >= $1
+WHERE deadlock_time > $1
 AND   deadlock_time <= $2
 AND   collection_time >= $3
 GROUP BY server_id";

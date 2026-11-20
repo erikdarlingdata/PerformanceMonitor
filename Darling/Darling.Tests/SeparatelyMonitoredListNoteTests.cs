@@ -64,8 +64,8 @@ public sealed class SeparatelyMonitoredListNoteTests
             var end = js.IndexOf("\n      )", at, StringComparison.Ordinal);
             Assert.Contains("\"separately_monitored_note\"", js.Substring(at, end - at), StringComparison.Ordinal);
         }
-        Assert.Contains("WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)", web, StringComparison.Ordinal);
-        Assert.Contains("as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted)", web, StringComparison.Ordinal);
+        Assert.Contains("WebSqlTextPreviewLength, registryState, logger, c.RequestAborted, responseByteBudget: null)", web, StringComparison.Ordinal);
+        Assert.Contains("null, AsOf(c), registryState, logger, c.RequestAborted, responseByteBudget: null)", web, StringComparison.Ordinal);
     }
 
     [Fact]

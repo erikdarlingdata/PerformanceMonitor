@@ -630,7 +630,7 @@ COPY (
 
         /* The control: the statement it replaced has a scan of the whole archive, so this pin can fail. */
         var oldScans = await ParquetScanFiltersAsync(LegacyTopQueriesByCpuSql(string.Empty, 100), ServerId, from, to, 50, 0, 0);
-        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>=", StringComparison.Ordinal));
+        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>", StringComparison.Ordinal));
     }
 
     /* ---- procedure comparison ---- */
@@ -715,7 +715,7 @@ COPY (
 
         /* The control: the statement it replaced has a scan of the whole archive, so this pin can fail. */
         var oldScans = await ParquetScanFiltersAsync(LegacyProcedureStatsComparisonSql(string.Empty), ServerId, curStart, curEnd, baseStart, baseEnd);
-        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>=", StringComparison.Ordinal));
+        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>", StringComparison.Ordinal));
     }
 
     /* A far baseline (#5381): the text lookup reads the two compared ranges, not the span from the earlier range's start to
@@ -738,8 +738,8 @@ COPY (
     /* The span window of the first #5381 revision, rebuilt from the current statement, as the control for the two pins below. */
     private static string SpanWindowProcedureStatsComparisonSql() =>
         LocalDataService.ProcedureStatsComparisonSql(string.Empty)
-            .Replace("((qs.collection_time >= $2 AND qs.collection_time <= $3)", "(qs.collection_time >= LEAST($2, $4) AND qs.collection_time <= GREATEST($3, $5)", StringComparison.Ordinal)
-            .Replace("OR (qs.collection_time >= $4 AND qs.collection_time <= $5))", ")", StringComparison.Ordinal);
+            .Replace("((qs.collection_time > $2 AND qs.collection_time <= $3)", "(qs.collection_time > LEAST($2, $4) AND qs.collection_time <= GREATEST($3, $5)", StringComparison.Ordinal)
+            .Replace("OR (qs.collection_time > $4 AND qs.collection_time <= $5))", ")", StringComparison.Ordinal);
 
     [Fact]
     public async Task ProcedureComparison_AFarBaselineOnAWideArchiveReadsAtTheLowLimit()
@@ -871,10 +871,10 @@ COPY (
         Assert.NotEmpty(scans);
         foreach (var scan in scans)
         {
-            /* A plain range prints as "collection_time>=..." and an OR of two ranges as an expression with spaces; compare without them. */
+            /* A plain range prints as "collection_time>..." and an OR of two ranges as an expression with spaces; compare without them. */
             var squeezed = scan.Replace(" ", string.Empty, StringComparison.Ordinal);
             Assert.True(
-                squeezed.Contains("collection_time>=", StringComparison.Ordinal) && squeezed.Contains("collection_time<=", StringComparison.Ordinal),
+                squeezed.Contains("collection_time>", StringComparison.Ordinal) && squeezed.Contains("collection_time<=", StringComparison.Ordinal),
                 "a read_parquet scan whose pushed-down filters lack the collection_time window: '" + scan + "'");
         }
     }

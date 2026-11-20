@@ -84,7 +84,7 @@ public sealed partial class ViewerDataService
             COUNT(*) AS collection_count
         FROM v_memory_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY 1
         ORDER BY 1

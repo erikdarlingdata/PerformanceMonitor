@@ -165,7 +165,7 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        incident_id, remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
-AND   analysis_time >= $2
+AND   analysis_time > $2
 AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
 LIMIT $4";

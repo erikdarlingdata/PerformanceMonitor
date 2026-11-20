@@ -719,7 +719,7 @@ public partial class ViewerServerTab
         {
             var tagFilter = await CurrentQueryTagFilterAsync();
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter);
+            var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter);
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
             var read = dataReadTask.Result;
             var rows = read.Rows;
@@ -751,7 +751,7 @@ public partial class ViewerServerTab
         {
             var tagFilter = await CurrentQueryTagFilterAsync();
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter);
+            var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter);
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
             var read = dataReadTask.Result;
             var rows = read.Rows;

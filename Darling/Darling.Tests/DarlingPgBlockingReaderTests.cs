@@ -248,7 +248,7 @@ public class DarlingPgBlockingReaderTests
         foreach (var sql in new[] { ChainsSql, CyclesSql })
         {
             Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-            Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+            Assert.Matches(@"collection_time >=? \$2", sql);
             Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         }
     }

@@ -180,7 +180,7 @@ public static class DarlingJobHistoryReader
         filter?.UntilUtc is null && DateTime.UtcNow - sinceUtc >= NarrowReadMinWindow;
 
     /// <summary>
-    /// Reads the newest <paramref name="limit"/> runs at or after <paramref name="sinceUtc"/> (naive UTC), for one
+    /// Reads the newest <paramref name="limit"/> runs after <paramref name="sinceUtc"/> (naive UTC), for one
     /// server or, with no <paramref name="serverId"/>, all of them, newest first. The window is exact after the
     /// server-local to UTC conversion; the SQL pre-filters widened by an hour.
     /// </summary>
@@ -444,7 +444,7 @@ ORDER BY jh.category_name";
         var kept = new List<DarlingJobHistoryRow>(rows.Count);
         foreach (var row in rows)
         {
-            if (row.RunDateTimeUtc is { } runUtc && runUtc >= since && (until is null || runUtc <= until))
+            if (row.RunDateTimeUtc is { } runUtc && runUtc > since && (until is null || runUtc <= until))
             {
                 kept.Add(row);
             }
@@ -636,7 +636,7 @@ ORDER BY jh.category_name";
         AND   jh.step_id = 0
         AND   jh.run_status = 1
         AND   jh.collection_time >= {floorParam}
-        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
+        AND   jh.run_datetime > $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
         GROUP BY jh.job_id
     ) AS js
 )";
@@ -799,7 +799,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
             AND   jh.step_id = 0
             AND   jh.run_status = 1
             AND   jh.collection_time >= {floorParam}
-            AND   jh.run_datetime >= bd.since_local{statsUntilSql}
+            AND   jh.run_datetime > bd.since_local{statsUntilSql}
             GROUP BY jh.job_id
             UNION ALL
             SELECT d.job_id, d.success_duration_sum, d.success_count, d.last_success_run_local
@@ -838,7 +838,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
                 AND   jh.collection_time >= {floorParam}
                 AND   jh.run_datetime >= e.day
                 AND   jh.run_datetime < e.day + interval '1 day'
-                AND   jh.run_datetime >= bd.since_local{statsUntilSql}
+                AND   jh.run_datetime > bd.since_local{statsUntilSql}
                 GROUP BY jh.job_id
             ) AS ed
             WHERE bd.w IS NOT NULL
@@ -857,7 +857,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
                 AND   jh.collection_time >= {floorParam}
                 AND   jh.run_datetime >= e.day
                 AND   jh.run_datetime < e.day + interval '1 day'
-                AND   jh.run_datetime >= bd.since_local{statsUntilSql}
+                AND   jh.run_datetime > bd.since_local{statsUntilSql}
                 GROUP BY jh.job_id
             ) AS ed
             WHERE bd.w IS NOT NULL

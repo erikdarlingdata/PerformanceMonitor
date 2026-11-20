@@ -245,8 +245,8 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
     /// before the cutoff are gone, so the oldest row is in the archive, in the first month the purge kept
     /// (<see cref="RetentionService.OldestRetainedInstant"/>), up to a month AFTER the raw cutoff. A recent hot row keeps the
     /// span far over the history gate; <c>as_of</c> puts the window ten days before the oldest row. Both tools say so, and
-    /// neither points at collection health. A window INSIDE the span with no rows keeps the collection wording: collection may
-    /// well have missed it.
+    /// neither points at collection health. A window INSIDE the span with no rows, and with over a day of history before its
+    /// end, keeps the collection wording: collection may well have missed it.
     /// </summary>
     [Fact]
     public async Task AWindowOlderThanRetention_SaysRetentionRemovedIt_AndOtherEmptyWindowsKeepTheCollectionText()
@@ -256,6 +256,9 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
         var oldestKept = DateTime.SpecifyKind(RetentionService.OldestRetainedInstant(now), DateTimeKind.Utc).AddHours(3);
         var oldestDaysAgo = (now - oldestKept).TotalDays;
 
+        /* Two archived rows two days apart: the history gate measures to a window's end, so the inside window below has a
+           day of history before it. */
+        await PlantWaitAsync(oldestKept.AddDays(2), StaleWait, 60_000L);
         await ArchiveWaitAsync(oldestKept);
         try
         {

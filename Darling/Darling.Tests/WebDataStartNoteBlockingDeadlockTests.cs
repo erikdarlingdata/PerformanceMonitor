@@ -114,9 +114,10 @@ public sealed class WebDataStartNoteBlockingDeadlockTests
         Assert.Contains("order = \"newest first\"", pgLog, StringComparison.Ordinal);
         Assert.Contains("oldest_returned_at = rows[^1].OccurredAtUtc", pgLog, StringComparison.Ordinal);
         var blocking = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpBlockingTools.cs");
-        Assert.Contains("oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.DeadlockTime))", blocking, StringComparison.Ordinal);
+        Assert.Contains("oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.DeadlockTime))", blocking, StringComparison.Ordinal);
         Assert.Contains("oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.DeadlockTime))", blocking, StringComparison.Ordinal);
         Assert.Contains("order = \"deadlock_time_desc\"", blocking, StringComparison.Ordinal);
+        Assert.Contains("oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.EventTime))", blocking, StringComparison.Ordinal);
         Assert.Contains("oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime))", blocking, StringComparison.Ordinal);
     }
 }
