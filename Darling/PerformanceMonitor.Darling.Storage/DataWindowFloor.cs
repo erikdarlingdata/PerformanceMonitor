@@ -301,7 +301,7 @@ public static class DataWindowFloor
     /// The probe over <paramref name="sources"/>: $1 the window's end, $2 its start, $3 the probe's clock (all naive
     /// UTC), $4 the scope's servers when <paramref name="scope"/> names any. Several sources (the two halves of a
     /// stitched rollup read) are probed side by side and the earliest answer wins. One arm per source, over the
-    /// servers that count (a row in [$2, $1], or a logged run of the collector there). For a source the schedule
+    /// servers that count (a row in ($2, $1], [$2, $1) for a source placed by its bucket, or a logged run of the collector in ($2, $1]). For a source the schedule
     /// governs: the later of the purge cutoff and the server's first collection, moved earlier by its first row in
     /// the window. For one it does not (see <see cref="Source.RetentionDefaultDays"/>): the oldest row the server
     /// holds at or before the window's end, a walk unbounded below that runs only for a server that counts, and
