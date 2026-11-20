@@ -11624,7 +11624,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
         /* #5773: a store above this build's top rung was migrated by a newer build. Warn and carry on: the loop below
            applies nothing, since every rung this build has is at or below the stamp. */
-        WarnIfStoreNewerThanBuild(logger, currentVersion, ladder[^1].Version);
+        WarnIfStoreNewerThanBuild(logger, currentVersion, Scripts[^1].Version);
 
         var applied = 0;
         foreach (var migration in ladder)
