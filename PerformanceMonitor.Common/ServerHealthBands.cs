@@ -3365,6 +3365,15 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
+                /* #9107: the default trace is turned off on the server. The run is a SUCCESS (so the row bands by its runs, not as a
+                   failure or a denial) and the count alone does not say what to do, so the sentence names the setup step. */
+                if (DefaultTraceOffNote.TryParse(lastNote))
+                {
+                    return noteCount >= totalRuns && totalRuns > 0
+                        ? "latest run: " + DefaultTraceOffNote.Sentence + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", DefaultTraceOffNote.Sentence, lastNote, noteCount, totalRuns);
+                }
+
                 /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
                 /* #8146: the same for ring-buffer loss; when a note carries both, truncation reads first. */
                 var truncationSentence = RingBufferTruncationNote.Describe(lastNote);

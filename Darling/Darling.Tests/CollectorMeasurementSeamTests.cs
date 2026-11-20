@@ -619,6 +619,10 @@ public class CollectorMeasurementSeamTests
                 SystemHealthEventsCollector.EventFileErrorMeasurement,
                 SystemHealthEventsCollector.EventFileBufferCutMeasurement,
                 SystemHealthEventsCollector.EventFileWildcardMeasurement,
+                /* #9107: the default trace is switched off on the server. Measured by default_trace_events' own ReadAsync from a const in
+                   DefaultTraceEventsCollector.cs; the expectation names the label the readers parse (DefaultTraceOffNote.Label), so the
+                   collector's const drifting from it fails here. */
+                PerformanceMonitor.Common.DefaultTraceOffNote.Label,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
