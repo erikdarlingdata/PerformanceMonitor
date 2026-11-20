@@ -817,6 +817,13 @@ public static class PgTableTuning
         "ALTER TABLE collect.query_store_hash_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
         "ALTER TABLE collect.query_store_top_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
         "ALTER TABLE collect.plan_regression_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        /* #9111: the Query Store closed-day rollups. query_store_grid_daily and query_store_slicer_hourly clear a day and insert it again on every build and
+           every rebuild of a marked day, and both age out the days below the retention floor, so they follow query_store_top_daily. The built-days table and
+           the tick heartbeat are one row per (server, day) and per server, updated in place; they take the smaller trigger. */
+        "ALTER TABLE collect.query_store_grid_daily SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_slicer_hourly SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
+        "ALTER TABLE collect.query_store_closed_day_built SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.query_store_closed_day_tick SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.attention_events SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
         "ALTER TABLE collect.pg_io_stats_hourly SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.analysis_findings SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
