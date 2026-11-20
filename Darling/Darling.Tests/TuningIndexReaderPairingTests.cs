@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -43,7 +44,21 @@ public sealed class TuningIndexReaderPairingTests
             [ProcedureStatsNameIndex.IndexName] = ("server_id", DarlingTrendReader.ProcedureDurationTrendOneProcedureByNameSql),
             ["idx_store_metrics_kind_name_time"] = ("object_kind", DarlingStoreMetricsReader.StoreMetricsLatestSql),
             [PgTableTuning.WaitStatsDailyCoverIndexName] = ("server_id", DailySummarySql.RangeSql),
+            [PgTableTuning.QueryStoreTimePanelIndexName] = ("collection_time", QueryStorePanelSql()),
         };
+
+    /// <summary>The statement the fleet Custom View compiles for a Query Store panel over a 4 hour window with the shared dedupe (#9151).</summary>
+    private static string QueryStorePanelSql()
+    {
+        var panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,\"groupBy\":[\"module_name\"],\"viz\":\"line\"}";
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panel)!, Array.Empty<string>());
+        Assert.True(parseError is null, parseError);
+        var end = new DateTime(2026, 8, 1, 4, 0, 0, DateTimeKind.Unspecified);
+        var context = new ComposeRunContext(null, end.AddHours(-4), end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown, QueryStoreWideEligible: false);
+        var (compiled, compileError) = ComposeCompiler.CompileCore(plan!, context, singleScanRankedTimeSeries: true, sharedQueryStoreDedupe: true);
+        Assert.True(compileError is null, compileError);
+        return compiled!.Sql;
+    }
 
     /// <summary>Every <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ... (&lt;leading&gt;, ...)</c> statement
     /// still in the list, with its name and leading (first key) column extracted from the statement itself —
@@ -95,9 +110,9 @@ public sealed class TuningIndexReaderPairingTests
     {
         var created = CreatedIndexes().ToList();
 
-        /* Sanity: this must actually see the nine indexes the list ships today (#4247 dropped five others),
+        /* Sanity: this must actually see the ten indexes the list ships today (#4247 dropped five others),
            or the regex/list drifted and the pairing check below would be vacuously true. */
-        Assert.Equal(9, created.Count);
+        Assert.Equal(10, created.Count);
 
         foreach (var (indexName, leadingColumn) in created)
         {

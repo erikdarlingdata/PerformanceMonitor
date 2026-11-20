@@ -891,6 +891,10 @@ DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
 DROP TABLE IF EXISTS collect.query_store_slicer_hourly;
 DROP TABLE IF EXISTS collect.query_store_closed_day_built;
 DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
+        // V288 (#9151): idx_collection_log_watermark with its INCLUDE column. It is the probe's newest sentinel, found by the index's shape, not its name. The rewind puts back V150's narrow index under the same name,
+        // so V150's own sentinel stays true and a re-run of V288 finds the narrow index and replaces it.
+        new(288, "hasCollectionLogWatermarkCovering", @"DROP INDEX IF EXISTS collect.idx_collection_log_watermark;
+CREATE INDEX idx_collection_log_watermark ON collect.collection_log (server_id, collector_name, collection_time DESC);"),
     ];
 
     /// <summary>
