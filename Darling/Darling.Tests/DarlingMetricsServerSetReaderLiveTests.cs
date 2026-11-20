@@ -46,6 +46,11 @@ public sealed class DarlingMetricsServerSetReaderLiveTests
     private const int EmptyId = -913_014;
     private const int PostgresId = -913_015;
     private const int EverythingId = -913_016;
+    private const int SlowWaitsRecentId = -913_017;
+    private const int SlowWaitsOldId = -913_018;
+    private const int UnscheduledWaitsId = -913_019;
+    private const int FleetScheduledId = -913_020;
+    private const int ServerRowWinsId = -913_021;
 
     private const string SecretDb = "SECRET_DB_9013";
     private const string TopApp = "TOP_APP_9013";
@@ -54,13 +59,15 @@ public sealed class DarlingMetricsServerSetReaderLiveTests
     private static readonly int[] SentinelIds =
     [
         CpuId, SchedulerId, PerfmonId, SessionsId, MemoryId, GrantsId, FileIoId, VolumeId, WaitsId, TempdbId,
-        StaleId, VolumeFreshId, VolumeOldId, EmptyId, PostgresId, EverythingId,
+        StaleId, VolumeFreshId, VolumeOldId, EmptyId, PostgresId, EverythingId, SlowWaitsRecentId, SlowWaitsOldId,
+        UnscheduledWaitsId,
     ];
 
     private static readonly string[] Tables =
     [
         "cpu_utilization_stats", "cpu_scheduler_stats", "perfmon_stats", "session_summary_stats", "memory_stats",
-        "memory_grant_stats", "file_io_stats", "database_size_stats", "wait_stats", "tempdb_stats", "servers",
+        "memory_grant_stats", "file_io_stats", "database_size_stats", "wait_stats", "tempdb_stats",
+        "config.config_collector_schedules", "servers",
     ];
 
     [Fact]
@@ -277,6 +284,57 @@ public sealed class DarlingMetricsServerSetReaderLiveTests
     });
 
     [Fact]
+    public Task WaitsScheduledEvery30Minutes_StayForThreeIntervals_AndGoAfterThem() => RunAsync(async (c, now, ct) =>
+    {
+        foreach (var (serverId, age) in new[] { (SlowWaitsRecentId, 40), (SlowWaitsOldId, 100) })
+        {
+            await InsertServerAsync(c, serverId, MonitoredEngineKind.SqlServer, ct);
+            await InsertScheduleAsync(c, serverId, "wait_stats", 30, ct);
+            await InsertWaitAsync(c, serverId, now.AddMinutes(-age), "LCK_M_X", 60, 6, 60, ct);
+        }
+
+        Assert.Equal(1, Single(await ReadForAsync(c, now, SlowWaitsRecentId, ct), "darling_wait_ms_per_second"));
+        Assert.Empty(await ReadForAsync(c, now, SlowWaitsOldId, ct));
+    });
+
+    [Fact]
+    public Task WithNoScheduleRows_TheOneMinuteFloorHolds() => RunAsync(async (c, now, ct) =>
+    {
+        await InsertServerAsync(c, UnscheduledWaitsId, MonitoredEngineKind.SqlServer, ct);
+        await InsertWaitAsync(c, UnscheduledWaitsId, now.AddMinutes(-20), "LCK_M_X", 60, 6, 60, ct);
+
+        Assert.Empty(await ReadForAsync(c, now, UnscheduledWaitsId, ct));
+    });
+
+    [Fact]
+    public async Task AFleetWideSchedule_Applies_AndAServerRowWinsOverIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live metrics server-set tests.");
+
+        /* #9013: a fleet-wide schedule row would apply to every server on the shared store, so this fact mints its own
+           scratch database through ScratchPostgres and never touches another test's rows. */
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+
+        var now = LiveClock.Now();
+        await InsertScheduleAsync(c, null, "file_io_stats", 30, ct);
+        foreach (var serverId in new[] { FleetScheduledId, ServerRowWinsId })
+        {
+            await InsertServerAsync(c, serverId, MonitoredEngineKind.SqlServer, ct);
+            await InsertFileIoAsync(c, serverId, now.AddMinutes(-40), "db1", "ROWS", 6, 0, 0, 0, 12, 0, 60, ct);
+        }
+        await InsertScheduleAsync(c, ServerRowWinsId, "file_io_stats", 1, ct);
+
+        Assert.Equal(2, Disk(await ReadForAsync(c, now, FleetScheduledId, ct), "darling_disk_read_latency_ms", "data", "user"));
+        Assert.Empty(await ReadForAsync(c, now, ServerRowWinsId, ct));
+    }
+
+    [Fact]
     public Task ServerWithNoRows_ReturnsNothing_ForIt() => RunAsync(async (c, now, ct) =>
     {
         await InsertServerAsync(c, EmptyId, MonitoredEngineKind.SqlServer, ct);
@@ -473,6 +531,18 @@ VALUES ($1, $2, $2, TRUE, 0, $3)", connection);
             ("version_store_reserved_mb", 3m * scale), ("unallocated_mb", 4m * scale),
             ("log_used_percent", (decimal)logPercent),
             ("holder_program_name", TopApp), ("top_session_id", 99));
+
+    private static async Task InsertScheduleAsync(
+        NpgsqlConnection connection, int? serverId, string collectorName, int frequencyMinutes, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes)
+VALUES ($1, $2, $3)", connection);
+        command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+        command.Parameters.AddWithValue(collectorName);
+        command.Parameters.AddWithValue(frequencyMinutes);
+        await command.ExecuteNonQueryAsync(ct);
+    }
 
     private static async Task DeleteSentinelRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

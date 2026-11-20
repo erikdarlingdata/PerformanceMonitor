@@ -40,15 +40,18 @@ internal sealed record ServerSetValue(int ServerId, string Metric, IReadOnlyList
 /// </summary>
 internal static class DarlingMetricsServerSetReader
 {
-    internal static readonly TimeSpan OneMinuteFreshness = TimeSpan.FromMinutes(15);
-    internal static readonly TimeSpan FiveMinuteFreshness = TimeSpan.FromMinutes(30);
-    internal static readonly TimeSpan HourlyFreshness = TimeSpan.FromHours(3);
+    /* #9013: a collection is fresh when it is newer than the larger of the floor below and three of the collector's
+       intervals on that server, so a collector an operator scheduled every 15 minutes or slower keeps its series
+       between samples instead of losing them while collection is healthy. The floors are the bounds for the shipped
+       cadences: 15 minutes for the one-minute collectors, 30 for the five-minute session summary, 3 hours for the
+       hourly database sizes. */
+    internal const int IntervalMultiplier = 3;
+    internal const int OneMinuteFloorMinutes = 15;
+    internal const int FiveMinuteFloorMinutes = 30;
+    internal const int HourlyFloorMinutes = 180;
 
-    /* The statements are static readonly rather than const: the bounds come from the TimeSpans above and the wait
+    /* The statements are static readonly rather than const: the cutoffs come from CollectorFreshnessSql and the wait
        category CASE from WaitCategorySql, neither of which is a compile-time constant. */
-    private static readonly string OneMinuteBound = IntervalLiteral(OneMinuteFreshness);
-    private static readonly string FiveMinuteBound = IntervalLiteral(FiveMinuteFreshness);
-    private static readonly string HourlyBound = IntervalLiteral(HourlyFreshness);
 
     private static readonly string Target = $@"WHERE s.is_enabled
 AND   {DarlingFleetReader.SqlServerCollectedTargetSql}";
@@ -63,7 +66,7 @@ CROSS JOIN LATERAL
     SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
     FROM v_cpu_utilization_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("cpu_utilization", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC, sample_time DESC
     LIMIT 1
 ) AS latest
@@ -85,7 +88,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_cpu_scheduler_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("cpu_scheduler_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -116,7 +119,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_perfmon_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("perfmon_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -169,7 +172,7 @@ CROSS JOIN LATERAL
 ) AS agg
 {Target}";
 
-    /// <summary>Sessions by state from the newest summary (a 5-minute collector, so the 30-minute bound). The
+    /// <summary>Sessions by state from the newest summary (a 5-minute collector, so the 30-minute floor). The
     /// <c>top_*</c> columns name an application and a host and are never selected.</summary>
     internal static readonly string SessionsSql = $@"
 SELECT s.server_id, 'darling_sessions' AS metric, 'state' AS label1_key, v.state AS label1_value, NULL::text AS label2_key, NULL::text AS label2_value, v.value
@@ -179,7 +182,7 @@ CROSS JOIN LATERAL
     SELECT running_sessions, sleeping_sessions, background_sessions, dormant_sessions
     FROM v_session_summary_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {FiveMinuteBound}
+    AND   collection_time >= {Fresh("session_summary_stats", FiveMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -202,7 +205,7 @@ CROSS JOIN LATERAL
     SELECT total_server_memory_mb, target_server_memory_mb, plan_cache_mb, available_physical_memory_mb
     FROM v_memory_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("memory_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -226,7 +229,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_memory_grant_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("memory_grant_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -260,7 +263,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_file_io_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("file_io_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -294,7 +297,7 @@ CROSS JOIN LATERAL
 {Target}";
 
     /// <summary>The lowest free share across the server's volumes in the newest size collection (an hourly collector,
-    /// so the 3-hour bound). Every file on a volume repeats the volume's figures, so the rows are first folded to one
+    /// so the 3-hour floor). Every file on a volume repeats the volume's figures, so the rows are first folded to one
     /// per <see cref="VolumeKey.Sql"/> (#7704: a Linux volume has no mount point name).</summary>
     internal static readonly string VolumeSql = $@"
 SELECT s.server_id, 'darling_disk_volume_min_free_percent' AS metric, NULL::text AS label1_key, NULL::text AS label1_value, NULL::text AS label2_key, NULL::text AS label2_value, agg.value
@@ -304,7 +307,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_database_size_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {HourlyBound}
+    AND   collection_time >= {Fresh("database_size_stats", HourlyFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -338,7 +341,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_wait_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("wait_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -384,7 +387,7 @@ CROSS JOIN LATERAL
     SELECT user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, unallocated_mb, log_used_percent
     FROM v_tempdb_stats
     WHERE server_id = s.server_id
-    AND   collection_time >= $1 - {OneMinuteBound}
+    AND   collection_time >= {Fresh("tempdb_stats", OneMinuteFloorMinutes)}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -442,6 +445,8 @@ CROSS JOIN LATERAL
         labels.Add(new(reader.GetString(keyOrdinal), reader.GetString(keyOrdinal + 1)));
     }
 
-    private static string IntervalLiteral(TimeSpan bound) =>
-        "INTERVAL '" + ((long)bound.TotalSeconds).ToString(CultureInfo.InvariantCulture) + " seconds'";
+    /// <summary>The freshness cutoff for one statement's collector, measured from <c>$1</c> for the LATERAL's server.</summary>
+    private static string Fresh(string collectorName, int floorMinutes) =>
+        CollectorFreshnessSql.Cutoff(
+            collectorName, IntervalMultiplier, "s.server_id", "$1", floorMinutes.ToString(CultureInfo.InvariantCulture));
 }
