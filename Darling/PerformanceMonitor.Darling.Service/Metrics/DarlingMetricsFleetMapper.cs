@@ -83,7 +83,7 @@ internal static class DarlingMetricsFleetMapper
 
             Add("darling_server_health_band", (int)card.Band);
 
-            /* #9013: the owner's condition: a server with no data yet gets its band and no value series, never zeros. The
+            /* #9013: a server with no data yet gets its band and no value series, never zeros, so it never looks like an idle server. The
                card's counts are plain ints, so before a first collection they would read as measured zeros. */
             if (!card.LastCollectionTime.HasValue)
             {

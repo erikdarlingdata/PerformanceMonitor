@@ -112,7 +112,8 @@ internal sealed class DarlingMetricsSnapshotCache
         var started = _time.GetTimestamp();
         try
         {
-            /* #9013: the timeout runs on the injected clock (R2), so a test's clock drives it as the host's real one does. */
+            /* #9013: the timeout runs on the injected TimeProvider, as the snapshot ages do, so a test's clock drives it as the host's
+               real one does. */
             using var timeout = new CancellationTokenSource(RefreshTimeout, _time);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stopping, timeout.Token);
             try

@@ -36,7 +36,8 @@ internal sealed class DarlingMetricsRefresher
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
 
-    /* Ticks, -1 for "not measured yet": a TimeSpan? cannot be written atomically, and Task 11 reads these from another thread. */
+    /* Ticks, -1 for "not measured yet": a TimeSpan? cannot be written atomically, and LastFleetDuration and
+       LastServerSetDuration are read on another thread than the refresh that writes them. */
     private long _fleetTicks = -1;
     private long _serverSetTicks = -1;
 

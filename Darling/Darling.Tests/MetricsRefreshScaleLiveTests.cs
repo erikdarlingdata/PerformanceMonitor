@@ -44,8 +44,8 @@ public sealed class MetricsRefreshScaleLiveTests
 {
     private const int HistoryMinutes = 360;
     private const int SliceMinutes = 30;
-    /* #9013 (R13): the collection-health read spans 7 days, so collection_log holds 7 days and the hour the oldest
-       timed window starts in. */
+    /* #9013: every refresh pays the collection-health read, which spans 7 days, so collection_log holds 7 days and the hour
+       the oldest timed window starts in. */
     private const int HealthHistoryMinutes = 7 * 1440 + 60;
     private const int HealthSliceMinutes = 1440;
     private static readonly TimeSpan RefreshStep = TimeSpan.FromSeconds(61);
@@ -315,7 +315,7 @@ FROM show_chunks('collection_log', older_than => $1::timestamp) AS ch", ct, anch
 
         await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
         var converted = await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        /* #9013 (R13): collection_log is outside the collector catalog; the service converts it on its own pass. */
+        /* #9013: collection_log is outside the collector catalog; the service converts it on its own pass. */
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct),
             "collection_log should be a hypertable, as the service's own pass leaves it");
         return $"TimescaleDB hypertables ({converted} collector tables and collection_log converted)";
@@ -502,7 +502,7 @@ CROSS JOIN generate_series(0, 39) AS f
 ORDER BY k DESC, sv.id, f";
 
     /// <summary>
-    /// #9013 (R13): a collection_log row per collector per collection at each collector's real cadence (the 1-minute
+    /// #9013: a collection_log row per collector per collection at each collector's real cadence (the 1-minute
     /// collectors every minute, sessions every 5 minutes, database sizes hourly) over <see cref="HealthHistoryMinutes"/>,
     /// the span the fleet read's 7-day collection-health read covers. Narrow rows, so 7 days fit where 7 days of the wide
     /// tables would not. $1 the pinned now, $2 the server count, $3 and $4 the newest and oldest minute of the slice.

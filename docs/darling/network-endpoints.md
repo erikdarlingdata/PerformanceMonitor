@@ -394,7 +394,7 @@ Wrong tokens are throttled per address, as on the MCP endpoint: three wrong bear
 
 The service reads `metrics.token` once, at start. To rotate it, change the secret and restart the service. Each refusal is logged with the client's address and the reason, never the token, and a repeating refusal from one address is rate limited in the log.
 
-The port has no TLS, so the token crosses the network in clear text. Keep the port on a trusted network, or put a TLS-terminating proxy in front of it. When the port binds an address that is not loopback and `allowFrom` is empty, the service logs one Warning after it binds: the token alone guards the port. Set `allowFrom` to the scraper's addresses.
+The port has no TLS, so the token crosses the network in clear text. Keep the port on a trusted network, or put a TLS-terminating proxy in front of it. Behind a proxy, every client reaches the port from the proxy's address, so they all share one throttle: one client that sends wrong tokens holds out the scraper too, until the wait ends. Keep the proxy's other clients off this route, or give the scraper its own path to the port. When the port binds an address that is not loopback and `allowFrom` is empty, the service logs one Warning after it binds: the token alone guards the port. Set `allowFrom` to the scraper's addresses.
 
 ### Limits
 

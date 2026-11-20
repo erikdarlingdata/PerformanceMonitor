@@ -48,8 +48,8 @@ internal static class DarlingMetricCatalog
     /// <summary>Label names and the only values each may take: no text from a monitored server reaches a label.</summary>
     public static readonly IReadOnlyDictionary<string, string[]> FixedLabelValues = new Dictionary<string, string[]>
     {
-        /* #9013: aliased from the CASE's own list (REVIEW-TRAPS "alias, do not copy"), so a new category cannot reach a
-           scrape without reaching this set. */
+        /* #9013: read from WaitCategorySql.Categories, which lists what the shared wait-category CASE can return, not copied
+           from it, so a new category cannot reach a scrape without reaching this set. */
         ["category"] = WaitCategorySql.Categories.Select(c => c.ToLowerInvariant()).ToArray(),
         ["file_type"] = new[] { "data", "log" },
         ["scope"] = new[] { "user", "tempdb" },
@@ -57,7 +57,8 @@ internal static class DarlingMetricCatalog
         ["state"] = new[] { "running", "sleeping", "background", "dormant" },
     };
 
-    /// <summary>In writer order: the meta series, the fleet set, then the server set, as the spec lists them.</summary>
+    /// <summary>In writer order, the order <see cref="Build"/> adds them: the meta series (darling_metrics_*), the fleet set
+    /// (darling_server_*, from the fleet read), then the server set (the readings from the server-set read).</summary>
     public static readonly IReadOnlyDictionary<string, (string Help, string[] Labels)> Metrics = Build();
 
     private static OrderedCatalog Build()
