@@ -61,6 +61,96 @@ Lite keeps archived data for 3 months. This is a fixed value. `settings.json` ha
 
 Lite keeps each log file for 7 days. To open the logs, click **View Log** or **Open Log Folder** in the sidebar.
 
+### Run Lite headless
+
+Lite can collect with no window, no tray icon and no signed-in user. A scheduled task starts it when the machine starts. Use this on a server that nobody signs in to.
+
+Start Lite with `--headless`:
+
+```
+PerformanceMonitorLite.exe --headless
+```
+
+A headless Lite does these things as usual:
+
+- It collects from every server, and it checks alerts.
+- It sends alerts by email, Slack, Teams and webhook.
+- It runs retention and archiving.
+- It runs the MCP server, if you turned it on.
+- It checks for updates. It writes the result to the log. It cannot show a balloon.
+
+A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each time it skips one, it writes one line to the log, at Information level, that starts with `Headless: skipped`. A dialog that carries an error is skipped the same way. The log holds the same error. After the first headless start, read the log to see what Lite skipped.
+
+Only one Lite runs in a Windows session. If you start Lite a second time in that session, the second start exits. A headless Lite does not show a window when the second start asks it to.
+
+If a headless Lite fails to start, it writes the error to the log and exits with code 3. Task Scheduler then sees a failed run, and its restart setting starts Lite again.
+
+#### Set up a dedicated Windows user
+
+1. Make a Windows user for Lite. A standard user is enough.
+2. Install Lite as that user. Run `Setup.exe` as that user, or unzip the portable ZIP into a folder that the user can write to. Lite keeps its data, its logs and its settings in that user's `%LOCALAPPDATA%`. See [Where Lite keeps its files](#where-lite-keeps-its-files).
+3. Sign in once as that user, and start Lite the normal way. The server list is shared by all users, but passwords are not. Lite keeps SQL and Entra passwords, the SMTP password and webhook URLs in the Windows Credential Manager of each user. This user has none yet. Open each server in **Edit Server**, enter the password again, and save. Settings are also kept for each user. Set up email, Slack, Teams and webhook alerts in **Settings** as this user.
+4. Close Lite. Sign out.
+
+Do not use **Entra ID (MFA)** or **Device Code** sign-in for a headless Lite. Both need a person to answer a prompt each session. A headless Lite cancels a device-code sign-in and writes the reason to the log. Use a login that needs no prompt: Windows, SQL Server, Service Principal, Managed Identity or Existing Azure Sign-In. See [Authentication](authentication.md).
+
+#### Start it with a scheduled task
+
+Make a task in Task Scheduler with these settings:
+
+| Setting | Value |
+|---|---|
+| Run as | The dedicated user |
+| Run whether the user is logged on or not | On |
+| Trigger | At startup |
+| Action | `PerformanceMonitorLite.exe` with the argument `--headless` |
+| If the task fails, restart every | 1 minute, up to 3 times |
+| Long-running limit | Turn off "Stop the task if it runs longer than" |
+
+Task Scheduler runs this task in session 0. Session 0 has no taskbar. Without `--headless`, the first tray balloon that fails for that reason writes one Warning to the log. Lite then skips tray balloons for the rest of the run. It does not write an error for each alert, and the other alert channels still send.
+
+#### Stop it
+
+Do not use **End** in Task Scheduler, and do not use `Stop-Process`. Both end Lite at once. Lite then runs no shutdown code. It does not close the database cleanly, and it does not release the MCP port.
+
+Use `--stop` instead:
+
+```
+PerformanceMonitorLite.exe --stop
+```
+
+`--stop` asks the running Lite to shut down the same way that it does when you close the window. Lite stops collection, stops the MCP server and closes the database. `--stop` then waits up to 60 seconds for Lite to exit. It does not start Lite or open a window. Its exit code tells you what happened:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Lite exited |
+| 1 | No Lite was listening. Lite is not running, or it is still starting. A Lite that is still starting does not listen yet. Try again in a minute. |
+| 2 | Lite had not exited after 60 seconds |
+
+The request goes to the Lite in the same Windows session as `--stop`, and `--stop` waits only for a Lite in that session. Run `--stop` in session 0, as the same user. Make a second scheduled task for it. Give it the same user, the same "Run whether the user is logged on or not" setting, and the action `PerformanceMonitorLite.exe` with the argument `--stop`. Run that task to stop Lite. For example:
+
+```
+schtasks /run /tn "Lite stop"
+```
+
+`--stop` writes what it did to the Lite log, in the same user's logs folder. Each line has `[Stop]` in it. The lines say whether `--stop` asked a running Lite to stop, found none, or timed out.
+
+A hard end does not break the store. DuckDB replays its write-ahead log at the next start. The next start can take a little longer than usual.
+
+#### Upgrade a headless Lite
+
+The **About** button needs a window, so a headless Lite does not update itself. It logs when a new version exists. To upgrade:
+
+1. Run `--stop`, and wait for exit code 0.
+2. Install the new version as the dedicated user. Run the new `Setup.exe` as that user, or unzip the new portable ZIP over the old folder.
+3. Run the scheduled task that starts Lite with `--headless`.
+
+Suppose you start the new version with `--headless` while the old version still runs in the same session. The new version asks the old one to shut down, and then it takes over. A headless start never shows the "close it and continue?" dialog. If the old version runs as an administrator and the new one does not, the new one cannot close it. It writes the reason to the log and exits. Stop the old one first.
+
+#### Where the logs are
+
+A headless Lite writes the same files as a Lite with a window. The logs are in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs` of the dedicated user. The files are `lite_<date>.log`. Lite keeps each file for 7 days. The data folder is `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the same user.
+
 ### Lite Data Storage
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
