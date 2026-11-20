@@ -11094,8 +11094,57 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// itself, both inside the first 3 s, which offsets V23's real ceiling to 303 s while V22, V39 and
     /// V104 are cancelled at 300.05 s. A rung that instrumented its own progress, the natural way to write
     /// a long data move, would not be cancelled at all.</para>
+    ///
+    /// <para><b>The default, not the only bound.</b> A rung named in
+    /// <see cref="DeclaredRungCommandTimeoutSeconds"/> runs under the longer bound declared there. Every other
+    /// rung, and every bookkeeping statement of the applier, runs under this one.</para>
     /// </summary>
     internal const int MigrationCommandTimeoutSeconds = 300;
+
+    /// <summary>
+    /// V281's command timeout (seconds), #9089: six times the default bound.
+    ///
+    /// <para><b>Why this rung needs its own.</b> V281 is silent for its whole run, so the default bound is a limit on
+    /// the rung's total time (see <see cref="MigrationCommandTimeoutSeconds"/>). All three of its passes follow the
+    /// text table: the backfill reads the main heap of <c>collect.query_store_text</c> once, the primary key sorts
+    /// every copied row, and the foreign key validation joins the new table to the text table, a full pass over
+    /// both. Warm and on local NVMe that is about 11 s for a 4.2 GB heap (see <see cref="V281Sql"/>). A larger
+    /// store with a cold cache takes several times as long for each gigabyte, and the foreign key validation is
+    /// then the longest of the three. A text heap a few times larger again, read cold, does not fit in the default
+    /// bound, and a rung cancelled there fails the upgrade on every retry while it holds its SHARE ROW EXCLUSIVE
+    /// lock on the text table for the whole bound.</para>
+    ///
+    /// <para><b>Why six times.</b> The rung's time is linear in the text heap, so a bound six times the default
+    /// covers a heap six times the one the default covers. It is over 150 times the warm measurement, which
+    /// leaves a text heap many times the measured one room to finish when it is read cold. It stays finite
+    /// for the reason the default does: a rung that cannot finish ends in a failure the log names, and the rung's
+    /// own <c>lock_timeout</c> still ends a wait for a lock inside the default bound.</para>
+    /// </summary>
+    internal const int V281CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
+    /// The rungs that run under a longer command timeout than <see cref="MigrationCommandTimeoutSeconds"/>, by
+    /// version, with the bound each one runs under (seconds). The applier reads this for every rung it applies
+    /// (<see cref="RungCommandTimeoutSeconds"/>).
+    ///
+    /// <para>A rung belongs here when it is silent, moves data an earlier rung stored, and its time follows a table
+    /// that grows without a small bound, so a store large enough cannot finish it inside the default. Each entry
+    /// is a finite bound with its reasoning on its own constant. <see cref="MigrationLockWaitTimeoutSeconds"/> is
+    /// derived from the longest entry, and <c>MigrationDataMovingRungCensusPins</c> requires every floor-setting
+    /// rung to state whether it is here.</para>
+    /// </summary>
+    internal static IReadOnlyDictionary<int, int> DeclaredRungCommandTimeoutSeconds { get; } = new Dictionary<int, int>
+    {
+        [281] = V281CommandTimeoutSeconds,
+    };
+
+    /// <summary>
+    /// The command timeout (seconds) the applier gives rung <paramref name="version"/>: its entry in
+    /// <see cref="DeclaredRungCommandTimeoutSeconds"/>, or <paramref name="defaultCommandTimeoutSeconds"/> when it
+    /// has none.
+    /// </summary>
+    internal static int RungCommandTimeoutSeconds(int version, int defaultCommandTimeoutSeconds) =>
+        DeclaredRungCommandTimeoutSeconds.TryGetValue(version, out var declared) ? declared : defaultCommandTimeoutSeconds;
 
     /// <summary>
     /// Lock-wait budget (seconds) for acquiring <see cref="MigrationLockKey"/>. A different quantity from
@@ -11138,9 +11187,18 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <see cref="MigrationCommandTimeoutSeconds"/>, so that bound is per-RUNG and V39's two indexes cost one
     /// multiple rather than two. V281 (#9043) is the fifth rung big enough to spend this budget: its backfill
     /// reads the main heap of the populated <c>query_store_text</c> once (about 11 s over a 4.2 GB heap on
-    /// PostgreSQL 18.6, see <see cref="V281Sql"/>). Five rungs is five times the bound for the data-moving
-    /// part of a full V21-to-current upgrade, and the sixth multiple here is margin, sized at one rung bound
-    /// because that is the granularity this ladder grows by — one new data-moving rung. Seeded reference points on that same
+    /// PostgreSQL 18.6, see <see cref="V281Sql"/>), and it runs under its own longer bound,
+    /// <see cref="V281CommandTimeoutSeconds"/>. The budget is the larger of two sums, each with one default
+    /// rung bound of margin, sized at one rung bound because that is the granularity this ladder grows by — one
+    /// new data-moving rung. The first is every floor-setting rung at the default bound: five rungs and the
+    /// margin, six default bounds. The second is the longest bound in
+    /// <see cref="DeclaredRungCommandTimeoutSeconds"/> and the margin, which is the larger and is this constant.
+    /// The two are not added together, because V281 and the three oldest floor-setting rungs are never expensive
+    /// in one upgrade: V281 reads rows only on a store that already had the text table (V74), and V22, V23 and
+    /// V39 are applied on every such store. V104 is the one floor-setting rung that can be pending beside a V281
+    /// with rows to read, on a store below V104 that collects Query Store, and there this budget is V281's bound
+    /// plus V104's exactly. A store at V104 or later has V281 as its only floor-setting rung and the whole
+    /// margin. Seeded reference points on that same
     /// local store, warm and on local NVMe (a cold busy store being why the rung bound is 300 s rather than
     /// 30): V22 1.29 s over 907 MB / 90 chunks, V23 9.37 s over a 608 MB heap, V39 1.44 s over 1.26 GB. The
     /// live 42-server store holds 2.72 GB, 0.69 GB and 24.5 GB in those same tables, so the real figures are
@@ -11213,7 +11271,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// unit, since each rung is one transaction, but it is PostgreSQL 17+ against readers here that gate
     /// as low as 13, and it ends the session with FATAL rather than failing the statement.</para>
     ///
-    /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the rung bound moves.
+    /// <para>A sum of the two rung bounds rather than a literal so the budgets cannot drift apart if a rung bound moves.
     /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A new
     /// FLOOR-SETTING rung is pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans
     /// every rung's shipped SQL for data-moving shapes and fails when that set stops matching the census
@@ -11227,10 +11285,10 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// longer dies at all when it had nothing to apply. The refinement deliberately NOT built is
     /// extending this budget whenever the stamp table is seen to advance, which would make a
     /// slow-but-progressing holder unable to strand a waiter at all: it costs a catalog probe and a read
-    /// per poll on the store being migrated, to buy a case that needs a single rung to exceed five minutes
-    /// on a ladder measured at 0.301 s.</para>
+    /// per poll on the store being migrated, to buy a case that needs the pending rungs to outlast this budget
+    /// while each stays inside its own bound, on a ladder measured at 0.301 s.</para>
     /// </summary>
-    private const int MigrationLockWaitTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
+    private const int MigrationLockWaitTimeoutSeconds = V281CommandTimeoutSeconds + MigrationCommandTimeoutSeconds;
 
     /// <summary>
     /// Gap (seconds) between <c>pg_try_advisory_lock</c> attempts while a sibling migrator holds the lock.
@@ -11315,7 +11373,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         int applied;
         try
         {
-            applied = await MigrateLockedAsync(connection, logger, cancellationToken);
+            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, cancellationToken);
         }
         finally
         {
@@ -11519,7 +11577,27 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         return true;
     }
 
-    private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>
+    /// Test seam: <see cref="MigrateLockedAsync"/> over a supplied ladder and with the default rung bound supplied, so a
+    /// test can show in seconds what a rung's command timeout does. The same code path: the ladder and the default
+    /// bound are the only things a test may change, and a rung's entry in
+    /// <see cref="DeclaredRungCommandTimeoutSeconds"/> is read exactly as it is for the shipped ladder. The caller
+    /// does not hold the advisory lock, so this is for a store no other migrator can reach.
+    /// </summary>
+    internal static Task<int> ApplyLadderForTestsAsync(
+        NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
+        CancellationToken cancellationToken)
+        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, cancellationToken);
+
+    /// <summary>
+    /// Applies every rung of <paramref name="ladder"/> above the store's stamped version, each in its own transaction
+    /// with its stamp. A rung's SQL runs as one command under <see cref="RungCommandTimeoutSeconds"/>: its declared
+    /// bound when it has one, <paramref name="defaultCommandTimeoutSeconds"/> otherwise. <see cref="MigrateAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
+    /// passes <see cref="Scripts"/> and <see cref="MigrationCommandTimeoutSeconds"/>.
+    /// </summary>
+    private static async Task<int> MigrateLockedAsync(
+        NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
+        CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
            on: V8 moves darling_schema_version into collect, and the version stamp below writes it by
@@ -11546,21 +11624,33 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
         /* #5773: a store above this build's top rung was migrated by a newer build. Warn and carry on: the loop below
            applies nothing, since every rung this build has is at or below the stamp. */
-        WarnIfStoreNewerThanBuild(logger, currentVersion, Scripts[^1].Version);
+        WarnIfStoreNewerThanBuild(logger, currentVersion, ladder[^1].Version);
 
         var applied = 0;
-        foreach (var migration in Scripts)
+        foreach (var migration in ladder)
         {
             if (migration.Version <= currentVersion)
             {
                 continue;
             }
 
+            var rungTimeoutSeconds = RungCommandTimeoutSeconds(migration.Version, defaultCommandTimeoutSeconds);
+            if (DeclaredRungCommandTimeoutSeconds.ContainsKey(migration.Version))
+            {
+                /* A declared rung can run for minutes with nothing else logged, and collection waits behind it, so the
+                   log says which rung is running and how long it may take. */
+                logger?.LogInformation(
+                    "Applying migration V{Version} ({Name}). It copies data the store already holds, so on a large " +
+                    "store it can run for several minutes, and for at most {Timeout}s. Collection starts when the " +
+                    "migrations finish.",
+                    migration.Version, migration.Name, rungTimeoutSeconds);
+            }
+
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             try
             {
-                using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds };
+                using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
                 await apply.ExecuteNonQueryAsync(cancellationToken);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
