@@ -49,7 +49,7 @@ WITH captured AS (
         COUNT(*) OVER (PARTITION BY database_name, recommendation_name, query_id) AS capture_count
     FROM plan_correction
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   recommendation_name IS NOT NULL
     AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -104,6 +104,9 @@ LIMIT $4";
         /* The same capture stored twice: one row on the page, counted twice. */
         await PlantAsync(connection, 13, t.AddMinutes(-3), "d", "R6", 6, "dup", 20, 2, t.AddMinutes(-4), ct);
         await PlantAsync(connection, 14, t.AddMinutes(-3), "d", "R6", 6, "dup", 20, 2, t.AddMinutes(-4), ct);
+
+        /* A capture exactly at the window's start is outside it (the half-open window of #9140), whichever statement reads. */
+        await PlantAsync(connection, 16, t.AddHours(-1), "a", "R7", 7, "at-the-start", 99, 1, null, ct);
 
         /* A row with no recommendation, outside the read. */
         await PlantAsync(connection, 15, t, "a", null, null, "enablement-only", null, null, null, ct);
