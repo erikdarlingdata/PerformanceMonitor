@@ -70,7 +70,7 @@ const FLEET = {
 };
 /* The two empty answers get_pg_replication_stats gives (DarlingMcpPgReplicationStatsTools.EmptyWords, #8920), as the service writes them. */
 const AURORA_REPLICAS_EMPTY = "No standby was streaming from pg-aurora in the last 24 hours. On an Aurora target that is the expected answer. Aurora readers use the shared storage volume instead of streaming replication, so they never appear in pg_stat_replication and this read is always empty on an Aurora writer. That is not a replication fault. Reader lag would need aurora_replica_status(), which Performance Monitor does not read.";
-const STOCK_REPLICAS_EMPTY = "No replica was connected to pg-stock in the last 24 hours. On a server with no replicas that is the expected answer. If a replica is supposed to be attached, check get_pg_replication_slots: a slot that persists with nothing connected to it retains WAL indefinitely.";
+const STOCK_REPLICAS_EMPTY = "No replica was connected to pg-stock in the last 24 hours. On a server with no replicas that is the expected answer. If a replica is supposed to be attached, check get_pg_replication_slots: a slot that persists with nothing connected to it retains WAL indefinitely, which is the case worth acting on.";
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   const body = u.pathname === "/api/fleet"
