@@ -197,6 +197,11 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     /// </summary>
     public const string TraceSequenceStateKey = "trace_event_sequence";
 
+    /* #9107: the measurement label for a switched-off default trace. A literal on purpose (the measurement-label scan reads a
+       const string declared in this file); it must equal PerformanceMonitor.Common.DefaultTraceOffNote.Label, which the readers parse,
+       and the off-setting behaviour test runs this label through DefaultTraceOffNote.TryParse so a drift fails. */
+    private const string DefaultTraceOffMeasurementLabel = "default_trace_off";
+
     public sealed class Row
     {
         public DateTime? EventTime { get; set; }
@@ -698,7 +703,7 @@ SELECT /* PerformanceMonitorLite */
             && !reader.IsDBNull(2)
             && Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture) == 0)
         {
-            context.Measure(PerformanceMonitor.Common.DefaultTraceOffNote.Label, 1);
+            context.Measure(DefaultTraceOffMeasurementLabel, 1);
         }
 
         if (haveTail && !reader.IsDBNull(0))
