@@ -107,7 +107,7 @@ public sealed class ViewerFleetRollupSqlTests
         /* Both blocking sources and the deadlock read are bounded on BOTH sides so the totals honor a
            settable window exactly (the caller passes the same one-hour window the cards use). */
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Equal(2, CountOccurrences(sql, "event_time >= $1"));   // one per blocking source
+        Assert.Equal(2, CountOccurrences(sql, "event_time > $1"));   // one per blocking source
         Assert.Equal(2, CountOccurrences(sql, "event_time <= $2"));
         /* #3895: and each event-table scan carries the partition-column floor the event window cannot supply
            (two blocking sources + the deadlock count), with no upper bound on it — a late collection is still
