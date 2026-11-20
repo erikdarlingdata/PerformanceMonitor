@@ -289,11 +289,112 @@ VALUES (933000001, (now() AT TIME ZONE 'UTC') - interval '2 hours', 9301, 'rl-93
         var since = anchor - TimeSpan.FromDays(30);
         var raw = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since, ServerOffset, 100000, 60, null, ct);
         AssertSame(raw, await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerOffset, 100000, 60, null, ct), "before the bump");
+        await AssertStatsSameAsync(dataSource, since, ServerOffset, 100000, null, "before the bump", ct);
         var ladder = raw.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning).ToList();
 
         await ExecuteAsync(dataSource, string.Create(CultureInfo.InvariantCulture, $"UPDATE collect.job_outcome_daily SET success_duration_sum = success_duration_sum + 100000 WHERE server_id = {ServerOffset} AND job_id = 'job1' AND run_day = ((now() AT TIME ZONE 'UTC') + make_interval(mins => {offsetMinutes}) - interval '5 days')::date"), ct);
         var rolled = await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, ServerOffset, 100000, 60, null, ct);
         Assert.NotEqual(ladder, rolled.Where(r => r.JobId == "job1" && r.StepId == 0 && r.RunStatus == 0).Select(r => r.IsLongRunning));
+    }
+
+    /// <summary>
+    /// A server whose stored UTC offset is wrong: none stored (the read uses 0) with rows on a +10 h clock, or 0 stored with rows on a +14 h
+    /// clock. Its rows were collected up to 14 hours before the server-local time the stored offset puts them at, so two things went wrong when
+    /// the read trusted the stored offset: a full day at the start of the window held rows that raw retention had already dropped (the summary
+    /// counted them, the raw read could not), and an edge day lost the rows collected before its offset-adjusted start. Raw rows older than the
+    /// retention horizon are dropped as the purge would, and two windows are read: one that starts at 22:00 UTC (its first full day is near the
+    /// horizon) and one that starts at 02:00 UTC (its edge day starts after rows that are in the window).
+    /// </summary>
+    [Theory]
+    [InlineData(false, 600)]
+    [InlineData(true, 840)]
+    public async Task AServerWhoseStoredOffsetIsWrong_ReadsWhatTheRawRowsRead_OnceRetentionHasDroppedRaw(bool storedOffsetIsZero, int realOffsetMinutes)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var anchor = await SeedAsync(dataSource, ct);
+        await MoveOffsetServerAsync(dataSource, realOffsetMinutes, ct);
+        await ExecuteAsync(dataSource, storedOffsetIsZero
+            ? string.Create(CultureInfo.InvariantCulture, $"UPDATE server_properties SET utc_offset_minutes = 0 WHERE server_id = {ServerOffset}")
+            : string.Create(CultureInfo.InvariantCulture, $"DELETE FROM server_properties WHERE server_id = {ServerOffset}"), ct);
+        await SetRetentionAsync(dataSource, 30, ct);
+        await RunTickAsync(dataSource, null, ct);
+        Assert.Equal(1L, await ScalarAsync<long>(dataSource, string.Create(CultureInfo.InvariantCulture, $"SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE server_id = {ServerOffset}"), ct));
+        await ExecuteAsync(dataSource, "DELETE FROM collect.job_history WHERE collection_time < (now() AT TIME ZONE 'UTC') - interval '30 days'", ct);
+
+        var horizon = anchor - TimeSpan.FromDays(30);
+        var nearTheHorizon = horizon.Date + TimeSpan.FromHours(22);
+        if (nearTheHorizon < horizon)
+        {
+            nearTheHorizon += TimeSpan.FromDays(1);
+        }
+
+        var earlyMorning = (anchor - TimeSpan.FromDays(20)).Date + TimeSpan.FromHours(2);
+        foreach (var since in new[] { nearTheHorizon, earlyMorning })
+        {
+            foreach (var serverId in new int?[] { null, ServerOffset })
+            {
+                var raw = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct);
+                Assert.NotEmpty(raw);
+                var label = string.Create(CultureInfo.InvariantCulture, $"since {since:o} server {serverId}");
+                AssertSame(raw, await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct), label);
+                await AssertStatsSameAsync(dataSource, since, serverId, 100000, null, label, ct);
+            }
+        }
+
+        /* The window near the horizon still reads the summary for its whole days: a bump of the summary's sums shows in the average. */
+        await ExecuteAsync(dataSource, string.Create(CultureInfo.InvariantCulture, $"UPDATE collect.job_outcome_daily SET success_duration_sum = success_duration_sum + 100000 WHERE server_id = {ServerOffset} AND job_id = 'job1'"), ct);
+        var unbumped = await DarlingJobHistoryReader.GetJobStatsAsync(dataSource, nearTheHorizon, ServerOffset, 100000, 120, rollup: false, cancellationToken: ct);
+        var bumped = await DarlingJobHistoryReader.GetJobStatsAsync(dataSource, nearTheHorizon, ServerOffset, 100000, 120, rollup: true, cancellationToken: ct);
+        Assert.NotEqual(unbumped, bumped);
+    }
+
+    /// <summary>
+    /// A server whose clock really runs at +14 h but whose stored offset was changed since: the window's first full day (the first local day
+    /// after the window's start, by the stored offset) starts before the retention horizon in real time, so raw retention has dropped some of its
+    /// rows while the summary still counts them. The stored offset is picked from the window's start so that this holds whatever the time of day
+    /// of the run, and one row is inserted on that day, collected 30 minutes before the horizon, so the day has a row to lose.
+    /// </summary>
+    [Fact]
+    public async Task AServerWhoseStoredOffsetChanged_NeverReadsAFullDayRawRetentionHasDroppedRowsOf()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var anchor = await SeedAsync(dataSource, ct);
+        await MoveOffsetServerAsync(dataSource, 840, ct);
+
+        /* The window starts on a whole minute at the horizon. The fixture row ran at +14 h, 35 minutes before the start, on local day M; the stored
+           offset puts the window's start at M's midnight, so M is the first full day. */
+        var since = new DateTime(((anchor - TimeSpan.FromDays(30)).Ticks + TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Unspecified);
+        var collected = since - TimeSpan.FromMinutes(30);
+        var ranLocal = collected - TimeSpan.FromMinutes(5) + TimeSpan.FromMinutes(840);
+        var storedOffset = (int)(ranLocal.Date - since).TotalMinutes;
+        await ExecuteAsync(dataSource, string.Create(CultureInfo.InvariantCulture, $@"
+UPDATE server_properties SET utc_offset_minutes = {storedOffset} WHERE server_id = {ServerOffset};
+INSERT INTO collect.job_history (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled, step_id, step_name, run_status, run_status_desc, run_datetime, run_duration_seconds, retries_attempted, message)
+VALUES (934000001, '{collected:yyyy-MM-dd HH:mm:ss}', {ServerOffset}, 'rl-{ServerOffset}', 934000001, 'job1', 'job1', true, 0, '(Job outcome)', 1, 'ok', '{ranLocal:yyyy-MM-dd HH:mm:ss}', 20000, 0, NULL)"), ct);
+        await SetRetentionAsync(dataSource, 30, ct);
+        await RunTickAsync(dataSource, null, ct);
+        Assert.Equal(1L, await ScalarAsync<long>(dataSource, string.Create(CultureInfo.InvariantCulture, $"SELECT count(*) FROM collect.job_outcome_daily WHERE server_id = {ServerOffset} AND job_id = 'job1' AND run_day = '{ranLocal.Date:yyyy-MM-dd}' AND success_duration_sum >= 20000"), ct));
+        await ExecuteAsync(dataSource, "DELETE FROM collect.job_history WHERE collection_time < (now() AT TIME ZONE 'UTC') - interval '30 days'", ct);
+        Assert.Equal(0L, await ScalarAsync<long>(dataSource, "SELECT count(*) FROM collect.job_history WHERE job_history_id = 934000001", ct));
+
+        foreach (var serverId in new int?[] { null, ServerOffset })
+        {
+            var raw = await DarlingJobHistoryReader.GetWithoutSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct);
+            Assert.NotEmpty(raw);
+            var label = string.Create(CultureInfo.InvariantCulture, $"since {since:o} stored offset {storedOffset} server {serverId}");
+            AssertSame(raw, await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct), label);
+            await AssertStatsSameAsync(dataSource, since, serverId, 100000, null, label, ct);
+        }
     }
 
     private static async Task AssertWindowMatchesAsync(NpgsqlDataSource dataSource, DateTime anchor, TimeSpan span, CancellationToken ct)
@@ -305,6 +406,7 @@ VALUES (933000001, (now() AT TIME ZONE 'UTC') - interval '2 hours', 9301, 'rl-93
             var rolled = await DarlingJobHistoryReader.GetWithSummaryAsync(dataSource, since, serverId, 100000, 120, null, ct);
             Assert.NotEmpty(raw);
             AssertSame(raw, rolled, string.Create(CultureInfo.InvariantCulture, $"span {span.TotalDays}d server {serverId}"));
+            await AssertStatsSameAsync(dataSource, since, serverId, 100000, null, string.Create(CultureInfo.InvariantCulture, $"span {span.TotalDays}d server {serverId}"), ct);
         }
     }
 
@@ -342,7 +444,27 @@ INSERT INTO config.config_collector_schedules (server_id, collector_name, retent
                     var label = string.Create(CultureInfo.InvariantCulture, $"span {span.TotalDays}d end {endAgo} server {serverId} limit {limit}");
                     Assert.NotEmpty(raw);
                     AssertSame(raw, rolled, label);
+                    await AssertStatsSameAsync(dataSource, since, serverId, limit, filter, label, ct);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The <c>job_stats</c> of the two statements, per (server, job): the average successful duration as Postgres prints it, digit for digit, and
+    /// the last success. <see cref="DarlingJobHistoryRow"/> carries no average, only the flag it decides.
+    /// </summary>
+    private static async Task AssertStatsSameAsync(NpgsqlDataSource dataSource, DateTime since, int? serverId, int limit, JobHistoryFilter? filter, string label, CancellationToken ct)
+    {
+        var raw = await DarlingJobHistoryReader.GetJobStatsAsync(dataSource, since, serverId, limit, 120, rollup: false, filter, ct);
+        var rolled = await DarlingJobHistoryReader.GetJobStatsAsync(dataSource, since, serverId, limit, 120, rollup: true, filter, ct);
+        Assert.NotEmpty(raw);
+        Assert.True(raw.Count == rolled.Count, $"{label}: {raw.Count} raw job averages against {rolled.Count}");
+        for (var i = 0; i < raw.Count; i++)
+        {
+            if (raw[i] != rolled[i])
+            {
+                Assert.Fail($"{label}: server {raw[i].ServerId} job {raw[i].JobId}: raw average {raw[i].AvgSuccessDuration} last {raw[i].LastSuccessRunLocal:o}, summary average {rolled[i].AvgSuccessDuration} last {rolled[i].LastSuccessRunLocal:o}");
             }
         }
     }

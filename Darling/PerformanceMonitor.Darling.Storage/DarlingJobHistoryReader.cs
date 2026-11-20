@@ -225,7 +225,20 @@ public static class DarlingJobHistoryReader
 
         var rows = new List<DarlingJobHistoryRow>();
 
-        await using var command = dataSource.CreateCommand(sql);
+        await using var command = CreateReadCommand(dataSource, sql, sinceUtc, serverId, limit, commandTimeoutSeconds, filter);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadRow(reader, clocks));
+        }
+
+        return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);
+    }
+
+    private static NpgsqlCommand CreateReadCommand(
+        NpgsqlDataSource dataSource, string sql, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds, JobHistoryFilter? filter)
+    {
+        var command = dataSource.CreateCommand(sql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
         if (serverId.HasValue)
@@ -247,13 +260,26 @@ public static class DarlingJobHistoryReader
             }
         }
 
+        return command;
+    }
+
+    /// <summary>The <c>job_stats</c> output of the read (#9110), per server and job: the average successful duration as the text Postgres prints and the
+    /// last success in the server's clock. With <paramref name="rollup"/> it is the summary's statement, without it the statement over <c>job_history</c>
+    /// alone, so a test can compare the two digit for digit; the row type of the read carries neither value.</summary>
+    internal static async Task<List<(int ServerId, string JobId, string? AvgSuccessDuration, DateTime? LastSuccessRunLocal)>> GetJobStatsAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
+        bool rollup, JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
+    {
+        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter), rollup: rollup, jobStatsOnly: true);
+        var stats = new List<(int, string, string?, DateTime?)>();
+        await using var command = CreateReadCommand(dataSource, sql, sinceUtc, serverId, limit, commandTimeoutSeconds, filter);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, clocks));
+            stats.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetDateTime(3)));
         }
 
-        return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);
+        return stats;
     }
 
     /// <summary>
@@ -514,7 +540,7 @@ ORDER BY jh.category_name";
     /// the window's length (<see cref="UsesNarrowFirstRead"/>), and the default shape's text is unchanged.
     /// </para>
     /// </summary>
-    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false, bool rollup = false)
+    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false, bool rollup = false, bool jobStatsOnly = false)
     {
         var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
         var floorParam = scopedToServer ? "$3" : "$2";
@@ -616,7 +642,7 @@ ORDER BY jh.category_name";
 )";
 
 
-        return $@"
+        var withSql = $@"
 WITH active_servers AS (
     SELECT DISTINCT jh.server_id
     FROM job_history AS jh
@@ -638,7 +664,16 @@ base AS (
 {baseCutSql}
 ),
 {jobStatsSql}
-SELECT
+";
+
+        /* #9110: a test reads the CTE's own output, to compare the average and the last success of the two statements digit for digit
+           (the row type carries no average). Same statement and parameters; only the final SELECT differs. */
+        if (jobStatsOnly)
+        {
+            return withSql + "SELECT server_id, job_id, avg_success_duration::text, last_success_run_local FROM job_stats ORDER BY server_id, job_id";
+        }
+
+        return withSql + @"SELECT
     base.server_id,
     base.server_name,
     base.instance_id,
@@ -672,9 +707,14 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     }
 
     /// <summary>The daily summary tables (#9110): per day and job, the days' newest collection, and each server's watermark.</summary>
-    internal const string RollupDailyTable = "collect.job_outcome_daily";
-    internal const string RollupDaysTable = "collect.job_outcome_daily_days";
-    internal const string RollupWatermarkTable = "collect.job_outcome_daily_watermark";
+    internal const string RollupDailyTable = JobOutcomeDaily.Table;
+    internal const string RollupDaysTable = JobOutcomeDaily.DaysTable;
+    internal const string RollupWatermarkTable = JobOutcomeDaily.WatermarkTable;
+
+    /// <summary>The widest a server's real clock can run from UTC (840 minutes) plus the hour a daylight-saving change adds (#9110): how far before a
+    /// server-local time its rows can have been collected, whatever offset is stored for the server (none, or one that has since changed). The
+    /// summary read bounds its raw ranges and its full days by this, never by the stored offset.</summary>
+    internal const string RollupWidestOffsetMargin = "interval '900 minutes'";
 
     /// <summary>How far before the store's retention horizon a window may start and still read the summary (#9110): the gap between the app's
     /// clock, when it made the window start, and the store's now. Under the slack, a row the purge could have dropped but the rollup still
@@ -741,7 +781,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
             s.since_local,
             s.until_local,
             s.w,
-            (date_trunc('day', GREATEST(s.since_local, {floorParam} + make_interval(mins => so.offset_minutes) + interval '1 hour') - interval '1 microsecond') + interval '1 day')::date AS full_lo,
+            (date_trunc('day', GREATEST(s.since_local, GREATEST({floorParam}, (now() AT TIME ZONE 'UTC') - make_interval(days => {DarlingRetentionHorizons.FleetRetentionDaysSql("job_history")})) + {RollupWidestOffsetMargin}) - interval '1 microsecond') + interval '1 day')::date AS full_lo,
             {fullHiSql} AS full_hi
         FROM (SELECT $1 + make_interval(mins => so.offset_minutes) AS since_local, {untilLocalSql} AS until_local, {RollupWatermarkSql("$1")} AS w) AS s
     ) AS bd
@@ -793,7 +833,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
                 AND   jh.job_id = ANY (b.job_ids)
                 AND   jh.step_id = 0
                 AND   jh.run_status = 1
-                AND   jh.collection_time >= e.day - make_interval(mins => so.offset_minutes) - interval '1 hour'
+                AND   jh.collection_time >= e.day - {RollupWidestOffsetMargin}
                 AND   jh.collection_time <= dd.max_collection_time AT TIME ZONE 'UTC'
                 AND   jh.collection_time >= {floorParam}
                 AND   jh.run_datetime >= e.day
