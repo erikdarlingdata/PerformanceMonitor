@@ -54,8 +54,8 @@ public sealed class JobHistoryRollupJobStatsLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var anchor = await SeedAsync(dataSource, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: false, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: true, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: false, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: true, ct);
 
         await RunTickAsync(dataSource, null, ct);
         Assert.True(await DarlingJobHistoryReader.RollupTablesExistAsync(dataSource, 60, ct));
@@ -78,10 +78,10 @@ public sealed class JobHistoryRollupJobStatsLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var anchor = await SeedAsync(dataSource, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: false, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: false, ct);
 
         await RunTickAsync(dataSource, null, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: true, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: true, ct);
         await AssertEveryReadMatchesAsync(dataSource, anchor, ct);
 
         var counted = await ScalarAsync<long>(dataSource, "SELECT sum(success_count)::bigint FROM collect.job_outcome_daily", ct);
@@ -101,8 +101,8 @@ public sealed class JobHistoryRollupJobStatsLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var anchor = await SeedAsync(dataSource, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: false, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: true, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: false, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: true, ct);
 
         await AssertEveryReadMatchesAsync(dataSource, anchor, ct);
 
@@ -124,8 +124,8 @@ public sealed class JobHistoryRollupJobStatsLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var anchor = await SeedAsync(dataSource, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: false, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: true, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: false, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: true, ct);
 
         await RunTickAsync(dataSource, anchor - TimeSpan.FromDays(3) - TimeSpan.FromHours(4), ct);
         var through = await ScalarAsync<DateTime>(dataSource, $"SELECT collected_through AT TIME ZONE 'UTC' FROM collect.job_outcome_daily_watermark WHERE server_id = {ServerA}", ct);
@@ -224,8 +224,8 @@ public sealed class JobHistoryRollupJobStatsLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var anchor = await SeedAsync(dataSource, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: false, ct);
-        await InsertLateRowsAsync(dataSource, aboveTheWatermark: true, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: false, ct);
+        await InsertLateRowsAsync(dataSource, anchor, aboveTheWatermark: true, ct);
         await SetRetentionAsync(dataSource, 20, ct);
 
         await RunTickAsync(dataSource, null, ct);
@@ -527,36 +527,42 @@ FROM (VALUES (9301, 0), (9302, 330)) AS sv(server_id, off), generate_series(1, 6
     /// builds just now (<paramref name="aboveTheWatermark"/>); the rest are at or below it. All are successes of 3000 seconds or more, so a
     /// miss or a double count moves the average.
     /// </summary>
-    private static async Task InsertLateRowsAsync(NpgsqlDataSource dataSource, bool aboveTheWatermark, CancellationToken ct) =>
+    private static async Task InsertLateRowsAsync(NpgsqlDataSource dataSource, DateTime anchor, bool aboveTheWatermark, CancellationToken ct) =>
         await ExecuteAsync(dataSource, $@"
 INSERT INTO collect.job_history (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled, step_id, step_name, run_status, run_status_desc, run_datetime, run_duration_seconds, retries_attempted, message)
 SELECT 932000000 + l.duration * 10 + sv.server_id - 9300, (now() AT TIME ZONE 'UTC') - make_interval(mins => l.collected_mins_ago), sv.server_id, 'rl-' || sv.server_id, 932000000 + l.duration * 10 + sv.server_id - 9300,
        l.job, l.job, true, 0, '(Job outcome)', 1, 'ok',
-       (now() AT TIME ZONE 'UTC') - make_interval(mins => l.ran_mins_ago) + make_interval(mins => sv.off), l.duration, 0, NULL
+       CASE WHEN l.cut_span_mins IS NULL
+            THEN (now() AT TIME ZONE 'UTC') - make_interval(mins => l.ran_mins_ago) + make_interval(mins => sv.off)
+            ELSE w.since_local + LEAST(interval '1 hour', (date_trunc('day', w.since_local) + interval '1 day' - w.since_local) / 2)
+       END, l.duration, 0, NULL
 FROM (VALUES (9301, 0), (9302, 330)) AS sv(server_id, off),
      (VALUES
         /* the window's first day (1, 7 and 30 days), collected hours later and 20 minutes ago */
-        ('job1', 1440 - 60,   100,  3000),
-        ('job2', 1440 - 120,  20,   3001),
-        ('job1', 10080 - 60,  120,  3002),
-        ('job2', 10080 - 120, 21,   3003),
-        ('job1', 43200 - 60,  130,  3004),
-        ('job2', 43200 - 120, 22,   3005),
-        /* the day the floor cuts: ran inside the window, collected before the floor (a day before the window starts) */
-        ('job4', 1440 - 60,   2880 + 180,  3006),
-        ('job4', 10080 - 60,  11520 + 180, 3007),
-        ('job4', 43200 - 60,  44640 + 180, 3008),
+        ('job1', 1440 - 60,   100,  3000, NULL),
+        ('job2', 1440 - 120,  20,   3001, NULL),
+        ('job1', 10080 - 60,  120,  3002, NULL),
+        ('job2', 10080 - 120, 21,   3003, NULL),
+        ('job1', 43200 - 60,  130,  3004, NULL),
+        ('job2', 43200 - 120, 22,   3005, NULL),
+        /* the day the floor cuts: ran inside the window, collected before the floor (a day before the window starts). It sits on the window's first day
+           on each server's own clock, whatever the hour: a row on a later day is a full day to the summary, which counts every row of a full day, while the
+           raw read drops it at the floor (a real row is never collected more than a day before it ran, so the floor never cuts a full day). */
+        ('job4', 1440 - 60,   2880 + 180,  3006, 1440),
+        ('job4', 10080 - 60,  11520 + 180, 3007, 10080),
+        ('job4', 43200 - 60,  44640 + 180, 3008, 43200),
         /* full days: collected days after they ran, and in the last half hour */
-        ('job3', 8 * 1440,    5 * 1440,   3009),
-        ('job1', 6 * 1440,    25,         3010),
-        ('job3', 20 * 1440,   12 * 1440,  3011),
-        ('job2', 21 * 1440,   26,         3012),
-        ('job3', 29 * 1440,   28 * 1440,  3013),
-        ('job5', 3 * 1440,    2 * 1440,   3014),
-        ('job6', 4 * 1440,    5,          3015),
-        ('job3', 480,         30,         3016),
-        ('job1', 60,          5,          3017)
-     ) AS l(job, ran_mins_ago, collected_mins_ago, duration)
+        ('job3', 8 * 1440,    5 * 1440,   3009, NULL),
+        ('job1', 6 * 1440,    25,         3010, NULL),
+        ('job3', 20 * 1440,   12 * 1440,  3011, NULL),
+        ('job2', 21 * 1440,   26,         3012, NULL),
+        ('job3', 29 * 1440,   28 * 1440,  3013, NULL),
+        ('job5', 3 * 1440,    2 * 1440,   3014, NULL),
+        ('job6', 4 * 1440,    5,          3015, NULL),
+        ('job3', 480,         30,         3016, NULL),
+        ('job1', 60,          5,          3017, NULL)
+     ) AS l(job, ran_mins_ago, collected_mins_ago, duration, cut_span_mins)
+CROSS JOIN LATERAL (SELECT '{anchor:yyyy-MM-dd HH:mm:ss}'::timestamp - make_interval(mins => l.cut_span_mins) + make_interval(mins => sv.off) AS since_local) AS w
 WHERE (l.collected_mins_ago < 50) = {(aboveTheWatermark ? "true" : "false")}", ct);
 
     private static async Task RunTickAsync(NpgsqlDataSource dataSource, DateTime? nowUtc, CancellationToken ct)
