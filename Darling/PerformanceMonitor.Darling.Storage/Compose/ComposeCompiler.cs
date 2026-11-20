@@ -477,6 +477,24 @@ public static class ComposeCompiler
             + $" FROM {table} AS {FactAlias} WHERE {window}) AS k WHERE true{hashKey}{residual})";
     }
 
+    /// <summary>The raw sources whose only usable index is (server_id, collection_time): they have no index on collection_time alone
+    /// (#9151). A fleet read of a short window on them, with no server predicate, makes the planner read the whole day's chunk and
+    /// throw most of it away (measured: 128 thousand blocks for a 4 hour window, because the plan never picks the index's skip scan).</summary>
+    private static readonly HashSet<string> s_noTimeOnlyIndexSources = new(StringComparer.Ordinal) { "procedure_stats", "query_stats" };
+
+    /// <summary>
+    /// Every server_id the raw table holds, read with one index probe per server (a loose index scan over (server_id, collection_time)).
+    /// An unscoped panel adds <c>server_id = ANY(this)</c> so the planner has a server list to drive the (server_id, collection_time)
+    /// index with and reads only the window, as a scoped panel always did. The list is every id the table holds, so it excludes no
+    /// row: server_id is NOT NULL, and a server missing from the registry (a removed server's history, #5525) is still in it.
+    /// The table name is a compile-time catalog constant, never a caller string.
+    /// </summary>
+    private static string DistinctServerIdsSql(string sourceTable)
+    {
+        var table = $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+        return $"ARRAY(WITH RECURSIVE ids(id) AS (SELECT min(server_id) FROM {table} UNION ALL SELECT (SELECT min(server_id) FROM {table} WHERE server_id > ids.id) FROM ids WHERE ids.id IS NOT NULL) SELECT id FROM ids WHERE id IS NOT NULL)";
+    }
+
     /// <summary>True when two normalized server scopes are the same set under ordinal comparison (the case rule of
     /// SQL <c>= ANY</c>); both null is the fleet matching the fleet.</summary>
     private static bool SameServerScope(IReadOnlyList<string>? proved, IReadOnlyList<string>? run)
@@ -722,6 +740,10 @@ public static class ComposeCompiler
             if (hasServerScope)
             {
                 sql.Append(indent).Append("  AND ").Append(FactScope()).Append('\n');
+            }
+            else if (route.Tier == ComposeSourceTier.Raw && s_noTimeOnlyIndexSources.Contains(plan.Measure.SourceTable))
+            {
+                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_id = ANY(").Append(DistinctServerIdsSql(plan.Measure.SourceTable)).Append(")\n");
             }
 
             foreach (var clause in filterClauses)
