@@ -531,7 +531,8 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            cycles that most need the path recorded are the ones that collect ZERO rows (a server whose
            trace churns through 20 MB files without producing curated events), and a row-derived path
            would never notice those rollovers — leaving the collector in the expensive fallback forever. */
-        Assert.Contains("FROM @default_trace_events;\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start;", text, StringComparison.Ordinal);
+        Assert.Contains("FROM @default_trace_events;\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start,
+    default_trace_enabled = @default_trace_enabled;", text, StringComparison.Ordinal);
         Assert.DoesNotContain("current_trace_path = ft.", text, StringComparison.Ordinal);
         Assert.DoesNotContain("trace_path", string.Join(",", DefaultTraceEventsCollector.Instance.PayloadColumns.Select(c => c.Name)), StringComparison.Ordinal);
     }
