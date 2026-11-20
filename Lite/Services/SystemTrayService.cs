@@ -28,6 +28,10 @@ public class SystemTrayService : IDisposable
     private readonly Action _restoreWindow;
     private readonly CollectionBackgroundService? _backgroundService;
     private bool _disposed;
+
+    /* #9142: with no taskbar every balloon throws from the tray library. The gate turns that into one Warning and a channel
+       that stays off, and keeps the throw out of every caller (an alert's toast, a resolution toast, the plain balloons). */
+    private readonly TrayChannelGate _gate = new(message => AppLogger.Warn("Tray", message));
     private MenuItem? _pauseResumeItem;
     private TextBlock? _tooltipText;
 
@@ -172,12 +176,18 @@ public class SystemTrayService : IDisposable
     }
 
     /// <summary>
-    /// Shows a balloon notification from the system tray icon.
+    /// Shows a balloon notification from the system tray icon. True when it was shown; false when the tray has no icon or
+    /// is unavailable (#9142). Never throws.
     /// </summary>
-    public void ShowNotification(string title, string message, BalloonIcon icon)
-    {
-        _trayIcon?.ShowBalloonTip(title, message, icon);
-    }
+    public bool ShowNotification(string title, string message, BalloonIcon icon) =>
+        _gate.Run(() =>
+        {
+            if (_trayIcon == null)
+                return false;
+
+            _trayIcon.ShowBalloonTip(title, message, icon);
+            return true;
+        });
 
     /// <summary>
     /// Shows a themed, button-less balloon (the same card chrome as the snoozable condition cards)
@@ -185,38 +195,42 @@ public class SystemTrayService : IDisposable
     /// Windows balloon. Pass <see cref="ToastSeverity.Success"/> for a green-check "resolved" accent.
     /// No-op if the tray icon hasn't been initialized.
     /// </summary>
-    public void ShowStyledNotification(string title, string message, ToastSeverity severity)
-    {
-        if (_trayIcon == null)
-            return;
+    public bool ShowStyledNotification(string title, string message, ToastSeverity severity) =>
+        _gate.Run(() =>
+        {
+            if (_trayIcon == null)
+                return false;
 
-        var trayIcon = _trayIcon;
-        var balloon = new StyledBalloon(title, message, severity);
-        trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, StyledToastTimeoutMs);
-        HoldWhileRead(balloon, trayIcon, StyledToastTimeoutMs);
-    }
+            var trayIcon = _trayIcon;
+            var balloon = new StyledBalloon(title, message, severity);
+            trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, StyledToastTimeoutMs);
+            HoldWhileRead(balloon, trayIcon, StyledToastTimeoutMs);
+            return true;
+        });
 
     /// <summary>
     /// Shows a custom interactive balloon with snooze buttons that create a temporary
     /// mute rule scoped to <paramref name="serverName"/> + <paramref name="metricName"/>.
     /// Falls back to a plain balloon if the tray icon hasn't been initialized.
     /// </summary>
-    public void ShowSnoozableNotification(
+    public bool ShowSnoozableNotification(
         string title,
         string message,
         BalloonIcon icon,
         string serverName,
         string metricName,
-        MuteRuleService muteRuleService)
-    {
-        if (_trayIcon == null)
-            return;
+        MuteRuleService muteRuleService) =>
+        _gate.Run(() =>
+        {
+            if (_trayIcon == null)
+                return false;
 
-        var trayIcon = _trayIcon;
-        var balloon = new SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService, () => trayIcon.CloseBalloon());
-        trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, SnoozeToastTimeoutMs);
-        HoldWhileRead(balloon, trayIcon, SnoozeToastTimeoutMs);
-    }
+            var trayIcon = _trayIcon;
+            var balloon = new SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService, () => trayIcon.CloseBalloon());
+            trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, SnoozeToastTimeoutMs);
+            HoldWhileRead(balloon, trayIcon, SnoozeToastTimeoutMs);
+            return true;
+        });
 
     /// <summary>How long a plain (cleared or resolved) card stays, and how long a snoozable one stays, without a reader on it.</summary>
     private const int StyledToastTimeoutMs = 10000;
