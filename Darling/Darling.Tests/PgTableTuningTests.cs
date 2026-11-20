@@ -87,7 +87,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(36, PgTableTuning.Statements.Count);   /* 9 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover, #8570 the procedure name index) + 5 DROP INDEX + 22 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables) */
+        Assert.Equal(40, PgTableTuning.Statements.Count);   /* 9 CREATE INDEX (#4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover, #8570 the procedure name index) + 5 DROP INDEX + 26 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables, #9111 the four closed-day rollup tables) */
     }
 
     /// <summary>

@@ -824,13 +824,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
                        ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
                        own statement_timeout and formatted it); everything else that reaches here is Ok. */
-                    var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
-                        ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
+                    var isServerError = ClassifyToolResponse(result) == ToolResponseKind.ServerError;
+                    var webSentence = isServerError ? McpHelpers.ErrorMessageOf(result) : null;
+                    var webOutcome = isServerError
+                        ? ReadOutcomeClassifier.ClassifySentence(webSentence!, context.RequestAborted)
                         : ReadOutcome.Ok;
                     var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
                     RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
-                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
+                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome, webSentence));
 
                     /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
                     ThrowIfCallerGone(result, context.RequestAborted);

@@ -262,7 +262,7 @@ public sealed class McpToolLatencyFilter
             var result = await next(request, cancellationToken);
             var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), scope.Fallback);
             Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
-            OfferSlow(scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome), caller);
+            OfferSlow(scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome, ErrorSentenceOf(result)), caller);
             return result;
         }
         catch (Exception ex)
@@ -505,15 +505,27 @@ public sealed class McpToolLatencyFilter
     /// without a running server.</summary>
     internal static ReadOutcome ClassifyResult(CallToolResult result, System.Threading.CancellationToken cancellationToken)
     {
+        if (ErrorSentenceOf(result) is { } sentence)
+        {
+            return ReadOutcomeClassifier.ClassifySentence(sentence, cancellationToken);
+        }
+
+        return result.IsError == true ? ReadOutcome.Error : ReadOutcome.Ok;
+    }
+
+    /// <summary>The caught-error sentence a tool's normal return carries, or null when it carries none. The one reading of the envelope
+    /// <see cref="ClassifyResult"/> and the slow-read record's <c>error_class</c> share.</summary>
+    private static string? ErrorSentenceOf(CallToolResult result)
+    {
         /* Round 1, L6: an envelope GCF re-encoded is read through its JSON form, so it is not counted as ok. */
         if (result.Content is { Count: 1 } content && content[0] is TextContentBlock block
             && EnvelopeText(block.Text) is var text
             && (result.IsError == true || McpHelpers.IsErrorEnvelope(text)))
         {
-            return ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(text), cancellationToken);
+            return McpHelpers.ErrorMessageOf(text);
         }
 
-        return result.IsError == true ? ReadOutcome.Error : ReadOutcome.Ok;
+        return null;
     }
 
     /// <summary>The arguments a slow-read record keeps for one MCP call. A write tool's arguments are the new values it

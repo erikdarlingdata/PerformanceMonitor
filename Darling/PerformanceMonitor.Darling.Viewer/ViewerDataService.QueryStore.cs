@@ -652,6 +652,106 @@ public sealed partial class ViewerDataService
         + ",\n" + QueryStoreTopTail;
 
     /// <summary>
+    /// #9111: the grid's <c>deduped</c> when a run of whole built UTC days lies inside the window. Three arms stacked: the interval table
+    /// from the read start up to the run, the interval table from the end of the run to the window's end, and
+    /// <c>query_store_grid_daily</c> for the run itself. Every arm projects the grid's group columns and the same recombinable parts
+    /// (<see cref="QueryStoreClosedDayRollup.GridValueColumns"/>): the execution count, each weighted average as its product
+    /// <c>avg_x * execution_count</c>, each minimum and maximum, and the plan-state columns. The aggregates above it are the
+    /// interval-table read's own with each weighted product read from its column (<see cref="OverRollupParts"/>), so a day comes out the
+    /// same from either source. The interval arms carry the interval-table read's window and <c>first_execution_time</c> bounds with the
+    /// run's edge in place of the window's, so the partitions of the run's days are not read. <paramref name="runStart"/> and
+    /// <paramref name="runEnd"/> are the parameters holding the run's first midnight and the midnight after its last day.
+    /// </summary>
+    private static string QueryStoreTopRollupPrefix(string runStart, string runEnd) => $$"""
+        WITH deduped AS NOT MATERIALIZED (
+            SELECT
+                {{QueryStoreClosedDayRollup.GridKeyColumns}},
+                {{QueryStoreClosedDayRollup.GridValueColumnsFromInterval}},
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) < {{runStart}}::timestamp
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= {{runStart}}::timestamp + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            UNION ALL
+            SELECT
+                {{QueryStoreClosedDayRollup.GridKeyColumns}},
+                {{QueryStoreClosedDayRollup.GridValueColumnsFromInterval}},
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   COALESCE(interval_start_time_utc, collection_time) >= {{runEnd}}::timestamp
+            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) < $3)
+            AND   first_execution_time >= {{runEnd}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            UNION ALL
+            SELECT
+                {{QueryStoreClosedDayRollup.GridKeyColumns}},
+                {{QueryStoreClosedDayRollup.GridValueColumns}},
+                1 AS rn
+            FROM query_store_grid_daily
+            WHERE server_id = $1
+            AND   day_utc >= CAST({{runStart}}::timestamp AS date)
+            AND   day_utc < CAST({{runEnd}}::timestamp AS date)
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        ),
+
+        """;
+
+    /// <summary>#9111: <paramref name="sql"/> with every weighted product <c>SUM(CAST(avg_x AS double precision) * execution_count)</c> read
+    /// from the column <see cref="QueryStoreTopRollupPrefix"/> projects it as, <c>SUM(avg_x_wsum)</c>. Nothing else changes, so the
+    /// rollup read ranks and aggregates by the interval-table read's own text.</summary>
+    private static string OverRollupParts(string sql) =>
+        System.Text.RegularExpressions.Regex.Replace(
+            sql, @"SUM\(CAST\((avg_\w+) AS double precision\) \* execution_count\)", "SUM(${1}_wsum)", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// #9111: <see cref="QueryStoreTopTableKeysSql"/> over <see cref="QueryStoreTopRollupPrefix"/>. $1 to $6 as that statement's, $7 the
+    /// first midnight of the built run, $8 the midnight after its last day.
+    /// </summary>
+    public static readonly string QueryStoreTopRollupKeysSql = QueryStoreTopRollupPrefix("$7", "$8") + OverRollupParts(QueryStoreTopTableKeysCte) + "\n"
+        + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys\n"
+        + "ORDER BY rank_cost DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
+
+    /// <summary>
+    /// #9111: <see cref="QueryStoreTopTableByKeysSql"/> over <see cref="QueryStoreTopRollupPrefix"/>. $1 to $11 as that statement's, $12 the
+    /// first midnight of the built run, $13 the midnight after its last day.
+    /// </summary>
+    public static readonly string QueryStoreTopRollupByKeysSql = QueryStoreTopRollupPrefix("$12", "$13")
+        + "keys AS (\n"
+        + "    SELECT *\n"
+        + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
+        + "         AS k(database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role)\n"
+        + "),\n"
+        + OverRollupParts(QueryStoreTopTableRankedCte)
+        + ",\n" + QueryStoreTopTail;
+
+    /// <summary>The two parameters a rollup read adds after its statement's own: the built run's first midnight and the midnight after
+    /// its last day.</summary>
+    private static void AddServedDaysParameters(Npgsql.NpgsqlCommand command, QueryStoreClosedDayRollup.ServedDays served)
+    {
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(served.Start, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(served.End, DateTimeKind.Unspecified) });
+    }
+
+    /// <summary>#9111: the built run of whole UTC days this read takes from the closed-day rollups, or null to read the interval table
+    /// alone: a store below the rollups' version, a server with no built day in the window, or one whose builds have stopped.</summary>
+    private async Task<QueryStoreClosedDayRollup.ServedDays?> ResolveServedDaysAsync(
+        Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime end, CancellationToken cancellationToken)
+    {
+        if (_cachedStoreSchemaVersion is not int version || version < QueryStoreClosedDayRollup.Version)
+        {
+            return null;
+        }
+
+        return await QueryStoreClosedDayRollup.ResolveServedDaysAsync(
+            connection, transaction, serverId, readStart, end, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
+
+    /// <summary>
     /// The store schema version <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) requires before it will
     /// even attempt <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the
     /// <c>PgMigrations</c> migration that creates the table. The slicer (#8549) reads the same constant before it routes to the
@@ -830,9 +930,11 @@ public sealed partial class ViewerDataService
     /// catch), and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
     private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopQueriesFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken,
+        bool useRollups = true)
     {
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var rollupsTried = false;
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -864,8 +966,17 @@ public sealed partial class ViewerDataService
 
             /* #5882: the same shorter first_execution_time floor as the MCP read (DarlingDataReader.TryGetQueryStoreTopFromTableAsync
                explains it), one extra round trip per table-served read. An open end reads to now. */
-            var keysSql = QueryStoreTopTableKeysSql;
-            var topSql = QueryStoreTopTableByKeysSql;
+            /* #9111: a run of whole built days inside the window comes from the closed-day rollup, in this read's snapshot; the window's
+               edges, the open days and any day that is not built stay on the interval table. No run reads the interval table alone. */
+            /* The built-day lookup itself reads the rollup bookkeeping tables, so a fault in it counts. Once it says no day is served, the
+               rest of the read is the interval table alone and a fault there is not the rollups' to retry. */
+            rollupsTried = useRollups && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
+            var served = rollupsTried
+                ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken)
+                : null;
+            rollupsTried = served is not null;
+            var keysSql = served is null ? QueryStoreTopTableKeysSql : QueryStoreTopRollupKeysSql;
+            var topSql = served is null ? QueryStoreTopTableByKeysSql : QueryStoreTopRollupByKeysSql;
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, literalEndUtc ?? DateTime.UtcNow, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
@@ -890,6 +1001,11 @@ public sealed partial class ViewerDataService
             {
                 AddTableReadParameters(keysCommand, serverId, plan.ReadStart, literalEndUtc, top, databaseNames);
                 keysCommand.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = TopFill.FinalCandidates(top) });
+                if (served is { } run)
+                {
+                    AddServedDaysParameters(keysCommand, run);
+                }
+
                 await using var keyReader = await keysCommand.ExecuteReaderAsync(cancellationToken);
                 while (await keyReader.ReadAsync(cancellationToken))
                 {
@@ -905,7 +1021,7 @@ public sealed partial class ViewerDataService
                ends with it. */
             await SetPerKeyFetchPlanAsync(connection, transaction, cancellationToken);
 
-            (rows, _) = await ReadTablePageByKeysAsync(connection, transaction, topSql, serverId, plan.ReadStart, literalEndUtc, top, databaseNames, keys, cancellationToken);
+            (rows, _) = await ReadTablePageByKeysAsync(connection, transaction, topSql, serverId, plan.ReadStart, literalEndUtc, top, databaseNames, keys, cancellationToken, served);
 
             return (rows, plan);
         }
@@ -914,6 +1030,16 @@ public sealed partial class ViewerDataService
             /* Review D4R M2: a permission failure here (a viewer role that can't SELECT the new table on an
                upgraded store) must not fall back to raw forever with no trace anywhere. #8549: it goes to the Viewer's own log, with the
                time spent, because a read cancelled at the deadline never reaches the store's statement history and a Trace line has no listener. */
+            /* #9111: a fault with the closed-day rollups in the read (a table the viewer role cannot read, a missing relation) aborts this
+               snapshot, so the read starts again on the interval table alone and gives that read's answer. A deadline is not retried: the
+               second read would only wait another one. */
+            if (rollupsTried && !IsCommandTimeout(ex))
+            {
+                LogRollupReadFallback("Query Store grid", elapsed, ex);
+                return await TryGetQueryStoreTopQueriesFromTableAsync(
+                    serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, tags, cancellationToken, useRollups: false);
+            }
+
             LogTableReadFallback("Query Store grid", elapsed, "the interval-table read failed", ex);
             return null;
         }
@@ -928,12 +1054,13 @@ public sealed partial class ViewerDataService
     /// <see cref="TopFill.NextCandidates"/> count, up to every kept key, so the page, its order and its rows are those of one fetch over
     /// all the kept keys. The keys statement orders by the page's own sort (total duration), so a prefix of the keys holds the page's
     /// first rows. The candidate count of the old fetch was never read by the grid, so none is returned.
-    /// Run inside the transaction that read <paramref name="keys"/>, after <see cref="SetPerKeyFetchPlanAsync"/>.
+    /// Run inside the transaction that read <paramref name="keys"/>, after <see cref="SetPerKeyFetchPlanAsync"/>. <paramref name="served"/> is the
+    /// built run a rollup statement (<see cref="QueryStoreTopRollupByKeysSql"/>) reads, bound after the keys (#9111).
     /// </summary>
     /// <returns>The page's rows, and how many keys each round fetched.</returns>
     internal static async Task<(List<ViewerQueryStoreRow> Rows, List<int> KeysPerRound)> ReadTablePageByKeysAsync(
         Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction? transaction, string topSql, int serverId, DateTime readStart, DateTime? literalEndUtc,
-        int top, IReadOnlyList<string>? databaseNames, TableReadKeys keys, CancellationToken cancellationToken)
+        int top, IReadOnlyList<string>? databaseNames, TableReadKeys keys, CancellationToken cancellationToken, QueryStoreClosedDayRollup.ServedDays? served = null)
     {
         var keysPerRound = new List<int>();
         var limit = TopFill.FirstCandidates(top);
@@ -946,6 +1073,11 @@ public sealed partial class ViewerDataService
             {
                 AddTableReadParameters(command, serverId, readStart, literalEndUtc, top, databaseNames);
                 fetched.AddParameters(command);
+                if (served is { } run)
+                {
+                    AddServedDaysParameters(command, run);
+                }
+
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
@@ -992,6 +1124,10 @@ public sealed partial class ViewerDataService
             : $" ({ex.GetType().Name}: {ex.Message}{(ex.InnerException is { } inner ? $" / {inner.GetType().Name}" : "")})";
         ViewerLogger.Warn("QueryStore", $"{read}: {why} after {elapsed.ElapsedMilliseconds} ms{detail}; retrying on raw history (#8549)");
     }
+
+    /// <summary>#9111: a read that took whole days from the closed-day rollups faulted and starts again on the interval table.</summary>
+    private static void LogRollupReadFallback(string read, System.Diagnostics.Stopwatch elapsed, Exception ex) =>
+        ViewerLogger.Warn("QueryStore", $"{read}: the closed-day rollup read failed after {elapsed.ElapsedMilliseconds} ms ({ex.GetType().Name}: {ex.Message}); reading the interval table instead (#9111)");
 
     /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
     /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
@@ -1502,6 +1638,66 @@ public sealed partial class ViewerDataService
         ORDER BY bucket
         """;
 
+    /// <summary>
+    /// #9111: <see cref="QueryStoreSlicerTableSql"/> when a run of whole built UTC days lies inside the window and the bin is a whole number
+    /// of hours. <c>binned</c> stacks three arms: the interval table from the read start up to the run, the interval table from the end of
+    /// the run to the window's end, and <c>query_store_slicer_hourly</c> for the run, whose rows are already the five products summed per
+    /// (hour, database, query). An hour lies inside one bin (the bin origin is a midnight and the bin a multiple of 60 minutes), so the
+    /// rollup's hour bins where its rows did. Everything from <c>sums</c> down is the interval-table statement's own text, and the query
+    /// stays in the rollup's key, so the totals and the distinct query count are the same from either source.
+    /// $1 to $5 as that statement's, $6 the first midnight of the built run, $7 the midnight after its last day.
+    /// </summary>
+    public static readonly string QueryStoreSlicerRollupSql = $$"""
+        WITH binned AS NOT MATERIALIZED (
+            SELECT
+                query_id,
+                date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
+                CAST(avg_cpu_time_us AS double precision) * execution_count AS cpu,
+                CAST(avg_duration_us AS double precision) * execution_count AS dur,
+                CAST(avg_logical_io_reads AS double precision) * execution_count AS reads,
+                CAST(avg_logical_io_writes AS double precision) * execution_count AS writes,
+                CAST(avg_physical_io_reads AS double precision) * execution_count AS preads
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) < $6::timestamp
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $6::timestamp + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            UNION ALL
+            SELECT
+                query_id,
+                date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
+                CAST(avg_cpu_time_us AS double precision) * execution_count AS cpu,
+                CAST(avg_duration_us AS double precision) * execution_count AS dur,
+                CAST(avg_logical_io_reads AS double precision) * execution_count AS reads,
+                CAST(avg_logical_io_writes AS double precision) * execution_count AS writes,
+                CAST(avg_physical_io_reads AS double precision) * execution_count AS preads
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $7::timestamp
+            AND   COALESCE(interval_start_time_utc, collection_time) < $3
+            AND   first_execution_time >= $7::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            UNION ALL
+            SELECT
+                query_id,
+                date_bin(CAST($5 AS integer) * INTERVAL '1 minute', hour_utc, {{TrendBucketSql.OriginSql}}) AS bucket,
+                cpu_wsum AS cpu,
+                duration_wsum AS dur,
+                logical_reads_wsum AS reads,
+                logical_writes_wsum AS writes,
+                physical_reads_wsum AS preads
+            FROM query_store_slicer_hourly
+            WHERE server_id = $1
+            AND   hour_utc >= $6::timestamp
+            AND   hour_utc < $7::timestamp
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+
+        """ + QueryStoreSlicerTableSql[QueryStoreSlicerTableSql.IndexOf("sums AS (", StringComparison.Ordinal)..];
+
     /// <summary>Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it ($5 minutes).
     /// #8549: a window of <see cref="QueryStoreIntervalWide.SlicerWideMinWindow"/> or more reads the interval table when the grid's gate
     /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>, schema version, coverage, the raw chunk floor) lets it; any "no" or fault reads
@@ -1542,9 +1738,10 @@ public sealed partial class ViewerDataService
     /// The legacy-row probe is skipped (<see cref="QueryStoreIntervalWide.LegacyRows.Allow"/>) because one snapshot per identity is
     /// what both statements keep for a legacy row too. The plan that served goes back with the buckets.</summary>
     private async Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)?> TryGetQueryStoreSlicerFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken, bool useRollups = true)
     {
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var rollupsTried = false;
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -1568,17 +1765,36 @@ public sealed partial class ViewerDataService
             }
 
             /* #8549: the table read alone gets the longer deadline, as the grid's does. */
-            await using var command = new Npgsql.NpgsqlCommand(QueryStoreSlicerTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
+            /* #9111: whole built days come from the hourly rollup when the bin is a whole number of hours, in this read's snapshot. */
+            var bucketMinutes = SlicerBuckets.MinutesFor(startUtc, endUtc);
+            rollupsTried = useRollups && bucketMinutes % 60 == 0 && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
+            var served = rollupsTried
+                ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken)
+                : null;
+            rollupsTried = served is not null;
+            await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = bucketMinutes });
+            if (served is { } run)
+            {
+                AddServedDaysParameters(command, run);
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return (await ReadSlicerBucketsAsync(reader, cancellationToken), plan);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #9111: as the grid's: a fault with the hourly rollup in the read starts it again on the interval table alone. */
+            if (rollupsTried && !IsCommandTimeout(ex))
+            {
+                LogRollupReadFallback("Query Store slicer", elapsed, ex);
+                return await TryGetQueryStoreSlicerFromTableAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken, useRollups: false);
+            }
+
             LogTableReadFallback("Query Store slicer", elapsed, "the interval-table read failed", ex);
             return null;
         }
