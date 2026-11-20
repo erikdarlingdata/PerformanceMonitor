@@ -48,6 +48,7 @@ public sealed class WebRouteStatementCensusTests
         "DarlingWebEndpoints.cs",
         "FrontDoor/DarlingFrontDoorWebProxy.cs",
         "Hosting/DarlingHealthHostService.cs",
+        "Hosting/DarlingMetricsHostService.cs",
         "Mcp/DarlingMcpHostService.cs",
     };
 
@@ -57,6 +58,7 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/ping\""] = "liveness, no data",
         ["\"/livez\""] = "the health port's one word (ok, starting, degraded or stopped), no data, no store read (#8184)",
         ["\"/readyz\""] = "the health port's one word (ok, starting, degraded or stopped), no data, no store read (#8184)",
+        ["\"/metrics\""] = "the metrics port: an in-memory snapshot, no store read per scrape (#9013)",
         ["\"/api/{**rest}\""] = "the front door's one catch-all (#6840), which exists only on a front door and maps no dashboard route. It answers five routes itself, none with statement text: /api/ping (liveness), /api/session (the seat's capabilities plus front_door and can_own), /api/me (the calling session's own identity, seat and expiry), /api/front-door (store names, health and server counts) and /api/front-door/locate (a store name, a server name, or an ambiguity message). It also answers every /api/mcp-tokens path with a fixed 404 and sends it to no store (#8737). Every other /api path is sent to one store's dashboard, whose own routes ran the sweep before answering, and the proxy copies that answer through unchanged",
         ["\"/api/webhook-signing\""] = "signing key presence and dates from the worker's in-process snapshot, no store read (#5998)",
         ["\"/api/session\""] = "the seat's capabilities",

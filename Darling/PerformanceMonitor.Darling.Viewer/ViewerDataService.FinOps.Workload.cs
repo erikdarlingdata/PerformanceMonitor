@@ -123,7 +123,7 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>The wait-category summary's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
-    public const string WaitCategorySummarySql = DarlingFinOpsOptimizationReader.WaitCategorySummarySql;
+    public static readonly string WaitCategorySummarySql = DarlingFinOpsOptimizationReader.WaitCategorySummarySql;
 
     public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
