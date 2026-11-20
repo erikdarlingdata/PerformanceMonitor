@@ -107,8 +107,10 @@ public sealed class AutomaticTuningEmptyTextTests
 
             var json = await DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, serverName, 24, 25, null, false, DatabaseFilter.All, null, ct);
 
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(json));
-            Assert.Equal(PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 13 }), Message(json));
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(json));
+            /* #9099: the version axis words it: the server's version and what the read needs. */
+            Assert.Contains("SQL Server 2016", Message(json), StringComparison.Ordinal);
+            Assert.Contains("SQL Server 2017 or later", Message(json), StringComparison.Ordinal);
         }, Cleanup);
 
     /// <summary>The reachable 2017+ case: a registered server whose collector has stored no plan correction cycle.</summary>

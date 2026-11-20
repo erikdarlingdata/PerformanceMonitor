@@ -54,7 +54,7 @@ internal static class DarlingEngineCapability
     /// columns are always there for it.</para>
     /// </summary>
     public const string ServerEngineSql = @"
-SELECT sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
+SELECT sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version, postgres_major_version
 FROM servers
 WHERE server_id = $1";
 
@@ -122,7 +122,7 @@ WHERE server_id = $1";
     /// server ids.
     /// </summary>
     public const string ServersEngineSql = @"
-SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
+SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version, postgres_major_version
 FROM servers
 WHERE server_id = ANY($1)";
 

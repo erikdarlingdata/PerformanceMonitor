@@ -2060,7 +2060,7 @@ public sealed class DarlingMcpDataTools
     /// <summary>The enabled servers and the engine facts the fleet liveness read needs to say which servers a collector does not apply to
     /// (the same columns <see cref="DarlingEngineCapability.ServerEngineSql"/> reads, for every enabled server at once).</summary>
     internal const string FleetServersSql = @"
-SELECT server_id, server_name, display_name, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
+SELECT server_id, server_name, display_name, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version, postgres_major_version
 FROM servers
 WHERE is_enabled
 ORDER BY server_name";

@@ -157,9 +157,12 @@ VALUES ($1,$2,$3,$4,$5,9,TRUE,10,1000)",
         foreach (var database in new string?[] { null, "AgDb" })
         {
             var reply = await DarlingMcpPvsTools.GetPvsStats(postgres, ServerName, 0, database, ct);
-            Assert.Equal("empty", StatusOf(reply));
+            Assert.Equal("not_collected", StatusOf(reply));
             using var doc = JsonDocument.Parse(reply);
-            Assert.Contains("no persistent version store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            var message = doc.RootElement.GetProperty("message").GetString();
+            Assert.Contains("SQL Server 2017", message, StringComparison.Ordinal);
+            Assert.Contains("SQL Server 2019 or later", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("primary", message, StringComparison.OrdinalIgnoreCase);
             Assert.Null(NoteOf(reply));
         }
     }

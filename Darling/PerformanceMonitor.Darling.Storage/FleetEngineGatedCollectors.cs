@@ -26,7 +26,7 @@ public static class FleetEngineGatedCollectors
 {
     /// <summary>The registry's engine facts for every server, the columns <c>DarlingEngineCapability.ServerEngineSql</c> reads for one.</summary>
     public const string Sql = @"
-SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version
+SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version, postgres_major_version
 FROM servers";
 
     /// <summary>
