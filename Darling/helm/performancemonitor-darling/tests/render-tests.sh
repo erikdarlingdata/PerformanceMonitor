@@ -458,7 +458,7 @@ t names_fit_with_the_longest_release_name
 # 53 characters, Helm's longest release name. Every object name must stay a valid label value (63), and the store
 # StatefulSet at most 52, because its pods get a controller-revision-hash label of the name plus 11 characters.
 LONG="$(printf 'r%.0s' $(seq 1 53))"
-helm template "${LONG}" "${CHART_DIR}" --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' \
+helm template "${LONG}" "${CHART_DIR}" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' \
   --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.allowFrom={10.1.0.0/16}' \
   --set 'network.trustedProxies={10.1.0.0/16}' > "${OUT}"
 assert_eq "$(yq '.metadata.name | select(length > 63)' "${OUT}" | grep -v -- '---' || true)" "" "names over 63 characters"
@@ -467,6 +467,8 @@ assert_eq "$(yq 'select(.kind == "StatefulSet") | .spec.serviceName | length <= 
 assert_eq "$(yq 'select(.kind == "StatefulSet") | ("data-" + .metadata.name + "-0") | length <= 63' "${OUT}")" "true" "store PVC name fits"
 assert_eq "$(yq '[.. | select(has("app.kubernetes.io/name")) | .["app.kubernetes.io/name"] | select(length > 63)] | length' "${OUT}" | grep -v -- '---' | sort -u)" "0" "name labels fit"
 # Every Service and Ingress name is distinct, and each Ingress backend names a rendered Service.
+assert_eq "$(yq 'select(.kind == "Service" and (.metadata.name | test("-metrics$"))) | .metadata.name | length' "${OUT}" | grep -v -- '---')" "63" "metrics Service name at the limit"
+assert_eq "$(yq 'select(.kind == "ServiceMonitor") | .metadata.name | length' "${OUT}" | grep -v -- '---')" "63" "ServiceMonitor name at the limit"
 assert_eq "$(yq 'select(.kind == "Service" or .kind == "Ingress") | .kind + "/" + .metadata.name' "${OUT}" | grep -v -- '---' | sort | uniq -d)" "" "duplicate names"
 for b in $(yq 'select(.kind == "Ingress") | .spec.rules[].http.paths[].backend.service.name' "${OUT}" | grep -v -- '---'); do
   assert_eq "$(yq "select(.kind == \"Service\" and .metadata.name == \"${b}\") | .metadata.name" "${OUT}")" "${b}" "Ingress backend ${b} is a Service"
@@ -797,3 +799,129 @@ assert_eq "$(doc ConfigMap "${DEPLOY}" | yq '.data | has("write-store-logins.sh"
 render -f "${CI_EXTERNAL}" --set store.provisionRoles.enabled=false
 assert_eq "$(dq '.spec.template.spec.initContainers | map(.name) | join(",")' | tr -d '"')" "render-config" "external, Job off: one init container"
 assert_eq "$(dq '[.spec.template.spec.volumes[] | select(.name == "store-logins" or .name == "role-passwords")] | length')" "0" "external, Job off: no wiring volumes"
+
+# ---- #9013: metrics ----
+
+t metrics_off_by_default
+render
+# Off writes no metrics block at all: darling.json, and so the pod's checksum/config, stay as they were before the chart had metrics.
+assert_eq "$(config_json 'has("metrics")')" "false" "no metrics block while off"
+render --set metrics.port=9100 --set 'metrics.allowFrom={10.0.0.0/8}'
+assert_eq "$(config_json 'has("metrics")')" "false" "no metrics block while off, other metrics values set"
+render
+assert_eq "$(dq '[.spec.template.spec.containers[0].ports[] | select(.name == "metrics")] | length')" "0" "no metrics container port"
+case ",$(secret_items)," in *,metrics-token=*) echo "the metrics token is mounted while metrics is off" >&2; exit 1 ;; esac
+
+t metrics_on_renders_block
+render --set metrics.enabled=true
+assert_eq "$(config_json '.metrics | sort_keys(.)')" '{"enabled":true,"listen":"0.0.0.0","port":5155,"token":"file:/run/secrets/darling/metrics-token"}' "metrics block"
+assert_eq "$(dq '.spec.template.spec.containers[0].ports[] | select(.name == "metrics")')" '{"name":"metrics","containerPort":5155,"protocol":"TCP"}' "metrics container port"
+assert_eq "$(secret_items)" "metrics-token=metrics-token,web-token=web-token" "metrics token mounted"
+
+t metrics_token_generated
+render
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data | keys | join(",")')" "mcp-token,metrics-token,web-token" "generated token keys"
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data.metrics-token | @base64d | length')" "40" "generated metrics token length"
+render --set secrets.values.metrics-token=abcdefghijklmnopqrst
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data.metrics-token | @base64d')" "abcdefghijklmnopqrst" "given key wins over generation"
+
+t metrics_allow_from
+render --set metrics.enabled=true --set 'metrics.allowFrom={10.244.0.0/16}'
+assert_eq "$(config_json '.metrics.allowFrom')" '["10.244.0.0/16"]' "metrics.allowFrom"
+render --set metrics.enabled=true --set 'network.allowFrom={10.0.0.0/8}'
+assert_eq "$(config_json '.metrics | has("allowFrom")')" "false" "network.allowFrom does not apply to metrics"
+
+t metrics_token_key_renamed
+render --set metrics.enabled=true --set secrets.metricsTokenKey=scrape
+assert_eq "$(config_json '.metrics.token')" '"file:/run/secrets/darling/scrape"' "renamed token reference"
+assert_eq "$(secret_items)" "scrape=scrape,web-token=web-token" "renamed token mounted"
+
+t metrics_owned
+assert_fails "config.metrics is owned by the chart and cannot be set inside config; use the value metrics.*" --set config.metrics.enabled=true
+assert_fails "config.metrics is owned by the chart and cannot be set inside config; use the value metrics.*" --set config.Metrics.port=1
+
+t metrics_port_clash
+assert_fails "metrics.port" --set metrics.enabled=true --set metrics.port=5154
+assert_fails "5154" --set metrics.enabled=true --set metrics.port=5154
+assert_fails "web.port" --set metrics.enabled=true --set metrics.port=5153
+assert_fails "mcp.port" --set metrics.enabled=true --set metrics.port=5152
+assert_fails "mcp.port" --set metrics.enabled=true --set metrics.port=5152 --set mcp.enabled=true
+assert_fails "web.port" --set metrics.enabled=true --set web.enabled=false --set metrics.port=5153
+assert_fails "mcp.port" --set metrics.enabled=true --set mcp.port=9100 --set metrics.port=9100
+render --set metrics.port=5152
+
+t metrics_image_guard
+assert_fails "metrics" --set metrics.enabled=true --set image.tag=3.13.0
+assert_fails "3.13.0" --set metrics.enabled=true --set image.tag=3.13.0
+assert_fails "metrics" --set metrics.enabled=true --set image.tag=v3.12.9
+render --set metrics.enabled=true --set image.tag=3.13.1
+render --set metrics.enabled=true --set image.tag=nightly
+render --set metrics.enabled=true
+render --set image.tag=3.13.0
+
+t metrics_schema
+assert_fails "metrics" --set metrics.port=x
+assert_fails "metrics" --set metrics.bogus=1
+assert_fails "interval" --set metrics.serviceMonitor.interval=1minute
+assert_fails "interval" --set metrics.serviceMonitor.interval=90
+# Any duration the ServiceMonitor CRD accepts, compound ones included.
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set metrics.serviceMonitor.interval=1m30s
+assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.spec.endpoints[0].interval')" "1m30s" "compound interval"
+render --set metrics.serviceMonitor.interval=1h
+render --set metrics.serviceMonitor.interval=500ms
+# Darling turns the port off for an allowFrom entry without a prefix length, so the render refuses it.
+assert_fails "metrics.allowFrom" --set metrics.enabled=true --set 'metrics.allowFrom={10.0.0.1}'
+assert_fails "metrics.allowFrom" --set metrics.enabled=true --set 'metrics.allowFrom={10.0.0.0/8,10.0.0.1}'
+render --set metrics.enabled=true --set 'metrics.allowFrom={10.0.0.1/32,fd00::/8}'
+assert_eq "$(config_json '.metrics.allowFrom')" '["10.0.0.1/32","fd00::/8"]' "CIDRs with a prefix length"
+
+t metrics_service
+render
+assert_eq "$(yq 'select(.kind == "Service" and .metadata.name == "'"${DEPLOY}-metrics"'") | .metadata.name' "${OUT}")" "" "no metrics Service by default"
+render --set metrics.enabled=true
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq -o=json -I=0 '.spec.ports')" '[{"name":"metrics","port":5155,"targetPort":5155}]' "metrics Service ports"
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq '.metadata.labels."app.kubernetes.io/component"')" "metrics" "component label"
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq -o=json -I=0 '.spec.selector')" "$(doc Service "${DEPLOY}-web" | yq -o=json -I=0 '.spec.selector')" "same selector as web"
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq '.spec.type')" "ClusterIP" "metrics Service type"
+render --set metrics.enabled=true --set metrics.port=9100
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq -o=json -I=0 '.spec.ports')" '[{"name":"metrics","port":9100,"targetPort":9100}]' "moved metrics port"
+
+t service_monitor_shape
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true
+sm() { doc ServiceMonitor "${DEPLOY}-metrics" | yq -o=json -I=0 "$1"; }
+assert_eq "$(sm '.apiVersion')" '"monitoring.coreos.com/v1"' "ServiceMonitor apiVersion"
+assert_eq "$(sm '.spec.selector.matchLabels | sort_keys(.)')" '{"app.kubernetes.io/component":"metrics","app.kubernetes.io/instance":"'"${RELEASE}"'","app.kubernetes.io/name":"performancemonitor-darling"}' "ServiceMonitor selector"
+assert_eq "$(sm '.spec.endpoints')" '[{"port":"metrics","path":"/metrics","interval":"60s","authorization":{"type":"Bearer","credentials":{"name":"'"${DEPLOY}"'","key":"metrics-token"}}}]' "ServiceMonitor endpoints"
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set secrets.existingSecret=s --set metrics.serviceMonitor.interval=30s --set metrics.serviceMonitor.labels.release=kps
+assert_eq "$(sm '.spec.endpoints[0].authorization.credentials.name')" '"s"' "existing Secret name"
+assert_eq "$(sm '.spec.endpoints[0].interval')" '"30s"' "interval reaches the endpoint"
+assert_eq "$(sm '.metadata.labels.release')" '"kps"' "extra label"
+# With existingSecret the pod mounts the metrics token key from that Secret.
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "secrets") | .secret.secretName')" '"s"' "secrets volume reads the existing Secret"
+assert_eq "$(secret_items)" "metrics-token=metrics-token,web-token=web-token" "metrics token mounted from the existing Secret"
+
+t service_monitor_labels_replace_chart_labels
+# A label the chart also sets is written once, with the user's value: a repeated key is invalid YAML to a strict parser.
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+  --set 'metrics.serviceMonitor.labels.app\.kubernetes\.io/name=custom' --set 'metrics.serviceMonitor.labels.helm\.sh/chart=x'
+sm_doc="$(awk '/^kind: ServiceMonitor/{f=1} f && /^---/{exit} f' "${OUT}")"
+assert_eq "$(grep -c '^    app.kubernetes.io/name:' <<<"${sm_doc}")" "1" "app.kubernetes.io/name once in the ServiceMonitor labels"
+assert_eq "$(grep -c '^    helm.sh/chart:' <<<"${sm_doc}")" "1" "helm.sh/chart once in the ServiceMonitor labels"
+assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.metadata.labels."app.kubernetes.io/name"')" "custom" "the user's value wins"
+assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.spec.selector.matchLabels."app.kubernetes.io/name"')" "performancemonitor-darling" "the selector keeps the chart's labels"
+
+t service_monitor_off
+render --set metrics.enabled=true
+assert_eq "$(yq 'select(.kind == "ServiceMonitor") | .kind' "${OUT}")" "" "no ServiceMonitor while off"
+
+t service_monitor_needs_metrics
+assert_fails "metrics.serviceMonitor.enabled needs metrics.enabled=true" --set metrics.serviceMonitor.enabled=true
+
+t notes_metrics
+n="$(notes --set metrics.enabled=true)"
+grep -qF metrics-token <<<"${n}" || { echo "NOTES lack the metrics token key" >&2; exit 1; }
+grep -qF 5155 <<<"${n}" || { echo "NOTES lack the metrics port" >&2; exit 1; }
+n="$(notes --set metrics.enabled=true --set secrets.existingSecret=s)"
+grep -qF "Secret s must hold metrics-token" <<<"${n}" || { echo "NOTES lack the existing Secret's key" >&2; exit 1; }
+n="$(notes)"
+if grep -qF metrics-token <<<"${n}"; then echo "NOTES mention the metrics token while metrics is off" >&2; exit 1; fi
