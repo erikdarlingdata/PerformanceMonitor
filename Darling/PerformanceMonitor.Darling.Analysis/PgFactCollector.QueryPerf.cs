@@ -385,7 +385,10 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// slice, then <c>plan_agg</c> over it. <see cref="PlanRegressionSuffix"/> is shared with
     /// <see cref="PlanRegressionTableSql"/>, so the two reads cannot drift above <c>plan_agg</c>.
     /// </summary>
-    private const string PlanRegressionRawPrefix = @"
+    private const string PlanRegressionRawPrefix = PlanRegressionRawHead + PlanRegressionRawTail;
+
+    /// <summary><see cref="PlanRegressionRawPrefix"/> up to the end of the snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionRawHead = @"
 WITH deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
@@ -456,7 +459,9 @@ WITH deduped AS
     -- would be a silent under-count and a worse bug than the one this fixes. Do not delete as dead
     -- weight -- it is doing all the pruning.
     AND   collection_time >= $3
-    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+";
+
+    private const string PlanRegressionRawTail = @"    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
 ),
 plan_agg AS
 (
@@ -496,7 +501,10 @@ plan_agg AS
     /// </summary>
     public const string PlanRegressionTableSql = PlanRegressionTablePrefix + PlanRegressionSuffix;
 
-    private const string PlanRegressionTablePrefix = @"
+    private const string PlanRegressionTablePrefix = PlanRegressionTableHead + PlanRegressionTableTail;
+
+    /// <summary><see cref="PlanRegressionTablePrefix"/> up to the end of the snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionTableHead = @"
 WITH plan_agg AS
 (
     -- #3953: the table twin. query_store_interval_latest already holds each interval's latest snapshot -- the
@@ -533,9 +541,32 @@ WITH plan_agg AS
     AND   last_execution_time >= $2
     AND   collection_time >= $3
     AND   first_execution_time >= $4
-    GROUP BY database_name, query_id, plan_id, replica_role
+";
+
+    private const string PlanRegressionTableTail = @"    GROUP BY database_name, query_id, plan_id, replica_role
 ),
 ";
+
+    /// <summary>
+    /// <see cref="PlanRegressionSql"/> for a pass anchored at an instant (<c>AnalysisContext.AsOfUtc</c>). $4 is the window's end:
+    /// no snapshot stored after it is read, so each interval answers with the newest snapshot the store held at that instant.
+    /// </summary>
+    internal const string PlanRegressionAsOfSql = PlanRegressionRawHead + @"    AND   collection_time <= $4
+" + PlanRegressionRawTail + PlanRegressionSuffix;
+
+    /// <summary>
+    /// <see cref="PlanRegressionTableSql"/> for a pass anchored at an instant. $5 is the window's end. The table holds one snapshot
+    /// of each interval, the newest, so an interval whose snapshot was stored after the window's end is left out whole.
+    /// </summary>
+    internal const string PlanRegressionTableAsOfSql = PlanRegressionTableHead + @"    AND   collection_time <= $5
+" + PlanRegressionTableTail + PlanRegressionSuffix;
+
+    /// <summary>
+    /// <see cref="PlanRegressionDailySql"/> for a pass anchored at an instant. $7 is the window's end, the bound of the interval
+    /// table half; the caller hands $3 only the days that were whole by that instant.
+    /// </summary>
+    internal const string PlanRegressionDailyAsOfSql = PlanRegressionDailyHead + @"        AND   l.collection_time <= $7::timestamp
+" + PlanRegressionDailyTail + PlanRegressionSuffix;
 
     /// <summary>
     /// PLAN_REGRESSION over per-day totals for the closed days and the interval table for the rest (#5448):
@@ -562,7 +593,10 @@ WITH plan_agg AS
     /// </summary>
     internal const string PlanRegressionDailySql = PlanRegressionDailyPrefix + PlanRegressionSuffix;
 
-    private const string PlanRegressionDailyPrefix = @"
+    private const string PlanRegressionDailyPrefix = PlanRegressionDailyHead + PlanRegressionDailyTail;
+
+    /// <summary><see cref="PlanRegressionDailyPrefix"/> up to the end of the interval table half's snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionDailyHead = @"
 WITH plan_agg AS
 (
     -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
@@ -619,7 +653,9 @@ WITH plan_agg AS
         AND   l.last_execution_time >= $2::timestamp
         AND   l.collection_time >= $5::timestamp
         AND   l.first_execution_time >= $4::timestamp
-        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
+";
+
+    private const string PlanRegressionDailyTail = @"        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
         -- (an open day is built partially; a whole day's watermark is its next midnight), so the live half is the rest.
         -- A scalar lookup ($6 is aligned with $3; a day not built finds no watermark and keeps every row), so the test
         -- stays a filter on the scan, as #5448's <> ALL($3) was, and adds no join whose strategy rests on an array estimate.
@@ -953,6 +989,9 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
             var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
             var builtDays = new List<PlanRegressionDaily.BuiltDay>();
+            /* A pass anchored at an instant reads nothing stored after its window's end: its statements carry that bound,
+               and it takes day totals only for the days that were whole by then. */
+            var anchored = context.AsOfUtc is not null;
             if (readsTable)
             {
                 /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
@@ -963,6 +1002,15 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                     connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
                     ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+                if (anchored)
+                {
+                    /* A day's totals are built from the newest snapshot of each of its intervals. One skew margin after the
+                       day's watermark every one of those snapshots is stored, so the totals are what the store held at the
+                       window's end; a later day is read from the interval table, under the bound. */
+                    var wholeBy = AsNaive(context.TimeRangeEnd).AddDays(-PlanRegressionSkewMarginDays);
+                    builtDays = builtDays.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
+                }
+
                 if (builtDays.Count == 0)
                 {
                     /* No built day, or the read failed (which leaves this transaction aborted): the exact-bound read runs
@@ -992,7 +1040,9 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                monitor sent before #7463 are left out here too. Asked in the read's own transaction, before the read. */
             var regressionSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
                 connection, snapshot, FactCommandTimeoutSeconds,
-                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
+                readsDays ? (anchored ? PlanRegressionDailyAsOfSql : PlanRegressionDailySql)
+                : anchored ? (readsTable ? PlanRegressionTableAsOfSql : PlanRegressionAsOfSql)
+                : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
             using var cmd = new NpgsqlCommand(regressionSql, connection, snapshot)
             { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -1012,6 +1062,11 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp,
                     Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray()
                 });
+                if (anchored)
+                {
+                    /* $7, the window's end: the bound of the anchored statement's interval table half. */
+                    cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, AsNaive(context.TimeRangeEnd));
+                }
             }
             else
             {
@@ -1021,6 +1076,12 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 {
                     /* $4, the table's partitioning column: the same value, bare, for the same reason. */
                     cmd.Parameters.AddWithValue(collectionBound);
+                }
+
+                if (anchored)
+                {
+                    /* The window's end, the last parameter of the two anchored statements ($4 raw, $5 table). */
+                    cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
                 }
             }
 
