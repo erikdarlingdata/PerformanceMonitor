@@ -182,6 +182,13 @@ export function serverIsOffline(server) {
   return !!remembered && !!remembered.card && remembered.card.is_online === false;
 }
 
+/** True when the server's fleet card says it is an Amazon Aurora PostgreSQL target (is_aurora, #9117). A tab's text that is true only on Aurora reads this
+ *  through build()'s ctx.aurora. No card yet reads as not Aurora, which a PostgreSQL tab never meets: it is built after its card arrives. */
+export function serverIsAurora(server) {
+  const remembered = lastCard.get(server);
+  return !!remembered && !!remembered.card && remembered.card.is_aurora === true;
+}
+
 /** True when a remembered card is too old for a tab click to reuse; a card with no stamp is stale. */
 export function rememberedCardIsStale(remembered, nowMs) {
   return !remembered || typeof remembered.at !== "number" || nowMs - remembered.at > REMEMBERED_CARD_MAX_AGE_MS;
@@ -595,7 +602,7 @@ function redrawPanels() {
   applyDatabaseFilter();
   /* #6793: the batch's signal rides in the tab's ctx too, for the tab files that read `ctx.signal` (the memory-grant charts, the overview strips,
      the recommendations list, the clerk and named trend draws). Without it each of them read on no signal on this page. */
-  const nodes = current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), signal: panelAbort.signal });
+  const nodes = current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), aurora: serverIsAurora(current.server), signal: panelAbort.signal });
   if (inPlace) cancelRefresh = refreshGridInPlace(gridNode, nodes);
   else mount(gridNode, nodes);
 }
