@@ -593,7 +593,9 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             Assert.False(doc.RootElement.GetProperty("window_truncated").GetBoolean());
 
             /* The cpu attribution reads samples over the served span (first bucket to the ceiling), not the requested
-               day: samples sit only inside +1h..+2h, 50% busy on 4 cores = 0.5 * 4 * 3600 s. */
+               day: samples sit only inside +1h..+2h, 50% busy on 4 cores = 0.5 * 4 * 3600 s. A sample is placed by the
+               instant it was taken, so the span counts the samples after its start up to and including its end: they are
+               a minute apart from +1h01 to +2h, as the collector takes them. */
             await using (var props = new NpgsqlCommand(@"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered)
 VALUES ($1,$2,$3,$4,'Enterprise Edition (64-bit)','15.0.4322.2','RTM',3,4,16,65536,2,8,false,false)", connection))
             {
@@ -616,7 +618,7 @@ VALUES ($1,$2,$3,$4,'Enterprise Edition (64-bit)','15.0.4322.2','RTM',3,4,16,655
                 await busy.ExecuteNonQueryAsync(ct);
             }
 
-            for (var minute = 0; minute <= 60; minute += 10)
+            for (var minute = 1; minute <= 60; minute++)
             {
                 await using var cpu = new NpgsqlCommand(
                     "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $2, 50, 0)", connection);
