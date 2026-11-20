@@ -208,7 +208,8 @@ internal static class DarlingMcpWindowNotice
     /// <summary>
     /// <see cref="ReadEventAsync"/> for every length a page of events can be cut to for the response budget: element <c>n</c> is the
     /// notice for the page's first <c>n</c> events (element 0 is unused), so a cut page names the floor of the events it kept and not of
-    /// the ones it left off. The coverage probe is read once, however many lengths there are.
+    /// the ones it left off. The coverage probe is read once, however many lengths there are, and a probe that fails is logged once:
+    /// the first length to read it logs the failure, and the later lengths read the same failure without a logger.
     /// </summary>
     internal static async Task<McpWindowNotice[]> ReadEventPrefixesAsync(
         Func<Task<DateTime?>> probe, IReadOnlyList<DateTime?> eventTimes, DateTime requestedStart, DateTime windowEnd, string table,
@@ -219,11 +220,13 @@ internal static class DarlingMcpWindowNotice
         var coverage = new Lazy<Task<DateTime?>>(probe);
         var notices = new McpWindowNotice[eventTimes.Count + 1];
         DateTime? oldest = null;
+        var probeFailed = false;
         for (var shown = 1; shown <= eventTimes.Count; shown++)
         {
             oldest = Earlier(oldest, eventTimes[shown - 1]);
             notices[shown] = await ReadEventAsync(
-                () => coverage.Value, oldest, requestedStart, windowEnd, table, logger: logger, cancellationToken: cancellationToken);
+                () => coverage.Value, oldest, requestedStart, windowEnd, table, logger: probeFailed ? null : logger, cancellationToken: cancellationToken);
+            probeFailed = probeFailed || notices[shown].IsUnavailable;
         }
 
         return notices;
