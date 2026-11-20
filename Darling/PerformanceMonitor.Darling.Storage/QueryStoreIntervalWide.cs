@@ -393,12 +393,14 @@ WITH
         interval_start_time_utc = EXCLUDED.interval_start_time_utc,
         interval_end_time_utc = EXCLUDED.interval_end_time_utc
     WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time, t.execution_count)
-    RETURNING 1
+    /* #9111: the UTC day the written row is placed in, the day the closed-day rollups key it by. */
+    RETURNING CAST(COALESCE(t.interval_start_time_utc, t.collection_time) AS date) AS day_utc
 )
 SELECT
     (SELECT COUNT(*) FROM upserted) AS applied_rows,
     b.raw_rows,
-    b.null_first_execution_rows
+    b.null_first_execution_rows,
+    (SELECT array_agg(DISTINCT u.day_utc) FROM upserted AS u) AS applied_days
 FROM batch_rows AS b;";
 
     /* ---- the read-source decision (grid/MCP top reads, #3953, ruling issuecomment-5836972848) ------------ */
@@ -2027,6 +2029,7 @@ FROM (
     {
         long rawRows;
         long nullFirstExecutionRows;
+        DateOnly[] appliedDays;
         await using (var upsert = new NpgsqlCommand(UpsertSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
         {
             upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -2036,6 +2039,16 @@ FROM (
             await reader.ReadAsync(cancellationToken);
             rawRows = reader.GetInt64(1);
             nullFirstExecutionRows = reader.GetInt64(2);
+            appliedDays = reader.IsDBNull(3) ? [] : reader.GetFieldValue<DateOnly[]>(3);
+        }
+
+        /* #9111: a row written into a day the closed-day rollups may already hold marks that day for a rebuild, in this batch's own
+           transaction. Today and yesterday are never built, so an ordinary batch stops at the day test and sends nothing. */
+        var nowUtc = DateTime.UtcNow;
+        var lateDays = QueryStoreClosedDayRollup.LateDays(appliedDays, nowUtc);
+        if (lateDays.Length > 0 && await ClosedDayBuiltExistsAsync(connection, transaction, commandTimeoutSeconds, cancellationToken))
+        {
+            await QueryStoreClosedDayRollup.MarkLateDaysAsync(connection, transaction, serverId, lateDays, nowUtc, commandTimeoutSeconds, cancellationToken);
         }
 
         /* A replayed batch raw no longer holds was purged before it could apply: this table lacks it for good, so
@@ -2060,6 +2073,24 @@ FROM (
             await ResetCoverageAsync(connection, transaction, serverId, collectionTime, commandTimeoutSeconds, cancellationToken);
         }
     }
+
+    /// <summary>Whether the store has the closed-day rollups' built table (V283). A yes is kept for the life of this writer; a store below
+    /// that version has no rollup to mark.</summary>
+    private async Task<bool> ClosedDayBuiltExistsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        if (_closedDayBuiltExists)
+        {
+            return true;
+        }
+
+        await using var probe = new NpgsqlCommand(
+            "SELECT to_regclass('collect.query_store_closed_day_built') IS NOT NULL", connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+        _closedDayBuiltExists = (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
+        return _closedDayBuiltExists;
+    }
+
+    private bool _closedDayBuiltExists;
 
     private async Task RecordPendingAsync(
         NpgsqlConnection connection,
