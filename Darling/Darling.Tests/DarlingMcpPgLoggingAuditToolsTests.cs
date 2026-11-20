@@ -217,6 +217,163 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
     }
 
     /// <summary>
+    /// A PostgreSQL 19 snapshot: <c>server_version_num</c> as <c>pg_settings</c> renders it (context
+    /// <c>internal</c>, source <c>default</c>) and <c>log_autoanalyze_min_duration</c> at its ten-minute
+    /// default unless a value is given. PostgreSQL 19 split the autovacuum log in two: the first setting now
+    /// writes vacuum runs only and this one writes automatic analyze runs.
+    /// </summary>
+    private static List<DarlingPgLoggingAuditReader.PgLoggingSettingRow> Pg19(
+        List<DarlingPgLoggingAuditReader.PgLoggingSettingRow> rows, string analyze = "600000", string source = "default")
+    {
+        Replace(rows, Row("server_version_num", "190000", context: "internal"));
+        Replace(rows, Row("log_autoanalyze_min_duration", analyze, "ms", source: source, boot: "600000"));
+        return rows;
+    }
+
+    /// <summary>
+    /// <b>PostgreSQL 19: <c>log_autovacuum_min_duration = 0</c> no longer logs analyze runs.</b> A server with
+    /// the vacuum setting at 0 and the analyze setting on its ten-minute default writes every vacuum run and
+    /// almost no analyze run, so the facet is not <c>instrumented</c>, and the remedy is the one statement that
+    /// is missing - the analyze setting - without asking for the vacuum setting that is already right.
+    /// </summary>
+    [Fact]
+    public void OnPostgres19_VacuumLoggedAtZeroWithTheAnalyzeDefault_IsNotInstrumented_AndTheRemedyNamesTheAnalyzeSetting()
+    {
+        var facet = FacetOf(DarlingPgLoggingAudit.Audit(Pg19(Recommended())), "log_autovacuum_min_duration");
+
+        Assert.Equal(DarlingPgLoggingAudit.Partial, facet.Verdict);
+        Assert.StartsWith("ALTER SYSTEM SET log_autoanalyze_min_duration = 0; SELECT pg_reload_conf();", facet.Remedy, StringComparison.Ordinal);
+        Assert.DoesNotContain("SET log_autovacuum_min_duration", facet.Remedy, StringComparison.Ordinal);
+        Assert.Contains("log_autoanalyze_min_duration", facet.CostNote, StringComparison.Ordinal);
+        Assert.Contains("600000", facet.CostNote, StringComparison.Ordinal);
+        Assert.Contains("analyze", facet.Unlocks, StringComparison.Ordinal);
+        Assert.Contains("log_autoanalyze_min_duration", facet.Unlocks, StringComparison.Ordinal);
+    }
+
+    /// <summary>Both settings at 0 on 19 is every run, and nothing is asked for.</summary>
+    [Fact]
+    public void OnPostgres19_BothSettingsAtZero_IsInstrumented_AndNothingIsAskedFor()
+    {
+        var facet = FacetOf(
+            DarlingPgLoggingAudit.Audit(Pg19(Recommended(), analyze: "0", source: "configuration file")),
+            "log_autovacuum_min_duration");
+
+        Assert.Equal(DarlingPgLoggingAudit.Instrumented, facet.Verdict);
+        Assert.StartsWith("No change needed", facet.Remedy, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Neither setting at 0 on 19: one remedy names both statements, so the operator reaches every run in
+    /// one reload instead of two rounds through this read.
+    /// </summary>
+    [Fact]
+    public void OnPostgres19_WhenBothSettingsFallShort_TheRemedyNamesBothStatements()
+    {
+        var facet = FacetOf(DarlingPgLoggingAudit.Audit(Pg19(Pg18Defaults())), "log_autovacuum_min_duration");
+
+        Assert.Equal(DarlingPgLoggingAudit.Partial, facet.Verdict);
+        Assert.StartsWith(
+            "ALTER SYSTEM SET log_autovacuum_min_duration = 0; ALTER SYSTEM SET log_autoanalyze_min_duration = 0; SELECT pg_reload_conf();",
+            facet.Remedy, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An analyze setting that is off while the vacuum setting is at 0 is a shortfall on the analyze side, not
+    /// an instrumented facet, and the remedy names the analyze setting.
+    /// </summary>
+    [Fact]
+    public void OnPostgres19_AnalyzeLoggingOff_WhileVacuumIsAtZero_IsNotInstrumented()
+    {
+        var facet = FacetOf(
+            DarlingPgLoggingAudit.Audit(Pg19(Recommended(), analyze: "-1", source: "configuration file")),
+            "log_autovacuum_min_duration");
+
+        Assert.NotEqual(DarlingPgLoggingAudit.Instrumented, facet.Verdict);
+        Assert.Contains("SET log_autoanalyze_min_duration = 0", facet.Remedy, StringComparison.Ordinal);
+    }
+
+    /// <summary>On a managed 19 the remedy is the parameter-group form for the analyze setting.</summary>
+    [Fact]
+    public void OnPostgres19_ManagedRemedy_NamesTheAnalyzeSettingInTheParameterGroup()
+    {
+        var rows = Pg19(Recommended());
+        rows.Add(Row("rds.extensions", "pg_stat_statements", context: "postmaster"));
+        var audit = DarlingPgLoggingAudit.Audit(rows);
+
+        var facet = FacetOf(audit, "log_autovacuum_min_duration");
+
+        Assert.True(audit.Managed);
+        Assert.StartsWith("Set log_autoanalyze_min_duration = 0 in the DB parameter group", facet.Remedy, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A 19 snapshot that does not carry the analyze setting cannot be called instrumented from the vacuum
+    /// setting alone: the half that is not in the snapshot is not inferred, so the facet is <c>unknown</c>.
+    /// </summary>
+    [Fact]
+    public void OnPostgres19_AnalyzeSettingMissingFromTheSnapshot_IsUnknown_NotInstrumented()
+    {
+        var rows = Recommended();
+        Replace(rows, Row("server_version_num", "190000", context: "internal"));
+
+        var facet = FacetOf(DarlingPgLoggingAudit.Audit(rows), "log_autovacuum_min_duration");
+
+        Assert.Equal(DarlingPgLoggingAudit.Unknown, facet.Verdict);
+        Assert.Contains("log_autoanalyze_min_duration", facet.CostNote, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <b>PostgreSQL 18 and below are untouched.</b> There the one setting covers vacuum and analyze runs, so
+    /// <c>log_autovacuum_min_duration = 0</c> is <c>instrumented</c> with the wording this read has always
+    /// used, and the facet never mentions the 19 setting. A stray <c>log_autoanalyze_min_duration</c> row on a
+    /// snapshot whose <c>server_version_num</c> says 18 cannot change that.
+    /// </summary>
+    [Fact]
+    public void OnPostgres18_TheOneSettingStillCoversAnalyzeRuns_AndTheWordingIsUnchanged()
+    {
+        var rows = Recommended();
+        Replace(rows, Row("server_version_num", "180004", context: "internal"));
+        Replace(rows, Row("log_autoanalyze_min_duration", "600000", "ms"));
+        var facet = FacetOf(DarlingPgLoggingAudit.Audit(rows), "log_autovacuum_min_duration");
+
+        Assert.Equal(DarlingPgLoggingAudit.Instrumented, facet.Verdict);
+        Assert.StartsWith("No change needed", facet.Remedy, StringComparison.Ordinal);
+        Assert.StartsWith("One LOG line per autovacuum or autoanalyze run that took longer than the threshold", facet.Unlocks, StringComparison.Ordinal);
+        Assert.StartsWith("0 logs every autovacuum and autoanalyze run.", facet.CostNote, StringComparison.Ordinal);
+        Assert.Equal("0 (every run).", facet.Recommended);
+        Assert.DoesNotContain("log_autoanalyze_min_duration", facet.CostNote + facet.Unlocks + facet.Remedy + facet.Recommended, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The wire carries the analyze setting beside the vacuum one on 19 - its value, source and verdict as the
+    /// server rendered them - and carries nothing there on 18 and below, so a reader can see what the
+    /// combined verdict rests on without a second read.
+    /// </summary>
+    [Fact]
+    public void TheWire_OnPostgres19_CarriesTheAnalyzeSettingBesideTheVacuumOne_AndOnPostgres18_Nothing()
+    {
+        using var on19 = JsonDocument.Parse(DarlingMcpPgLoggingAuditTools.BuildAuditJson(
+            "srv", DarlingPgLoggingAudit.Audit(Pg19(Recommended()))));
+        var facet19 = on19.RootElement.GetProperty("facets").EnumerateArray()
+            .Single(f => f.GetProperty("setting").GetString() == "log_autovacuum_min_duration");
+
+        Assert.True(facet19.TryGetProperty("companion", out var companion), "the autovacuum facet carries no companion on a 19 snapshot");
+        Assert.Equal("log_autoanalyze_min_duration", companion.GetProperty("setting").GetString());
+        Assert.Equal("600000", companion.GetProperty("value").GetString());
+        Assert.Equal("ms", companion.GetProperty("unit").GetString());
+        Assert.Equal("default", companion.GetProperty("source").GetString());
+        Assert.Equal(DarlingPgLoggingAudit.Partial, companion.GetProperty("verdict").GetString());
+
+        using var on18 = JsonDocument.Parse(DarlingMcpPgLoggingAuditTools.BuildAuditJson(
+            "srv", DarlingPgLoggingAudit.Audit(Recommended())));
+        var facet18 = on18.RootElement.GetProperty("facets").EnumerateArray()
+            .Single(f => f.GetProperty("setting").GetString() == "log_autovacuum_min_duration");
+
+        Assert.True(facet18.TryGetProperty("companion", out var companion18));
+        Assert.Equal(JsonValueKind.Null, companion18.ValueKind);
+    }
+
+    /// <summary>
     /// <c>log_connections</c> across the 17/18 boundary, in the spellings 18.4 stores verbatim. Anything
     /// that produces lines is instrumented; the empty string — 18's default and its "off" — is off.
     /// </summary>

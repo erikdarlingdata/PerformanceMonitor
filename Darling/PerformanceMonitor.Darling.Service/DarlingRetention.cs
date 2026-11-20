@@ -575,13 +575,12 @@ public static class DarlingRetention
                        the catalog, so no sweep purges it: the copy that empties it drops it. */
                     if (timescaleAvailable && !definition.StaysPlainTable)
                     {
-                        var dropped = await DropChunksOneAsync(
-                            postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
-                            logger, cancellationToken);
-                        if (dropped is not null)
+                        var (outcome, dropped) = await DropChunksOneAsync(
+                            postgres, definition.TargetTable, retentionDays, logger, cancellationToken);
+                        if (outcome == DropChunksOutcome.Dropped)
                         {
                             tablesPurged++;
-                            totalChunksDropped += dropped.Value;
+                            totalChunksDropped += dropped;
 
                             /* #8549: the oldest-run rollup is dropped with the raw chunks it summarizes, at the same horizon. */
                             if (string.Equals(definition.TargetTable, "job_history", StringComparison.Ordinal))
@@ -589,6 +588,14 @@ public static class DarlingRetention
                                 await DropJobHistoryOldestDailyAsync(postgres, retentionDays, logger, cancellationToken);
                             }
 
+                            continue;
+                        }
+
+                        if (outcome == DropChunksOutcome.GaveWay)
+                        {
+                            /* #9102: another session held a lock on one of the expired chunks through every try (warned). The
+                               table is a hypertable and its chunks are whole, so the DELETE below is not for it: the next pass
+                               drops them. Counted as neither purged nor failed. */
                             continue;
                         }
 
@@ -952,24 +959,29 @@ public static class DarlingRetention
                On plain PostgreSQL, or if its hypertable conversion failed, it falls back to the batched DELETE so
                the horizon is ALWAYS honored. Failure-isolated like every sibling. The FleetServerId=0 retention
                run-record sentinel is a genuine collection_log row and lives in a chunk normally. */
-            var logPurged = false;
+            var logTakesDelete = true;
             if (timescaleAvailable)
             {
-                var droppedLog = await DropChunksOneAsync(
-                    postgres, "collection_log", DropChunksSqlFor("collection_log", CollectionLogRetentionDays),
-                    logger, cancellationToken);
-                if (droppedLog is not null)
+                var (logOutcome, droppedLog) = await DropChunksOneAsync(
+                    postgres, "collection_log", CollectionLogRetentionDays, logger, cancellationToken);
+                if (logOutcome == DropChunksOutcome.Dropped)
                 {
                     tablesPurged++;
-                    totalChunksDropped += droppedLog.Value;
-                    logPurged = true;
+                    totalChunksDropped += droppedLog;
+                    logTakesDelete = false;
+                }
+                else if (logOutcome == DropChunksOutcome.GaveWay)
+                {
+                    /* #9102: a lock holder kept the expired chunks through every try (warned). They are whole chunks of a
+                       hypertable, so the next pass drops them and no DELETE runs in their place. */
+                    logTakesDelete = false;
                 }
 
                 /* drop_chunks failed (warned) — most likely collection_log's conversion failed and it is still
                    plain. Fall through to the extension-free DELETE so it still honors its horizon. */
             }
 
-            if (!logPurged)
+            if (logTakesDelete)
             {
                 var logDeleted = await PurgeOneAsync(
                     postgres, "collection_log", TimeSlicedDeleteSql("collection_log", "collection_time"),
@@ -2317,6 +2329,73 @@ WHERE NOT EXISTS
         => $"SELECT drop_chunks('{table}', older_than => make_interval(days => {retentionDays}))";
 
     /// <summary>
+    /// How long one <c>drop_chunks</c> waits for a lock before it gives way, in milliseconds (#9102). The expired chunks' own
+    /// locks are taken without waiting (<see cref="DropChunksGivingWaySql"/>); this bounds the wait for any other lock the drop
+    /// needs while it holds them. It is half of PostgreSQL's default <c>deadlock_timeout</c> (one second), so a drop that is
+    /// the first to wait leaves before its deadlock check runs. A store whose <c>deadlock_timeout</c> is set below this value
+    /// can still pick the drop as the victim, which <see cref="ExecuteDropChunksWithDeadlockRetryAsync"/> retries.
+    /// </summary>
+    internal const int DropChunksLockTimeoutMilliseconds = 500;
+
+    /// <summary>How many times one pass tries a table's <c>drop_chunks</c> when each try gives way to a lock holder (#9102).</summary>
+    internal const int DropChunksLockAttempts = 3;
+
+    /// <summary>The pause between two tries of one table's <c>drop_chunks</c> after a try gave way (#9102): long enough for a
+    /// short read to finish, short enough that one table does not hold up a pass over all of them.</summary>
+    internal static readonly TimeSpan DropChunksLockRetryPause = TimeSpan.FromSeconds(1);
+
+    /// <summary>What <see cref="DropChunksGivingWaySql"/> answers when the drop gave way to a lock holder and dropped nothing.</summary>
+    internal const int DropChunksGaveWay = -1;
+
+    /// <summary>The transaction-local setting that carries <see cref="DropChunksGivingWaySql"/>'s answer from its block to the read after it.</summary>
+    private const string DropChunksAnswerSetting = "performance_monitor.drop_chunks";
+
+    /// <summary>
+    /// One table's <c>drop_chunks</c> (<see cref="DropChunksSqlFor(string, int)"/>) as one command of two statements that gives
+    /// way to a lock holder instead of waiting behind it (#9102). A read through a hypertable holds AccessShare on its chunks,
+    /// and <c>drop_chunks</c> takes AccessExclusive on each expired chunk in turn and keeps the ones it has until it commits. A
+    /// drop that waits for one chunk while it holds another closes a lock cycle with a reader that holds the first and asks for
+    /// the second, and PostgreSQL cancels whichever of the two began waiting first. So the block takes AccessExclusive on every
+    /// expired chunk with <c>NOWAIT</c> before it drops any (<c>show_chunks</c> with the drop's own arguments names them): it
+    /// never waits for a chunk's lock, so it never waits for one while it holds another. Any other lock the drop needs is
+    /// waited for at most <see cref="DropChunksLockTimeoutMilliseconds"/>. Either refusal is <c>lock_not_available</c>, which the
+    /// block catches: that undoes the block and releases every lock it took. The read after it answers the number of chunks
+    /// dropped (<c>drop_chunks</c> returns one row per chunk), or <see cref="DropChunksGaveWay"/>. The refusal is caught in the
+    /// block because giving way is not a failure, and an error PL/pgSQL catches writes no ERROR to the store's own log. Every
+    /// other error leaves the block as it would leave the bare statement. Both settings are transaction-local, and the command
+    /// is one implicit transaction.
+    /// </summary>
+    internal static string DropChunksGivingWaySql(string table, int retentionDays) => $@"DO $do$
+DECLARE
+    expired regclass;
+    dropped integer;
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '{DropChunksLockTimeoutMilliseconds}ms', true);
+    FOR expired IN SELECT show_chunks('{table}', older_than => make_interval(days => {retentionDays})) LOOP
+        EXECUTE pg_catalog.format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE NOWAIT', expired);
+    END LOOP;
+    SELECT count(*) INTO dropped FROM ({DropChunksSqlFor(table, retentionDays)}) AS chunk;
+    PERFORM pg_catalog.set_config('{DropChunksAnswerSetting}', dropped::text, true);
+EXCEPTION WHEN lock_not_available THEN
+    PERFORM pg_catalog.set_config('{DropChunksAnswerSetting}', '{DropChunksGaveWay}', true);
+END
+$do$;
+SELECT pg_catalog.current_setting('{DropChunksAnswerSetting}')::integer";
+
+    /// <summary>What one table's <c>drop_chunks</c> came to in a pass.</summary>
+    private enum DropChunksOutcome
+    {
+        /// <summary>The statement ran; the count is the chunks it dropped, zero when none had expired.</summary>
+        Dropped,
+
+        /// <summary>Every try met a lock another session holds (warned). Nothing was dropped.</summary>
+        GaveWay,
+
+        /// <summary>The statement failed for any other reason (warned).</summary>
+        Failed,
+    }
+
+    /// <summary>
     /// <c>drop_chunks</c> for <c>collect.job_history_oldest_daily</c> (#8549), at <c>job_history</c>'s own horizon, so the rollup keeps no
     /// bucket the raw table has aged out of for long (its reader does not trust the bucket on raw's oldest day, but the rollup should not grow
     /// past the table it summarizes). A no-op where the relation is absent or the plain view a store without a hypertable carries: the DO block
@@ -2358,30 +2437,62 @@ END
 $do$";
 
     /// <summary>
-    /// One table's drop_chunks; returns the number of chunks dropped, or null when it failed
-    /// (warned; the caller falls back to DELETE for that table). drop_chunks returns one row per
-    /// dropped chunk, so the count comes from reading the result set.
+    /// One table's drop_chunks, run through <see cref="DropChunksGivingWaySql"/> so it gives way to a lock holder instead of
+    /// waiting behind it (#9102). A try that gives way is tried again after
+    /// <see cref="DropChunksLockRetryPause"/>, <see cref="DropChunksLockAttempts"/> tries in all; a reader's statement is over
+    /// long before that. <see cref="DropChunksOutcome.Dropped"/> carries the number of chunks dropped.
+    /// <see cref="DropChunksOutcome.GaveWay"/> means a session held its lock through every try: the caller leaves the table
+    /// for the next pass and does not fall back to DELETE, which is for a table that has no chunks.
+    /// <see cref="DropChunksOutcome.Failed"/> is any other failure (warned); the caller falls back to DELETE for that table.
     /// </summary>
-    private static Task<int?> DropChunksOneAsync(
+    private static async Task<(DropChunksOutcome Outcome, int ChunksDropped)> DropChunksOneAsync(
         NpgsqlDataSource postgres,
         string tableName,
-        string dropChunksSql,
+        int retentionDays,
         ILogger? logger,
         CancellationToken cancellationToken)
-        => ExecuteDropChunksWithDeadlockRetryAsync(async () =>
+    {
+        var givingWaySql = DropChunksGivingWaySql(tableName, retentionDays);
+        for (var attempt = 1; ; attempt++)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(dropChunksSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-
-            var chunksDropped = 0;
-            using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            var dropped = await ExecuteDropChunksWithDeadlockRetryAsync(async () =>
             {
-                chunksDropped++;
+                await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+                using var command = new NpgsqlCommand(givingWaySql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+                var answer = await command.ExecuteScalarAsync(cancellationToken);
+                if (answer is null or DBNull)
+                {
+                    /* No answer is not "dropped nothing": say it failed, so the caller does not count a drop that may not have run. */
+                    throw new InvalidOperationException("the drop_chunks command returned no answer.");
+                }
+
+                return Convert.ToInt32(answer, CultureInfo.InvariantCulture);
+            }, tableName, logger);
+
+            if (dropped is null)
+            {
+                return (DropChunksOutcome.Failed, 0);
             }
 
-            return chunksDropped;
-        }, tableName, logger);
+            if (dropped.Value != DropChunksGaveWay)
+            {
+                return (DropChunksOutcome.Dropped, dropped.Value);
+            }
+
+            if (attempt >= DropChunksLockAttempts)
+            {
+                logger?.LogWarning(
+                    "Retention purge (drop_chunks) for {Table} gave way to another session's lock {Attempts} times; its expired chunks stay until the next retention pass.",
+                    tableName, DropChunksLockAttempts);
+                return (DropChunksOutcome.GaveWay, 0);
+            }
+
+            logger?.LogInformation(
+                "Retention purge (drop_chunks) for {Table} met a lock another session holds and gave way; try {Attempt} of {Attempts}, the next in {PauseMilliseconds} ms.",
+                tableName, attempt, DropChunksLockAttempts, (int)DropChunksLockRetryPause.TotalMilliseconds);
+            await Task.Delay(DropChunksLockRetryPause, cancellationToken);
+        }
+    }
 
     /// <summary>
     /// Runs one table's drop_chunks with a SINGLE immediate retry on deadlock (#2143). 40P01 is transient
