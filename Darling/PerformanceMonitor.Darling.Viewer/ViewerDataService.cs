@@ -1593,8 +1593,8 @@ SELECT
     to_regclass('collect.query_store_text_seen') IS NOT NULL,
     /* V282 (#9110) adds the job outcome daily rollup's three plain tables, on every store and never dropped. Found by catalog, as the V281 line above is. */
     to_regclass('collect.job_outcome_daily') IS NOT NULL AND to_regclass('collect.job_outcome_daily_days') IS NOT NULL AND to_regclass('collect.job_outcome_daily_watermark') IS NOT NULL,
-    /* V283 (#9111) adds the Query Store closed-day rollups' three plain tables, on every store and never dropped. Found by catalog, as the V282 line above is. */
-    to_regclass('collect.query_store_grid_daily') IS NOT NULL AND to_regclass('collect.query_store_slicer_hourly') IS NOT NULL AND to_regclass('collect.query_store_closed_day_built') IS NOT NULL";
+    /* V283 (#9111) adds the Query Store closed-day rollups' four plain tables, on every store and never dropped. Found by catalog, as the V282 line above is. */
+    to_regclass('collect.query_store_grid_daily') IS NOT NULL AND to_regclass('collect.query_store_slicer_hourly') IS NOT NULL AND to_regclass('collect.query_store_closed_day_built') IS NOT NULL AND to_regclass('collect.query_store_closed_day_tick') IS NOT NULL";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -1871,7 +1871,7 @@ SELECT
         /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
-        /* V283 (#9111): the Query Store closed-day rollups' three tables, created on every store and never dropped. Relation-existence sentinel,
+        /* V283 (#9111): the Query Store closed-day rollups' four tables, created on every store and never dropped. Relation-existence sentinel,
            newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through
            to 282 and showing a spurious upgrade banner on a store that is current. */
         if (hasQueryStoreClosedDayRollups)

@@ -930,9 +930,11 @@ public sealed partial class ViewerDataService
     /// catch), and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
     private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopQueriesFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken,
+        bool useRollups = true)
     {
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var rollupsTried = false;
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -966,7 +968,10 @@ public sealed partial class ViewerDataService
                explains it), one extra round trip per table-served read. An open end reads to now. */
             /* #9111: a run of whole built days inside the window comes from the closed-day rollup, in this read's snapshot; the window's
                edges, the open days and any day that is not built stay on the interval table. No run reads the interval table alone. */
-            var served = await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken);
+            rollupsTried = useRollups && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
+            var served = rollupsTried
+                ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken)
+                : null;
             var keysSql = served is null ? QueryStoreTopTableKeysSql : QueryStoreTopRollupKeysSql;
             var topSql = served is null ? QueryStoreTopTableByKeysSql : QueryStoreTopRollupByKeysSql;
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
@@ -1022,6 +1027,16 @@ public sealed partial class ViewerDataService
             /* Review D4R M2: a permission failure here (a viewer role that can't SELECT the new table on an
                upgraded store) must not fall back to raw forever with no trace anywhere. #8549: it goes to the Viewer's own log, with the
                time spent, because a read cancelled at the deadline never reaches the store's statement history and a Trace line has no listener. */
+            /* #9111: a fault with the closed-day rollups in the read (a table the viewer role cannot read, a missing relation) aborts this
+               snapshot, so the read starts again on the interval table alone and gives that read's answer. A deadline is not retried: the
+               second read would only wait another one. */
+            if (rollupsTried && !IsDeadline(ex))
+            {
+                LogRollupReadFallback("Query Store grid", elapsed, ex);
+                return await TryGetQueryStoreTopQueriesFromTableAsync(
+                    serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, tags, cancellationToken, useRollups: false);
+            }
+
             LogTableReadFallback("Query Store grid", elapsed, "the interval-table read failed", ex);
             return null;
         }
@@ -1106,6 +1121,13 @@ public sealed partial class ViewerDataService
             : $" ({ex.GetType().Name}: {ex.Message}{(ex.InnerException is { } inner ? $" / {inner.GetType().Name}" : "")})";
         ViewerLogger.Warn("QueryStore", $"{read}: {why} after {elapsed.ElapsedMilliseconds} ms{detail}; retrying on raw history (#8549)");
     }
+
+    /// <summary>#9111: a read that took whole days from the closed-day rollups faulted and starts again on the interval table.</summary>
+    private static void LogRollupReadFallback(string read, System.Diagnostics.Stopwatch elapsed, Exception ex) =>
+        ViewerLogger.Warn("QueryStore", $"{read}: the closed-day rollup read failed after {elapsed.ElapsedMilliseconds} ms ({ex.GetType().Name}: {ex.Message}); reading the interval table instead (#9111)");
+
+    /// <summary>Whether <paramref name="ex"/> is a command running past its deadline, which a second read would only repeat.</summary>
+    private static bool IsDeadline(Exception ex) => ex is TimeoutException || ex.InnerException is TimeoutException;
 
     /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
     /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
@@ -1716,9 +1738,10 @@ public sealed partial class ViewerDataService
     /// The legacy-row probe is skipped (<see cref="QueryStoreIntervalWide.LegacyRows.Allow"/>) because one snapshot per identity is
     /// what both statements keep for a legacy row too. The plan that served goes back with the buckets.</summary>
     private async Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)?> TryGetQueryStoreSlicerFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken, bool useRollups = true)
     {
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var rollupsTried = false;
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -1744,7 +1767,8 @@ public sealed partial class ViewerDataService
             /* #8549: the table read alone gets the longer deadline, as the grid's does. */
             /* #9111: whole built days come from the hourly rollup when the bin is a whole number of hours, in this read's snapshot. */
             var bucketMinutes = SlicerBuckets.MinutesFor(startUtc, endUtc);
-            var served = bucketMinutes % 60 == 0
+            rollupsTried = useRollups && bucketMinutes % 60 == 0 && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
+            var served = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken)
                 : null;
             await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
@@ -1763,6 +1787,13 @@ public sealed partial class ViewerDataService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #9111: as the grid's: a fault with the hourly rollup in the read starts it again on the interval table alone. */
+            if (rollupsTried && !IsDeadline(ex))
+            {
+                LogRollupReadFallback("Query Store slicer", elapsed, ex);
+                return await TryGetQueryStoreSlicerFromTableAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken, useRollups: false);
+            }
+
             LogTableReadFallback("Query Store slicer", elapsed, "the interval-table read failed", ex);
             return null;
         }

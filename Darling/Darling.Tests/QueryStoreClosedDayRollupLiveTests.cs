@@ -56,6 +56,10 @@ public sealed class QueryStoreClosedDayRollupLiveTests
         ("past 30 days, one database", DataEnd.AddDays(-30), DataEnd, new[] { "rollA" }),
         ("starts and ends inside a day", DataEnd.AddDays(-30).AddHours(13), DataEnd.AddDays(-2).AddHours(-5), null),
         ("starts on an interval's first instant", DataEnd.AddDays(-9).AddHours(23), DataEnd.AddDays(-1), null),
+        /* The end edge alone: a whole-day start and an end inside a day (partial last day), and an end on an interval's first instant
+           (the interval starting there is outside [start, end)). Both are read through the grid, whose end is the window's own. */
+        ("ends inside a day", DataEnd.AddDays(-30), DataEnd.AddDays(-3).AddHours(5), null),
+        ("ends on an interval's first instant", DataEnd.AddDays(-30), DataEnd.AddDays(-3).AddHours(7), null),
     ];
 
     private const string SeedSql = @"
@@ -208,9 +212,9 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
 
     /// <summary>Builds every due day at the tick's clock, then stamps the builds at the store's own clock, which is what the
     /// reader's freshness test compares with.</summary>
-    private static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct)
+    private static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
     {
-        var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, TickNow, retentionDays, NullLogger.Instance, ct);
+        var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
         await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC' WHERE NOT removed", ct);
         return result;
@@ -220,7 +224,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         QueryStoreClosedDayRollup.ResolveServedDaysAsync(store.Connection, null, ServerId, start, end, 30, ct);
 
     /// <summary>
-    /// The rung is the newest on a dense ladder, makes its three tables empty, runs twice, and the store probe maps a store that holds
+    /// The rung is the newest on a dense ladder, makes its four tables empty, runs twice, and the store probe maps a store that holds
     /// them to this version and a store without one of them to the version below.
     /// </summary>
     [Fact]
@@ -238,7 +242,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, null, ct);
 
-        var tables = new[] { "query_store_grid_daily", "query_store_slicer_hourly", "query_store_closed_day_built" };
+        var tables = new[] { "query_store_grid_daily", "query_store_slicer_hourly", "query_store_closed_day_built", "query_store_closed_day_tick" };
         foreach (var table in tables)
         {
             await ExecuteAsync(connection, $"DROP TABLE IF EXISTS collect.{table}", ct);
@@ -336,6 +340,100 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
             "SELECT COUNT(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND rebuild_needed", ct, ("server_id", ServerId)));
         Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(DataEnd.AddDays(-30), DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
         AssertSame(expectedAfterLate, await ReadAllAsync(store.Viewer, ct), "after the late rows' days were rebuilt");
+    }
+
+    [Fact]
+    public async Task ALateRowAnOlderServiceWritesWithoutAMark_SendsTheReadToTheIntervalTable_UntilTheNextTickRebuildsItsDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        var expected = await ReadAllAsync(store.Viewer, ct);
+        await TickAsync(store, KeepEverything, ct);
+        var window = (Start: DataEnd.AddDays(-30), End: DataEnd);
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(window.Start, window.End), await ServedAsync(store, window.Start, window.End, ct));
+        AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after the build");
+
+        /* The heartbeat is the first tick's clock less the margin, written though the tick built days. */
+        Assert.Equal(TickNow - QueryStoreClosedDayRollup.HeartbeatMargin, await ScalarAsync<DateTime>(store.Connection,
+            "SELECT ticked_at FROM collect.query_store_closed_day_tick WHERE server_id = @server_id", ct, ("server_id", ServerId)));
+
+        /* A late row written the old way: a plain INSERT into a built day, collected after the last tick, no mark. */
+        var lateDay = DateOnly.FromDateTime(DataEnd.AddDays(-12));
+        var lateCollected = TickNow.AddMinutes(5);
+        await using (var tx = await store.Connection.BeginTransactionAsync(ct))
+        {
+            await using var copy = new NpgsqlCommand(@"
+CREATE TEMP TABLE late_rows ON COMMIT DROP AS
+SELECT * FROM collect.query_store_interval_wide
+WHERE server_id = @server_id AND interval_start_time_utc >= @day AND interval_start_time_utc < @day + interval '1 day' ORDER BY avg_duration_us DESC LIMIT 40;
+UPDATE late_rows SET runtime_stats_interval_id = runtime_stats_interval_id + 900000000, collection_time = @collected, execution_count = execution_count * 9;
+INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.Connection, tx);
+            copy.Parameters.AddWithValue("server_id", ServerId);
+            copy.Parameters.AddWithValue("day", lateDay.ToDateTime(TimeOnly.MinValue));
+            copy.Parameters.AddWithValue("collected", lateCollected);
+            await copy.ExecuteNonQueryAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+
+        Assert.Equal(40L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_interval_wide WHERE server_id = @server_id AND collection_time = @collected", ct, ("server_id", ServerId), ("collected", lateCollected)));
+
+        Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND rebuild_needed", ct, ("server_id", ServerId)));
+
+        /* The read sees the row: the run is not taken from the rollups, and every window equals what the interval table alone says. */
+        Assert.Null(await ServedAsync(store, window.Start, window.End, ct));
+        var viaRollupsOff = await ReadWithoutHeartbeatAsync(store, ct);
+        Assert.False(expected["past 30 days / grid"].SequenceEqual(viaRollupsOff["past 30 days / grid"]), "the late rows changed nothing in the 30-day grid, so the test proves nothing");
+        AssertSame(viaRollupsOff, await ReadAllAsync(store.Viewer, ct), "with a late row no mark covers");
+
+        /* The next tick marks the day from the row itself and builds it again; the window is served from the rollups once more. */
+        var next = await TickAsync(store, KeepEverything, ct, TickNow.AddHours(1));
+        /* The late day, and the newest day that the hour's clock has just closed. */
+        Assert.True(next.Built >= 1);
+        Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND rebuild_needed", ct, ("server_id", ServerId)));
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(window.Start, window.End), await ServedAsync(store, window.Start, window.End, ct));
+        AssertSame(viaRollupsOff, await ReadAllAsync(store.Viewer, ct), "after the tick rebuilt the late row's day");
+
+        /* A tick with nothing to build still moves the heartbeat. */
+        var idle = await TickAsync(store, KeepEverything, ct, TickNow.AddHours(2));
+        Assert.Equal(0, idle.Built);
+        Assert.Equal(TickNow.AddHours(2) - QueryStoreClosedDayRollup.HeartbeatMargin, await ScalarAsync<DateTime>(store.Connection,
+            "SELECT ticked_at FROM collect.query_store_closed_day_tick WHERE server_id = @server_id", ct, ("server_id", ServerId)));
+    }
+
+    /// <summary>Every window read with the server's heartbeat gone, which sends every read to the interval table; the heartbeat comes back.</summary>
+    private static async Task<Dictionary<string, List<string>>> ReadWithoutHeartbeatAsync(Store store, CancellationToken ct)
+    {
+        var beat = await ScalarAsync<DateTime>(store.Connection, "SELECT ticked_at FROM collect.query_store_closed_day_tick WHERE server_id = @server_id", ct, ("server_id", ServerId));
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_closed_day_tick WHERE server_id = @server_id", ct, ("server_id", ServerId));
+        var raw = await ReadAllAsync(store.Viewer, ct);
+        await ExecuteAsync(store.Connection, "INSERT INTO collect.query_store_closed_day_tick (server_id, ticked_at) VALUES (@server_id, @beat)", ct, ("server_id", ServerId), ("beat", beat));
+        return raw;
+    }
+
+    [Fact]
+    public async Task ARollupStatementThatFaults_ReadsTheIntervalTableInstead_WithTheSameAnswer()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        var expected = await ReadAllAsync(store.Viewer, ct);
+        await TickAsync(store, KeepEverything, ct);
+        Assert.NotNull(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
+        AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after the build");
+
+        /* The grid's daily table goes: the grid's statements fault on it, and the grid reads the interval table. The slicer still reads its hourly rollup. */
+        await ExecuteAsync(store.Connection, "DROP TABLE collect.query_store_grid_daily", ct);
+        AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "with the daily rollup gone");
+
+        /* Then the slicer's hourly table goes too. */
+        await ExecuteAsync(store.Connection, "DROP TABLE collect.query_store_slicer_hourly", ct);
+        AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "with both rollups gone");
     }
 
     [Fact]

@@ -54,7 +54,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class QueryStoreClosedDayRollup
 {
-    /// <summary>The migration that creates the three tables.</summary>
+    /// <summary>The migration that creates the four tables.</summary>
     public const int Version = 283;
 
     /// <summary>The eleven averages the grid weights by execution count; each has an <c>_wsum</c> column in the daily table.</summary>
@@ -95,7 +95,7 @@ public static class QueryStoreClosedDayRollup
             .Concat(["min_dop", "max_dop", "last_execution_time", "query_plan_hash", "is_forced_plan", "plan_forcing_type", "first_execution_time",
                 "plan_type", "force_failure_count", "last_force_failure_reason", "compatibility_level"]));
 
-    /// <summary>V283: the three tables, created empty. The service's tick fills them; no data moves in the migration.</summary>
+    /// <summary>V283: the four tables, created empty. The service's tick fills them; no data moves in the migration.</summary>
     public static readonly string CreateSql = $@"
 /* #9111: the Query Store grid's closed-day rollup. One row per (server, UTC day of the interval's start, the grid's six group
    columns). NULL key columns are stored as they are. */
@@ -166,6 +166,15 @@ CREATE TABLE IF NOT EXISTS collect.query_store_closed_day_built
     rebuild_needed boolean NOT NULL DEFAULT false,
     removed boolean NOT NULL DEFAULT false,
     CONSTRAINT pk_query_store_closed_day_built PRIMARY KEY (server_id, day_utc)
+);
+
+/* The tick heartbeat: one row per server, written at the start of every tick, built day or not. ticked_at is the instant after which
+   the collected rows are the ones no tick has looked at yet (the tick's clock less HeartbeatMargin). A reader takes a server's built days
+   only while no row collected after ticked_at lies in them, which stands in for a writer's mark when the writer is an older service. */
+CREATE TABLE IF NOT EXISTS collect.query_store_closed_day_tick
+(
+    server_id integer NOT NULL PRIMARY KEY,
+    ticked_at timestamp NOT NULL
 );";
 
     /// <summary>A day is closed once its end plus this has passed: the longest interval a row can span plus the collector's longest
@@ -360,6 +369,73 @@ WHERE b.removed
   AND EXISTS (SELECT 1 FROM collect.query_store_closed_day_built AS n
               WHERE n.server_id = b.server_id AND n.removed AND n.day_utc > b.day_utc);";
 
+    /// <summary>How far before its own clock a tick sets the heartbeat. <c>collection_time</c> is stamped when the collector reads the
+    /// snapshot and the row commits after that, so a row collected a moment before a tick can commit after the tick read the day. A
+    /// write that takes longer than this to commit is not covered.</summary>
+    public static readonly TimeSpan HeartbeatMargin = TimeSpan.FromMinutes(10);
+
+    /// <summary>The enabled servers with an interval-table coverage claim, each with its heartbeat (null before its first tick); the
+    /// servers <see cref="PlanSql"/> plans builds for.</summary>
+    public const string HeartbeatServersSql = @"
+SELECT c.server_id, t.ticked_at
+FROM collect.query_store_interval_wide_coverage AS c
+JOIN collect.servers AS sv ON sv.server_id = c.server_id
+LEFT JOIN collect.query_store_closed_day_tick AS t ON t.server_id = c.server_id
+WHERE sv.is_enabled;";
+
+    /// <summary>
+    /// Marks every built day that holds a row collected after the server's last heartbeat as needing a rebuild, and returns how many days it
+    /// marked. This is the mark an older service never writes: the tick makes it on that service's behalf, from the rows themselves.
+    /// A day with no built row is planned for a build anyway. $1 server_id, $2 the server's last heartbeat.
+    /// </summary>
+    public const string MarkChangedDaysSql = @"
+WITH late AS
+(
+    SELECT DISTINCT CAST(COALESCE(w.interval_start_time_utc, w.collection_time) AS date) AS day_utc
+    FROM collect.query_store_interval_wide AS w
+    WHERE w.server_id = $1
+      AND w.collection_time > $2
+),
+marked AS
+(
+    UPDATE collect.query_store_closed_day_built AS b
+    SET rebuild_needed = true
+    FROM late AS l
+    WHERE b.server_id = $1
+      AND b.day_utc = l.day_utc
+      AND NOT b.removed
+      AND NOT b.rebuild_needed
+    RETURNING 1
+)
+SELECT COUNT(*) FROM marked;";
+
+    /// <summary>Records the heartbeat; it never moves back. $1 server_id, $2 the heartbeat.</summary>
+    public const string RecordHeartbeatSql = @"
+INSERT INTO collect.query_store_closed_day_tick AS t (server_id, ticked_at)
+VALUES ($1, $2)
+ON CONFLICT (server_id) DO UPDATE
+SET ticked_at = EXCLUDED.ticked_at
+WHERE t.ticked_at < EXCLUDED.ticked_at;";
+
+    /// <summary>
+    /// Whether a read of one server's built days $2 to $3 (midnight to midnight) must go to the interval table: the server has no
+    /// heartbeat, or a row collected after it has its interval start inside the range. A current service marks such a day when it writes
+    /// the row, and the tick marks it for an older one; this covers the time between the write and the next tick, for either. It reads
+    /// only rows collected since the last tick, through the interval table's <c>collection_time</c> bound. $1 server_id.
+    /// </summary>
+    public const string ChangedSinceTickSql = @"
+SELECT
+    (SELECT t.ticked_at FROM collect.query_store_closed_day_tick AS t WHERE t.server_id = $1) IS NULL
+    OR EXISTS
+    (
+        SELECT 1
+        FROM collect.query_store_interval_wide AS w
+        WHERE w.server_id = $1
+          AND w.collection_time > (SELECT t.ticked_at FROM collect.query_store_closed_day_tick AS t WHERE t.server_id = $1)
+          AND COALESCE(w.interval_start_time_utc, w.collection_time) >= $2::timestamp
+          AND COALESCE(w.interval_start_time_utc, w.collection_time) < $3::timestamp
+    );";
+
     /// <summary>
     /// The built days of one server a reader may take, oldest first. $1 server_id, $2 the first day, $3 the day after the last,
     /// $4 <see cref="FreshFor"/>. No row comes back when the server's newest build is older than $4 on the store's clock.
@@ -424,7 +500,18 @@ ORDER BY b.day_utc;";
             }
         }
 
-        return LongestRun(days);
+        var run = LongestRun(days);
+        if (run is not { } served)
+        {
+            return null;
+        }
+
+        /* A row that landed in the run after the last tick looked, from a writer that marked nothing, sends this server to the interval table. */
+        await using var changed = new NpgsqlCommand(ChangedSinceTickSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+        changed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        changed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = served.Start });
+        changed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = served.End });
+        return (bool)(await changed.ExecuteScalarAsync(cancellationToken))! ? null : served;
     }
 
     /// <summary>The longest run of consecutive days in <paramref name="days"/> (sorted, oldest first); the newest such run on a tie.</summary>
@@ -456,6 +543,60 @@ ORDER BY b.day_utc;";
         return new ServedDays(
             days[bestStart].ToDateTime(TimeOnly.MinValue),
             days[bestStart + bestLength - 1].AddDays(1).ToDateTime(TimeOnly.MinValue));
+    }
+
+    /// <summary>
+    /// The tick's first step, for every server and whether or not anything is built after it: marks the built days that hold a row collected
+    /// since the server's last heartbeat, then moves the heartbeat to <paramref name="nowUtc"/> less <see cref="HeartbeatMargin"/>, in one
+    /// transaction. The marked days are planned for a rebuild by the same tick, so the heartbeat never passes a row its day was built
+    /// without. A server whose step fails keeps its old heartbeat and is tried again next tick. Returns how many days it marked.
+    /// </summary>
+    public static async Task<int> HeartbeatAsync(NpgsqlConnection connection, DateTime nowUtc, ILogger logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        var servers = new List<(int ServerId, DateTime? Previous)>();
+        await using (var list = new NpgsqlCommand(HeartbeatServersSql, connection) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var reader = await list.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                servers.Add((reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1)));
+            }
+        }
+
+        var marked = 0;
+        var beat = Unspecified(nowUtc - HeartbeatMargin);
+        foreach (var (serverId, previous) in servers)
+        {
+            try
+            {
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                if (previous is { } last)
+                {
+                    await using var mark = new NpgsqlCommand(MarkChangedDaysSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+                    mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                    mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(last) });
+                    marked += Convert.ToInt32(await mark.ExecuteScalarAsync(cancellationToken));
+                }
+
+                await using (var record = new NpgsqlCommand(RecordHeartbeatSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+                {
+                    record.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                    record.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = beat });
+                    await record.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Query Store closed-day rollups: the heartbeat of server {ServerId} failed and is retried next tick: {Message}", serverId, ex.Message);
+            }
+        }
+
+        return marked;
     }
 
     /// <summary>The builds due at <paramref name="nowUtc"/>, newest day first.</summary>
@@ -609,6 +750,7 @@ ORDER BY b.day_utc;";
         int built = 0, failed = 0, started = 0;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
         var removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
 
