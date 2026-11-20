@@ -146,7 +146,9 @@ public class AnomalyDetector
 
     /// <summary>
     /// Day-over-day object/index detection (delta-based, not stddev-baseline) since the
-    /// index_object_stats collector runs daily and its counters are cumulative.
+    /// index_object_stats collector runs daily and its counters are cumulative. The two snapshots compared are
+    /// the newest two before the analysis window's end, so a pass as of a past instant compares the
+    /// snapshots that existed then; a snapshot stamped exactly on the end belongs to the next window.
     /// Emits ANOMALY_OBJECT_GROWTH for the biggest table grower over threshold and
     /// ANOMALY_OBJECT_CONTENTION for the index with the largest new lock-wait time.
     /// </summary>
@@ -162,7 +164,7 @@ public class AnomalyDetector
             using (var cmd = connection.CreateCommand())
             {
                 cmd.CommandText = @"
-WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
+WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 AND collection_time < $4 ORDER BY collection_time DESC LIMIT 2),
 latest AS (SELECT MAX(collection_time) t FROM snaps),
 prior AS (SELECT MIN(collection_time) t FROM snaps),
 cur AS (SELECT database_name, object_id, MAX(schema_name) schema_name, MAX(table_name) table_name, SUM(reserved_mb) mb
@@ -183,9 +185,10 @@ ORDER BY growth_mb DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthMbThreshold });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthPctThreshold });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
                 /* #5558: object sizes (reserved_mb) mirror the primary, so a secondary copy's growth is the primary's
                    to report. Only this growth query is filtered; the contention anomaly stays node-local. */
-                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name", 4);
+                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name", 5);
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
@@ -229,7 +232,7 @@ ORDER BY growth_mb DESC LIMIT 1";
             using (var cmd = connection.CreateCommand())
             {
                 cmd.CommandText = @"
-WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
+WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 AND collection_time < $3 ORDER BY collection_time DESC LIMIT 2),
 latest AS (SELECT MAX(collection_time) t FROM snaps),
 prior AS (SELECT MIN(collection_time) t FROM snaps),
 cur AS (SELECT database_name, object_id, index_id, schema_name, table_name, index_name,
@@ -246,6 +249,7 @@ AND   cur.ms - prv.ms >= $2
 ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectLockWaitMsDeltaThreshold });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
@@ -460,16 +464,20 @@ ORDER BY local_hour";
         }
     }
 
-    private static async Task<bool> IsAzureSqlDatabaseAsync(DuckDBConnection connection, AnalysisContext context)
+    /// <summary>Whether the newest <c>server_properties</c> row before the analysis window's end names an Azure SQL
+    /// Database, so a pass as of a past instant reads the edition the store held then.</summary>
+    internal static async Task<bool> IsAzureSqlDatabaseAsync(DuckDBConnection connection, AnalysisContext context)
     {
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 SELECT engine_edition
 FROM v_server_properties
 WHERE server_id = $1
+AND   collection_time < $2
 ORDER BY collection_time DESC
 LIMIT 1";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
         var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
         return edition is not null and not DBNull
             && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;

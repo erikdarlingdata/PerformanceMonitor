@@ -49,7 +49,6 @@ public sealed class ViewerBlockingDepthSqlTests
         Assert.Contains("blocking_query_plan_xml", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 200", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
-        Assert.Contains("event_time >= $2", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $3", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $5", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
 

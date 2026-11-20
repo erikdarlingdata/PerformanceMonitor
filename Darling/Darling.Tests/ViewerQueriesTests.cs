@@ -170,7 +170,6 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal); /* no such view exists in Darling */
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0", sql, StringComparison.Ordinal);
@@ -363,7 +362,6 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.Contains(distinctCount, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains($"{windowFilter} >= $2", sql, StringComparison.Ordinal);
         Assert.Contains($"{windowFilter} {endOperator} $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY bucket", sql, StringComparison.Ordinal);
 

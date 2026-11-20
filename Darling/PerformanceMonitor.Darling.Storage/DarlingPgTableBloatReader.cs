@@ -91,7 +91,7 @@ public static class DarlingPgTableBloatReader
                 alignment_bytes, pgstattuple_available
             FROM pg_table_bloat_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, collection_time DESC
         ),
@@ -111,7 +111,7 @@ public static class DarlingPgTableBloatReader
             SELECT database_name, schema_name, table_name, count(*) AS sample_count
             FROM pg_table_bloat_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY database_name, schema_name, table_name
         )
@@ -185,7 +185,7 @@ public static class DarlingPgTableBloatReader
                 bloat_bytes_estimate, estimate_unavailable, live_tuples, last_analyzed, mods_since_analyze, pgstattuple_available
             FROM pg_table_bloat_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, collection_time DESC
         )
@@ -297,9 +297,9 @@ public static class DarlingPgTableBloatReader
     public const string PgTableBloatProbeSql = """
         SELECT
             (SELECT count(*) FROM pg_table_bloat_stats
-             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS rows_in_window,
+             WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3) AS rows_in_window,
             (SELECT count(DISTINCT collection_time) FROM pg_table_bloat_stats
-             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS snapshots_in_window,
+             WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3) AS snapshots_in_window,
             (SELECT count(*) FROM pg_table_bloat_stats WHERE server_id = $1) AS rows_ever
         """;
 

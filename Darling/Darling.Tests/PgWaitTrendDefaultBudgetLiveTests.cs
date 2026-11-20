@@ -174,14 +174,15 @@ public sealed class PgWaitTrendDefaultBudgetLiveTests
         return await DarlingWebEndpoints.BuildReadDispatch()["get_pg_wait_trend"](context, postgres, null!);
     }
 
-    /// <summary>The collector's rows for one event across the window: a rated collection every minute from the window's start, the
-    /// last one a minute before its end, each carrying the same delta over the same 60-second interval.</summary>
+    /// <summary>The collector's rows for one event across the window: a rated collection every minute from half a minute after the
+    /// window's start, the last one half a minute before its end, each carrying the same delta over the same 60-second interval. None is
+    /// stamped on the window's start, which belongs to the window before, so all of them are inside (start, end].</summary>
     private static Task SeedAsync(NpgsqlConnection connection, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO pg_wait_stats (collection_id, collection_time, server_id, server_name, wait_type_id, wait_event_id, wait_type, wait_event, waits, wait_time_us, delta_waits, delta_wait_time_us, sample_interval_seconds) "
             + "SELECT $1 + g, $2 + g * INTERVAL '1 minute', $3, $4, 1, 101, 'IO', $5, 1000 + $6 * (g + 1), 50000000 + $7 * (g + 1), $6, $7, $8 "
             + "FROM generate_series(0, $9) AS g",
-            CollectionIdGenerator.Next(), WindowStart, ServerId, ServerName, WaitEvent, DeltaWaitsPerCollection, DeltaWaitTimeUsPerCollection, IntervalSeconds, Collections - 1);
+            CollectionIdGenerator.Next(), WindowStart.AddSeconds(30), ServerId, ServerName, WaitEvent, DeltaWaitsPerCollection, DeltaWaitTimeUsPerCollection, IntervalSeconds, Collections - 1);
 
     private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {

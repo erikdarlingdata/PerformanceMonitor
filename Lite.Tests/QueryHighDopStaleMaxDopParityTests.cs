@@ -137,6 +137,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
         + @"[ \t]*FROM[ \t]+(?<source>v_server_config|server_config)[ \t]*\r?\n"
         + @"[ \t]*WHERE[ \t]+server_id[ \t]*=[ \t]*\$\d+[ \t]*\r?\n"
         + @"[ \t]*AND[ \t]+configuration_name[ \t]*=[ \t]*'max degree of parallelism'[ \t]*\r?\n"
+        + @"[ \t]*AND[ \t]+capture_time[ \t]*<=[ \t]*\$\d+[ \t]*\r?\n"
         + @"[ \t]*ORDER[ \t]+BY[ \t]+capture_time[ \t]+DESC[ \t]*\r?\n"
         + @"[ \t]*LIMIT[ \t]+1[ \t]*\r?\n"
         + @"[ \t]*\)",
@@ -446,6 +447,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
             + "    FROM v_server_config\r\n"
             + "    WHERE server_id = $1\r\n"
             + "    AND   configuration_name = 'max degree of parallelism'\r\n"
+            + "    AND   capture_time <= $3\r\n"
             + "    ORDER BY capture_time DESC\r\n"
             + "    LIMIT 1\r\n"
             + ")\r\n";
@@ -465,6 +467,10 @@ public sealed class QueryHighDopStaleMaxDopParityTests
                     "'cost threshold for parallelism'",
                     StringComparison.Ordinal)),
             "the CTE discriminator accepted an unrelated configuration setting");
+        Assert.False(
+            CurrentMaxDopCte.IsMatch(
+                shippedCte.Replace("    AND   capture_time <= $3\r\n", "", StringComparison.Ordinal)),
+            "the CTE discriminator accepted a capture stored after the window's end");
 
         /* And the raw-table check must actually fire on the bare name, or the v_ assertion above is
            decoration. */

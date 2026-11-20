@@ -182,7 +182,7 @@ public sealed partial class ViewerDataService
             clerk_type
         FROM v_memory_clerks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY clerk_type
         ORDER BY SUM(memory_mb) DESC
@@ -230,7 +230,7 @@ public sealed partial class ViewerDataService
             memory_node_id
         FROM v_memory_pressure_events
         WHERE server_id = $1
-        AND   sample_time >= $2
+        AND   sample_time > $2
         AND   sample_time <= $3
         AND   collection_time >= $4
         ORDER BY sample_time

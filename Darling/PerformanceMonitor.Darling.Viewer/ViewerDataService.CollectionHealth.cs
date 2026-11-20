@@ -417,7 +417,7 @@ public sealed partial class ViewerDataService
             read_source
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time DESC
         LIMIT $4
@@ -444,7 +444,7 @@ public sealed partial class ViewerDataService
             COUNT(*) AS run_count
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status = 'SUCCESS'
         AND   duration_ms IS NOT NULL
@@ -473,7 +473,7 @@ public sealed partial class ViewerDataService
         FROM v_collection_log
         WHERE server_id = $1
         AND   collector_name = $2
-        AND   collection_time >= $3
+        AND   collection_time > $3
         AND   collection_time <= $4
         ORDER BY collection_time DESC
         """;

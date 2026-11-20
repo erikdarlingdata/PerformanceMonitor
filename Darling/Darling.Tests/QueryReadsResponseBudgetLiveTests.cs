@@ -72,14 +72,15 @@ public sealed class QueryReadsResponseBudgetLiveTests
         {
             var end = WindowEnd();
             var weekStart = end.AddHours(-168);
-            /* A collection every five minutes for the week, one handle, one plan. */
+            /* A collection every five minutes for the week, one handle, one plan, each a minute past its five-minute mark: none is stamped
+               on a window's start, which belongs to the window before, so the week holds all 2,016 and a day all 288. */
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
                       delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, min_dop, max_dop,
                       query_plan_hash, sample_interval_seconds)
                   SELECT $1 + g, $2 + g * INTERVAL '5 minutes', $3, $4, $5, $6, '0xH1', 10, 10000, 20000, 100, 100, 1, 1, '0xPLAN8812', 300
                   FROM generate_series(0, $7) AS g",
-                CollectionIdGenerator.Next(), weekStart, TrendServerId, TrendServerName, Db, TrendHash, (168 * 12) - 1);
+                CollectionIdGenerator.Next(), weekStart.AddMinutes(1), TrendServerId, TrendServerName, Db, TrendHash, (168 * 12) - 1);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
@@ -109,7 +110,7 @@ public sealed class QueryReadsResponseBudgetLiveTests
                 var points = root.GetProperty("trend").EnumerateArray().ToArray();
                 Assert.Equal(points.Length, root.GetProperty("data_points").GetInt32());
                 Assert.InRange(points.Length, 20, 288);
-                /* The newest point of the window (the last collection, five minutes before its end) is in the reply, and the window's oldest is not. */
+                /* The newest point of the window (the bucket of the last collection, five minutes before its end) is in the reply, and the window's oldest is not. */
                 Assert.Equal(Stamp(end.AddMinutes(-5)), points[^1].GetProperty("collection_time").GetString()![..19]);
                 var firstStamp = points[0].GetProperty("collection_time").GetString()![..19];
                 Assert.NotEqual(Stamp(end.AddHours(-24)), firstStamp);

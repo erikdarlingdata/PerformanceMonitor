@@ -461,7 +461,7 @@ public static class DurationTrendRouting
                 AND   collection_time <= $3
                 GROUP BY collection_time
             ) AS g
-            WHERE collection_time >= $2
+            WHERE collection_time > $2
         )
         """;
     }
@@ -727,7 +727,7 @@ stored AS
                      WHEN is_stored THEN NULLIF(max_interval_seconds, 0)
                 END AS interval_seconds{matched}
             FROM gapped
-            WHERE collection_time >= $2
+            WHERE collection_time > $2
             AND   collection_time <= $3
         )
         """;
@@ -931,7 +931,7 @@ stored AS
                        SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS avg_cpu_ms
                 FROM procedure_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   sample_interval_seconds IS DISTINCT FROM 0
                 AND   {match}
@@ -1066,7 +1066,7 @@ stored AS
             AND   qs.database_name = $2
             AND   qs.query_hash = $3
             AND   qs.collection_time >= $7
-            AND   qs.collection_time >= $4
+            AND   qs.collection_time > $4
             AND   qs.collection_time <= $5
         ) AS h
         GROUP BY bucket_start

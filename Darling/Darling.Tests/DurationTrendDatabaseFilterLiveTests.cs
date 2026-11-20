@@ -201,8 +201,9 @@ public sealed class DurationTrendDatabaseFilterLiveTests
     /// <summary>
     /// [#5414 round 2, per-bucket HAVING] A bucket the chosen databases had no rows in is a measured 0, not a missing
     /// bucket, and it is as much a bucket the store covered as any other. Collections every 15 minutes for four hours, C in
-    /// every one, A in the third hour's first collection only. The window starts at the store's first collection, which
-    /// is two hours before A's first row: [A] returns every hour bucket (zero before and after its one busy hour), the
+    /// every one, A in the third hour's first collection only. The window starts 15 minutes before the store's first
+    /// collection, so that collection is inside it and not stamped on its start, and the first collection is two hours
+    /// before A's first row: [A] returns every hour bucket (zero before and after its one busy hour), the
     /// answer does not claim the window was cut short, and effective_start is the store's own first collection. A
     /// database with no row anywhere in the window is still the empty answer. The viewer's duration and execution-count
     /// charts read the same rule.
@@ -220,24 +221,25 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             }
 
             const double bucketSeconds = 4 * 900;
+            var start = first.AddMinutes(-15);
             var end = now.AddMinutes(5);
             var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
-            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(first, rollups.Item1, rollups.Item2, windowEndUtc: end);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, rollups.Item1, rollups.Item2, windowEndUtc: end);
             Assert.Equal(RetentionTier.Raw, route.Tier);
 
-            var a = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.One(A), ct);
+            var a = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 60, DatabaseFilter.One(A), ct);
             Assert.Equal(4, a.Points.Count);
             var expected = new[] { 0.0, 0.0, 6_000 / bucketSeconds, 0.0 };
             for (var i = 0; i < expected.Length; i++) { Assert.Equal(expected[i], a.Points[i].Value!.Value, 6); }
             Assert.False(a.Truncated);
             Assert.Equal(first, a.EffectiveStartUtc);
 
-            var all = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.All, ct);
+            var all = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 60, DatabaseFilter.All, ct);
             Assert.Equal(4, all.Points.Count);
             Assert.False(all.Truncated);
             Assert.Equal(first, all.EffectiveStartUtc);
 
-            var none = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.One("NoSuchDatabase"), ct);
+            var none = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 60, DatabaseFilter.One("NoSuchDatabase"), ct);
             Assert.Empty(none.Points);
 
             /* The viewer's two charts: the window's bucket width is the viewer's own, so every collection is a point (a
@@ -246,15 +248,15 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             foreach (var executions in new[] { false, true })
             {
                 var series = executions
-                    ? await viewer.GetExecutionCountTrendAsync(serverId, first, end, new[] { A }, nowUtc: first.AddHours(1), cancellationToken: ct)
-                    : await viewer.GetQueryDurationTrendAsync(serverId, first, end, new[] { A }, nowUtc: first.AddHours(1), cancellationToken: ct);
+                    ? await viewer.GetExecutionCountTrendAsync(serverId, start, end, new[] { A }, nowUtc: first.AddHours(1), cancellationToken: ct)
+                    : await viewer.GetQueryDurationTrendAsync(serverId, start, end, new[] { A }, nowUtc: first.AddHours(1), cancellationToken: ct);
                 Assert.False(series.Truncated, executions ? "executions" : "duration");
                 Assert.Equal(first, series.EffectiveStartUtc);
                 Assert.Equal(first, series.Points.First().CollectionTime);
                 Assert.Contains(series.Points, p => p.Value == 0.0 && p.CollectionTime < first.AddHours(2));
                 var viewerNone = executions
-                    ? await viewer.GetExecutionCountTrendAsync(serverId, first, end, new[] { "NoSuchDatabase" }, nowUtc: first.AddHours(1), cancellationToken: ct)
-                    : await viewer.GetQueryDurationTrendAsync(serverId, first, end, new[] { "NoSuchDatabase" }, nowUtc: first.AddHours(1), cancellationToken: ct);
+                    ? await viewer.GetExecutionCountTrendAsync(serverId, start, end, new[] { "NoSuchDatabase" }, nowUtc: first.AddHours(1), cancellationToken: ct)
+                    : await viewer.GetQueryDurationTrendAsync(serverId, start, end, new[] { "NoSuchDatabase" }, nowUtc: first.AddHours(1), cancellationToken: ct);
                 Assert.Empty(viewerNone.Points);
             }
         }, Cleanup);

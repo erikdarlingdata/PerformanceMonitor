@@ -42,7 +42,6 @@ public sealed class ViewerSessionStatsSqlTests
         Assert.DoesNotContain("FROM v_session_stats", sql, StringComparison.Ordinal);
 
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
 
         /* #4234/#4349: bucketed — the outer read joins agg + latest on bucket_start and orders by

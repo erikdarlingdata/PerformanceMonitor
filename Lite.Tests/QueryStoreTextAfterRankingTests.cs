@@ -343,9 +343,29 @@ WHERE {presence}";
     }
 
     /// <summary>
+    /// The regressions fallback reads its window one UTC day at a time, and the days leave no gap between them: a row
+    /// collected exactly on a UTC midnight inside the window is found.
+    /// </summary>
+    [Fact]
+    public async Task WindowTextFallback_FindsARowCollectedOnAUtcMidnightInsideTheWindow()
+    {
+        var duckDb = await BuildStoreAsync(textRepeat: 3);
+        using (var readLock = duckDb.AcquireReadLock())
+        using (var connection = duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            await InsertExtraAsync(connection, 9141, 914, "h914", 9141, _anchor.Date.AddDays(-1), "midnight 914");
+        }
+
+        using var read = await new LocalDataService(duckDb).OpenConnectionAsync();
+        Assert.Equal("midnight 914", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 914, _anchor.AddDays(-3), _anchor));
+    }
+
+    /// <summary>
     /// The regressions fallback (a key whose latest kept row has no text) walks the window one UTC day at a time, newest
-    /// first, and stops at the first day with a text, instead of one MAX over every file of the window. Both window ends
-    /// are inclusive, including a row collected exactly at either.
+    /// first, and stops at the first day with a text, instead of one MAX over every file of the window. The window is
+    /// open at its start and closed at its end: a row collected exactly on the start belongs to the window before, and a
+    /// row collected exactly on the end is read.
     /// </summary>
     [Fact]
     public async Task WindowTextFallback_WalksTheWindowNewestUtcDayFirst()
@@ -366,7 +386,8 @@ WHERE {presence}";
         using var read = await new LocalDataService(duckDb).OpenConnectionAsync();
         var from = _anchor.AddDays(-3);
         Assert.Equal("aaa newer", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 910, from, _anchor));
-        Assert.Equal("edge start 911", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from, _anchor));
+        Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from, _anchor));
+        Assert.Equal("edge start 911", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from.AddDays(-1), from));
         Assert.Equal("edge end 912", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 912, from, _anchor));
         Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 910, from.AddDays(2), _anchor.AddDays(-1)));
         Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 913, from, _anchor));
@@ -512,9 +533,9 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
             /* The bound must be on the scan itself (a Filters line of the parquet scan), not only in a later FILTER. */
             Assert.Matches(@"(?s)(READ_PARQUET|PARQUET_SCAN|TABLE_SCAN).*Filters:.*collection_time", text);
             /* Both bounds must be literal comparisons on the column, which is what DuckDB turns into a row-group skip: a bound
-               wrapped in a function (epoch_ms(collection_time) >= ...) still prints under Filters: but skips nothing. */
+               wrapped in a function (epoch_ms(collection_time) > ...) still prints under Filters: but skips nothing. */
             var bare = Regex.Replace(text, @"[\s│┌┐└┘├┤┬┴┼─]+", "");
-            Assert.Contains("collection_time>=", bare, StringComparison.Ordinal);
+            Assert.Contains("collection_time>", bare, StringComparison.Ordinal);
             Assert.Contains("collection_time<=", bare, StringComparison.Ordinal);
         }
     }

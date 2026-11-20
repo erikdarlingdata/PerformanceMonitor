@@ -104,7 +104,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_hash = $3
-        AND   collection_time >= $4
+        AND   collection_time > $4
         AND   collection_time <= $5
         ORDER BY collection_time
         """;
@@ -191,47 +191,55 @@ public sealed partial class ViewerDataService
     /// schema_name, $4 object_name, $5 window start, $6 window end (naive UTC).
     /// </summary>
     public const string ProcStatsHistorySql = """
-        SELECT
-            collection_time,
-            delta_execution_count,
-            delta_worker_time,
-            delta_elapsed_time,
-            delta_logical_reads,
-            delta_logical_writes,
-            delta_physical_reads,
-            min_worker_time,
-            max_worker_time,
-            min_elapsed_time,
-            max_elapsed_time,
-            total_spills,
-            min_logical_reads,
-            max_logical_reads,
-            min_physical_reads,
-            max_physical_reads,
-            min_logical_writes,
-            max_logical_writes,
-            min_spills,
-            max_spills,
-            sql_handle,
-            plan_handle,
-            cached_time,
-            last_execution_time,
-            object_type,
-            execution_count,
-            total_worker_time,
-            total_elapsed_time,
-            total_logical_reads,
-            total_physical_reads,
-            total_logical_writes,
-            delta_spills,
-            COALESCE(sample_interval_seconds, CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS bigint)) AS sample_interval_seconds
-        FROM procedure_stats
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   schema_name = $3
-        AND   object_name = $4
-        AND   collection_time >= $5
-        AND   collection_time <= $6
+        WITH history AS
+        (
+            SELECT
+                collection_time,
+                delta_execution_count,
+                delta_worker_time,
+                delta_elapsed_time,
+                delta_logical_reads,
+                delta_logical_writes,
+                delta_physical_reads,
+                min_worker_time,
+                max_worker_time,
+                min_elapsed_time,
+                max_elapsed_time,
+                total_spills,
+                min_logical_reads,
+                max_logical_reads,
+                min_physical_reads,
+                max_physical_reads,
+                min_logical_writes,
+                max_logical_writes,
+                min_spills,
+                max_spills,
+                sql_handle,
+                plan_handle,
+                cached_time,
+                last_execution_time,
+                object_type,
+                execution_count,
+                total_worker_time,
+                total_elapsed_time,
+                total_logical_reads,
+                total_physical_reads,
+                total_logical_writes,
+                delta_spills,
+                COALESCE(sample_interval_seconds, CAST(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS bigint)) AS sample_interval_seconds
+            FROM procedure_stats
+            WHERE server_id = $1
+            AND   database_name = $2
+            AND   schema_name = $3
+            AND   object_name = $4
+            /* A pre-V128 row takes its interval from the row before it, so the row stamped on $5 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($5, $6]. */
+            AND   collection_time >= $5
+            AND   collection_time <= $6
+        )
+        SELECT *
+        FROM history
+        WHERE collection_time > $5
         ORDER BY collection_time
         """;
 
@@ -310,7 +318,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collector_name = 'procedure_stats'
         AND   status = 'SUCCESS'
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time
         """;
@@ -429,7 +437,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_id = $3
-        AND   collection_time >= $4
+        AND   collection_time > $4
         AND   collection_time <= $5
         ORDER BY collection_time
         """;

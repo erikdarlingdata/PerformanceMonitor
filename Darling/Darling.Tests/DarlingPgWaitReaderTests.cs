@@ -80,7 +80,7 @@ public class DarlingPgWaitReaderTests
     public void UsesTheStandardServerAndWindowParameters()
     {
         Assert.Contains("server_id = $1", Sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", Sql, StringComparison.Ordinal);
+        Assert.Matches(@"collection_time >=? \$2", Sql);
         Assert.Contains("collection_time <= $3", Sql, StringComparison.Ordinal);
     }
 

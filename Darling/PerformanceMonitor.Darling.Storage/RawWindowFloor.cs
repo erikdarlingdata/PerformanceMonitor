@@ -82,7 +82,7 @@ public static class RawWindowFloor
             SELECT 1
             FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS w
             WHERE w.server_id = $1
-            AND   w.collection_time >= $2
+            AND   w.collection_time > $2
             AND   w.collection_time <= $3
         )
         """;
@@ -149,7 +149,7 @@ public static class RawWindowFloor
             SELECT 1
             FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS w
             WHERE w.server_id = $1
-            AND   w.collection_time >= $2
+            AND   w.collection_time > $2
             AND   w.collection_time <= $3
         )
         OR EXISTS
@@ -159,7 +159,7 @@ public static class RawWindowFloor
             WHERE c.server_id = $1
             AND   c.collector_name = 'procedure_stats'
             AND   c.status = 'SUCCESS'
-            AND   c.collection_time >= $2
+            AND   c.collection_time > $2
             AND   c.collection_time <= $3
         )
         """;

@@ -153,7 +153,7 @@ public sealed class TopRankingTwoPassTests
         var sql = Sql(name);
         foreach (var filter in new[]
         {
-            "server_id = $1", "collection_time >= $2", "collection_time <= $3",
+            "server_id = $1", "collection_time > $2", "collection_time <= $3",
             "$5::text[] IS NULL OR database_name = ANY($5)", "{TimescaleSupport.IntervalHonestSourceFilter}",
         })
         {

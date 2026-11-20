@@ -150,7 +150,7 @@ SELECT server_id, query_hash,
        CAST(COALESCE(SUM(delta_logical_reads), 0) AS DOUBLE), CAST(COALESCE(SUM(delta_logical_writes), 0) AS DOUBLE),
        CAST(COALESCE(SUM(delta_execution_count), 0) AS DOUBLE)
 FROM v_query_stats
-WHERE server_id IN ({ids}) AND collection_time >= $1 AND collection_time <= $2
+WHERE server_id IN ({ids}) AND collection_time > $1 AND collection_time <= $2
 GROUP BY server_id, query_hash", "query_stats", hot ? "query_stats" : "v_query_stats"), 1, HashTag);
 
         sections[QueryTagRollupSection.PlanCache.Name] = await ReadPlanCacheAsync(planCacheHot);
@@ -168,7 +168,7 @@ WITH deduped AS (
                PARTITION BY server_id, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                ORDER BY collection_time DESC, execution_count DESC) AS rn
     FROM v_query_store_stats
-    WHERE server_id IN ({ids}) AND collection_time >= $1 AND collection_time <= $2
+    WHERE server_id IN ({ids}) AND collection_time > $1 AND collection_time <= $2
 )
 SELECT server_id, query_hash,
        CAST(COALESCE(SUM(CAST(avg_cpu_time_us AS DOUBLE) * execution_count), 0) AS DOUBLE),
@@ -193,7 +193,7 @@ SELECT server_id, database_name, schema_name, object_name,
        CAST(COALESCE(SUM(delta_logical_reads), 0) AS DOUBLE), CAST(COALESCE(SUM(delta_logical_writes), 0) AS DOUBLE),
        CAST(COALESCE(SUM(delta_execution_count), 0) AS DOUBLE)
 FROM v_procedure_stats
-WHERE server_id IN ({ids}) AND collection_time >= $1 AND collection_time <= $2
+WHERE server_id IN ({ids}) AND collection_time > $1 AND collection_time <= $2
 GROUP BY server_id, database_name, schema_name, object_name", 3, ObjectTag);
 
         static string CallerOf(System.Data.Common.DbDataReader r, int at) =>
@@ -209,7 +209,7 @@ GROUP BY server_id, database_name, schema_name, object_name", 3, ObjectTag);
         async Task<List<(int Server, string Key, bool Blocked, double Ms, double Count)>> BlockingRows(QueryTagRollupSection section, Func<string, string> source, string timeColumn, bool collapse)
         {
             var rows = new List<(int, string, bool, double, double)>();
-            var where = $"server_id IN ({ids}) AND {timeColumn} >= $1 AND {timeColumn} <= $2";
+            var where = $"server_id IN ({ids}) AND {timeColumn} > $1 AND {timeColumn} <= $2";
             foreach (var side in new[] { "blocked", "blocking" })
             {
                 var sql = collapse
@@ -251,7 +251,7 @@ GROUP BY server_id, {side}_client_app, {side}_login_name, {side}_host_name, data
             var found = new List<(int Server, string? Xml, DateTime? When)>();
             await ReadRowsAsync(connection, $@"
 SELECT server_id, deadlock_graph_xml, deadlock_time
-FROM {StoredEventCopies.Deadlocks($"server_id IN ({ids}) AND deadlock_time >= $1 AND deadlock_time <= $2")} AS dl
+FROM {StoredEventCopies.Deadlocks($"server_id IN ({ids}) AND deadlock_time > $1 AND deadlock_time <= $2")} AS dl
 ORDER BY deadlock_time DESC, deadlock_id DESC
 LIMIT {QueryTagDeadlockScanCeiling + 1}", window,
                 r =>

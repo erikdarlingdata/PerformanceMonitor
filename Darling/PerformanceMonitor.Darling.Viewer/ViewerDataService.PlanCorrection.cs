@@ -64,7 +64,7 @@ public sealed partial class ViewerDataService
             implementation_script
         FROM plan_correction
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   recommendation_name IS NOT NULL
         AND   ($4::text[] IS NULL OR database_name = ANY($4))

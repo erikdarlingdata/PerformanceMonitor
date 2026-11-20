@@ -88,7 +88,7 @@ public static class DarlingPgWaitReader
             SUM(SUM(delta_wait_time_us)) OVER () / 1000.0 AS window_total_wait_time_ms
         FROM pg_wait_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY
             COALESCE(wait_type, 'unknown_type_' || wait_type_id::text),
