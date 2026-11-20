@@ -81,6 +81,40 @@ public sealed class TopProceduresHourlyMidLiveTests
             Assert.True(midPages < rawPages, $"mid route read {midPages} pages, the raw statement {rawPages}");
         });
 
+    [Fact]
+    public Task MidRoute_ReadsRaw_WhenAWinnerHoldsTwoObjectTypes() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            await AssertMidPlannedButRawPageAsync(scratch, connection, start, end, ct);
+        }, SeedShape.TwoObjectTypes);
+
+    [Fact]
+    public Task MidRoute_ReadsRaw_WhenTheRollupHasAHoleInTheMid() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            await AssertMidPlannedButRawPageAsync(scratch, connection, start, end, ct);
+        }, SeedShape.MaterializationGap);
+
+    /// <summary>The plan takes the mid, yet the routed page equals the page with the rollup dropped (raw alone). The seed shape is one
+    /// where the mid's own answer would differ from raw's, so a read that skipped its fallback fails here.</summary>
+    private static async Task AssertMidPlannedButRawPageAsync(ScratchPostgres scratch, NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct)
+    {
+        await using (var source = NpgsqlDataSource.Create(scratch.ConnectionString))
+        {
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(source, ct);
+            Assert.NotNull(DarlingDataReader.PlanProceduresHourlyMid(rollups, coverage, TopRanking.Cpu, start, end));
+        }
+
+        var routed = await ReadAsync(scratch, TopRanking.Cpu, start, end, ct);
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalDailyView}");
+        await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}");
+        var raw = await ReadAsync(scratch, TopRanking.Cpu, start, end, ct);
+
+        Assert.Equal(raw, routed);
+        Assert.NotEqual("[]", raw);
+    }
+
     private static async Task<object?> ExplainAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DarlingDataReader.HourlyMid? mid, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, connection);
@@ -108,12 +142,21 @@ public sealed class TopProceduresHourlyMidLiveTests
         return JsonSerializer.Serialize(result.Rows);
     }
 
+    /// <summary>Extra seed on top of the plain store: <see cref="TwoObjectTypes"/> gives one procedure a second object type, and
+    /// <see cref="MaterializationGap"/> leaves hours of the window out of the rollup's refresh.</summary>
+    private enum SeedShape
+    {
+        Plain,
+        TwoObjectTypes,
+        MaterializationGap,
+    }
+
     /// <summary>
     /// Plants <see cref="Objects"/> procedures, one row each every five minutes from two hours before the window to one hour after it,
     /// plus the edge rows, refreshes the interval-honest hourly rollup over all of it, and runs the body. The window ends 20 minutes
-    /// past an hour two hours ago, so it is inside raw retention and its last part is an edge.
+    /// past an hour of the previous UTC day, so it is inside raw retention and its last part is an edge.
     /// </summary>
-    private static async Task WithStoreAsync(Func<ScratchPostgres, NpgsqlConnection, DateTime, DateTime, CancellationToken, Task> body)
+    private static async Task WithStoreAsync(Func<ScratchPostgres, NpgsqlConnection, DateTime, DateTime, CancellationToken, Task> body, SeedShape shape = SeedShape.Plain)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -138,10 +181,12 @@ public sealed class TopProceduresHourlyMidLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var now = DateTime.UtcNow;
-        var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
-        var end = hour.AddHours(-2).AddMinutes(20);
+        /* Anchored through LiveClock (#5608): a 24 hour window straddles a raw chunk boundary, and with the end placed "two hours
+           ago" that boundary moves with the hour the test runs. The end sits 20 minutes past an hour of the previous UTC day, so the
+           window is inside raw retention, its last part is an edge, and the layout is the same at any hour. */
+        var end = LiveClock.AnchoredEndNotAfterNow().AddMinutes(20);
         var start = end.AddHours(-24);
+        var hour = new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(2);
 
         /* Object n: CPU 1000 + n per row (P058 and P059 tie on CPU, P059 has more executions), elapsed 3000 - n,
            executions 1 + n % 7. P007 has a NULL schema. One extra row each sits exactly on the window's start (left out) and
@@ -165,11 +210,45 @@ public sealed class TopProceduresHourlyMidLiveTests
                    (914709000003, $3, {ServerId}, '{ServerName}', 'db0', 'dbo', 'P003', 'P', 5, 990000, 990000, 0)
             """, start, end, start.AddHours(5).AddMinutes(2));
 
-        await using (var refresh = new NpgsqlCommand(
-            $"CALL refresh_continuous_aggregate('collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}'::regclass, $1::timestamp, $2::timestamp)", connection))
+        if (shape == SeedShape.TwoObjectTypes)
         {
-            refresh.Parameters.AddWithValue(start.AddHours(-3));
-            refresh.Parameters.AddWithValue(hour);
+            /* P010 also exists as a function ('FN') with the same load, so the rollup, which has no object_type, ranks the two together
+               (about 582,000 CPU, a winner) while raw ranks each type alone (about 290,000 each, below the eighth place). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
+                INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name,
+                                             object_type, sql_handle, plan_handle, delta_execution_count, delta_worker_time, delta_elapsed_time,
+                                             delta_logical_reads, delta_spills, min_worker_time, max_worker_time, sample_interval_seconds)
+                SELECT 914710000000 + row_number() OVER (), t, {ServerId}, '{ServerName}', 'db' || (n % 3), 'dbo', 'P' || lpad(n::text, 3, '0'),
+                       'FN', 'shf' || n, 'phf' || n, 1 + n % 7, 1000 + n, 3000 - n, 10 * n, n % 2, n, 2 * n, 300
+                FROM generate_series(10, 10) AS n
+                CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '5 minutes') AS t
+                """, start.AddHours(-2).AddMinutes(1), end.AddHours(1));
+        }
+
+        if (shape == SeedShape.MaterializationGap)
+        {
+            /* The load is uniform across the window, so a gap alone would not move the ranking. PGAP does all its work inside the
+               skipped hours (about 3.6 million CPU, the top of the raw page), so a mid that ignored the hole would not rank it. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
+                INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name,
+                                             object_type, sql_handle, plan_handle, delta_execution_count, delta_worker_time, delta_elapsed_time,
+                                             sample_interval_seconds)
+                SELECT 914720000000 + row_number() OVER (), t, {ServerId}, '{ServerName}', 'db0', 'dbo', 'PGAP', 'P', 'shg', 'phg', 3, 100000, 100000, 300
+                FROM generate_series($1::timestamp, $2::timestamp, interval '5 minutes') AS t
+                """, start.AddHours(8).AddMinutes(1), start.AddHours(11));
+        }
+
+        /* A refresh over a sub-range leaves the rest unmaterialized. The gap case skips hours 8 to 12 of the window: raw holds
+           rows there and the rollup holds no bucket, which is the hole the mid route's scan must see. */
+        var refreshRanges = shape == SeedShape.MaterializationGap
+            ? new[] { (start.AddHours(-3), start.AddHours(8)), (start.AddHours(12), hour) }
+            : new[] { (start.AddHours(-3), hour) };
+        foreach (var (lo, hi) in refreshRanges)
+        {
+            await using var refresh = new NpgsqlCommand(
+                $"CALL refresh_continuous_aggregate('collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}'::regclass, $1::timestamp, $2::timestamp)", connection);
+            refresh.Parameters.AddWithValue(lo);
+            refresh.Parameters.AddWithValue(hi);
             await refresh.ExecuteNonQueryAsync(ct);
         }
 
