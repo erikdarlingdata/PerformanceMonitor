@@ -33,7 +33,9 @@ public sealed partial class PgFactCollector
        server's current maxdop setting can produce right now is impossible under today's configuration,
        so it provably predates whatever change set that configuration and must not be counted. A
        current_maxdop of 0 (unlimited) or unknown (no server_config row yet) makes no configuration
-       impossible, so the count is unchanged in both of those cases. */
+       impossible, so the count is unchanged in both of those cases. The setting is the newest capture at
+       or before $3, the analysis window's end, so a pass over an earlier window is held to the setting
+       that window had. */
     public static string QueryStatsSql => @"
 WITH current_maxdop AS
 (
@@ -41,6 +43,7 @@ WITH current_maxdop AS
     FROM server_config
     WHERE server_id = $1
     AND   configuration_name = 'max degree of parallelism'
+    AND   capture_time <= $3
     ORDER BY capture_time DESC
     LIMIT 1
 )

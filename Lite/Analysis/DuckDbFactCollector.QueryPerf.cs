@@ -57,7 +57,8 @@ LIMIT " + FactRanked.MaxObjects + ";";
                MAXDOP is the ordinary remediation for this very finding, so without the cross-check
                the finding survives its own fix. A current_maxdop of 0 (unlimited) or unknown (no
                v_server_config row yet) makes no configuration impossible, so the count is unchanged
-               in both of those cases.
+               in both of those cases. The setting is the newest capture at or before $3, the analysis
+               window's end, so a pass over an earlier window is held to the setting that window had.
                LEFT JOIN ... ON true rather than a correlated subquery: the CTE is at most one row, so
                the join stays one-to-one and the config read is evaluated once, not per query row. */
             cmd.CommandText = @"
@@ -67,6 +68,7 @@ WITH current_maxdop AS
     FROM v_server_config
     WHERE server_id = $1
     AND   configuration_name = 'max degree of parallelism'
+    AND   capture_time <= $3
     ORDER BY capture_time DESC
     LIMIT 1
 )
