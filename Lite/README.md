@@ -19,6 +19,7 @@ There is nothing to install first. `Setup.exe` and the portable `PerformanceMoni
 ## More
 
 - [Lite guide](../docs/lite-guide.md): install, upgrade, where Lite keeps its files, configuration, appearance and collectors
+- [Run Lite headless](../docs/lite-guide.md#run-lite-headless): `--headless` and `--stop`, for a machine that nobody signs in to
 - [Troubleshooting](../docs/troubleshooting.md)
 - [Changelog](../CHANGELOG.md)
 - [Root README](../README.md) for the full documentation
