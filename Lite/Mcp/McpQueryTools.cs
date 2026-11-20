@@ -24,7 +24,7 @@ public sealed class McpQueryTools
         ? "Omit full_text to fit more queries as 400-character previews, or narrow the page with database_name or tag to read the ones left out."
         : "Narrow the page with database_name or tag to read the queries left out.";
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only: truncated = true says rows were left off the end for it, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only. truncated = true says rows were left out, by the top cap or by the budget; budget_truncated = true and budget_note are the budget cut alone, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -98,12 +98,17 @@ public sealed class McpQueryTools
             var droppedDatabases = string.IsNullOrEmpty(database_name)
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope, excludeDatabaseNames: droppedDatabases);
-            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            /* The ranking is read for top + 1 rows, listed databases first and the fill from the dropped ones after: the extra row is the
+               observed signal that the window held more queries than top, and the first top rows are the same rows in the same order. */
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top + 1, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope, excludeDatabaseNames: droppedDatabases);
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top + 1)
             {
-                var fill = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
+                var fill = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top + 1 - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
                 rows = [.. rows, .. fill];
             }
+
+            var moreThanTop = rows.Count > top;
+            if (moreThanTop) rows = rows.GetRange(0, top);
 
             /* #7005: every empty answer below also says whether the store holds the window (the notice rides it by WithEmptyWindowNoticeAsync). */
             async Task<string> EmptyAnswerAsync()
@@ -257,9 +262,13 @@ public sealed class McpQueryTools
                 DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
             }
 
-            /* #8568: the page ends at the last whole row that fits the response budget, heaviest first, and says so
-               (truncated, budget_note), as Darling's twin does. */
-            return McpResponseBudget.CapPage(payload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(full_text));
+            /* `truncated` is true when the window held more queries than top. #8568: the page also ends at the last whole row that
+               fits the response budget, heaviest first, and says so (budget_truncated, budget_note), and `truncated` is then true for
+               either cut, as Darling's twin does. */
+            payload["truncated"] = moreThanTop;
+            return McpResponseBudget.CapArray(
+                payload, "queries", "heaviest first", "queries", _ => TopQueriesCutRemedy(full_text), McpResponseBudget.DefaultBytes,
+                "budget_truncated", "budget_note", (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count);
         }
         catch (Exception ex)
         {
@@ -500,7 +509,7 @@ public sealed class McpQueryTools
         return message is null ? null : McpHelpers.Status("unavailable", message);
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut (no limit changes it), because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept: truncated says rows were cut for that, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut (no limit changes it), because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept. truncated says rows were left out, by the top cap or by the budget; budget_truncated and budget_note are the budget cut alone, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -544,13 +553,17 @@ public sealed class McpQueryTools
 
             var nowUtc = windowEnd;
             var requestedStart = nowUtc.AddHours(-hours_back);
+            /* Read for top + 1 queries: the extra row is the observed signal that the window held more queries than top, and the first
+               top are the same rows in the same order. */
             var rows = await dataService.GetQueryStoreTopQueriesAsync(
-                resolved.ServerId, hours_back, top,
+                resolved.ServerId, hours_back, top + 1,
                 databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
                 asOfUtc: windowEnd,
                 executionType: execution_type,
                 moduleName: module_name,
                 tags: tagScope);
+            var moreThanTop = rows.Count > top;
+            if (moreThanTop) rows = rows.GetRange(0, top);
 
             /* #4231 (Lite's twin of Darling's #2364): what the window ACTUALLY reached. rows above are the top
                N by COST, so their timestamps say nothing about how far back the read went. query_store_stats
@@ -657,9 +670,10 @@ public sealed class McpQueryTools
                 queries = result
             }, tagScope.Named);
 
-            /* #6131: the page is capped under the shared response budget (top 200 measured 177 KB on the Darling twin, which
-               has the same shape), and `truncated` says when it was. It is the budget cut only; the window floor keeps
-               window_truncated and its own note. */
+            /* `truncated` is true when the window held more queries than top. #6131: the page is also capped under the shared
+               response budget (top 200 measured 177 KB on the Darling twin, which has the same shape). The rows are heaviest first,
+               so the cut drops the lightest; budget_truncated and budget_note are that cut alone, and `truncated` is true for either.
+               The window floor keeps window_truncated and its own note. */
             var topPayload = System.Text.Json.Nodes.JsonNode.Parse(topJson)!.AsObject();
 
             /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
@@ -669,7 +683,10 @@ public sealed class McpQueryTools
                 topPayload[McpRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
 
-            return McpResponseBudget.CapPage(topPayload, "queries", "heaviest first", "queries");
+            topPayload["truncated"] = moreThanTop;
+            return McpResponseBudget.CapArray(
+                topPayload, "queries", "heaviest first", "queries", null, McpResponseBudget.DefaultBytes, "budget_truncated", "budget_note",
+                (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count);
         }
         catch (Exception ex)
         {
