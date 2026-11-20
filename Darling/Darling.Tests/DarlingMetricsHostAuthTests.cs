@@ -45,13 +45,15 @@ public sealed class DarlingMetricsHostAuthTests
     }
 
     private static async Task<WebApplication> StartAsync(
-        IPAddress? remote, string? allowFrom = null, DarlingMetricsHostTests.CapturingLogger? logger = null)
+        IPAddress? remote, string? allowFrom = null, DarlingMetricsHostTests.CapturingLogger? logger = null, TimeProvider? clock = null)
     {
         var check = CheckWith(allowFrom);
         var ct = TestContext.Current.CancellationToken;
         var cache = new DarlingMetricsSnapshotCache(
             _ => throw new InvalidOperationException("no store in this test"), () => false, TimeProvider.System, NullLogger.Instance, ct);
         var refusals = new DarlingHttpRefusalLog();
+        var throttle = new DarlingSignInThrottle();
+        var time = clock ?? TimeProvider.System;
         ILogger log = logger ?? (ILogger)NullLogger.Instance;
 
         var builder = WebApplication.CreateSlimBuilder();
@@ -67,7 +69,7 @@ public sealed class DarlingMetricsHostAuthTests
             });
         }
 
-        DarlingMetricsHostService.MapRoutes(app, context => DarlingMetricsHostService.Answer(context, check, cache, refusals, log, TimeProvider.System));
+        DarlingMetricsHostService.MapRoutes(app, context => DarlingMetricsHostService.Answer(context, check, cache, refusals, throttle, log, time));
         await app.StartAsync(ct);
         return app;
     }
@@ -140,6 +142,50 @@ public sealed class DarlingMetricsHostAuthTests
         Assert.Contains("Metrics", warning.Text, StringComparison.Ordinal);
         Assert.DoesNotContain(logger.Lines, l => l.Text.Contains(presented, StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Lines, l => l.Text.Contains(Token, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task WrongTokens_BelowTheFreeAllowance_StayPlain401s()
+    {
+        await using var app = await StartAsync(IPAddress.Loopback, clock: new ManualTimeProvider());
+
+        for (var i = 0; i < DarlingSignInThrottle.FreeFailures; i++)
+        {
+            using var refused = await ScrapeAsync(app, Bearer("wrong-9013-" + i));
+            await AssertUnauthorizedAsync(refused);
+            Assert.False(refused.Headers.Contains("Retry-After"));
+        }
+
+        using var right = await ScrapeAsync(app, Bearer(Token));
+        Assert.Equal(HttpStatusCode.OK, right.StatusCode);
+    }
+
+    [Fact]
+    public async Task RepeatedWrongTokens_FromOneSource_AreHeldWith429AndRetryAfter_ThenTheRightTokenIsServedAfterTheWait()
+    {
+        var clock = new ManualTimeProvider();
+        var logger = new DarlingMetricsHostTests.CapturingLogger();
+        await using var app = await StartAsync(Outside, logger: logger, clock: clock);
+
+        /* The free allowance and the miss that starts the wait are each compared and answered 401. */
+        for (var i = 0; i <= DarlingSignInThrottle.FreeFailures; i++)
+        {
+            using var refused = await ScrapeAsync(app, Bearer("wrong-9013-" + i));
+            await AssertUnauthorizedAsync(refused);
+        }
+
+        /* Inside the wait even the right token is held, never compared. */
+        using var held = await ScrapeAsync(app, Bearer(Token));
+        Assert.Equal(HttpStatusCode.TooManyRequests, held.StatusCode);
+        Assert.Equal(
+            ((int)Math.Ceiling(DarlingSignInThrottle.BaseDelay.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Assert.Single(held.Headers.GetValues("Retry-After")));
+        Assert.Contains(logger.Lines, l => l.Text.Contains("HTTP 429", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, l => l.Text.Contains(Token, StringComparison.Ordinal));
+
+        clock.Advance(DarlingSignInThrottle.BaseDelay);
+        using var after = await ScrapeAsync(app, Bearer(Token));
+        Assert.Equal(HttpStatusCode.OK, after.StatusCode);
     }
 
     [Fact]

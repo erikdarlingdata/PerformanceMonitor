@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -155,7 +156,10 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             app = builder.Build();
             /* #9013: one refusal log for this host, so its per-source rate limit spans every request the port answers. */
             var refusals = new DarlingHttpRefusalLog();
-            MapRoutes(app, context => Answer(context, check, cache, refusals, _logger, _time));
+            /* #9013: the bearer gate's per-source wait after repeated wrong tokens, as on MCP: one per started port, so a restart starts
+               clean and no static outlives the listener that earned the failures. */
+            var tokenThrottle = new DarlingSignInThrottle();
+            MapRoutes(app, context => Answer(context, check, cache, refusals, tokenThrottle, _logger, _time));
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
 
             _app = app;
@@ -195,10 +199,13 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
     /// #9013: one <c>GET /metrics</c>, gated in the MCP host's order (#5288): an address outside <c>metrics.allowFrom</c> is a 403
     /// whatever token it sends, then a missing or wrong bearer token is a 401, both with an empty body; only then the scrape. The
     /// address is the TCP peer: forwarded headers are never read, and loopback is always admitted, as on web and MCP. An empty
-    /// <c>allowFrom</c> means no address filter, so the list is not asked at all (an empty list admits nobody).
+    /// <c>allowFrom</c> means no address filter, so the list is not asked at all (an empty list admits nobody). A presented bearer token
+    /// goes through <paramref name="tokenThrottle"/> first, as on MCP: a source held after repeated wrong tokens gets 429 with
+    /// <c>Retry-After</c> and nothing is compared.
     /// </summary>
     internal static async Task Answer(
-        HttpContext context, MetricsCheck check, DarlingMetricsSnapshotCache cache, DarlingHttpRefusalLog refusals, ILogger logger, TimeProvider time)
+        HttpContext context, MetricsCheck check, DarlingMetricsSnapshotCache cache, DarlingHttpRefusalLog refusals,
+        DarlingSignInThrottle tokenThrottle, ILogger logger, TimeProvider time)
     {
         var remote = context.Connection.RemoteIpAddress;
         if (check.AllowList.Count > 0 && !DarlingHostBinding.IsRemoteAddressAllowed(remote, check.AllowList))
@@ -213,8 +220,46 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
 
         var authorization = context.Request.Headers.Authorization.ToString();
         var presented = DarlingMcpHostService.ExtractBearerToken(authorization);
+
+        /* #9013: the MCP bearer gate's wait (DarlingSignInThrottle): the port is reachable before a credential, and in a container it
+           listens on every address with no allowFrom by default, so without it a token could be tried at line rate. Only a presented
+           Bearer is an attempt; it is counted in one atomic step before the comparison, and a held source compares nothing, a right
+           token included. The wait is per source address and kept in memory: a restart clears it. */
+        var attempt = default(SignInAttempt);
+        if (presented is not null)
+        {
+            Func<DateTime> clock = () => time.GetUtcNow().UtcDateTime;
+            attempt = await tokenThrottle.BeginAttemptAsync(
+                DarlingSignInThrottle.SourceKey(remote), clock, context.RequestAborted).ConfigureAwait(false);
+            if (attempt.IsHeld)
+            {
+                var seconds = (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds);
+                var totalHold = attempt.Hold == SignInHold.Total;
+                refusals.Report(
+                    logger, RefusalSurface, DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
+                    totalHold
+                        ? $"requests are held for {seconds} more second(s): {DarlingSignInThrottle.GlobalMaxAttempts} wrong bearer tokens arrived within the hour from several addresses, so no token is compared from an address that has not presented a correct one recently; restarting the service clears it, and the failing client is in this log with its 401 lines (fix its token or take it out of metrics.allowFrom)"
+                        : $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
+                    clock(),
+                    state: totalHold ? "held-total" : "held-source");
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+                context.Response.ContentType = "text/plain; charset=utf-8";
+                await context.Response.WriteAsync(
+                    totalHold
+                        ? $"Bearer tokens are held for {seconds} seconds: {DarlingSignInThrottle.GlobalMaxAttempts} wrong tokens arrived in the last hour from several addresses, "
+                          + "not necessarily this one. No token is compared from an address that has not presented a correct one recently. "
+                          + "The hold is kept in memory: restarting the service clears it. Find the client that sends the wrong token and fix it or take it out of metrics.allowFrom, or the hold returns."
+                        : $"Too many wrong bearer tokens from this address. Try again in {seconds} seconds. "
+                          + "No token is compared during the wait. The wait is kept in memory: restarting the service clears it.").ConfigureAwait(false);
+                return;
+            }
+        }
+
         if (presented is null || !DarlingHostBinding.FixedTimeTokenEquals(presented, check.Token))
         {
+            /* The reserved attempt's miss is recorded now (a missing Bearer reserved nothing, so this does nothing for it). */
+            tokenThrottle.Missed(attempt);
             /* #9013: the MCP host's three states, read from the header's shape only, so the line never holds what was presented. */
             var refusal = presented is null
                 ? DarlingMcpHostService.DescribeBearerRefusal(authorization)
@@ -229,6 +274,7 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             return;
         }
 
+        tokenThrottle.Accepted(attempt);
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = PrometheusText.ContentType;
         await context.Response.WriteAsync(PrometheusText.Write(cache.Scrape(), time.GetUtcNow().UtcDateTime)).ConfigureAwait(false);
