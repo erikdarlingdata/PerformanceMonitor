@@ -112,7 +112,7 @@ public sealed class DarlingMcpBlockingTools
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.One(database_name), SqlTextPreviewLength, registryState, logger, cancellationToken);
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.One(database_name), SqlTextPreviewLength, registryState, logger, cancellationToken, McpResponseBudget.DefaultBytes);
 
     /// <summary>
     /// get_blocking under an explicit <paramref name="sqlTextPreviewLength"/> (#4198): the MCP tool passes
@@ -120,10 +120,13 @@ public sealed class DarlingMcpBlockingTools
     /// viewer's <c>/api/read</c> mirror passes <see cref="WebSqlTextPreviewLength"/> so its page does not
     /// change.
     /// </summary>
+    #pragma warning disable CA1068 // responseByteBudget trails the token on purpose; putting it before would shift every positional caller
     internal static Task<string> GetBlocking(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of, int sqlTextPreviewLength,
-        MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.All, sqlTextPreviewLength, registryState, logger, cancellationToken);
+        MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes) =>
+    #pragma warning restore CA1068
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.All, sqlTextPreviewLength, registryState, logger, cancellationToken, responseByteBudget);
 
     /// <summary>
     /// get_blocking over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
@@ -131,12 +134,17 @@ public sealed class DarlingMcpBlockingTools
     /// scan and before <paramref name="limit"/>, so the page is the newest <c>limit</c> events of the chosen databases. The empty answer
     /// and a dedup_key miss say "for the chosen databases" so they are not read as a verdict on a database the read never looked at;
     /// the status word is unchanged (<c>empty</c>: we looked at the chosen databases and found nothing).
+    /// <paramref name="responseByteBudget"/> is the byte target the page is cut to, rows left off the end whole (the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/>); null keeps every row, as the web viewer's mirror does.
     /// </summary>
+    #pragma warning disable CA1068 // responseByteBudget trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetBlocking(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of,
         DatabaseFilter databases, int sqlTextPreviewLength,
-        MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+        MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
+    #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -227,10 +235,11 @@ public sealed class DarlingMcpBlockingTools
 
             /* #4966: where the store's data starts for the window. An event list, so the floor is the earlier of the coverage probe and
                the oldest event the page shows (a first run of a collector can store events from before itself). The
-               page is fed by two collectors (XE reports and DMV snapshots), so the probe is both and the earlier wins, as the viewer's grid does. */
-            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+               page is fed by two collectors (XE reports and DMV snapshots), so the probe is both and the earlier wins, as the viewer's grid does.
+               The response budget can leave the oldest events off the page, so a notice is read for every length it can be cut to. */
+            var notices = await DarlingMcpWindowNotice.ReadEventPrefixesAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
-                page.Min(r => r.EventTime), windowStart, now, BlockingPageTables, logger: logger, cancellationToken: cancellationToken);
+                page.Select(r => r.EventTime).ToList(), windowStart, now, BlockingPageTables, logger: logger, cancellationToken: cancellationToken);
 
             /* #4198: filtering (a dedup_key) already narrowed the page to one named incident, so that call
                is exempt from the preview cut — see SqlTextPreviewLength's doc comment. */
@@ -290,54 +299,69 @@ public sealed class DarlingMcpBlockingTools
                 has_blocked_plan = r.HasBlockedPlan ? true : (bool?)null,
                 has_blocking_plan = r.HasBlockingPlan ? true : (bool?)null,
                 dedup_key = keys[i]
-            });
+            }).ToList();
 
-            var json = WithoutNullPlanFlags(new
+            /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            var lossRuns = await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken);
+
+            /* The newest events that fit the response budget: events are left off the end whole, never cut, and every field that describes
+               the page (the count, the span, the window notice) is that of the events it kept. `truncated` is true for either cut, the
+               row limit or the budget; budget_truncated is the budget alone. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
-                hours_back,
-                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
-                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
-                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
-                database_name = databases.Describe(),
-                dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
-                /*
-                    #3541 A3: `total_events` is gone. It was the reader's capped row count — neither the
-                    window's total nor the page's — under a name that promised the first. What is published
-                    now is what was measured: how many rows this page holds, whether the window held more,
-                    and the time span the page actually covers. Newest-first makes the page a contiguous
-                    slice of the window's tail, so oldest_returned_event_time IS the reach of this read —
-                    the #3287 figure, and the field a caller has to read before believing that a quiet page
-                    describes a quiet window. Under a dedup_key the page is the matching rows and the two
-                    stamps bound the INCIDENT rather than the reach; the scan fields below carry the reach.
-                */
-                events_returned = page.Count,
-                truncated,
-                /* Min/Max over the rows rather than rows[0] / rows[^1]: those coincide only under time
-                   ordering, and a dedup_key page is the matching rows rather than a contiguous slice.
-                   Enumerable.Min over DateTime? skips nulls and yields null for a page with no stamps. */
-                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
-                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
-                order = "event_time_desc",
-                /* The fingerprint scan, stated only when one ran: how many window rows were fingerprinted
-                   and whether the window held more than the scan could reach. Null rather than 0 without a
-                   key, because no scan was made — 0 would read as "a scan found nothing". */
-                rows_examined = filtering ? examined : (int?)null,
-                scan_truncated = filtering ? scanTruncated : (bool?)null,
-                events = result,
-                separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
-                separately_monitored_databases = separate
-            }, "events", "has_blocked_plan", "has_blocking_plan");
+                var notice = notices[kept];
+                var json = WithoutNullPlanFlags(new
+                {
+                    server = resolved.DisplayName,
+                    /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
+                    hours_back,
+                    /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                       window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                       for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                    database_name = databases.Describe(),
+                    dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
+                    /*
+                        #3541 A3: `total_events` is gone. It was the reader's capped row count — neither the
+                        window's total nor the page's — under a name that promised the first. What is published
+                        now is what was measured: how many rows this page holds, whether the window held more,
+                        and the time span the page actually covers. Newest-first makes the page a contiguous
+                        slice of the window's tail, so oldest_returned_event_time IS the reach of this read —
+                        the #3287 figure, and the field a caller has to read before believing that a quiet page
+                        describes a quiet window. Under a dedup_key the page is the matching rows and the two
+                        stamps bound the INCIDENT rather than the reach; the scan fields below carry the reach.
+                    */
+                    events_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "blocking events",
+                            "Pass as_of at oldest_returned_event_time to read on from there, or narrow the page with database_name or a smaller hours_back.")
+                        : null,
+                    /* Min/Max over the rows rather than rows[0] / rows[^1]: those coincide only under time
+                       ordering, and a dedup_key page is the matching rows rather than a contiguous slice.
+                       Enumerable.Min over DateTime? skips nulls and yields null for a page with no stamps. */
+                    oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.EventTime)),
+                    newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.EventTime)),
+                    order = "event_time_desc",
+                    /* The fingerprint scan, stated only when one ran: how many window rows were fingerprinted
+                       and whether the window held more than the scan could reach. Null rather than 0 without a
+                       key, because no scan was made — 0 would read as "a scan found nothing". */
+                    rows_examined = filtering ? examined : (int?)null,
+                    scan_truncated = filtering ? scanTruncated : (bool?)null,
+                    events = result.Take(kept),
+                    separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
+                    separately_monitored_databases = separate
+                }, "events", "has_blocked_plan", "has_blocking_plan");
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
-            return RingBufferLossAnswer.Attach(
-                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
-                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken), !databases.IsAll);
+                /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+                return RingBufferLossAnswer.Attach(notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json, lossRuns, !databases.IsAll);
+            }
+
+            return responseByteBudget is int budget ? McpResponseBudget.FitPrefix(page.Count, Reply, budget).Json : Reply(page.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -393,7 +417,7 @@ public sealed class DarlingMcpBlockingTools
             : string.Empty;
 
     [McpServerTool(Name = "get_deadlocks"), Description("Recent deadlock events with victim process info, newest first, window ends at as_of. Use get_deadlock_detail for the graph XML. not_collected wins if the engine can't run deadlocks; then precondition names a fixable gap (e.g. XE session gone); else empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: truncated true means raise limit or narrow the window, not widen hours_back. Darling: dedup_key scans the whole window before limit, up to a stated ceiling (rows_examined/scan_truncated); a no-match answer is still empty. <<GUIDE>> Gets recent deadlock events with victim process info, NEWEST FIRST. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: deadlocks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_deadlock_time / newest_returned_deadlock_time bound the page, under the newest-first ordering the oldest stamp IS how far back this read reached, so a truncated page says nothing about the earlier part of the window. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help, because the cap is on rows. With dedup_key the fingerprint scan runs over the window BEFORE limit, up to a stated ceiling (rows_examined / scan_truncated). dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key: paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated. database_name: the database the deadlock is recorded under: the event's own database on an Azure SQL Database master target, otherwise the capture database on Azure, or the victim's database. A cross-database deadlock lists every database in get_deadlock_detail's graph." + McpHelpers.UtcStampsDescription)]
-    public static async Task<string> GetDeadlocks(
+    public static Task<string> GetDeadlocks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -402,8 +426,19 @@ public sealed class DarlingMcpBlockingTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetDeadlocks(postgres, server_name, hours_back, limit, dedup_key, as_of, registryState, logger, cancellationToken, McpResponseBudget.DefaultBytes);
+
+    /// <summary>
+    /// get_deadlocks under an explicit response byte target: the MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>, and the page
+    /// leaves rows off the end whole when they do not fit it; the web viewer's <c>/api/read</c> mirror passes null and keeps every row.
+    /// </summary>
+    #pragma warning disable CA1068 // responseByteBudget trails the token on purpose; the MCP entry above is the same list without it
+    internal static async Task<string> GetDeadlocks(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, string? as_of,
+        MonitoredServerRegistryState? registryState, ILogger? logger, CancellationToken cancellationToken, int? responseByteBudget)
     {
+    #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -470,10 +505,11 @@ public sealed class DarlingMcpBlockingTools
             /* #5236: the victim-plan flag for the page's rows only (see get_blocking). */
             await DarlingBlockingReader.ReadVictimPlanFlagsAsync(postgres, resolved.ServerId, page, cancellationToken);
 
-            /* #4966: an event list, so the floor is the earlier of the coverage probe and the oldest deadlock the page shows. */
-            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+            /* #4966: an event list, so the floor is the earlier of the coverage probe and the oldest deadlock the page shows. The response
+               budget can leave the oldest deadlocks off the page, so a notice is read for every length it can be cut to. */
+            var notices = await DarlingMcpWindowNotice.ReadEventPrefixesAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
-                page.Min(r => r.DeadlockTime), windowStart, now, "deadlocks", logger: logger, cancellationToken: cancellationToken);
+                page.Select(r => r.DeadlockTime).ToList(), windowStart, now, "deadlocks", logger: logger, cancellationToken: cancellationToken);
 
             var separate = await SeparatelyMonitoredForAsync(postgres, registryState, resolved.ServerId, cancellationToken);
 
@@ -490,39 +526,54 @@ public sealed class DarlingMcpBlockingTools
                    get_deadlock_plan_xml's). Written only when true, as get_blocking's plan flags are. */
                 has_victim_plan = r.HasVictimPlan ? true : (bool?)null,
                 dedup_key = keys[i]
-            });
+            }).ToList();
 
-            var json = WithoutNullPlanFlags(new
+            /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            var lossRuns = await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, DeadlocksCollector.Instance.Name, windowStart, now, cancellationToken);
+
+            /* The newest deadlocks that fit the response budget: rows are left off the end whole, never cut, and every field that describes
+               the page (the count, the span, the window notice) is that of the rows it kept. `truncated` is true for either cut, the row
+               limit or the budget; budget_truncated is the budget alone. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
-                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
-                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
-                /* #3541 A3: the page described as a page — see get_blocking for why `total_deadlocks` went.
-                   The ORDER BY is deadlock_time, so the bounds are on that stamp rather than collection_time,
-                   and a deadlock whose stamp did not parse (null) is skipped by Min/Max rather than read as
-                   the epoch. */
-                deadlocks_returned = page.Count,
-                truncated,
-                oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.DeadlockTime)),
-                newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.DeadlockTime)),
-                order = "deadlock_time_desc",
-                rows_examined = filtering ? examined : (int?)null,
-                scan_truncated = filtering ? scanTruncated : (bool?)null,
-                deadlocks = result,
-                separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
-                separately_monitored_databases = separate
-            }, "deadlocks", "has_victim_plan");
+                var notice = notices[kept];
+                var json = WithoutNullPlanFlags(new
+                {
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                       window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                       for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
+                    /* #3541 A3: the page described as a page — see get_blocking for why `total_deadlocks` went.
+                       The ORDER BY is deadlock_time, so the bounds are on that stamp rather than collection_time,
+                       and a deadlock whose stamp did not parse (null) is skipped by Min/Max rather than read as
+                       the epoch. */
+                    deadlocks_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "deadlocks",
+                            "Pass as_of at oldest_returned_deadlock_time to read on from there, or narrow the window with hours_back.")
+                        : null,
+                    oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.DeadlockTime)),
+                    newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.DeadlockTime)),
+                    order = "deadlock_time_desc",
+                    rows_examined = filtering ? examined : (int?)null,
+                    scan_truncated = filtering ? scanTruncated : (bool?)null,
+                    deadlocks = result.Take(kept),
+                    separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
+                    separately_monitored_databases = separate
+                }, "deadlocks", "has_victim_plan");
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
-            return RingBufferLossAnswer.Attach(
-                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
-                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, DeadlocksCollector.Instance.Name, windowStart, now, cancellationToken));
+                /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+                return RingBufferLossAnswer.Attach(notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json, lossRuns);
+            }
+
+            return responseByteBudget is int budget ? McpResponseBudget.FitPrefix(page.Count, Reply, budget).Json : Reply(page.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

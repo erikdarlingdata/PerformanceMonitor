@@ -79,7 +79,7 @@ public sealed class DarlingMcpPlanCorrectionTools
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetPlanCorrections(postgres, server_name, hours_back, limit, as_of, full_text, DatabaseFilter.One(database_name), logger, cancellationToken);
+        => GetPlanCorrections(postgres, server_name, hours_back, limit, as_of, full_text, DatabaseFilter.One(database_name), logger, cancellationToken, responseByteBudget: McpResponseBudget.DefaultBytes);
 
     /// <summary>
     /// #5244: the get_plan_corrections read over a LIST of databases. The MCP tool passes <c>DatabaseFilter.One(database_name)</c>
@@ -87,6 +87,8 @@ public sealed class DarlingMcpPlanCorrectionTools
     /// rows (before the cap) and the automatic-tuning snapshot (its rows only; the newest-capture anchor stays the
     /// server's). The one-name consumer on the empty path (its message) is list-aware: with a filter it says "for the database X"
     /// (one name) or "for the chosen databases" (two or more) and gives no verdict about the server's collection.
+    /// <paramref name="responseByteBudget"/> is the byte target the page is cut to, rows left off the end whole (the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/>); null keeps every row, as the web viewer's mirror does.
     /// </summary>
     internal static async Task<string> GetPlanCorrections(
         NpgsqlDataSource postgres,
@@ -98,7 +100,8 @@ public sealed class DarlingMcpPlanCorrectionTools
         DatabaseFilter databaseFilter,
         ILogger? logger,
         CancellationToken cancellationToken,
-        bool collapse = false)
+        bool collapse = false,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -179,48 +182,65 @@ public sealed class DarlingMcpPlanCorrectionTools
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
             });
 
-            var payload = new
+            /* The latest snapshot whatever its age: on a readable secondary the collector no longer writes one, so the rows are
+               the last primary-role capture, and the note says so and how old they are. The age is measured at the window's
+               end (as_of when given), so a read of a past instant is not graded against the present. */
+            var automaticTuningNote = QueryStoreSnapshotStaleness.Join(
+                tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
+                tuning.Count > 0
+                    ? QueryStoreSnapshotStaleness.Note(
+                        DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
+                        tuningSchedule.Enabled, tuningSchedule.IntervalMinutes, "the as_of on each automatic_tuning row")
+                    : null);
+
+            var recommendationRows = (collapse ? WithSeenKeys(recommendations, page).Cast<object?>() : recommendations.Cast<object?>()).ToList();
+
+            /* The newest capture rows that fit the response budget: rows are left off the end whole, never cut, and every field that
+               describes the page (the count and the span) is that of the rows it kept. `truncated` is true for either cut, the row limit or
+               the budget; budget_truncated is the budget alone. */
+            string Reply(int kept)
             {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: the window floor. No effective_hours_back: this payload carries a page `truncated`, and the census holds that key
-                   apart from the window floor, so the reach is the instant. */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
-                database_name = databaseFilter.Describe(),
-                automatic_tuning = tuning.Select(t => new
+                var payload = new
                 {
-                    database_name = t.DatabaseName,
-                    force_last_good_plan_desired_state = t.DesiredState,
-                    force_last_good_plan_actual_state = t.ActualState,
-                    force_last_good_plan_reason = t.Reason,
-                    as_of = t.CollectionTime.ToString("o"),
-                }),
-                /* The latest snapshot whatever its age: on a readable secondary the collector no longer writes one, so the rows are
-                   the last primary-role capture, and the note says so and how old they are. The age is measured at the window's
-                   end (as_of when given), so a read of a past instant is not graded against the present. */
-                automatic_tuning_note = QueryStoreSnapshotStaleness.Join(
-                    tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
-                    tuning.Count > 0
-                        ? QueryStoreSnapshotStaleness.Note(
-                            DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
-                            tuningSchedule.Enabled, tuningSchedule.IntervalMinutes, "the as_of on each automatic_tuning row")
-                        : null),
-                /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
-                   the window's tail, so the oldest stamp IS the reach; null when the window held no
-                   recommendation rows and only the tuning snapshot answered. */
-                recommendations_returned = page.Count,
-                truncated,
-                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
-                order = "collection_time_desc",
-                recommendations = collapse ? WithSeenKeys(recommendations, page) : (object)recommendations,
-            };
-            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: the window floor. No effective_hours_back: this payload carries a page `truncated`, and the census holds that key
+                       apart from the window floor, so the reach is the instant. */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                    database_name = databaseFilter.Describe(),
+                    automatic_tuning = tuning.Select(t => new
+                    {
+                        database_name = t.DatabaseName,
+                        force_last_good_plan_desired_state = t.DesiredState,
+                        force_last_good_plan_actual_state = t.ActualState,
+                        force_last_good_plan_reason = t.Reason,
+                        as_of = t.CollectionTime.ToString("o"),
+                    }),
+                    automatic_tuning_note = automaticTuningNote,
+                    /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
+                       the window's tail, so the oldest stamp IS the reach; null when the window held no
+                       recommendation rows and only the tuning snapshot answered. */
+                    recommendations_returned = kept,
+                    truncated = truncated || kept < page.Count,
+                    budget_truncated = kept < page.Count,
+                    budget_note = kept < page.Count
+                        ? McpResponseBudget.PageCutNote(page.Count, kept, "newest capture first", "recommendation rows",
+                            "Pass as_of at oldest_returned_collection_time to read on from there, or narrow the page with database_name.")
+                        : null,
+                    /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
+                    oldest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.CollectionTime)),
+                    newest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.CollectionTime)),
+                    order = "collection_time_desc",
+                    recommendations = recommendationRows.Take(kept),
+                };
+                var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+                return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            }
+
+            return responseByteBudget is int budget ? McpResponseBudget.FitPrefix(page.Count, Reply, budget).Json : Reply(page.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

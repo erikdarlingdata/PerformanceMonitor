@@ -138,7 +138,7 @@ public sealed class DarlingMcpSessionTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         GetActiveQueries(postgres, server_name, hours_back, database_name, blocking_only, wait_type, limit,
-            full_text ? null : QueryTextPreviewLength, as_of, logger, cancellationToken, tag, collection_time, snapshots_only, include_monitor);
+            full_text ? null : QueryTextPreviewLength, as_of, logger, cancellationToken, tag, collection_time, snapshots_only, include_monitor, McpResponseBudget.DefaultBytes);
 
     /// <summary>
     /// get_active_queries under an explicit query-text preview length (#4198 lane W2): the MCP tool above
@@ -153,22 +153,24 @@ public sealed class DarlingMcpSessionTools
     internal static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? database_name, bool blocking_only, string? waitType,
         int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null,
-        string? collectionTime = null, bool snapshotsOnly = false, bool includeMonitor = false) =>
+        string? collectionTime = null, bool snapshotsOnly = false, bool includeMonitor = false, int? responseByteBudget = McpResponseBudget.DefaultBytes) =>
     #pragma warning restore CA1068
         GetActiveQueries(postgres, server_name, hours_back, DatabaseFilter.One(database_name), blocking_only, waitType,
-            limit, queryTextPreviewLength, as_of, logger, cancellationToken, tag, collectionTime, snapshotsOnly, includeMonitor);
+            limit, queryTextPreviewLength, as_of, logger, cancellationToken, tag, collectionTime, snapshotsOnly, includeMonitor, responseByteBudget);
 
     /// <summary>
     /// The same read over a SET of databases (#5245). The MCP tool and the web mirror pass <see cref="DatabaseFilter.One"/> of
     /// their one <c>database_name</c> until a later lane wires the list. <b>The name is no longer trimmed (#5245):</b> a blank
     /// name is <see cref="DatabaseFilter.All"/>, and every other name is compared exactly as given, so ' SalesDb' no longer
-    /// finds <c>SalesDb</c>. The wait type is still trimmed (#5235).
+    /// finds <c>SalesDb</c>. The wait type is still trimmed (#5235). <paramref name="responseByteBudget"/> is the byte target the page is
+    /// cut to, rows left off the end whole (the MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>); null keeps every row, as
+    /// the web viewer's mirror does.
     /// </summary>
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, bool blocking_only, string? waitType,
         int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null,
-        string? collectionTime = null, bool snapshotsOnly = false, bool includeMonitor = false)
+        string? collectionTime = null, bool snapshotsOnly = false, bool includeMonitor = false, int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -374,7 +376,35 @@ public sealed class DarlingMcpSessionTools
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
             }
 
-            return node.ToJsonString(McpHelpers.JsonOptions);
+            /* The newest snapshot rows that fit the response budget: rows are left off the end whole, never cut, and every field that
+               describes the page (the count, the span, each victim's blocker_not_shown) is that of the rows it kept. `truncated` is true
+               for either cut, the row limit or the budget; budget_truncated is the budget alone. */
+            if (responseByteBudget is not int budget)
+            {
+                return node.ToJsonString(McpHelpers.JsonOptions);
+            }
+
+            return McpResponseBudget.CapArray(
+                node, "queries", "newest capture first", "snapshot rows",
+                _ => "Pass as_of at oldest_returned_collection_time to read on from there, or narrow the page with database_name, wait_type or blocking_only.",
+                budget, "budget_truncated", "budget_note",
+                (kept, count) =>
+                {
+                    kept["snapshots_returned"] = count;
+                    kept["truncated"] = truncated || count < shown.Count;
+                    kept["oldest_returned_collection_time"] = McpHelpers.FormatEffectiveStart(shown[count - 1].CollectionTime);
+                    kept["newest_returned_collection_time"] = McpHelpers.FormatEffectiveStart(shown[0].CollectionTime);
+
+                    /* A victim whose blocker was cut from the page says past_page, not nothing. */
+                    var keptOnPage = new HashSet<(DateTime, int)>(shown.Take(count).Select(r => (r.CollectionTime, r.SessionId)));
+                    if (kept["queries"] is JsonArray keptRows)
+                    {
+                        for (var i = 0; i < keptRows.Count && i < shown.Count; i++)
+                        {
+                            if (keptRows[i] is JsonObject keptRow) keptRow["blocker_not_shown"] = BlockerNotShown(shown[i], keptOnPage);
+                        }
+                    }
+                });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

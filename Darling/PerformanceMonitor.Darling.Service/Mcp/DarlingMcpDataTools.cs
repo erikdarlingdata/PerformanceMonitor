@@ -881,11 +881,15 @@ public sealed class DarlingMcpDataTools
             var rankedDatabases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
                 asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, logger: logger, cancellationToken: cancellationToken);
             var droppedDatabases = DatabasesLeftOut.Distinct(rankedDatabases.ExcludedNames);
+            /* The ranking is read for top + 1 rows, listed databases first and the fill from the dropped ones after: the extra row is the
+               observed signal that the window held more queries than top, and the first top rows are the same rows in the same order. */
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
-            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, droppedDatabases,
+                postgres, resolved.ServerId, requestedStart, now, top + 1, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
+            var fetched = await DroppedDatabaseRows.FillAsync(routed.Rows, top + 1, droppedDatabases,
                 async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
                     postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter)).Rows);
+            var moreThanTop = fetched.Count > top;
+            var rows = moreThanTop ? fetched.Take(top).ToList() : fetched;
             var droppedWithoutRows = DroppedDatabaseMark.WithoutRows(droppedDatabases, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -1179,10 +1183,14 @@ public sealed class DarlingMcpDataTools
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
             }
 
-            /* #8568: under a response budget the page ends at the last whole row that fits it, heaviest first, and says
-               so (truncated, budget_note). The web viewer's page passes none and keeps its rows exactly. */
+            /* `truncated` is true when the window held more queries than top. #8568: under a response budget the page also ends at the last
+               whole row that fits it, heaviest first, and says so (budget_truncated, budget_note), and `truncated` is then true for either cut.
+               The web viewer's page passes none and keeps its rows exactly. */
+            queriesPayload["truncated"] = moreThanTop;
             return responseByteBudget is int budget
-                ? McpResponseBudget.CapPage(queriesPayload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(queryTextLength > QueryTextPreviewLength), budget)
+                ? McpResponseBudget.CapArray(
+                    queriesPayload, "queries", "heaviest first", "queries", _ => TopQueriesCutRemedy(queryTextLength > QueryTextPreviewLength), budget,
+                    "budget_truncated", "budget_note", (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count)
                 : queriesPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1352,13 +1360,17 @@ public sealed class DarlingMcpDataTools
                and of a page with rows (databases_left_out + a note), and an empty page's sentence claims only the databases the server
                still has, so "the collector recorded nothing" is never said over a window where it recorded rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
-            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken, tagFilter);
+            /* Read for top + 1 rows: the extra row is the observed signal that the window held more procedures than top, and the first top
+               rows are the same rows in the same order. */
+            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top + 1, databases, ranking, cancellationToken, tagFilter);
             /* #7725: the databases the server still lists rank first; what the limit leaves is filled from the left-out databases, ranked the same
                way and marked database_dropped, so a dropped database's rows never push out a listed row and the grid is not empty while the work is
                on record. databases_left_out below then names only the databases with no row in the reply. */
-            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, leftOut,
+            var fetched = await DroppedDatabaseRows.FillAsync(routed.Rows, top + 1, leftOut,
                 async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(
                     postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, ranking, cancellationToken, tagFilter)).Rows);
+            var moreThanTop = fetched.Count > top;
+            var rows = moreThanTop ? fetched.Take(top).ToList() : fetched;
             var leftOutWithoutRows = DroppedDatabaseMark.WithoutRows(leftOut, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -1532,6 +1544,8 @@ public sealed class DarlingMcpDataTools
                 proceduresPayload["tag_filter"] = procedureTagName;
             }
 
+            /* True when the window held more procedures than top; the page is the heaviest top of them. */
+            proceduresPayload["truncated"] = moreThanTop;
             return proceduresPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1677,8 +1691,11 @@ public sealed class DarlingMcpDataTools
 
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, execution_type, module_name, cancellationToken, tagFilter);
-            var rows = read.Rows;
+            /* Read for top + 1 queries: the extra row is the observed signal that the window held more queries than top, and the first top
+               are the same rows in the same order. */
+            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top + 1, databases, execution_type, module_name, cancellationToken, tagFilter);
+            var moreThanTop = read.Rows.Count > top;
+            var rows = moreThanTop ? read.Rows.Take(top).ToList() : read.Rows;
             var tablePlan = read.Table;
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
@@ -1835,13 +1852,13 @@ public sealed class DarlingMcpDataTools
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* Which tier answered. */
                 history_source = tablePlan is null ? "raw" : "interval_table",
-                /* #3653 item 17: the WINDOW floor under its own key. This tool has no page cut to disclose (top
-                   is a rank, not a cap the window overflowed), and the flag was spelled `truncated` anyway — the
-                   page dialect's word, which on every neighbour in this file means "limit bit, raise it". Here
-                   nothing the caller sends changes it: the raw tier is where the rows were, and it stops where
-                   it stops. The trend family renamed the same fact the same way (DarlingMcpTrendTools, Lite's
-                   WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
-                   beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
+                /* #3653 item 17: the WINDOW floor under its own key, apart from the page's `truncated` (written onto the payload
+                   node below, which is true when the window held more queries than top or the response budget left rows off
+                   the end, so a larger top or a narrower page reaches them). Nothing the caller sends changes this flag: the raw
+                   tier is where the rows were, and it stops where it stops. The trend family spells the same fact the same way
+                   (DarlingMcpTrendTools, Lite's WriteDisclosure), and the census fails a bare `truncated` beside
+                   `effective_hours_back`. The note beside it keeps its name: it is the prose for THIS flag, and `*_note` is the
+                   house idiom. */
                 window_truncated = truncated,
                 /* #5094: the daily summary answered whole days of this window, so the totals and the ranking are close,
                    not exact. Always present, so a caller reads the flag rather than inferring it from a missing key. */
@@ -1884,13 +1901,17 @@ public sealed class DarlingMcpDataTools
                 storePayload[DarlingRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
 
-            /* #6131: the page is capped under the shared response budget, as the other read tools' pages are. top 200 measured
-               177 KB with nothing to say rows had been left out. The rows are heaviest first, so the cut drops the lightest.
-               `truncated` is this page cut ONLY: the window floor keeps its own flag, window_truncated, and its own note.
-               The web viewer's mirror passes a null budget and keeps its page exactly. */
+            /* `truncated` is true when the window held more queries than top. #6131: the page is also capped under the shared response
+               budget, as the other read tools' pages are (top 200 measured 177 KB). The rows are heaviest first, so the cut drops the
+               lightest; budget_truncated and budget_note are that cut alone, and `truncated` is true for either. The window floor
+               keeps its own flag, window_truncated, and its own note. The web viewer's mirror passes a null budget and keeps its
+               page exactly. */
+            storePayload["truncated"] = moreThanTop;
             if (responseByteBudget is int budget)
             {
-                return McpResponseBudget.CapPage(storePayload, "queries", "heaviest first", "queries", budget);
+                return McpResponseBudget.CapArray(
+                    storePayload, "queries", "heaviest first", "queries", null, budget, "budget_truncated", "budget_note",
+                    (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count);
             }
 
             return storePayload.ToJsonString(McpHelpers.JsonOptions);
