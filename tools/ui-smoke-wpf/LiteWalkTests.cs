@@ -106,6 +106,13 @@ public sealed class LiteWalkTests : WalkBase
         Safely("lite finops high impact", () =>
         {
             Step("FinOps tab", () => SelectMainTab(main, "FinOpsTab", "FinOps"));
+            // The tab's own selector starts on the first server in its list, which is the disabled one: pick the seeded server.
+            Step("FinOps server", () =>
+            {
+                var combo = Find(Find(main, "FinOpsContent"), "ServerSelector").AsComboBox();
+                combo.Select(ServerName);
+                return true;
+            });
             Step("High Impact sub-tab", () => SelectTabInWindow(main, "High Impact"));
             Step("high impact rows", () => WaitForRows(main, "HighImpactDataGrid", ControlType.DataItem));
             Shot("13-finops-high-impact");
