@@ -118,6 +118,9 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
     internal string StatsClause(int firstParam) =>
         UntilUtc is null ? string.Empty : $"\n        AND   jh.run_datetime <= ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)";
 
+    /// <summary>The parameter number of the end instant (#9110), or null when there is none.</summary>
+    internal int? StatsUntilParam(int firstParam) => UntilUtc is null ? null : UntilParam(firstParam);
+
     internal IEnumerable<NpgsqlParameter> Parameters()
     {
         if (JobName is not null)
@@ -185,7 +188,8 @@ public static class DarlingJobHistoryReader
         NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
         JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
-        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter));
+        var rollup = await RollupTablesExistAsync(dataSource, commandTimeoutSeconds, cancellationToken);
+        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter), rollup: rollup);
         var clocks = await DarlingServerClocksReader.GetAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
 
         var rows = new List<DarlingJobHistoryRow>();
@@ -479,7 +483,7 @@ ORDER BY jh.category_name";
     /// the window's length (<see cref="UsesNarrowFirstRead"/>), and the default shape's text is unchanged.
     /// </para>
     /// </summary>
-    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false)
+    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false, bool rollup = false)
     {
         var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
         var floorParam = scopedToServer ? "$3" : "$2";
@@ -553,28 +557,10 @@ ORDER BY jh.category_name";
 ),";
 
 
-        return $@"
-WITH active_servers AS (
-    SELECT DISTINCT jh.server_id
-    FROM job_history AS jh
-    WHERE jh.collection_time >= {floorParam}
-    {serverFilter}
-    {allowedServerSql}
-),
-server_offsets AS (
-    SELECT
-        a.server_id,
-        reg.display_name,
-        COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes{offsetKnownSql}
-    FROM active_servers AS a
-    LEFT JOIN LATERAL ({latestOffsetSql}) AS svr ON true
-    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
-),
-{topByServerSql}
-base AS (
-{baseCutSql}
-),
-job_stats AS (
+        /* #9110: with the summary, job_stats reads whole days from it and only the rest from job_history. */
+        var jobStatsSql = rollup
+            ? BuildRollupJobStatsSql(floorParam, statsUntilSql, filter?.StatsUntilParam(firstFilterParam))
+            : $@"job_stats AS (
     SELECT
         so.server_id,
         js.job_id,
@@ -596,7 +582,31 @@ job_stats AS (
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
         GROUP BY jh.job_id
     ) AS js
-)
+)";
+
+
+        return $@"
+WITH active_servers AS (
+    SELECT DISTINCT jh.server_id
+    FROM job_history AS jh
+    WHERE jh.collection_time >= {floorParam}
+    {serverFilter}
+    {allowedServerSql}
+),
+server_offsets AS (
+    SELECT
+        a.server_id,
+        reg.display_name,
+        COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes{offsetKnownSql}
+    FROM active_servers AS a
+    LEFT JOIN LATERAL ({latestOffsetSql}) AS svr ON true
+    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
+),
+{topByServerSql}
+base AS (
+{baseCutSql}
+),
+{jobStatsSql}
 SELECT
     base.server_id,
     base.server_name,
@@ -628,6 +638,149 @@ LEFT JOIN job_stats
     ON  job_stats.server_id = base.server_id
     AND job_stats.job_id = base.job_id
 ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
+    }
+
+    /// <summary>The daily summary tables (#9110): per day and job, the days' newest collection, and each server's watermark.</summary>
+    internal const string RollupDailyTable = "collect.job_outcome_daily";
+    internal const string RollupDaysTable = "collect.job_outcome_daily_days";
+    internal const string RollupWatermarkTable = "collect.job_outcome_daily_watermark";
+
+    /// <summary>
+    /// #9110: <c>job_stats</c> from the daily summary (the daily summary tables). Per listed server, with <c>W</c> the server's
+    /// <c>collected_through</c>: the summary counts every qualifying row with <c>collection_time &lt;= W</c> exactly once and no row above it,
+    /// so the average successful duration and the last success of each listed job are the sum of four parts that never overlap:
+    /// <list type="bullet">
+    /// <item>the summary rows of the full days (wholly inside the window on that server's clock, and wholly at or after the
+    /// <c>collection_time</c> floor);</item>
+    /// <item>the raw rows of those full days with <c>collection_time &gt; W</c>, a range on <c>collection_time</c> that reaches only recent
+    /// chunks once the summary has caught up;</item>
+    /// <item>the raw rows of each edge day (the window's partial first day, the partial last day when the window has an end, and the days
+    /// the floor cuts) collected up to the newest <c>collection_time</c> the summary holds for that day, from the day's UTC start (less an
+    /// hour for a daylight-saving change). That range is bounded on <c>collection_time</c> too, so it reads about a day of chunks, plus
+    /// up to the day's newest late row;</item>
+    /// <item>the raw rows of each edge day with <c>collection_time &gt; W</c>.</item>
+    /// </list>
+    /// A server with no watermark row reads <c>job_history</c> for the whole window, as the statement without the summary does. The average is
+    /// the summed durations over the summed counts as a numeric, so it matches <c>AVG(bigint)</c> digit for digit, and a job with only NULL
+    /// durations has a NULL average and still has its last success. The summary counts only non-NULL durations, so the raw count does the same.
+    /// </summary>
+    internal static string BuildRollupJobStatsSql(string floorParam, string statsUntilSql, int? untilParam)
+    {
+        var untilLocalSql = untilParam is { } n ? $"${n} + make_interval(mins => so.offset_minutes)" : "NULL::timestamp";
+        var fullHiSql = untilParam is null ? "'infinity'::date" : "date_trunc('day', s.until_local)::date";
+
+        return $@"job_stats AS (
+    SELECT
+        so.server_id,
+        js.job_id,
+        js.avg_success_duration,
+        js.last_success_run_local
+    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
+    JOIN server_offsets AS so ON so.server_id = b.server_id
+    LEFT JOIN {RollupWatermarkTable} AS wm ON wm.server_id = b.server_id
+    CROSS JOIN LATERAL (
+        SELECT
+            s.since_local,
+            s.until_local,
+            s.w,
+            (date_trunc('day', GREATEST(s.since_local, {floorParam} + make_interval(mins => so.offset_minutes) + interval '1 hour') - interval '1 microsecond') + interval '1 day')::date AS full_lo,
+            {fullHiSql} AS full_hi
+        FROM (SELECT $1 + make_interval(mins => so.offset_minutes) AS since_local, {untilLocalSql} AS until_local, wm.collected_through AT TIME ZONE 'UTC' AS w) AS s
+    ) AS bd
+    CROSS JOIN LATERAL (
+        SELECT
+            p.job_id,
+            SUM(p.duration_sum)::numeric / NULLIF(SUM(p.duration_count), 0) AS avg_success_duration,
+            MAX(p.last_run) AS last_success_run_local
+        FROM (
+            SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0) AS duration_sum, COUNT(jh.run_duration_seconds) AS duration_count, MAX(jh.run_datetime) AS last_run
+            FROM job_history AS jh
+            WHERE bd.w IS NULL
+            AND   jh.server_id = b.server_id
+            AND   jh.job_id = ANY (b.job_ids)
+            AND   jh.step_id = 0
+            AND   jh.run_status = 1
+            AND   jh.collection_time >= {floorParam}
+            AND   jh.run_datetime >= bd.since_local{statsUntilSql}
+            GROUP BY jh.job_id
+            UNION ALL
+            SELECT d.job_id, d.success_duration_sum, d.success_count, d.last_success_run_local
+            FROM {RollupDailyTable} AS d
+            WHERE bd.w IS NOT NULL
+            AND   d.server_id = b.server_id
+            AND   d.job_id = ANY (b.job_ids)
+            AND   d.run_day >= bd.full_lo
+            AND   d.run_day < bd.full_hi
+            UNION ALL
+            SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0), COUNT(jh.run_duration_seconds), MAX(jh.run_datetime)
+            FROM job_history AS jh
+            WHERE bd.w IS NOT NULL
+            AND   jh.server_id = b.server_id
+            AND   jh.job_id = ANY (b.job_ids)
+            AND   jh.step_id = 0
+            AND   jh.run_status = 1
+            AND   jh.collection_time > bd.w
+            AND   jh.collection_time >= {floorParam}
+            AND   jh.run_datetime >= bd.full_lo
+            AND   jh.run_datetime < bd.full_hi
+            GROUP BY jh.job_id
+            UNION ALL
+            SELECT ed.job_id, ed.duration_sum, ed.duration_count, ed.last_run
+            FROM generate_series(bd.since_local::date::timestamp, COALESCE(bd.until_local::date, bd.full_lo - 1)::timestamp, interval '1 day') AS e(day)
+            LEFT JOIN {RollupDaysTable} AS dd ON dd.server_id = b.server_id AND dd.run_day = e.day::date
+            CROSS JOIN LATERAL (
+                SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0) AS duration_sum, COUNT(jh.run_duration_seconds) AS duration_count, MAX(jh.run_datetime) AS last_run
+                FROM job_history AS jh
+                WHERE jh.server_id = b.server_id
+                AND   jh.job_id = ANY (b.job_ids)
+                AND   jh.step_id = 0
+                AND   jh.run_status = 1
+                AND   jh.collection_time >= e.day - make_interval(mins => so.offset_minutes) - interval '1 hour'
+                AND   jh.collection_time <= dd.max_collection_time AT TIME ZONE 'UTC'
+                AND   jh.collection_time >= {floorParam}
+                AND   jh.run_datetime >= e.day
+                AND   jh.run_datetime < e.day + interval '1 day'
+                AND   jh.run_datetime >= bd.since_local{statsUntilSql}
+                GROUP BY jh.job_id
+            ) AS ed
+            WHERE bd.w IS NOT NULL
+            AND   NOT (e.day::date >= bd.full_lo AND e.day::date < bd.full_hi)
+            UNION ALL
+            SELECT ed.job_id, ed.duration_sum, ed.duration_count, ed.last_run
+            FROM generate_series(bd.since_local::date::timestamp, COALESCE(bd.until_local::date, bd.full_lo - 1)::timestamp, interval '1 day') AS e(day)
+            CROSS JOIN LATERAL (
+                SELECT jh.job_id, COALESCE(SUM(jh.run_duration_seconds), 0) AS duration_sum, COUNT(jh.run_duration_seconds) AS duration_count, MAX(jh.run_datetime) AS last_run
+                FROM job_history AS jh
+                WHERE jh.server_id = b.server_id
+                AND   jh.job_id = ANY (b.job_ids)
+                AND   jh.step_id = 0
+                AND   jh.run_status = 1
+                AND   jh.collection_time > bd.w
+                AND   jh.collection_time >= {floorParam}
+                AND   jh.run_datetime >= e.day
+                AND   jh.run_datetime < e.day + interval '1 day'
+                AND   jh.run_datetime >= bd.since_local{statsUntilSql}
+                GROUP BY jh.job_id
+            ) AS ed
+            WHERE bd.w IS NOT NULL
+            AND   NOT (e.day::date >= bd.full_lo AND e.day::date < bd.full_hi)
+        ) AS p
+        GROUP BY p.job_id
+    ) AS js
+)";
+    }
+
+    /// <summary>
+    /// #9110: whether the store holds the daily summary tables (the daily summary tables), so the read can use
+    /// <see cref="BuildRollupJobStatsSql"/>. A store below the rung that adds them has none, and the read keeps the statement that reads
+    /// <c>job_history</c> alone.
+    /// </summary>
+    internal static async Task<bool> RollupTablesExistAsync(NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = dataSource.CreateCommand(
+            $"SELECT to_regclass('{RollupDailyTable}') IS NOT NULL AND to_regclass('{RollupDaysTable}') IS NOT NULL AND to_regclass('{RollupWatermarkTable}') IS NOT NULL");
+        command.CommandTimeout = commandTimeoutSeconds;
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
     /// <summary>
