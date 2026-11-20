@@ -89,8 +89,15 @@ public static class DarlingStoreTableHealthReader
     /// </summary>
     public const long RewriteCandidateMinEmptyBytes = PgTargetScorer.BloatSizeFloorBytes;
 
-    /// <summary>The note on an index that is not a valid, ready btree, so it has no estimate.</summary>
+    /// <summary>The note on a btree index that is not valid or not ready, so it has no estimate.</summary>
     public const string InvalidIndexReason = "The index is not valid or not ready, so no estimate is made.";
+
+    /// <summary>The note on a valid, ready index of another access method (gin, gist, hash, brin, spgist): the estimate models btree pages only.
+    /// A <c>format()</c> pattern whose one <c>%s</c> is the access method's name.</summary>
+    public const string NonBtreeIndexReasonFormat = "The estimate covers btree indexes only; this is a %s index.";
+
+    /// <summary>The note on a valid, ready btree index the estimate returned no row for.</summary>
+    public const string NoEstimateRowReason = "The estimate returned no figure for this index.";
 
     /// <summary>
     /// The plain sentence for an index estimate's stored reason. The index bloat collector writes its reasons for people who
@@ -412,8 +419,9 @@ public static class DarlingStoreTableHealthReader
     /// could estimate. NULL when none could be, with <see cref="EstimateSkippedReason"/>.</param>
     /// <param name="EstimatedBloatShare">Estimated reclaimable bytes over the same indexes' size, 0 to 1.</param>
     /// <param name="EstimateIndexesUsable">How many of the row's indexes the estimate covered.</param>
-    /// <param name="EstimateSkippedReason">NULL when any index in the row has an estimate. Otherwise the estimate's own reason,
-    /// or a note that the index is not a valid, ready btree.</param>
+    /// <param name="EstimateSkippedReason">NULL when any index in the row has an estimate. Otherwise the estimate's own reason, or the
+    /// note that fits the index: not valid or not ready (<see cref="InvalidIndexReason"/>), another access method than btree
+    /// (<see cref="NonBtreeIndexReasonFormat"/>), or no figure returned (<see cref="NoEstimateRowReason"/>).</param>
     /// <param name="EstimatedBasisBytes">The size, as the estimate saw it, of the indexes it covered: what
     /// <see cref="EstimatedBloatShare"/> is a share of. Under <see cref="Bytes"/> when the estimate covered only some of the row's
     /// copies, so a rolled-up row can say which size its share is of. NULL when nothing was estimated.</param>
@@ -954,6 +962,8 @@ ix AS (
         x.indisprimary,
         x.indisunique,
         x.indisvalid,
+        (x.indisvalid AND x.indisready) AS usable,
+        am.amname AS access_method,
         pg_catalog.pg_relation_size(x.indexrelid) AS bytes,
         pg_catalog.pg_relation_size(c.oid) AS heap_bytes,
         COALESCE(s.idx_scan, 0) AS idx_scan,
@@ -964,6 +974,7 @@ ix AS (
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
     JOIN pg_catalog.pg_index AS x ON x.indrelid = c.oid
     JOIN pg_catalog.pg_class AS ic ON ic.oid = x.indexrelid
+    JOIN pg_catalog.pg_am AS am ON am.oid = ic.relam
     LEFT JOIN pg_catalog.pg_stat_all_indexes AS s ON s.indexrelid = x.indexrelid
     LEFT JOIN ptree AS pt ON pt.leaf_index_oid = x.indexrelid
     LEFT JOIN est AS e ON e.index_oid = x.indexrelid
@@ -983,6 +994,8 @@ grp AS (
         bool_or(i.indisprimary) AS is_primary,
         bool_or(i.indisunique) AS is_unique,
         bool_and(i.indisvalid) AS valid,
+        bool_or(NOT i.usable) AS any_unusable,
+        max(i.access_method) FILTER (WHERE i.access_method <> 'btree') AS other_method,
         (count(*) FILTER (WHERE i.bytes > i.heap_bytes AND i.bytes >= {IndexFlagMinimumBytes.ToString(CultureInfo.InvariantCulture)}))::int AS larger_count,
         sum(i.est_reclaimable_bytes)::bigint AS est_reclaimable_bytes,
         sum(i.est_index_bytes) FILTER (WHERE i.est_reclaimable_bytes IS NOT NULL)::bigint AS est_basis_bytes,
@@ -1016,7 +1029,11 @@ SELECT
     CASE WHEN g.est_basis_bytes > 0 THEN g.est_reclaimable_bytes::double precision / g.est_basis_bytes END AS est_bloat_share,
     g.est_usable,
     CASE WHEN g.est_usable > 0 THEN NULL
-         ELSE COALESCE(g.skipped_reason, '{InvalidIndexReason}') END AS est_skipped_reason,
+         ELSE COALESCE(
+                g.skipped_reason,
+                CASE WHEN g.any_unusable THEN '{InvalidIndexReason}'
+                     WHEN g.other_method IS NOT NULL THEN pg_catalog.format('{NonBtreeIndexReasonFormat}', g.other_method)
+                     ELSE '{NoEstimateRowReason}' END) END AS est_skipped_reason,
     g.est_basis_bytes
 FROM grp AS g
 CROSS JOIN statsinfo AS si

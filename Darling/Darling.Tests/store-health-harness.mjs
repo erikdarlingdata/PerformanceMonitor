@@ -114,6 +114,8 @@ const INDEXES = [
   index({ index_name: "ix_big", larger_than_heap: true, bytes: 900 * MB, index_to_heap: 1.1 }),
   index({ index_name: "ix_ok" }),
   index({ index_name: "ix_unanalyzed", estimate_skipped_reason: "The table has never been analyzed, so no estimate is made." }),
+  /* #9105: a valid index the estimate does not cover (a GIN trigram index) says so in a few words, and the sentence stays one click away. */
+  index({ index_name: "ix_trgm", estimate_skipped_reason: "The estimate covers btree indexes only; this is a gin index." }),
   /* #8897: one rolled-up row that is partly estimated, with one copy larger than its table, one with several, and one estimated in full. */
   index({ index_name: "ix_rolled_one", index_count: 164, larger_than_heap: true, larger_than_heap_count: 1, bytes: 18 * MB, heap_bytes: 451 * MB, index_to_heap: 0.04,
     estimated_reclaimable_bytes: 6 * MB, estimated_bloat_share: 1, estimated_basis_bytes: 6 * MB, estimate_indexes_usable: 40 }),

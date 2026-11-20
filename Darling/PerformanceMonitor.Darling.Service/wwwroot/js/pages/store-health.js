@@ -231,6 +231,7 @@ const INDEX_SKIP_WORDS = [
   [/^The index holds no pages yet/, "Empty index"],
   [/^The estimate came out below zero/, "Estimate below zero"],
   [/^The index is not valid or not ready/, "Not valid or not ready"],
+  [/^The estimate covers btree indexes only/, "Not a btree index"],
 ];
 
 export function indexSkipText(text) {
