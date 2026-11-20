@@ -701,7 +701,7 @@ jobs:
   # is passed, so the cut is the class-name hash (the cut the script falls back to when the gate pins none); no
   # ci-select call is made, so every class runs, the Guard classes too (there is no Guard job here). The release
   # run in build.yml still runs the suite whole, in one log.
-  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17 (pr.yml runs the same job when a
+  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16, 17, 18 and 19 (pr.yml runs the same job when a
   # pull request changes a file it covers). Builds Darling.Tests itself: this workflow has no shared test build.
   pg-old-targets:
     name: PostgreSQL collectors on old targets
@@ -771,7 +771,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           ./.github/scripts/start-test-pg.ps1 -Mode Start
-          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17
+          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17,18,19
 
       # DARLING_TEST_PG_TARGETS_REQUIRED turns a missing target variable into a failure instead of a skip. A run that
       # matched no test exits 0, so the step also fails on a total of zero.
@@ -780,7 +780,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17)) {
+          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17,18,19)) {
             $name, $value = $line -split '=', 2
             [Environment]::SetEnvironmentVariable($name, $value)
           }

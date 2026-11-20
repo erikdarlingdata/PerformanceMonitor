@@ -862,6 +862,9 @@ jobs:
             [Environment]::SetEnvironmentVariable($name, $value)
           }
           $env:DARLING_TEST_PG_TARGETS_REQUIRED = '1'
+          # PostgreSQL 18 and 19 run on the nightly leg only: this leg runs the majors one after another in one job, so each
+          # added major lengthens every pull request run (#9132). Their targets are not started here, so they may be absent.
+          $env:DARLING_TEST_PG_TARGETS_OPTIONAL = '18,19'
           New-Item -ItemType Directory -Force -Path TestResults | Out-Null
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -class "*PgCollectorsOnOldTargetsLiveTests*" -longRunning 300 2>&1 | Tee-Object -FilePath TestResults/pg-old-targets.log
           $exit = $LASTEXITCODE

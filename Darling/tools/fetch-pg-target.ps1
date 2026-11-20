@@ -5,7 +5,7 @@
 .DESCRIPTION
   Test infrastructure, not shipped. fetch-pg-runtime.ps1 builds the PostgreSQL 18 + TimescaleDB runtime that is the
   STORE; every live test reads the store and the targets from it. This script supplies the other side: a PostgreSQL
-  10, 13, 14, 16 or 17 server that a collector reads FROM, so a version gate or a NULL an old server sends turns a
+  10, 13, 14, 16, 17, 18 or 19 server that a collector reads FROM, so a version gate or a NULL an old server sends turns a
   run red before the release does (#6206, #6836).
 
   Steps, for the one major named by -Major:
@@ -87,6 +87,21 @@ $targets = @{
         Version = '17.11'
         Url = 'https://get.enterprisedb.com/postgresql/postgresql-17.11-1-windows-x64-binaries.zip'
         Sha256 = '6EABDF00D2893713B75DB4336A23C3FDF505F056E217EC6E2E95D901750CFEA3'
+        VcRuntime = @()
+    }
+    # 18.7, 389,515,503 bytes, hashed 2026-11-20. The store runtime (fetch-pg-runtime.ps1) is a separate PostgreSQL 18 pin.
+    '18' = @{
+        Version = '18.7'
+        Url = 'https://get.enterprisedb.com/postgresql/postgresql-18.7-1-windows-x64-binaries.zip'
+        Sha256 = 'EAD0BBC27FB678FA24DCF86B738981323042ABD073C744103BF7F3AED23F9A33'
+        VcRuntime = @()
+    }
+    # 19.0 (released 2026-11-19), 68,546,993 bytes, hashed 2026-11-20. The zip is smaller than the older majors' (it holds
+    # no pgAdmin tree), and the bin, lib and share trees this script keeps are all in it.
+    '19' = @{
+        Version = '19.0'
+        Url = 'https://get.enterprisedb.com/postgresql/postgresql-19.0-1-windows-x64-binaries.zip'
+        Sha256 = 'BC397F1E58F018E364262074C2E9D960F6169E7436892DBE6E73313D1BB201FF'
         VcRuntime = @()
     }
 }
