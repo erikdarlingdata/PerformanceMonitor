@@ -206,14 +206,14 @@ WITH plans AS NOT MATERIALIZED (
     SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
            variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
     AND   plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
 markers AS (
     SELECT database_name, collection_time,
            RANK() OVER (PARTITION BY database_name ORDER BY collection_time) AS marker_rank,
            COUNT(*) OVER (PARTITION BY database_name) AS marker_total
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
     AND   database_name IN (SELECT database_name FROM plans)),
 newest AS (
     SELECT database_name, MAX(collection_time) AS newest_capture FROM markers GROUP BY database_name),
@@ -279,7 +279,7 @@ LIMIT {maxForces + 1}";
 WITH newest AS (
     SELECT database_name, MAX(collection_time) AS newest_capture
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
     GROUP BY database_name)
 SELECT p.database_name, COUNT(DISTINCT p.plan_id)
 FROM collect.query_store_forced_plans AS p
@@ -292,7 +292,7 @@ GROUP BY p.database_name";
     public static string CapturesSql(DatabaseFilter databases) => $@"
 SELECT database_name, MAX(collection_time)
 FROM collect.query_store_forced_plans
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND plan_id IS NULL{databases.Clause("database_name", 4)}
+WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND plan_id IS NULL{databases.Clause("database_name", 4)}
 GROUP BY database_name
 ORDER BY database_name";
 
@@ -344,7 +344,7 @@ WITH d AS (
            ROW_NUMBER() OVER (PARTITION BY s.plan_id, " + IntervalIdentity + @"
                               ORDER BY s.collection_time DESC, s.execution_count DESC) AS rn
     FROM query_store_stats AS s
-    WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3 AND s.collection_time >= $4 AND s.collection_time <= $5)
+    WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3 AND s.collection_time > $4 AND s.collection_time <= $5)
 SELECT plan_id, SUM(execution_count), MAX(last_execution_time),
        " + WeightedAverage("avg_cpu_time_us") + @", " + WeightedAverage("avg_duration_us") + @", MAX(max_duration_us), MIN(first_execution_time)
 FROM d

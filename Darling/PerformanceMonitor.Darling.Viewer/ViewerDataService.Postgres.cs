@@ -74,7 +74,7 @@ public sealed partial class ViewerDataService
                                                                                   AS last_message
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   collector_name = ANY($4::text[])
         GROUP BY collector_name

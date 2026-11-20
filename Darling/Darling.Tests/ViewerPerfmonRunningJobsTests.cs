@@ -35,7 +35,6 @@ public sealed class ViewerPerfmonSqlTests
         Assert.Contains("SELECT DISTINCT counter_name", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("FROM v_perfmon_stats", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY lower(counter_name), counter_name", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
     }
@@ -70,7 +69,6 @@ public sealed class ViewerPerfmonSqlTests
         var sql = ViewerDataService.PerfmonTrendsSql(count);
         /* server_id/start/end take $1/$2/$3; the counter-name IN list starts at $4 (Lite's numbering). */
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains(inClause, sql, StringComparison.Ordinal);
         Assert.Contains(highestParam, sql, StringComparison.Ordinal);

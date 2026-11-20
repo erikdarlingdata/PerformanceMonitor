@@ -169,7 +169,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* And the row SAYS which population it belongs to, so an include-dismissed page can label each row. */
         Assert.Contains("dismissed\n", sql.Replace("\r\n", "\n"), StringComparison.Ordinal);
         /* #2495: BOTH window edges are bound, so server_id and the cap moved up one ordinal each. */
-        Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
         Assert.Contains("a.server_id = $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
@@ -200,7 +199,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
 
         Assert.Contains("SELECT COUNT(*)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = TRUE", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);

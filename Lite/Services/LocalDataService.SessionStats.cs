@@ -138,7 +138,7 @@ WITH raw AS
         top_host_connections
     FROM v_session_summary_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 ),
 agg AS

@@ -153,7 +153,7 @@ WITH raw AS
         plan_cache_mb
     FROM v_memory_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -211,7 +211,7 @@ SELECT
     clerk_type
 FROM v_memory_clerks
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 GROUP BY clerk_type
 ORDER BY SUM(memory_mb) DESC";
@@ -274,7 +274,7 @@ SELECT
     COUNT(*) AS collection_count
 FROM v_memory_clerks
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   clerk_type IN ({typeParams})
 GROUP BY clerk_type, 2
@@ -375,7 +375,7 @@ SELECT
     memory_node_id
 FROM v_memory_pressure_events
 WHERE server_id = $1
-AND   sample_time >= $2
+AND   sample_time > $2
 AND   sample_time <= $3
 ORDER BY sample_time";
 
@@ -431,7 +431,7 @@ SELECT
     memory_node_id
 FROM v_memory_pressure_events
 WHERE server_id = $1
-AND   sample_time >= $2
+AND   sample_time > $2
 AND   sample_time <= $3
 ORDER BY sample_time DESC
 LIMIT $4";
@@ -463,7 +463,7 @@ SELECT
     COUNT(DISTINCT date_trunc('second', sample_time)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
 FROM v_memory_pressure_events
 WHERE server_id = $1
-AND   sample_time >= $2
+AND   sample_time > $2
 AND   sample_time <= $3
 GROUP BY memory_notification
 ORDER BY memory_notification";

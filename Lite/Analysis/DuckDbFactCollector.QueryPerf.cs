@@ -57,7 +57,8 @@ LIMIT " + FactRanked.MaxObjects + ";";
                MAXDOP is the ordinary remediation for this very finding, so without the cross-check
                the finding survives its own fix. A current_maxdop of 0 (unlimited) or unknown (no
                v_server_config row yet) makes no configuration impossible, so the count is unchanged
-               in both of those cases.
+               in both of those cases. The setting is the newest capture at or before $3, the analysis
+               window's end, so a pass over an earlier window is held to the setting that window had.
                LEFT JOIN ... ON true rather than a correlated subquery: the CTE is at most one row, so
                the join stays one-to-one and the config read is evaluated once, not per query row. */
             cmd.CommandText = @"
@@ -67,6 +68,7 @@ WITH current_maxdop AS
     FROM v_server_config
     WHERE server_id = $1
     AND   configuration_name = 'max degree of parallelism'
+    AND   capture_time <= $3
     ORDER BY capture_time DESC
     LIMIT 1
 )
@@ -456,6 +458,9 @@ WITH deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    -- $3 is the window's end. A row collected after it was not in the store at that instant, so a pass as of a past
+    -- instant ranks the plans that instant had; the dedup keeps each interval's newest row collected by then.
+    AND   collection_time <= $3
     /*SEC*/
 ),
 plan_agg AS
@@ -625,9 +630,10 @@ LIMIT 100";
 
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
                 /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
                    primary stay in the window, so the read skips those databases. */
-                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
+                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 4);
 
                 cmd.CommandText = plan.Apply(cmd.CommandText);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

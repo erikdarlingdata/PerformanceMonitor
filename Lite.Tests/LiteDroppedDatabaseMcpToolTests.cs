@@ -123,6 +123,36 @@ public sealed class LiteDroppedDatabaseMcpToolTests : IDisposable
         Assert.Equal(new[] { "GoneDb" }, LeftOut(one));
     }
 
+    /* truncated says the window held more procedures than top, as Darling's twin writes it; the dropped databases' fill counts. */
+    [Fact]
+    public async Task TopProcedures_SayTruncated_WhenTheWindowHeldMoreThanTop_CountingTheDroppedFill()
+    {
+        await SeedDropAsync();
+        await ProcedureAsync("LiveDb", "usp_A", 300_000);
+        await ProcedureAsync("LiveDb", "usp_B", 200_000);
+        await ProcedureAsync("GoneDb", "usp_Gone", 900_000);
+
+        static bool Truncated(JsonElement root)
+        {
+            Assert.True(root.TryGetProperty("truncated", out var truncated), "the page names whether top left procedures out");
+            return truncated.GetBoolean();
+        }
+
+        var whole = Parse(await McpQueryTools.GetTopProceduresByCpu(_service, _serverManager, ServerName, 24, 3));
+        Assert.Equal(new[] { "LiveDb", "LiveDb", "GoneDb" }, Databases(whole, "procedures"));
+        Assert.False(Truncated(whole));
+
+        /* The listed databases hold two; the third, the one past top, is the dropped database's. */
+        var two = Parse(await McpQueryTools.GetTopProceduresByCpu(_service, _serverManager, ServerName, 24, 2));
+        Assert.Equal(new[] { "LiveDb", "LiveDb" }, Databases(two, "procedures"));
+        Assert.Equal(new[] { "GoneDb" }, LeftOut(two));
+        Assert.True(Truncated(two));
+
+        var one = Parse(await McpQueryTools.GetTopProceduresByCpu(_service, _serverManager, ServerName, 24, 1));
+        Assert.Equal(new[] { "LiveDb" }, Databases(one, "procedures"));
+        Assert.True(Truncated(one));
+    }
+
     [Fact]
     public async Task TopQueries_RankTheListedDatabaseFirst_ThenTheDroppedOne_Marked()
     {

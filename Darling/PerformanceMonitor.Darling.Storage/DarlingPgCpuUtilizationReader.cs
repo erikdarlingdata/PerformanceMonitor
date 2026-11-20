@@ -253,7 +253,7 @@ public static class DarlingPgCpuUtilizationReader
                configured_memory_bytes
         FROM pg_cpu_utilization
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   cpu_percent IS NOT NULL
         ORDER BY sample_time
@@ -374,7 +374,7 @@ public static class DarlingPgCpuUtilizationReader
             COUNT(memory_total_bytes) AS memory_samples
         FROM pg_cpu_utilization
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   cpu_percent IS NOT NULL
         GROUP BY 1

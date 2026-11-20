@@ -61,7 +61,7 @@ internal static class DarlingBlockingTrendReader
         WITH bpr AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             AND   {{BlockingWaits.NotSelfWaitSql}}
@@ -70,7 +70,7 @@ internal static class DarlingBlockingTrendReader
         dmv AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             AND   {{BlockingWaits.NotSelfWaitSql}}
@@ -98,7 +98,7 @@ internal static class DarlingBlockingTrendReader
                 COUNT(*) AS deadlock_count
             FROM v_deadlocks
             WHERE server_id = $1
-            AND   deadlock_time >= $2
+            AND   deadlock_time > $2
             AND   deadlock_time <= $3
             AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', deadlock_time)
@@ -132,6 +132,8 @@ internal static class DarlingBlockingTrendReader
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type LIKE 'LCK%'
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($2, $3]. */
             AND   collection_time >= $2
             AND   collection_time <= $3
         ),
@@ -145,6 +147,7 @@ internal static class DarlingBlockingTrendReader
             FROM raw
             WHERE interval_seconds > 0
             AND   delta_wait_time_ms >= 0
+            AND   collection_time > $2
         )
         """;
 
@@ -449,7 +452,7 @@ internal static class DarlingBlockingTrendReader
             MAX(collection_time)
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status = 'SUCCESS'
         AND   collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')
@@ -470,7 +473,7 @@ internal static class DarlingBlockingTrendReader
             MAX(collection_time)
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status = 'SUCCESS'
         AND   collector_name = 'deadlocks'

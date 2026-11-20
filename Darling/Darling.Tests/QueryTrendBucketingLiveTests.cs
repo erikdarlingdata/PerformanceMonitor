@@ -64,11 +64,13 @@ public sealed class QueryTrendBucketingLiveTests
         try
         {
             /* The window ends on the hour, which is on the grid of every width the ladder serves a day at (10, 15, 20, 30 minutes),
-               so every bucket is whole and the first sits exactly at the start. */
+               so every bucket is whole and the first sits exactly at the start. The collections are half a minute off the minute, so
+               none is stamped on the window's start, which belongs to the window before, and all 1,440 are inside (start, end]. */
             var end = WindowEnd(minuteModTen: 0);
             end = end.AddMinutes(-end.Minute);
             var start = end.AddHours(-24);
-            await SeedMinuteCollectionsAsync(connection, ct, start, 1440);
+            var firstCollection = start.AddSeconds(30);
+            await SeedMinuteCollectionsAsync(connection, ct, firstCollection, 1440);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, AsOf(end), cancellationToken: ct);
@@ -108,7 +110,8 @@ public sealed class QueryTrendBucketingLiveTests
             /* Stamped at the bucket's start: the first at the window's start, the second one width on. */
             Assert.Equal(start.ToString(Stamp), points[0].GetProperty("collection_time").GetString()![..19]);
             Assert.Equal(start.AddMinutes(width).ToString(Stamp), points[1].GetProperty("collection_time").GetString()![..19]);
-            Assert.Equal(start.ToString(Stamp), root.GetProperty("effective_start").GetString()![..19]);
+            /* The coverage is the first collection the store held, half a minute after the first bucket's stamp. */
+            Assert.Equal(firstCollection.ToString(Stamp), root.GetProperty("effective_start").GetString()![..19]);
             Assert.False(root.GetProperty("window_truncated").GetBoolean());
 
             var note = root.GetProperty("aggregate_note").GetString();
@@ -214,9 +217,10 @@ public sealed class QueryTrendBucketingLiveTests
         var bodySucceeded = false;
         try
         {
+            /* The collections are half a minute off the minute, so none is stamped on the window's start and all 1,440 are inside (start, end]. */
             var end = WindowEnd(minuteModTen: 0);
             var start = end.AddHours(-24);
-            await SeedMinuteCollectionsAsync(connection, ct, start, 1440);
+            await SeedMinuteCollectionsAsync(connection, ct, start.AddSeconds(30), 1440);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 

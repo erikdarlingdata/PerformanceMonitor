@@ -127,8 +127,8 @@ public sealed class QueryStoreTopBudgetTests : IClassFixture<SharedDuckDbFixture
 
     /// <summary>
     /// #6131: top 200 measured 177 KB with no field saying rows had been left out. The page is cut to the shared response
-    /// budget, heaviest rows kept, and <c>truncated</c> with the budget sentence say so; the window-floor flag keeps its own name.
-    /// A default page that fits says <c>truncated: false</c>.
+    /// budget, heaviest rows kept, and <c>truncated</c>, <c>budget_truncated</c> and the budget sentence say so; the window-floor
+    /// flag keeps its own name. A page that <c>top</c> alone cut says <c>truncated: true</c> and <c>budget_truncated: false</c>.
     /// </summary>
     [Fact]
     public async Task Top200_IsCutUnderTheResponseBudget_AndSaysSo()
@@ -146,6 +146,8 @@ public sealed class QueryStoreTopBudgetTests : IClassFixture<SharedDuckDbFixture
         var returned = root.GetProperty("queries").GetArrayLength();
         Assert.InRange(returned, 1, Asked - 1);
         Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.True(root.TryGetProperty("budget_truncated", out var budgetCut) && budgetCut.ValueKind == JsonValueKind.True,
+            "the budget cut the page, so budget_truncated is true");
         var note = root.GetProperty("budget_note").GetString();
         Assert.Contains("response budget", note, StringComparison.Ordinal);
         Assert.Contains($"only {returned}", note, StringComparison.Ordinal);
@@ -157,7 +159,10 @@ public sealed class QueryStoreTopBudgetTests : IClassFixture<SharedDuckDbFixture
 
         var small = await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager, ServerName, top: 5);
         using var smallDoc = JsonDocument.Parse(small);
-        Assert.False(smallDoc.RootElement.GetProperty("truncated").GetBoolean());
+        /* 200 queries ran and the page holds the heaviest 5: top left the rest out, and the budget cut nothing. */
+        Assert.True(smallDoc.RootElement.GetProperty("truncated").GetBoolean(), "top 5 of 200 queries left queries out and truncated is false");
+        Assert.True(smallDoc.RootElement.TryGetProperty("budget_truncated", out var smallBudgetCut) && smallBudgetCut.ValueKind == JsonValueKind.False,
+            "top 5 fits the response budget, so budget_truncated is false");
         Assert.Equal(JsonValueKind.Null, smallDoc.RootElement.GetProperty("budget_note").ValueKind);
         Assert.Equal(5, smallDoc.RootElement.GetProperty("queries").GetArrayLength());
     }

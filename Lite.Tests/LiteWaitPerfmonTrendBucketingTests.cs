@@ -305,12 +305,13 @@ public sealed class LiteTrendBucketingLiveTests : IClassFixture<SharedDuckDbFixt
     {
         var end = new DateTime(2026, 3, 12, 10, 0, 0);
         var start = end.AddHours(-1);
-        for (var m = 0; m < 60; m++)
+        /* One collection a minute, each stamped at the end of the minute it measured: the hour's sixty are (start, end]. */
+        for (var m = 1; m <= 60; m++)
         {
             var at = start.AddMinutes(m);
             await SeedWaitAsync(at, "SOS_SCHEDULER_YIELD", 30000, 29000, 100, 60);
             await SeedWaitAsync(at, "PAGEIOLATCH_SH", 6000, 10, 50, 60);
-            if (m % 5 == 4)
+            if (m % 5 == 0)
             {
                 await SeedWaitAsync(at, "CXCONSUMER", 600, 0, 1, 300);
             }

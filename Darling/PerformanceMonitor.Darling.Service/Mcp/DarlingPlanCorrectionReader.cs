@@ -83,7 +83,7 @@ SELECT
     revert_action_initiated_time
 FROM plan_correction
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   recommendation_name IS NOT NULL
 AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -120,7 +120,7 @@ WITH ranked AS (
         COUNT(*) OVER (PARTITION BY database_name, recommendation_name, query_id) AS capture_count
     FROM plan_correction
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   recommendation_name IS NOT NULL
     AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -216,8 +216,9 @@ ORDER BY page.collection_time DESC, page.score DESC, page.database_name, page.qu
     /// The latest FORCE_LAST_GOOD_PLAN enablement snapshot per database. The enablement columns repeat on
     /// every one of a database's recommendation rows, so this takes the newest capture for the server and
     /// DISTINCTs it back to one row per database. $1 server_id, $2 the chosen databases (#5244: one text[], NULL for every
-    /// database). The predicate filters ROWS of the snapshot: the newest-capture anchor stays the server's whole newest
-    /// capture, so a filtered and an unfiltered call show the same capture.
+    /// database), $3 the instant the snapshot is read as of (NULL: no bound). The predicate filters ROWS of the snapshot: the
+    /// newest-capture anchor stays the server's whole newest capture at or before $3, so a filtered and an unfiltered call show
+    /// the same capture, and a read as of a past instant never shows a capture taken after it.
     /// </summary>
     public const string AutomaticTuningSql = @"
 SELECT * FROM (
@@ -229,7 +230,7 @@ SELECT DISTINCT
     collection_time
 FROM plan_correction
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1 AND ($3::timestamp IS NULL OR collection_time <= $3))
 AND   ($2::text[] IS NULL OR database_name = ANY($2))
 ) AS d
 /* #7699 item 2: tempdb is on the collector's list but sys.database_automatic_tuning_options has no row for it, so it
@@ -339,13 +340,18 @@ ORDER BY lower(database_name), database_name";
     /// chosen databases' rows and never moves the snapshot anchor (<see cref="DatabaseFilter.All"/>, the default: every
     /// database).</summary>
     public static async Task<List<AutomaticTuningRow>> GetLatestAutomaticTuningAsync(
-        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases = default, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases = default, DateTime? asOf = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<AutomaticTuningRow>();
         await using var command = postgres.CreateCommand(AutomaticTuningSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.Add(databases.Parameter());
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+            Value = asOf is { } bound ? DateTime.SpecifyKind(bound, DateTimeKind.Unspecified) : DBNull.Value,
+        });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

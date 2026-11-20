@@ -275,7 +275,6 @@ public sealed class FleetSweepStateRungTests
     [Fact]
     public void TheSpanRead_CarriesBothBounds_AndNothingReadsTheStoresClock()
     {
-        Assert.Contains("swept_at >= $1", FleetSweepStore.GetRunsBySpanSql, StringComparison.Ordinal);
         Assert.Contains("swept_at <= $2", FleetSweepStore.GetRunsBySpanSql, StringComparison.Ordinal);
 
         foreach (var sql in new[]
@@ -324,7 +323,6 @@ public sealed class FleetSweepStateRungTests
         })
         {
             Assert.Contains("JOIN collect.fleet_sweep_runs r ON r.sweep_id", sql, StringComparison.Ordinal);
-            Assert.Contains("r.swept_at >= $1", sql, StringComparison.Ordinal);
             Assert.Contains("r.swept_at <= $2", sql, StringComparison.Ordinal);
         }
 

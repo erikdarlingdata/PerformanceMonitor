@@ -79,7 +79,7 @@ public static class DarlingPgPredicateStatsReader
                    worst_estimate_error_ratio, sample_rate, collection_time
             FROM pg_predicate_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, column_name, operator, query_id,
                      collection_time DESC

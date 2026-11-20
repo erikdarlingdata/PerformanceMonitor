@@ -40,7 +40,7 @@ WITH per_collection AS
         log_used_mb
     FROM v_tempdb_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -151,7 +151,7 @@ SELECT
     log_reuse_wait_desc
 FROM v_tempdb_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 ORDER BY collection_time DESC
 LIMIT 1";

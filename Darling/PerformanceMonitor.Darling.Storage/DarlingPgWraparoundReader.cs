@@ -75,7 +75,7 @@ public static class DarlingPgWraparoundReader
             MAX(min_multixid_age) OVER (PARTITION BY database_name) AS window_peak_min_multixid_age
         FROM pg_wraparound_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY database_name, collection_time DESC
         )

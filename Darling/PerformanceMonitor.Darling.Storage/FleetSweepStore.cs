@@ -328,7 +328,7 @@ LIMIT 1;";
     /// store's time zone.
     /// </summary>
     public const string GetRunsBySpanSql = RunColumns + @"
-WHERE swept_at >= $1
+WHERE swept_at > $1
 AND   swept_at <= $2
 ORDER BY swept_at DESC, sweep_id DESC;";
 
@@ -363,7 +363,7 @@ ORDER BY server_id, alert_family;";
 SELECT w.sweep_id, w.server_id, w.alert_family
 FROM collect.fleet_sweep_would_have_paged w
 JOIN collect.fleet_sweep_runs r ON r.sweep_id = w.sweep_id
-WHERE r.swept_at >= $1
+WHERE r.swept_at > $1
 AND   r.swept_at <= $2
 ORDER BY w.sweep_id, w.server_id, w.alert_family;";
 
@@ -386,7 +386,7 @@ ORDER BY w.sweep_id, w.server_id, w.alert_family;";
 SELECT v.server_id, v.server_name
 FROM collect.fleet_sweep_server_verdicts v
 JOIN collect.fleet_sweep_runs r ON r.sweep_id = v.sweep_id
-WHERE r.swept_at >= $1
+WHERE r.swept_at > $1
 AND   r.swept_at <= $2
 GROUP BY v.server_id, v.server_name
 ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id);";

@@ -86,8 +86,8 @@ public partial class LocalDataService
 {
     /// <summary>
     /// #5643: this server's late cycles in the 24 h ending at <paramref name="asOfUtc"/> (default now), from the
-    /// <c>collection_cycle</c>/<c>SKIPPED</c> rows the collection loop writes. The window is inclusive at both ends. The
-    /// newest row (ties broken by <c>log_id</c>) supplies the "last" fields.
+    /// <c>collection_cycle</c>/<c>SKIPPED</c> rows the collection loop writes. The window leaves its start out and keeps its
+    /// end. The newest row (ties broken by <c>log_id</c>) supplies the "last" fields.
     /// </summary>
     public async Task<SkippedCycleSummary> GetSkippedCycleSummaryAsync(int serverId, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
@@ -123,7 +123,7 @@ FROM
     WHERE server_id = $1
     AND   collector_name = $2
     AND   status = $3
-    AND   collection_time >= $4
+    AND   collection_time > $4
     AND   collection_time <= $5
 ) t";
 

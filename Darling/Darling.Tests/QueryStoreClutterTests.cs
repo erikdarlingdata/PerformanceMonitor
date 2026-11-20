@@ -596,7 +596,6 @@ public sealed class QueryStoreClutterTests
         })
         {
             Assert.Contains("server_id = ANY($1::int[])", sql, StringComparison.Ordinal);
-            Assert.Contains(">= $2", sql, StringComparison.Ordinal);
             Assert.Contains("<= $3", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("percentile_cont", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);

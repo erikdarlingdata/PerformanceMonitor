@@ -121,7 +121,7 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
             var (totalCount, snapshots) = dataReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(snapshots);

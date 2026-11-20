@@ -303,7 +303,7 @@ FROM collect.schema_objects WHERE version_id = ANY($1)", ids))
        o.change_login, o.change_app, o.change_host
 FROM collect.schema_objects o WHERE ")
             .Append(q.Scope(keys, "o"))
-            .Append(" AND o.valid_from >= ").Append(q.P(NpgsqlDbType.Timestamp, Naive(fromUtc)))
+            .Append(" AND o.valid_from > ").Append(q.P(NpgsqlDbType.Timestamp, Naive(fromUtc)))
             .Append(" AND o.valid_from <= ").Append(q.P(NpgsqlDbType.Timestamp, Naive(toUtc)));
         if (database != null)
         {

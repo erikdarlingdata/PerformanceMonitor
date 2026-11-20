@@ -181,7 +181,7 @@ internal static class DarlingTrendReader
             CAST(plan_cache_mb AS double precision) AS plan_cache_mb
         FROM v_memory_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time
         """;
@@ -426,7 +426,7 @@ internal static class DarlingTrendReader
                         FROM v_perfmon_stats
                         WHERE server_id = $1
                         AND   counter_name = $2
-                        AND   collection_time >= $3
+                        AND   collection_time > $3
                         AND   collection_time <= $4
                         AND   {{isWaitStatistics}}
                         WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
@@ -446,7 +446,7 @@ internal static class DarlingTrendReader
                         FROM v_perfmon_stats
                         WHERE server_id = $1
                         AND   counter_name = $2
-                        AND   collection_time >= $3
+                        AND   collection_time > $3
                         AND   collection_time <= $4
                         AND   NOT ({{isWaitStatistics}})
                     ) AS raw
@@ -563,7 +563,7 @@ internal static class DarlingTrendReader
         SELECT DISTINCT counter_name, lower(counter_name) AS name_key
         FROM v_perfmon_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY lower(counter_name), counter_name
         """;
@@ -621,7 +621,7 @@ internal static class DarlingTrendReader
                 ) AS series_rank
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   (delta_reads > 0 OR delta_writes > 0)
@@ -689,7 +689,7 @@ internal static class DarlingTrendReader
                 (delta_reads > 0 OR delta_writes > 0) AS active
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   sample_interval_seconds IS DISTINCT FROM 0
@@ -1636,7 +1636,7 @@ internal static class DarlingTrendReader
                 WHERE qs.server_id = $1
                 AND   qs.database_name = $2
                 AND   qs.query_hash = $3
-                AND   qs.collection_time >= $4
+                AND   qs.collection_time > $4
                 AND   qs.collection_time <= $5
             ) AS q
         ) AS b

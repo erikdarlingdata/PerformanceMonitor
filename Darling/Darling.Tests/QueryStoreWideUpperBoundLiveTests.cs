@@ -79,7 +79,9 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         (31, null, W1.AddHours(12).AddMinutes(1), W1.AddMinutes(-3)),           // legacy, one minute past the slack: dropped
     };
 
-    private static readonly int[] ExpectedTop = { 1, 2, 3, 4, 5, 9, 10, 12, 13 };
+    /* The history read places a row by the instant it was collected, in (start, end]: row 3, collected exactly at the end, is in, and
+       row 2, collected exactly at the start, is not. */
+    private static readonly int[] ExpectedHistory = { 1, 3, 4, 5, 9, 10, 12, 13 };
     private static readonly int[] ExpectedDaily = { 1, 2, 4, 5, 9, 12 };
     private static readonly DateTime[] ExpectedTrendPoints =
     {
@@ -157,7 +159,7 @@ public sealed class QueryStoreWideUpperBoundLiveTests
                 Assert.Equal(viaOld, viaNew);
             }
 
-            Assert.Equal(ExpectedTop.Contains(q), viaNew.Count == 1);
+            Assert.Equal(ExpectedHistory.Contains(q), viaNew.Count == 1);
         }
 
         /* ---- The duration trend's table read: both arms. ---- */

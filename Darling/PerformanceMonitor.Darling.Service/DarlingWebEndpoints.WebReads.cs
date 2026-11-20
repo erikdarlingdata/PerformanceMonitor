@@ -76,7 +76,7 @@ public static partial class DarlingWebEndpoints
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"), collectionTime: Str(c, "collection_time"), snapshotsOnly: QueryBool(c, "snapshots_only", false), includeMonitor: QueryBool(c, "include_monitor", false))
+                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"), collectionTime: Str(c, "collection_time"), snapshotsOnly: QueryBool(c, "snapshots_only", false), includeMonitor: QueryBool(c, "include_monitor", false), responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
@@ -124,7 +124,7 @@ public static partial class DarlingWebEndpoints
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
             ["get_blocking"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)
+                ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted, responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
             /* #6292: the web-only Block chain read. A key that is present but unreadable is refused, never defaulted; an omitted ecid is 0, as the
                grid carries it. The tree is the Viewer's own, built by the shared reconstruction. */
@@ -144,7 +144,7 @@ public static partial class DarlingWebEndpoints
             /* #5246: the drawn graph is added here for the web only, so the MCP tool's payload, response budget and Lite parity do not change. */
             ["get_deadlock_detail"] = async (c, pg, an) => DarlingWebDeadlockGraph.AddGraphs(await DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted)),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), null, AsOf(c), registryState, logger, c.RequestAborted, responseByteBudget: null),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, ChartBudget(c), cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
@@ -155,7 +155,7 @@ public static partial class DarlingWebEndpoints
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
             ["get_plan_corrections"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted, collapse: true)
+                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted, collapse: true, responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
 
             /* ── config (current + history) ── */
@@ -263,7 +263,7 @@ public static partial class DarlingWebEndpoints
                 ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted, tag: Str(c, "tag"), responseByteBudget: null, roundAverages: false)
                 : DatabaseNamesRefusal(c),
             ["get_long_query_completions"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), AsOf(c), databases, logger, c.RequestAborted, tag: Str(c, "tag"), include_monitor: QueryBool(c, "include_monitor", false))
+                ? DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), AsOf(c), databases, logger, c.RequestAborted, tag: Str(c, "tag"), include_monitor: QueryBool(c, "include_monitor", false), responseByteBudget: null)
                 : DatabaseNamesRefusal(c),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -406,7 +406,7 @@ public static partial class DarlingWebEndpoints
                c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
             ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
-            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
+            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), null, c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
             ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
             ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), readAdmission, c.RequestAborted),

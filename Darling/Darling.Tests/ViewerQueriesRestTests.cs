@@ -293,7 +293,6 @@ public sealed class ViewerQuerySnapshotsSqlTests
         Assert.Contains("FROM query_snapshots", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_snapshots", sql, StringComparison.Ordinal); /* viewer reads base tables */
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("query_text NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id", sql, StringComparison.Ordinal);

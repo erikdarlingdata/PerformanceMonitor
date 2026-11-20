@@ -183,7 +183,7 @@ public static class DarlingPgTrendReader
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   wait_event = $2
-        AND   collection_time >= $3
+        AND   collection_time > $3
         AND   collection_time <= $4
         AND   sample_interval_seconds > 0
         GROUP BY collection_time
@@ -206,7 +206,7 @@ public static class DarlingPgTrendReader
         WHERE server_id = $1
         AND   wait_event IS NOT NULL
         AND   NOT (wait_type IS NOT DISTINCT FROM 'Extension' AND wait_event IS NOT DISTINCT FROM 'Extension')
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   sample_interval_seconds > 0
         GROUP BY wait_event
@@ -308,7 +308,7 @@ public static class DarlingPgTrendReader
             FROM pg_wait_stats
             WHERE server_id = $1
             AND   wait_event = $2
-            AND   collection_time >= $3
+            AND   collection_time > $3
             AND   collection_time <= $4
             AND   sample_interval_seconds > 0
             GROUP BY collection_time
@@ -363,6 +363,7 @@ public static class DarlingPgTrendReader
                  THEN coalesce(calls, 0)::double precision / interval_seconds
             END                                             AS calls_per_second
         FROM per_snapshot
+        WHERE collection_time > $3
         ORDER BY collection_time
         """;
 
@@ -388,6 +389,8 @@ public static class DarlingPgTrendReader
             FROM pg_statement_stats
             WHERE server_id = $1
             AND   queryid = $2
+            /* A pre-V128 snapshot takes its interval from the row before it, so the snapshot stamped on $3 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($3, $4]. */
             AND   collection_time >= $3
             AND   collection_time <= $4
             GROUP BY collection_time
@@ -426,6 +429,8 @@ public static class DarlingPgTrendReader
             FROM pg_statement_stats
             WHERE server_id = $1
             AND   queryid = $2
+            /* The snapshot stamped on $3 is read so the run that stored it owns it, and so a snapshot no run claims has its
+               predecessor: its point sits on $3 and the read below drops it, as it drops every point outside ($3, $4]. */
             AND   collection_time >= $3
             AND   collection_time <= $4
             GROUP BY collection_time
@@ -518,9 +523,9 @@ public static class DarlingPgTrendReader
             COUNT(*)                                                             AS intervals
         FROM rated
         WHERE interval_seconds > 0
-        AND   point_time >= $3
+        AND   point_time > $3
         AND   point_time <= $4
-        AND   EXISTS (SELECT 1 FROM statement_snapshots)
+        AND   EXISTS (SELECT 1 FROM statement_snapshots WHERE collection_time > $3)
         GROUP BY 1
         ORDER BY 1
         """;
@@ -600,7 +605,7 @@ public static class DarlingPgTrendReader
         "SELECT queryid\n"
         + "FROM pg_statement_stats\n"
         + "WHERE server_id = $1\n"
-        + "AND   collection_time >= $2\n"
+        + "AND   collection_time > $2\n"
         + "AND   collection_time <= $3\n"
         /* #7567: never one of the service's own statements (PgOwnStatement.Marker): on a quiet server the wait sampler's
            pg_sleep is the heaviest statement, and a chart of the service's own sampler is nobody's question. */
@@ -1521,7 +1526,7 @@ public static class DarlingPgTrendReader
             WHERE server_id = $1
             AND   backend_type IS NOT NULL
             AND   context IS NOT NULL
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text IS NULL OR backend_type = $4)
             AND   ($5::text IS NULL OR context = $5)

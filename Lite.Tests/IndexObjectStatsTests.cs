@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -26,6 +27,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
     private static readonly DateTime _latest = DateTime.UtcNow;
     private static readonly DateTime _prior = _latest.AddDays(-1);
     private static readonly DateTime _startTime = _latest.AddDays(-10); // instance start (no reset)
+
+    /// <summary>The end of the detector's window, a minute after the latest snapshot: the window is [start, end), so the latest
+    /// snapshot sits inside it.</summary>
+    private static readonly DateTime _windowEnd = _latest.AddMinutes(1);
     private long _nextId = -1;
 
     public IndexObjectStatsTests(SharedDuckDbFixture fixture)
@@ -272,7 +277,7 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         for (int d = 1; d <= 5; d++)
             await SeedCpuAsync(_latest.AddDays(-d), 10);
 
-        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var context = DetectorContext();
         var anomalies = await _detector.DetectAnomaliesAsync(context);
 
         var growth = anomalies.FirstOrDefault(f => f.Key == "ANOMALY_OBJECT_GROWTH");
@@ -286,6 +291,42 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.True(contention!.Metadata["lock_wait_ms_delta"] >= 89_000);
     }
 
+    /// <summary>The two snapshots compared are the newest two before the window's end. A third snapshot, stored a day after
+    /// the end, repeats the latest one: a comparison that took it would find no growth and no new lock wait.</summary>
+    [Fact]
+    public async Task DetectObjectStatsAnomalies_ASnapshotStoredAfterTheWindowEnd_IsNotCompared()
+    {
+        var anomalies = await DetectWithARepeatedSnapshotAtAsync(_windowEnd.AddDays(1));
+
+        Assert.Contains(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
+        Assert.Contains(anomalies, f => f.Key == "ANOMALY_OBJECT_CONTENTION");
+    }
+
+    /// <summary>A snapshot stamped exactly on the window's end belongs to the next window, so it is not compared either.</summary>
+    [Fact]
+    public async Task DetectObjectStatsAnomalies_ASnapshotStampedOnTheWindowEnd_IsNotCompared()
+    {
+        var anomalies = await DetectWithARepeatedSnapshotAtAsync(_windowEnd);
+
+        Assert.Contains(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
+        Assert.Contains(anomalies, f => f.Key == "ANOMALY_OBJECT_CONTENTION");
+    }
+
+    /// <summary>The scenario plus a third snapshot at <paramref name="repeatAt"/> that repeats the latest one, run through the detector.</summary>
+    private async Task<List<Fact>> DetectWithARepeatedSnapshotAtAsync(DateTime repeatAt)
+    {
+        await SeedScenarioAsync();
+        await InsertObjectStat(repeatAt, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 600m, 3_000_000, 5000, 100, 10, 50, 0, 0);
+        await InsertObjectStat(repeatAt, "AppDb", 300, 1, "dbo", "HotTable", "PK_HotTable", 80m, 250_000, 200, 8, 0, 400, 100_000, 3);
+        for (int d = 1; d <= 5; d++)
+            await SeedCpuAsync(_latest.AddDays(-d), 10);
+
+        return await _detector.DetectAnomaliesAsync(DetectorContext());
+    }
+
+    private static AnalysisContext DetectorContext()
+        => new() { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _windowEnd.AddHours(-4), TimeRangeEnd = _windowEnd };
+
     [Fact]
     public async Task DetectObjectStatsAnomalies_SingleSnapshot_NoFalsePositive()
     {
@@ -294,7 +335,7 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         for (int d = 1; d <= 5; d++)
             await SeedCpuAsync(_latest.AddDays(-d), 10);
 
-        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var context = DetectorContext();
         var anomalies = await _detector.DetectAnomaliesAsync(context);
 
         Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
@@ -311,7 +352,7 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         for (int d = 1; d <= 5; d++)
             await SeedCpuAsync(_latest.AddDays(-d), 10);
 
-        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var context = DetectorContext();
         var anomalies = await _detector.DetectAnomaliesAsync(context);
 
         var growth = anomalies.FirstOrDefault(f => f.Key == "ANOMALY_OBJECT_GROWTH");
@@ -332,7 +373,7 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         for (int d = 1; d <= 5; d++)
             await SeedCpuAsync(_latest.AddDays(-d), 10);
 
-        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var context = DetectorContext();
         var anomalies = await _detector.DetectAnomaliesAsync(context);
 
         Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");

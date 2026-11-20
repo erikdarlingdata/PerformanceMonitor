@@ -57,8 +57,8 @@ public static class SkippedCycleReader
     public static readonly TimeSpan Window = TimeSpan.FromHours(24);
 
     /// <summary>
-    /// The statement. $1 server id, $2 collector name, $3 status, $4 window start, $5 window end. The window is
-    /// inclusive at both ends. The count and the sum are window aggregates, evaluated before the LIMIT, so the one row
+    /// The statement. $1 server id, $2 collector name, $3 status, $4 window start, $5 window end. The window leaves its
+    /// start out and keeps its end. The count and the sum are window aggregates, evaluated before the LIMIT, so the one row
     /// that comes back is the newest (collection_time, then log_id) and carries the totals; no rows means none.
     /// </summary>
     public const string SummarySql = @"
@@ -73,7 +73,7 @@ FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
 AND   status = $3
-AND   collection_time >= $4
+AND   collection_time > $4
 AND   collection_time <= $5
 ORDER BY collection_time DESC, log_id DESC
 LIMIT 1";

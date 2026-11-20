@@ -58,7 +58,7 @@ WITH windowed AS
         c.offset_reset    AS offset_reset,
         c.groups_dropped  AS groups_dropped
     FROM collect.store_log_captures AS c
-    WHERE c.capture_time >= $1
+    WHERE c.capture_time > $1
     AND   c.capture_time <= $2
 ),
 newest AS
@@ -106,7 +106,7 @@ WITH buckets AS
 (
     SELECT DISTINCT date_trunc('hour', c.capture_time) AS bucket
     FROM collect.store_log_captures AS c
-    WHERE c.capture_time >= $1
+    WHERE c.capture_time > $1
     AND   c.capture_time <= $2
 ),
 hourly AS
@@ -116,7 +116,7 @@ hourly AS
         date_trunc('hour', e.capture_time)        AS bucket,
         sum(e.occurrences)::bigint                AS occurrences
     FROM collect.store_log_events AS e
-    WHERE e.capture_time >= $1
+    WHERE e.capture_time > $1
     AND   e.capture_time <= $2
     GROUP BY e.event_class, date_trunc('hour', e.capture_time)
 ),
@@ -126,7 +126,7 @@ severities AS
         e.event_class                                         AS event_class,
         array_agg(DISTINCT e.severity ORDER BY e.severity)    AS severities
     FROM collect.store_log_events AS e
-    WHERE e.capture_time >= $1
+    WHERE e.capture_time > $1
     AND   e.capture_time <= $2
     GROUP BY e.event_class
 ),
@@ -190,7 +190,7 @@ SELECT
     (array_agg(e.sample_line ORDER BY e.capture_time DESC))[1] AS sample_line,
     count(*) OVER ()::bigint                 AS total_groups
 FROM collect.store_log_events AS e
-WHERE e.capture_time >= $1
+WHERE e.capture_time > $1
 AND   e.capture_time <= $2
 AND   e.message_text IS NOT NULL
 GROUP BY e.event_class, e.severity, e.message_text
@@ -608,7 +608,7 @@ WITH newest AS
     SELECT max(m.capture_time) AS capture_time
     FROM collect.store_log_events AS m
     WHERE m.sample_line IS NOT NULL
-    AND   m.capture_time >= $1
+    AND   m.capture_time > $1
     AND   m.capture_time <= $2
 )
 SELECT left(e.sample_line, 64)

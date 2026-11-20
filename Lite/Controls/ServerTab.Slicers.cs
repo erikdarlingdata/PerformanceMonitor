@@ -39,7 +39,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
+            var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, 0, e.ReadStartUtc, e.EndUtc, SelectedDatabaseFilter));
             _blockedProcessFilterMgr!.UpdateData(bprRead.Rows);
             /* A slicer drag re-reads the grid over a narrower window, which can itself start after the stored coverage does
                (#4966): the banner follows the SAME UTC pair the read took, as the Queries grids' slicer handlers do. */
@@ -55,7 +55,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, e.StartUtc, e.EndUtc));
+            var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, e.ReadStartUtc, e.EndUtc));
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
             /* Same as OnBlockingSlicerChanged (#4966): the banner follows the UTC pair this read took. */
             await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, e.StartUtc, e.EndUtc, dlr, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
@@ -107,10 +107,10 @@ public partial class ServerTab : UserControl
         try
         {
             var includeMonitor = ActiveQueriesIncludeMonitor;
-            var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter, includeMonitor: includeMonitor));
+            var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.ReadStartUtc, e.EndUtc, SelectedDatabaseFilter, includeMonitor: includeMonitor));
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LiveSnapshotIndicator.Text = "";
-            /* The banner takes e.StartUtc/e.EndUtc, the UTC pair the grid read above takes (same as the three Queries grids). */
+            /* The banner takes e.StartUtc/e.EndUtc, the selection's own UTC bounds (same as the three Queries grids). */
             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -167,11 +167,11 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var queryStats = await ReadTopQueriesAsync(0, e.StartUtc, e.EndUtc);
+            var queryStats = await ReadTopQueriesAsync(0, e.ReadStartUtc, e.EndUtc);
             _queryStatsFilterMgr!.UpdateData(queryStats);
             UpdateQueryStatsEmptyMessage(queryStats.Count);
             /* #4284: the comparison reads UTC collection_time directly, with no offset conversion of its own
-               (same as the banner below), so it takes e.StartUtc/e.EndUtc -- the same pair the grid read above takes. */
+               (same as the banner below), so it takes e.StartUtc/e.EndUtc, the selection's own UTC bounds. */
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
@@ -320,7 +320,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var (procStats, procLeftOut) = await ReadTopProceduresAsync(0, e.StartUtc, e.EndUtc);
+            var (procStats, procLeftOut) = await ReadTopProceduresAsync(0, e.ReadStartUtc, e.EndUtc);
             _procStatsFilterMgr!.UpdateData(procStats);
             /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
