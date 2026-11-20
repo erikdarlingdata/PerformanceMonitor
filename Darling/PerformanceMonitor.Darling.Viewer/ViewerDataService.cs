@@ -1605,7 +1605,7 @@ SELECT
     /* V286 (#9147) adds the query_stats per-collection summary table, on every store and never dropped. Found by catalog, as the V283 line above is. */
     to_regclass('collect.query_stats_collection') IS NOT NULL,
     /* V287 (#9164) adds the hourly host rollup's two plain tables, on every store and never dropped. Found by catalog, as the V283 line above is. */
-    to_regclass('collect.query_stats_host_hourly') IS NOT NULL AND to_regclass('collect.query_stats_host_hourly_built') IS NOT NULL",
+    to_regclass('collect.query_stats_host_hourly') IS NOT NULL AND to_regclass('collect.query_stats_host_hourly_built') IS NOT NULL,
     /* V288 (#9151) gives idx_collection_log_watermark an INCLUDE column. Found by catalog (more attributes than key attributes), so the answer does not depend on the
        connecting role's privileges. A store behind V150 has no such index and reads false, as it should. */
     EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace

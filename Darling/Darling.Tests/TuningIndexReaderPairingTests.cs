@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -49,19 +48,6 @@ public sealed class TuningIndexReaderPairingTests
             [PgTableTuning.DatabaseStatesNameCoverIndexName] = ("server_id", QueryStoreBackfillState.LastSeenPerDatabaseSql),
             [PgTableTuning.CpuWindowCoverIndexName] = ("collection_time", DarlingFinOpsInventoryReader.ServerMetricsSql),
         };
-
-    /// <summary>The statement the fleet Custom View compiles for a Query Store panel over a 4 hour window with the shared dedupe (#9151).</summary>
-    private static string QueryStorePanelSql()
-    {
-        var panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,\"groupBy\":[\"module_name\"],\"viz\":\"line\"}";
-        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panel)!, Array.Empty<string>());
-        Assert.True(parseError is null, parseError);
-        var end = new DateTime(2026, 8, 1, 4, 0, 0, DateTimeKind.Unspecified);
-        var context = new ComposeRunContext(null, end.AddHours(-4), end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown, QueryStoreWideEligible: false);
-        var (compiled, compileError) = ComposeCompiler.CompileCore(plan!, context, singleScanRankedTimeSeries: true, sharedQueryStoreDedupe: true);
-        Assert.True(compileError is null, compileError);
-        return compiled!.Sql;
-    }
 
     /// <summary>Every <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ... (&lt;leading&gt;, ...)</c> statement
     /// still in the list, with its name and leading (first key) column extracted from the statement itself —

@@ -444,11 +444,6 @@ public static class PgTableTuning
     public const string LegacyRowIndexName = "idx_query_store_stats_server_time_null_start";
 
     /// <summary>
-    /// #9151: the covering index the fleet Custom View Query Store panel reads its window from. Exposed so the live test can find it by name.
-    /// </summary>
-    public const string QueryStoreTimePanelIndexName = "idx_query_store_stats_time_panel";
-
-    /// <summary>
     /// The partial index over the restart rows of <c>collect.query_stats</c>:
     /// <c>(collection_time) WHERE sample_interval_seconds = 0</c>. It serves
     /// <see cref="IntervalRollupRestartRows.QueryStatsRestartRowsSql"/>. The statement that builds it carries the
@@ -686,30 +681,6 @@ public static class PgTableTuning
            is a first-start build of roughly 30-70 s, inside SetupTimeoutSeconds with over 4x headroom. A build that runs
            out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
         "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
-        /* The fleet Custom View Query Store panel over a short window (#9151). The panel reads the raw rows of its window (4 hours by
-           default) with no server predicate, de-duplicates them over the nine partition columns and groups the result. With only the
-           (server_id, collection_time) and (collection_time) indexes the plan visited the window's heap pages for every row it read,
-           because those indexes hold none of the columns the panel needs. Design measurements, on a local TimescaleDB store of 42 servers
-           with 810,000 rows in the 4 hour window (one uncompressed 6 hour chunk, 107,000 heap pages): the compiled statement read
-           442,000 blocks in 16 s, and with this index the same statement is an Index Only Scan with no heap fetches, 75,000 blocks in
-           2.1 s to 3.7 s. Computing the de-duplication once (the shared qs_dedup CTE) takes it to 37,600 blocks.
-
-           WHAT IT HOLDS: the window's key (collection_time) and, as INCLUDE columns, every column the de-duplication CTE reads: the nine
-           partition columns, module_name and query_hash, execution_count and the four duration and CPU columns the Query Store measures
-           read. Not the text and plan columns. A column the panel starts to read later and is not here makes the scan fetch the heap
-           again: the answer stays correct and the read is as slow as before. ComposeQueryStoreTimePanelIndexLiveTests holds the plan.
-
-           COST: about 222 MB per 6 hour chunk on that store (16% of the 1.42 GB heap); one collection pass of 16,800 rows inserted in
-           the same time with and without it (inside the noise). The build read the three uncompressed chunks (3.4 GB) in about 19 s.
-
-           COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own heap, so each compressed
-           chunk gets an empty 8 KB index and the compressed relations get none. Those chunks are still read by the columnar scan,
-           which this index does not change; the index serves the uncompressed chunks. Compressing a chunk empties its index, and a
-           new chunk inherits it.
-
-           START PATH, ONE BUILD PER START: the build reads every uncompressed chunk's heap, so it shares the one-build budget
-           (s_oneBuildPerStart) and the hourly pass never builds it. Until it exists the panel reads its window as it did before. */
-        "CREATE INDEX IF NOT EXISTS " + QueryStoreTimePanelIndexName + " ON collect.query_store_stats (collection_time) INCLUDE (server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role, module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us)",
         /* The restart rows of query_stats and procedure_stats (#4605). A restart row is a row in which no counter was
            knowable (sample_interval_seconds = 0): a first sighting, an uncredited counter reset (a restart, a
            plan-cache eviction) or a gap past the policy (CollectorDeltaCalculator). The hourly interval
