@@ -23,6 +23,7 @@ on:
       - 'Darling/tools/provision-roles.sql'
       - '.github/workflows/darling-linux-store.yml'
       - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingHealth*.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingMetrics*.cs'
       # The release publishing (#8017): its script is tested by tests/release-tests.sh in the static job.
       - '.github/scripts/darling-helm-release.sh'
       - '.github/workflows/darling-helm-release.yml'

@@ -207,7 +207,7 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 | `config` | `{}` | Your `darling.json`: servers, collection, alerts. The chart owns some keys (below). |
 | `configSubstitutions` | `[]` | `{ placeholder, secretKey }` pairs: secrets written into `darling.json` when the pod starts. |
 | `passwordKey.existingSecret`, `.secretKey`, `.source` | none, `password-key`, `file` | Keep the key that seals stored server passwords in a Secret. |
-| `secrets.existingSecret`, `.values`, `.webTokenKey`, `.mcpTokenKey` | none, `{}`, `web-token`, `mcp-token` | The chart Secret: tokens and your own keys. |
+| `secrets.existingSecret`, `.values`, `.webTokenKey`, `.mcpTokenKey`, `.metricsTokenKey` | none, `{}`, `web-token`, `mcp-token`, `metrics-token` | The chart Secret: tokens and your own keys. |
 | `store.mode` | `bundled` | `bundled` or `external`. |
 | `store.bundled.image`, `.persistence`, `.auth.existingSecret`, `.resources` | the image above, `10Gi`, none, requests 2Gi and limit 4Gi memory | The bundled store. |
 | `store.external.*` | empty | The external store (above). |
@@ -218,6 +218,9 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 | `web.network.*`, `web.ingress.*` | empty, disabled | Per-surface overrides, and the dashboard Ingress. |
 | `mcp.enabled`, `mcp.port` | `false`, `5152` | The MCP endpoint. |
 | `mcp.network.allowFrom`, `mcp.ingress.*` | empty, disabled | Override, and the MCP Ingress. |
+| `metrics.enabled`, `metrics.port` | `false`, `5155` | The Prometheus `/metrics` port (needs an image newer than 3.13.0). Its token comes from the chart Secret. |
+| `metrics.allowFrom` | empty | Addresses allowed to scrape; empty adds none. `network.allowFrom` never applies to metrics. |
+| `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | `false`, `60s`, `{}` | A Prometheus Operator ServiceMonitor for the metrics Service (needs `metrics.enabled` and the CRD). |
 
 Fixed, not values: one replica, the `Recreate` strategy, and the pod security context (`runAsNonRoot`, user, group and `fsGroup` 1654, `fsGroupChangePolicy: OnRootMismatch`, `RuntimeDefault` seccomp). Every container drops all capabilities, forbids privilege escalation and has a read-only root filesystem. No container ever runs as root. The init container that writes `darling.json` has small fixed resources (requests 10m CPU and 16Mi, limit 64Mi), so a namespace with a ResourceQuota accepts the pod.
 
@@ -228,9 +231,10 @@ The chart owns exactly these keys of `darling.json`:
 - `postgres.managed` and `postgres.connectionString` (from `store.*`);
 - `web.enabled`, `web.port`, `web.publicBaseUrl`, `web.network.listen`, `web.network.allowFrom`, `web.network.trustedProxies` and `web.network.token`;
 - `mcp.enabled`, `mcp.port`, `mcp.network.listen`, `mcp.network.allowFrom` and `mcp.network.token`;
+- `metrics.enabled`, `metrics.port`, `metrics.listen`, `metrics.allowFrom` and `metrics.token`;
 - `health` and `passwordKey`.
 
-Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them, and `config` must spell the top-level `postgres`, `web` and `mcp` exactly so: a `Postgres` block would sit beside the chart's and Darling would read only one of the two, so the render fails. The same holds for `network` inside `web` and `mcp`: a `config.web.Network` block would sit beside the chart's `network` block, and its `tls` or `oidc` settings would be dropped without a message, so the render fails. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
+Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them, and `config` must spell the top-level `postgres`, `web`, `mcp` and `metrics` exactly so: a `Postgres` block would sit beside the chart's and Darling would read only one of the two, so the render fails. The same holds for `network` inside `web` and `mcp`: a `config.web.Network` block would sit beside the chart's `network` block, and its `tls` or `oidc` settings would be dropped without a message, so the render fails. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
 
 ### Through `config`
 
@@ -257,8 +261,29 @@ Darling listens on `0.0.0.0` inside the pod, and `allowFrom` decides who it serv
 - For the dashboard, Darling's Host guard admits one DNS name: the host of `web.publicBaseUrl`. With several web Ingress hosts, only that one works; the others get `400`.
 - For MCP, Darling's Host guard admits one DNS name. The chart sets `mcp.network.hostName` to the first MCP Ingress host (set it in `config` to use another), so only that host works.
 - A token you supply (in `secrets.values` or your `existingSecret`) must be at least 16 characters with at least 6 different characters. A shorter or more repetitive one keeps that surface loopback-only, with a Critical line in the log. The chart's generated tokens are 40 random characters.
-- `trustedProxies` set to the controller pods' CIDR trusts every pod in that CIDR: any of them can claim any client address in `X-Forwarded-For`. The health port, 5154, answers anyone who can route to the pod. A NetworkPolicy that admits only the ingress controller to the web and MCP ports, and nothing else to the pod, closes both (the kubelet's probes come from the node, which most network plugins always admit).
+- `trustedProxies` set to the controller pods' CIDR trusts every pod in that CIDR: any of them can claim any client address in `X-Forwarded-For`. The health port, 5154, answers anyone who can route to the pod. A NetworkPolicy that admits only the ingress controller to the web and MCP ports, Prometheus to the metrics port, and nothing else to the pod, closes both (the kubelet's probes come from the node, which most network plugins always admit).
 - IPv4 is assumed: the chart sets `listen` to `0.0.0.0`. IPv6-only clusters are not supported in this version.
+
+### Prometheus metrics
+
+`metrics.enabled=true` opens Darling's `/metrics` port (default 5155) and adds a ClusterIP Service for it, named `<fullname>-metrics`. The port serves the numbers of the dashboard's fleet page and per-server SQL Server gauges (CPU, memory, disk, waits, tempdb), labeled with the server's display name, in the Prometheus text format; [the metrics port](../../../docs/darling/network-endpoints.md#the-metrics-port) lists what it returns. It needs a Darling image newer than 3.13.0, and the chart refuses an older release tag.
+
+- The port is protected by a bearer token, `secrets.metricsTokenKey` (default `metrics-token`) in the chart Secret, generated like the web and MCP tokens. With `secrets.existingSecret`, that Secret must hold the key. Read it with `kubectl get secret <fullname> -o jsonpath='{.data.metrics-token}' | base64 -d`.
+- `network.allowFrom` never applies to metrics. `metrics.allowFrom` is the address filter of this port, a list of CIDRs (one address is `/32`; an entry without a prefix length fails the render, since Darling would turn the port off for it). Empty adds none, so the token is the only gate, and Darling logs a Warning at every start that the port is guarded by the token alone over plain HTTP. That warning is expected with the chart's default, and setting `metrics.allowFrom` to the Prometheus pods' CIDR removes it.
+- A scrape reads an in-memory snapshot, never the store. A scrape starts a refresh only when the snapshot is at least 55 seconds old, so the store sees at most one refresh a minute and none while nobody scrapes. The default `metrics.serviceMonitor.interval` is therefore `60s`; scraping faster returns the same values.
+- With the Prometheus Operator, `metrics.serviceMonitor.enabled=true` renders a ServiceMonitor that scrapes the Service with the chart's token (a `monitoring.coreos.com/v1` object, rendered without asking the cluster, so the CRD must exist where you apply it). Put the label your Prometheus selects on in `metrics.serviceMonitor.labels` (for kube-prometheus-stack, `release: <its release name>`); a key the chart also sets takes your value there, while the ServiceMonitor's selector keeps the chart's labels. `metrics.serviceMonitor.interval` takes any Prometheus duration (`30s`, `1m30s`). Enabling it without `metrics.enabled` fails the render.
+- Without the Operator, point a plain scrape job at the Service, with the token in a file Prometheus can read:
+
+```yaml
+scrape_configs:
+  - job_name: darling
+    metrics_path: /metrics
+    scrape_interval: 60s
+    authorization:
+      credentials_file: /etc/prometheus/secrets/darling-metrics-token
+    static_configs:
+      - targets: ["<fullname>-metrics.<namespace>.svc:5155"]
+```
 
 ## Which values the store overrides after the first start
 
@@ -272,7 +297,7 @@ Darling listens on `0.0.0.0` inside the pod, and `allowFrom` decides who it serv
 | `planContentRetentionDays`, `composeStatementTimeoutSeconds`, `planXmlCompression` | First-run seed | The column in `config.config_service` in the store |
 | `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the dashboard's Admin page, or the MCP tools `add_servers` and `edit_server` |
 | `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` (the chart's `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port`) | First-run seed | The Viewer's Settings, or `--enable-mcp` / `--disable-mcp` / `--enable-web` / `--disable-web` run in the pod (`kubectl exec`). Live, no restart. A port changed this way no longer matches the chart's Service and probes, so change the chart value too |
-| `postgres` (the chart's `store.*`), `passwordKey`, `health`, `mcp.network` and `web.network` (the chart's `network.*`, `web.*`, `mcp.*`), and every other key of `config` not listed above | File only | Change the chart value and upgrade |
+| `postgres` (the chart's `store.*`), `passwordKey`, `health`, `metrics` (the chart's `metrics.*`), `mcp.network` and `web.network` (the chart's `network.*`, `web.*`, `mcp.*`), and every other key of `config` not listed above | File only | Change the chart value and upgrade |
 
 The source is [`darling.json` is only a seed](../../../docs/darling/install.md#darlingjson-is-only-a-seed) and the [source-of-truth table](../../../docs/darling/configuration.md#where-each-setting-lives-first-run-seed-or-file-only) in the configuration reference, which has the full list. So `servers`, `alerts` and `webhooks` in `config` are right for the first install and for a store you are rebuilding, and wrong as the way to change a running one.
 
@@ -293,9 +318,9 @@ An init container writes the Secret's value into the file the service reads, whe
 
 ## Secrets and GitOps
 
-Unless you name your own, the chart generates the web token, the MCP token (in `<fullname>`) and the bundled store's password (in `<fullname>-store`). It looks the existing Secrets up in the cluster on each upgrade so the values stay, and marks them `helm.sh/resource-policy: keep` so an uninstall leaves them (and so the store's password still matches its volume; see [Uninstall](#uninstall)).
+Unless you name your own, the chart generates the web, MCP and metrics tokens (in `<fullname>`) and the bundled store's password (in `<fullname>-store`). It looks the existing Secrets up in the cluster on each upgrade so the values stay, and marks them `helm.sh/resource-policy: keep` so an uninstall leaves them (and so the store's password still matches its volume; see [Uninstall](#uninstall)).
 
-A tool that renders the chart without reading the cluster (`helm template`, which is what a GitOps controller runs) cannot see them, so it generates new tokens and a new store password on every sync. A new store password locks Darling out of a store that already has data. **For a GitOps install, create the Secrets yourself and set `secrets.existingSecret` and `store.bundled.auth.existingSecret` to their names.** Any secret manager can create them (External Secrets or Sealed Secrets, for example). `secrets.existingSecret` needs the token keys (`web-token`, `mcp-token`, or the names you set), the keys your `config` and `configSubstitutions` refer to, and for a `file:` reference the path `/run/secrets/darling/<key>`. The install notes print a warning whenever a generated value is in use.
+A tool that renders the chart without reading the cluster (`helm template`, which is what a GitOps controller runs) cannot see them, so it generates new tokens and a new store password on every sync. A new store password locks Darling out of a store that already has data. **For a GitOps install, create the Secrets yourself and set `secrets.existingSecret` and `store.bundled.auth.existingSecret` to their names.** Any secret manager can create them (External Secrets or Sealed Secrets, for example). `secrets.existingSecret` needs the token keys (`web-token`, `mcp-token`, `metrics-token` with `metrics.enabled`, or the names you set), the keys your `config` and `configSubstitutions` refer to, and for a `file:` reference the path `/run/secrets/darling/<key>`. The install notes print a warning whenever a generated value is in use.
 
 The chart mounts at `/run/secrets/darling` only the keys that the rendered `darling.json` references as `file:/run/secrets/darling/<key>`: the token keys of the enabled surfaces, and the keys your `config` names. A key used only by `configSubstitutions` reaches the init container as an environment variable and is never a file in the Darling container, so no server can name it as its password. A key counts only when it is a whole string value that starts with `file:`, the way Darling recognises a reference. Reference chart Secret keys only from settings Darling reads: a `file:` value under a key Darling does not know is mounted without being one of its own secrets. The dashboard and the MCP tools accept no `env:` or `file:` password. A server added later from the host command line with a `file:` password needs its own file, mounted with `extraVolumes` and `extraVolumeMounts`: every key `darling.json` references belongs to the service or to a server the file declares, and is refused for any other server. Every mounted key must exist in the Secret, or the pod does not start (the kubelet names the missing key in the pod's events).
 

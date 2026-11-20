@@ -1,0 +1,3 @@
+# Metrics on, no image tag, ServiceMonitor off: CI's kubeconform has no schema for the ServiceMonitor CRD.
+metrics:
+  enabled: true
