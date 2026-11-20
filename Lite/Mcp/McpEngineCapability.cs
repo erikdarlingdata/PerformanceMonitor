@@ -81,7 +81,8 @@ internal static class McpEngineCapability
         string collectorName)
     {
         var awsRdsKind = AwsRdsKindOf(serverManager, serverId);
-        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, awsRdsKind: awsRdsKind, sqlMajorVersion: SqlMajorVersionOf(serverManager, serverId));
+        var sqlMajorVersion = SqlMajorVersionOf(serverManager, serverId);
+        return NotCollectedStatusAsync(dataService, serverId, serverName, collectorName, awsRdsKind: awsRdsKind, sqlMajorVersion: sqlMajorVersion);
     }
 
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
