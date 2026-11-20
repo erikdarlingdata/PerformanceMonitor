@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Text.Json;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using Xunit;
@@ -62,6 +63,35 @@ public class MetricsConfigTests
         Assert.Equal("10.0.0.1", metrics.Listen);
         Assert.Equal("env:SOME_VAR", metrics.Token);
         Assert.Equal("10.0.0.0/8", metrics.AllowFrom);
+    }
+
+    /// <summary>#9013: allowFrom takes the array form web and MCP take, and it yields the same allow list as the comma string.</summary>
+    [Fact]
+    public void AllowFromArray_ParsesToTheSameAllowListAsTheCommaString()
+    {
+        var fromArray = Block("{\"enabled\":true,\"token\":\"" + GoodToken + "\",\"allowFrom\":[\"10.0.0.0/8\", \"192.168.1.0/24\"]}");
+        var fromString = Block("{\"enabled\":true,\"token\":\"" + GoodToken + "\",\"allowFrom\":\"10.0.0.0/8,192.168.1.0/24\"}");
+
+        Assert.Equal("10.0.0.0/8,192.168.1.0/24", fromArray.AllowFrom);
+        var arrayCheck = MetricsConfig.Check(fromArray, 5100, 5200, null);
+        var stringCheck = MetricsConfig.Check(fromString, 5100, 5200, null);
+        Assert.Empty(arrayCheck.Problems);
+        Assert.Equal(2, arrayCheck.AllowList.Count);
+        Assert.Equal(stringCheck.AllowList.ToString(), arrayCheck.AllowList.ToString());
+    }
+
+    /// <summary>#9013: as on web and MCP, the converter checks shape only. A bad CIDR inside the array loads and is a
+    /// metrics.allowFrom problem; an element that is not a string fails the load.</summary>
+    [Fact]
+    public void AllowFromArray_BadElement_IsAnAllowFromProblem_ANonStringElementFailsTheLoad()
+    {
+        var block = Block("{\"enabled\":true,\"token\":\"" + GoodToken + "\",\"allowFrom\":[\"10.0.0.0/8\", \"not-a-cidr\"]}");
+
+        var check = MetricsConfig.Check(block, 5100, 5200, null);
+
+        Assert.Contains("metrics.allowFrom", Assert.Single(check.Problems), StringComparison.Ordinal);
+        Assert.Null(check.Token);
+        Assert.ThrowsAny<JsonException>(() => Block("{\"enabled\":true,\"allowFrom\":[\"10.0.0.0/8\", 5]}"));
     }
 
     [Theory]

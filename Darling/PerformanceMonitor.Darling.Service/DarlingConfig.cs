@@ -2413,9 +2413,11 @@ public sealed class MetricsConfig
     public string? Token { get; set; }
 
     /// <summary>
-    /// CIDRs separated by commas (a string, like <c>web.network.allowFrom</c>). Empty or absent means no address filter.
+    /// CIDRs separated by commas, or a JSON array of CIDR strings, like <c>web.network.allowFrom</c>: the converter joins an array
+    /// with commas and <see cref="Hosting.CidrAllowList"/> parses either. Empty or absent means no address filter.
     /// </summary>
     [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
     public string? AllowFrom { get; set; }
 
     /// <summary>
