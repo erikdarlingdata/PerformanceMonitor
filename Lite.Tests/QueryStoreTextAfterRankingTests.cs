@@ -343,6 +343,25 @@ WHERE {presence}";
     }
 
     /// <summary>
+    /// The regressions fallback reads its window one UTC day at a time, and the days leave no gap between them: a row
+    /// collected exactly on a UTC midnight inside the window is found.
+    /// </summary>
+    [Fact]
+    public async Task WindowTextFallback_FindsARowCollectedOnAUtcMidnightInsideTheWindow()
+    {
+        var duckDb = await BuildStoreAsync(textRepeat: 3);
+        using (var readLock = duckDb.AcquireReadLock())
+        using (var connection = duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            await InsertExtraAsync(connection, 9141, 914, "h914", 9141, _anchor.Date.AddDays(-1), "midnight 914");
+        }
+
+        using var read = await new LocalDataService(duckDb).OpenConnectionAsync();
+        Assert.Equal("midnight 914", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 914, _anchor.AddDays(-3), _anchor));
+    }
+
+    /// <summary>
     /// The regressions fallback (a key whose latest kept row has no text) walks the window one UTC day at a time, newest
     /// first, and stops at the first day with a text, instead of one MAX over every file of the window. Both window ends
     /// are inclusive, including a row collected exactly at either.
