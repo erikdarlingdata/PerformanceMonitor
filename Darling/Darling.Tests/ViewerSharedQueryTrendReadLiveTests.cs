@@ -124,7 +124,8 @@ FROM (VALUES
 
     /// <summary>
     /// A collection a minute over a three-day window: the chart budget gathers them into 5-minute buckets, so every
-    /// point is a merged bucket stamped at its bucket's start. The second database has a row in every third collection
+    /// point is a merged bucket stamped at its bucket's start. The window is (start, end], so the first bucket holds the four
+    /// collections after the one stamped on the start. The second database has a row in every third collection
     /// only, one 10-minute stretch of restart collections empties two whole buckets, and a 2-minute stretch leaves a
     /// bucket rated over three of its five collections.
     /// </summary>
@@ -187,7 +188,7 @@ WHERE d.name = 'DbA' OR m.minute_number % 3 = 0", connection))
         Assert.Equal(863, all.Executions.Points.Count);
         Assert.DoesNotContain(all.Executions.Points, p => p.CollectionTime == restartFrom || p.CollectionTime == restartFrom.AddMinutes(5));
         Assert.Equal(start, all.Executions.Points[0].CollectionTime);
-        Assert.Equal(ExpectedBucketRate(start, 5, includeSecondDatabase: true, firstDatabase: true), all.Executions.Points[0].Value, 9);
+        Assert.Equal(ExpectedFirstBucketRate(start, 5, includeSecondDatabase: true, firstDatabase: true), all.Executions.Points[0].Value, 9);
 
         /* The partly rated bucket is rated over the three collections outside the 2-minute stretch (minutes 0, 3 and 4). */
         var partialBucket = partialFrom.AddMinutes(-1);
@@ -198,7 +199,7 @@ WHERE d.name = 'DbA' OR m.minute_number % 3 = 0", connection))
         var filtered = await ReadPairAsync(viewer, start, end, OneDatabase, end, ct);
         Assert.Equal(RetentionTier.Raw, filtered.Executions.Tier);
         Assert.Equal(863, filtered.Executions.Points.Count);
-        Assert.Equal(ExpectedBucketRate(start, 5, includeSecondDatabase: true, firstDatabase: false), filtered.Executions.Points[0].Value, 9);
+        Assert.Equal(ExpectedFirstBucketRate(start, 5, includeSecondDatabase: true, firstDatabase: false), filtered.Executions.Points[0].Value, 9);
 
         var unmatched = await ReadPairAsync(viewer, start, end, NoSuchDatabase, end, ct);
         Assert.Empty(unmatched.Executions.Points);
@@ -345,15 +346,16 @@ CROSS JOIN (VALUES (1, 'DbA'), (3, 'DbB')) AS d(n, name)", connection))
         return executions;
     }
 
-    /// <summary>The executions per second of a fully rated bucket of the merged-bucket seed: a collection a minute, 60 s each.</summary>
-    private static double ExpectedBucketRate(DateTime bucketStart, int bucketMinutes, bool includeSecondDatabase, bool firstDatabase)
+    /// <summary>The executions per second of the window's first bucket of the merged-bucket seed: a collection a minute, 60 s each. The
+    /// collection stamped on the window's start belongs to the window before, so the bucket is rated over the collections after it.</summary>
+    private static double ExpectedFirstBucketRate(DateTime windowStart, int bucketMinutes, bool includeSecondDatabase, bool firstDatabase)
     {
         var executions = 0L;
-        for (var minute = 0; minute < bucketMinutes; minute++)
+        for (var minute = 1; minute < bucketMinutes; minute++)
         {
-            executions += Executions(bucketStart.AddMinutes(minute), firstDatabase, includeSecondDatabase);
+            executions += Executions(windowStart.AddMinutes(minute), firstDatabase, includeSecondDatabase);
         }
 
-        return executions / (bucketMinutes * 60.0);
+        return executions / ((bucketMinutes - 1) * 60.0);
     }
 }

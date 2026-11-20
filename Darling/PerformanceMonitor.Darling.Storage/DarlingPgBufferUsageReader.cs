@@ -103,7 +103,7 @@ public static class DarlingPgBufferUsageReader
             SELECT max(collection_time) AS at
             FROM pg_buffer_usage
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT

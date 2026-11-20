@@ -225,8 +225,9 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
     /// #8910: a window older than the retention the store keeps is answered as removed by retention, not as a collector that
     /// "may have stopped or broken". The store holds a row at the retention horizon and a recent one, so the span passes the
     /// history gate; <c>as_of</c> puts the window ten days past the horizon. Both tools say so, and neither points at
-    /// collection health. A window INSIDE the span with no rows, and a window before a young store's first row, keep the
-    /// collection wording: collection may well have missed the first, and retention never held the second.
+    /// collection health. A window INSIDE the span with no rows and over a day of history before its end, and a window before
+    /// a young store's first row, keep the collection wording: collection may well have missed the first, and retention never
+    /// held the second.
     /// </summary>
     [Fact]
     public async Task AWindowOlderThanRetention_SaysRetentionRemovedIt_AndOtherEmptyWindowsKeepTheCollectionText()
@@ -258,6 +259,9 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
             /* ── the store as the issue found it: its oldest row sits at the retention horizon (a day past it, as a
                chunk purge leaves it), and a recent row keeps the whole span far over the 24h gate. */
             await PlantWaitAsync(connection, Naive(now.AddDays(-(retentionDays + 1))), StaleWait, 60_000L, ct);
+            /* A second row two days later: the history gate measures to a window's end, so the inside window below has a
+               day of history before it. */
+            await PlantWaitAsync(connection, Naive(now.AddDays(-(retentionDays - 1))), StaleWait, 60_000L, ct);
             await PlantWaitAsync(connection, Naive(now.AddHours(-5)), StaleWait, 60_000L, ct);
 
             var removed = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 48, as_of: AsOf(retentionDays + 10));

@@ -482,7 +482,7 @@ public sealed class WebDataStartNoteTests
         Assert.True(correctionsTool > 0);
         var correctionsBody = corrections[correctionsTool..];
         Assert.Contains("var truncated = rows.Count > limit;", correctionsBody, StringComparison.Ordinal);
-        Assert.Contains("oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime))", correctionsBody, StringComparison.Ordinal);
+        Assert.Contains("oldest_returned_collection_time = kept == 0 ? null : McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.CollectionTime))", correctionsBody, StringComparison.Ordinal);
         Assert.Contains("order = \"collection_time_desc\"", correctionsBody, StringComparison.Ordinal);
     }
 

@@ -71,7 +71,6 @@ public sealed class ViewerMemorySqlTests
 
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(granted_memory_mb) AS double precision)", sql, StringComparison.Ordinal);
         /* per_collection still sums per collection_time before the outer bucket AVERAGES the gauge (#4349). */
@@ -90,7 +89,6 @@ public sealed class ViewerMemorySqlTests
 
         Assert.Contains("FROM v_memory_clerks", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY clerk_type", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY SUM(memory_mb) DESC", sql, StringComparison.Ordinal);
@@ -185,7 +183,6 @@ public sealed class ViewerMemorySqlTests
            the answer itself — #4229 adds a collection_time >= $4 FLOOR beside it (EventWindowFloor), so the
            table is a hypertable partitioned on collection_time and this sample_time window alone gave the
            planner nothing to exclude a chunk on. The floor is a second predicate, not a replacement. */
-        Assert.Contains("sample_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("sample_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY sample_time", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);

@@ -178,6 +178,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         cmd.Parameters.AddWithValue(serverId);
         cmd.Parameters.AddWithValue(0.0);
         cmd.Parameters.AddWithValue(0.0);
+        cmd.Parameters.AddWithValue(new DateTime(9999, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)); /* the window end: no bound here */
         using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
@@ -198,6 +199,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         using var cmd = new NpgsqlCommand(PgAnomalyDetector.ObjectContentionSql, connection);
         cmd.Parameters.AddWithValue(serverId);
         cmd.Parameters.AddWithValue(0.0);
+        cmd.Parameters.AddWithValue(new DateTime(9999, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)); /* the window end: no bound here */
         using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {

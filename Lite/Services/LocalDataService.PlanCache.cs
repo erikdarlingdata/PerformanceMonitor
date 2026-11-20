@@ -102,7 +102,7 @@ WITH per_collection AS
         CAST(SUM(multi_use_size_mb) AS DOUBLE PRECISION) AS multi_use_mb
     FROM v_plan_cache_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY collection_time
 )
@@ -134,7 +134,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_plan_cache_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -203,7 +203,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_plan_cache_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT

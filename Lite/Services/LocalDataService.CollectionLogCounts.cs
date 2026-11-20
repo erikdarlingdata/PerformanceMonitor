@@ -31,7 +31,7 @@ public partial class LocalDataService
 SELECT COUNT(*)
 FROM v_collection_log
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   ($4 IS NULL OR collector_name = $4)
 AND   ($5 IS NULL OR duration_ms >= $5)
@@ -69,7 +69,7 @@ AND   ($6 IS NULL OR status = UPPER($6))";
 SELECT COUNT(*)
 FROM v_collection_log
 WHERE server_id IN ({string.Join(",", serverIds)})
-AND   collection_time >= $1
+AND   collection_time > $1
 AND   collection_time <= $2
 AND   ($3 IS NULL OR collector_name = $3)
 AND   ($4 IS NULL OR duration_ms >= $4)

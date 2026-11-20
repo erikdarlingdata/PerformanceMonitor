@@ -52,7 +52,8 @@ public sealed class WebBlockingColumnsPageTests
         var seg = next > 0 ? src[start..next] : src[start..];
         var sel = seg.IndexOf(".Select(", StringComparison.Ordinal);
         Assert.True(sel >= 0, tool + " has no row projection");
-        var close = seg.IndexOf("\n            });", sel, StringComparison.Ordinal);
+        /* The projection closes as `});`, or as `}).ToList();` when the read measures its rows more than once. */
+        var close = seg.IndexOf("\n            })", sel, StringComparison.Ordinal);
         if (close < 0) close = seg.IndexOf("\n                })", sel, StringComparison.Ordinal);
         return Regex.Matches(seg[sel..close], "^\\s+([a-z_]+) = ", RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList();
     }

@@ -756,7 +756,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row: use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row: necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spilled-page (8 KB pages) and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Every detail='full' min/max figure, total_clr_ms and plan_generation_num are LIFETIME values for the plan's time in cache (the highest stored value of a cumulative counter in the window), not window figures; only the totals and averages are windowed deltas. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only: truncated = true says rows were left off the end for it, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Cached queries (sys.dm_exec_query_stats) ranked by CPU in a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before top: filter_applied names the floor; an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted when inputs are missing. window_truncated marks a window floor, not a page cut; effective_start is where it begins. Row cap is top, not limit; truncated if top or the 32 KB budget cut rows, budget_truncated the budget alone. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row: use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row: necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spilled-page (8 KB pages) and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Every detail='full' min/max figure, total_clr_ms and plan_generation_num are LIFETIME values for the plan's time in cache (the highest stored value of a cumulative counter in the window), not window figures; only the totals and averages are windowed deltas. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only. truncated = true says rows were left out, by the top cap or by the budget; budget_truncated = true and budget_note are the budget cut alone, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -881,11 +881,15 @@ public sealed class DarlingMcpDataTools
             var rankedDatabases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
                 asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, logger: logger, cancellationToken: cancellationToken);
             var droppedDatabases = DatabasesLeftOut.Distinct(rankedDatabases.ExcludedNames);
+            /* The ranking is read for top + 1 rows, listed databases first and the fill from the dropped ones after: the extra row is the
+               observed signal that the window held more queries than top, and the first top rows are the same rows in the same order. */
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
-            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, droppedDatabases,
+                postgres, resolved.ServerId, requestedStart, now, top + 1, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
+            var fetched = await DroppedDatabaseRows.FillAsync(routed.Rows, top + 1, droppedDatabases,
                 async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
                     postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter)).Rows);
+            var moreThanTop = fetched.Count > top;
+            var rows = moreThanTop ? fetched.Take(top).ToList() : fetched;
             var droppedWithoutRows = DroppedDatabaseMark.WithoutRows(droppedDatabases, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -1179,10 +1183,14 @@ public sealed class DarlingMcpDataTools
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
             }
 
-            /* #8568: under a response budget the page ends at the last whole row that fits it, heaviest first, and says
-               so (truncated, budget_note). The web viewer's page passes none and keeps its rows exactly. */
+            /* `truncated` is true when the window held more queries than top. #8568: under a response budget the page also ends at the last
+               whole row that fits it, heaviest first, and says so (budget_truncated, budget_note), and `truncated` is then true for either cut.
+               The web viewer's page passes none and keeps its rows exactly. */
+            queriesPayload["truncated"] = moreThanTop;
             return responseByteBudget is int budget
-                ? McpResponseBudget.CapPage(queriesPayload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(queryTextLength > QueryTextPreviewLength), budget)
+                ? McpResponseBudget.CapArray(
+                    queriesPayload, "queries", "heaviest first", "queries", _ => TopQueriesCutRemedy(queryTextLength > QueryTextPreviewLength), budget,
+                    "budget_truncated", "budget_note", (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count)
                 : queriesPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1352,13 +1360,17 @@ public sealed class DarlingMcpDataTools
                and of a page with rows (databases_left_out + a note), and an empty page's sentence claims only the databases the server
                still has, so "the collector recorded nothing" is never said over a window where it recorded rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
-            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken, tagFilter);
+            /* Read for top + 1 rows: the extra row is the observed signal that the window held more procedures than top, and the first top
+               rows are the same rows in the same order. */
+            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top + 1, databases, ranking, cancellationToken, tagFilter);
             /* #7725: the databases the server still lists rank first; what the limit leaves is filled from the left-out databases, ranked the same
                way and marked database_dropped, so a dropped database's rows never push out a listed row and the grid is not empty while the work is
                on record. databases_left_out below then names only the databases with no row in the reply. */
-            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, leftOut,
+            var fetched = await DroppedDatabaseRows.FillAsync(routed.Rows, top + 1, leftOut,
                 async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(
                     postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, ranking, cancellationToken, tagFilter)).Rows);
+            var moreThanTop = fetched.Count > top;
+            var rows = moreThanTop ? fetched.Take(top).ToList() : fetched;
             var leftOutWithoutRows = DroppedDatabaseMark.WithoutRows(leftOut, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -1532,6 +1544,8 @@ public sealed class DarlingMcpDataTools
                 proceduresPayload["tag_filter"] = procedureTagName;
             }
 
+            /* True when the window held more procedures than top; the page is the heaviest top of them. */
+            proceduresPayload["truncated"] = moreThanTop;
             return proceduresPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1598,7 +1612,7 @@ public sealed class DarlingMcpDataTools
         return message is null ? null : McpHelpers.Status("unavailable", message);
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut (no limit changes it), because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept: truncated says rows were cut for that, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut (no limit changes it), because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. truncated says top or the 32 KB budget cut rows, budget_truncated the budget alone. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept. truncated says rows were left out, by the top cap or by the budget; budget_truncated and budget_note are the budget cut alone, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1677,8 +1691,11 @@ public sealed class DarlingMcpDataTools
 
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, execution_type, module_name, cancellationToken, tagFilter);
-            var rows = read.Rows;
+            /* Read for top + 1 queries: the extra row is the observed signal that the window held more queries than top, and the first top
+               are the same rows in the same order. */
+            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top + 1, databases, execution_type, module_name, cancellationToken, tagFilter);
+            var moreThanTop = read.Rows.Count > top;
+            var rows = moreThanTop ? read.Rows.Take(top).ToList() : read.Rows;
             var tablePlan = read.Table;
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
@@ -1835,13 +1852,13 @@ public sealed class DarlingMcpDataTools
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* Which tier answered. */
                 history_source = tablePlan is null ? "raw" : "interval_table",
-                /* #3653 item 17: the WINDOW floor under its own key. This tool has no page cut to disclose (top
-                   is a rank, not a cap the window overflowed), and the flag was spelled `truncated` anyway — the
-                   page dialect's word, which on every neighbour in this file means "limit bit, raise it". Here
-                   nothing the caller sends changes it: the raw tier is where the rows were, and it stops where
-                   it stops. The trend family renamed the same fact the same way (DarlingMcpTrendTools, Lite's
-                   WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
-                   beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
+                /* #3653 item 17: the WINDOW floor under its own key, apart from the page's `truncated` (written onto the payload
+                   node below, which is true when the window held more queries than top or the response budget left rows off
+                   the end, so a larger top or a narrower page reaches them). Nothing the caller sends changes this flag: the raw
+                   tier is where the rows were, and it stops where it stops. The trend family spells the same fact the same way
+                   (DarlingMcpTrendTools, Lite's WriteDisclosure), and the census fails a bare `truncated` beside
+                   `effective_hours_back`. The note beside it keeps its name: it is the prose for THIS flag, and `*_note` is the
+                   house idiom. */
                 window_truncated = truncated,
                 /* #5094: the daily summary answered whole days of this window, so the totals and the ranking are close,
                    not exact. Always present, so a caller reads the flag rather than inferring it from a missing key. */
@@ -1884,13 +1901,17 @@ public sealed class DarlingMcpDataTools
                 storePayload[DarlingRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
 
-            /* #6131: the page is capped under the shared response budget, as the other read tools' pages are. top 200 measured
-               177 KB with nothing to say rows had been left out. The rows are heaviest first, so the cut drops the lightest.
-               `truncated` is this page cut ONLY: the window floor keeps its own flag, window_truncated, and its own note.
-               The web viewer's mirror passes a null budget and keeps its page exactly. */
+            /* `truncated` is true when the window held more queries than top. #6131: the page is also capped under the shared response
+               budget, as the other read tools' pages are (top 200 measured 177 KB). The rows are heaviest first, so the cut drops the
+               lightest; budget_truncated and budget_note are that cut alone, and `truncated` is true for either. The window floor
+               keeps its own flag, window_truncated, and its own note. The web viewer's mirror passes a null budget and keeps its
+               page exactly. */
+            storePayload["truncated"] = moreThanTop;
             if (responseByteBudget is int budget)
             {
-                return McpResponseBudget.CapPage(storePayload, "queries", "heaviest first", "queries", budget);
+                return McpResponseBudget.CapArray(
+                    storePayload, "queries", "heaviest first", "queries", null, budget, "budget_truncated", "budget_note",
+                    (kept, count) => kept["truncated"] = moreThanTop || count < rows.Count);
             }
 
             return storePayload.ToJsonString(McpHelpers.JsonOptions);

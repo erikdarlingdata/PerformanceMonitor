@@ -88,6 +88,8 @@ internal static class DarlingLatchSpinlockReader
                 END AS interval_seconds
             FROM v_latch_stats
             WHERE server_id = $1
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+               the reads below drop it, and every row they count was collected in ($2, $3]. */
             AND   collection_time >= $2
             AND   collection_time <= $3
         ),
@@ -99,6 +101,7 @@ internal static class DarlingLatchSpinlockReader
                 CAST(SUM(delta_waiting_requests_count) AS bigint) AS total_delta_waiting_requests,
                 MAX(collection_time) AS latest_collection_time
             FROM windowed
+            WHERE collection_time > $2
             GROUP BY latch_class
         ),
         latest AS
@@ -112,6 +115,7 @@ internal static class DarlingLatchSpinlockReader
                    interval the band came from beside the window totals it does NOT come from. */
                 CASE WHEN interval_seconds > 0 THEN CAST(interval_seconds AS double precision) END AS latest_interval_seconds
             FROM windowed
+            WHERE collection_time > $2
             ORDER BY latch_class, collection_time DESC
         )
         SELECT
@@ -180,7 +184,7 @@ internal static class DarlingLatchSpinlockReader
                 MAX(collection_time) AS latest_collection_time
             FROM v_spinlock_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             /* The earlier read joined its newest-row CTE on spinlock_name = spinlock_name, which drops a NULL name before the
                LIMIT; the column is nullable, so the name is excluded here, ahead of the top-N cut, to keep that behavior. */

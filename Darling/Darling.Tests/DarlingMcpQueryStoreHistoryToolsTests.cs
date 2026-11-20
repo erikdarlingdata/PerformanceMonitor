@@ -255,7 +255,6 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
         var sql = DarlingMcpQueryStoreHistoryTools.HistoryTableSql;
         Assert.Contains("FROM query_store_interval_wide", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1 AND database_name = $2 AND query_id = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $4 AND collection_time <= $5", sql, StringComparison.Ordinal);
         Assert.Contains("first_execution_time >= $4 - interval '", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
     }

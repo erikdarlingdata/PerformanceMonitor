@@ -116,7 +116,7 @@ public sealed partial class ViewerDataService
             victim_query_plan_xml
         FROM deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
         ORDER BY deadlock_time DESC

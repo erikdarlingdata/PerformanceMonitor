@@ -138,13 +138,13 @@ WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3", new[] { "server_id" }) + @"
 SELECT
@@ -179,13 +179,13 @@ SELECT
         FROM collection_log AS l
         WHERE " + DarlingPgBlockingReader.PgBlockingCaptureFilter + @"
         AND   l.rows_collected > 0
-        AND   l.collection_time >= $1
+        AND   l.collection_time > $1
         AND   l.collection_time <= $2
     ) AS total_blocking_events,
     (
         SELECT COUNT(*)
         FROM v_deadlocks
-        WHERE deadlock_time >= $1
+        WHERE deadlock_time > $1
         AND   deadlock_time <= $2
         AND   collection_time >= $3
     )

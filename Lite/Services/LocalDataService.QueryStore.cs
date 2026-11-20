@@ -610,7 +610,7 @@ WITH deduped_current AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+    AND   collection_time > $2 AND collection_time <= $3" + dbClause + @"
 ),
 deduped_baseline AS (
     SELECT
@@ -630,7 +630,7 @@ deduped_baseline AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $4 AND collection_time <= $5" + dbClause + @"
+    AND   collection_time > $4 AND collection_time <= $5" + dbClause + @"
 ),
 top_current AS (
     SELECT database_name, query_hash
@@ -1035,7 +1035,7 @@ FROM v_query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   query_id = $3
-AND   collection_time >= $4
+AND   collection_time > $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 

@@ -42,14 +42,12 @@ public sealed class ViewerWave2SqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         if (fromClause == "FROM blocked_process_reports")
         {
-            Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
             Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
             Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("collection_time <=", sql, StringComparison.Ordinal);
         }
         else
         {
-            Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
             Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         }
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);

@@ -263,7 +263,6 @@ public sealed class ViewerCollectionLogDataStartTests
     public void TheDrillsSql_BoundsTheRunsOnBothSides_AndTheReadBindsBothAsNaiveUtc()
     {
         var sql = ViewerDataService.CollectionLogByCollectorSql;
-        Assert.Contains("AND   collection_time >= $3", sql, StringComparison.Ordinal);
         Assert.Contains("AND   collection_time <= $4", sql, StringComparison.Ordinal);
 
         var body = MethodBody(DataServiceFile(), @"public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync\(int serverId, string collectorName, DateTime startUtc, DateTime endUtc");

@@ -102,7 +102,7 @@ public static class DarlingPgPlanCaptureReadinessReader
                    facet, is_satisfied, observed, detail, collection_time
             FROM pg_plan_capture_readiness
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY facet, collection_time DESC
         ) AS latest
