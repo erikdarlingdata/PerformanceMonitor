@@ -1236,6 +1236,18 @@ public sealed partial class DarlingWorker
         {
             _logger.LogWarning("Object executions daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+
+        /* #9110: the per-day successful job outcomes the Job History read's per-job average and last success read whole days from. It reads
+           job_history, not the Query Store tables, so it has no dependence on the passes above; it sits here to run on the same hourly tick,
+           with its own catch so a failure leaves their work standing. */
+        try
+        {
+            await JobOutcomeDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Job outcome daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
     }
 
     /// <summary>

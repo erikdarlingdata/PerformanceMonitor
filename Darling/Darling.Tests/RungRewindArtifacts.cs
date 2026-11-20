@@ -880,6 +880,10 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         new(281, "hasQueryStoreTextSeen", @"DROP TRIGGER IF EXISTS trg_query_store_text_seen_ins ON collect.query_store_text;
 DROP FUNCTION IF EXISTS collect.query_store_text_seen_track();
 DROP TABLE IF EXISTS collect.query_store_text_seen;"),
+        // V282 (#9110): the job outcome daily rollup's two tables. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V282
+        // creates them empty and the service builds the days again. Safe on a store that never had them.
+        new(282, "hasJobOutcomeDaily", @"DROP TABLE IF EXISTS collect.job_outcome_daily;
+DROP TABLE IF EXISTS collect.job_outcome_daily_built;"),
     ];
 
     /// <summary>
