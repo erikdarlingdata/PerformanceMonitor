@@ -443,6 +443,13 @@ public sealed class DarlingAnalysisService
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.TimeRangeEnd, context.CancellationToken);
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours)
+                && await WindowEndsBeforeTheOldestRowAsync(engineKind, context))
+            {
+                /* No upper bound: every row the store holds. */
+                dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, DateTime.MaxValue, context.CancellationToken);
+            }
+
             if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
                 InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
@@ -1769,6 +1776,16 @@ WHERE server_id = $1";
     /// itself, exposed so the engine-routing pins can assert it on every token in <see cref="MonitoredEngineKind"/>.</summary>
     internal AnalysisEngineSet EngineFor(string? engineKind) =>
         MonitoredEngineKind.IsPostgres(engineKind) ? _pgTargetEngine : _sqlServerEngine;
+
+    /// <summary>
+    /// True when the window ends before the oldest row the store holds for the server. Such a window has no history by its
+    /// end, which says nothing about how long the server had been monitored by then: retention may have removed those rows,
+    /// or the server was not monitored yet. The history gate then measures all the history the store holds, so the pass goes
+    /// on to the empty-window answer, which says which of the two it was.
+    /// </summary>
+    private async Task<bool> WindowEndsBeforeTheOldestRowAsync(string? engineKind, AnalysisContext context)
+        => await ReadRetentionBoundaryAsync(CoverageTableFor(engineKind), context.ServerId, context.CancellationToken) is { } boundary
+           && context.TimeRangeEnd < boundary.OldestRowUtc;
 
     /// <summary>
     /// Returns the total span of data collected for a server up to <paramref name="windowEndUtc"/>, measured on the
