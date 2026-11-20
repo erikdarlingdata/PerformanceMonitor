@@ -230,6 +230,36 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.InRange(statements, 2, DarlingMcpFindQueriesByTextTools.RawTierSpanCount - 1);
     }
 
+    /// <summary>#9150: a page that fills in the newest span stops the search there (one statement), and the reply says the page is the whole-window
+    /// answer: <c>complete</c> is true and <c>searched_from</c> is the window's start, because spans run newest first and the older ones could not
+    /// change a full page. <c>truncated</c> says more matches exist. A count statement on span-b half an hour ago makes the newest span hold two rows.</summary>
+    [Fact]
+    public async Task APageThatFillsInTheNewestSpan_IsTheWholeWindowAnswer_AndIsTruncated()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, _) = await OpenScratchAsync(ct);
+        await using var _s = scratch;
+        await using (var c = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await c.OpenAsync(ct);
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
+                  VALUES ($1,$2,2,'span-b','Books',$3,sha256('count'::text::bytea))",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromMinutes(30), CountHash);
+        }
+
+        var statements = 0;
+        var planCache = await PlanCacheAsync(scratch.ConnectionString, "dbo.Ledger", Counting(() => statements++), 1, ct);
+
+        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.True(planCache.GetProperty("truncated").GetBoolean());
+        Assert.Equal(1, statements);
+        var searchedWindow = planCache.GetProperty("searched");
+        Assert.True(searchedWindow.GetProperty("complete").GetBoolean());
+        Assert.Equal(searchedWindow.GetProperty("window_from").GetString(), searchedWindow.GetProperty("searched_from").GetString());
+        Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
+    }
+
     private const string CommonHash = "0xC001";
     private const string SecondCommonHash = "0xC002";
     private const string NullDatabaseHash = "0xC003";

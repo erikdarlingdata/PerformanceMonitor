@@ -234,7 +234,7 @@ public sealed class FindQueriesByTextOneServerProbeLiveTests
         Assert.Equal(["0xA001@Sales"], Keys(planCache));
     }
 
-    /// <summary>#9150: a finished one-server search says it read the whole raw window of the server it was asked about.</summary>
+    /// <summary>#9150: a finished one-server search says its page is the exact answer for the whole raw window of the server it was asked about.</summary>
     [Fact]
     public async Task AFinishedSearch_SaysItSearchedTheServersWholeWindow()
     {
