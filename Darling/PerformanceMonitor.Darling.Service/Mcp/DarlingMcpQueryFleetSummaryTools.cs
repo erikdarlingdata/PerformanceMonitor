@@ -297,7 +297,8 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     public const int QueryStoreMaxHours = 168;
 
     /// <summary>#8570: the deduped raw arm and its per-pair sums, shared by the one-relation and the daily-mid Query Store statements so the two
-    /// cannot drift. Ends with the comma that precedes the <c>pairs</c> arm. $1 query_hash, $2/$3 window, $4 the instant raw takes over.</summary>
+    /// cannot drift. Ends with the comma that precedes the <c>pairs</c> arm. $1 query_hash, $2/$3 window (start inclusive, end exclusive: an interval belongs to the window its
+    /// start falls in, so the interval that starts at $3 is the next window's, #9100), $4 the instant raw takes over.</summary>
     private const string QueryStoreTailCtes = """
         placed AS
         (
@@ -314,7 +315,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 WHERE query_hash = $1
                 AND   interval_start_time_utc >= $2
                 AND   interval_start_time_utc >= $4
-                AND   interval_start_time_utc <= $3
+                AND   interval_start_time_utc < $3
                 AND   collection_time >= GREATEST($2, $4) - interval '1 hour'
                 AND   collection_time <= $3 + interval '1 day'
                 AND   interval_start_time_utc IS NOT NULL
@@ -328,7 +329,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             WHERE query_hash = $1
             AND   collection_time >= $2
             AND   collection_time >= $4
-            AND   collection_time <= $3
+            AND   collection_time < $3
             AND   interval_start_time_utc IS NULL
         ),
         tail AS

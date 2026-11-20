@@ -151,7 +151,7 @@ public sealed partial class ViewerDataService
                lands after the range ends, would vanish. It also has to match the BARS' window, or the two
                surfaces on one chart disagree about whether an interval is in the window at all. */
             AND   COALESCE(interval_start_time_utc, collection_time) >= $5
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $6
+            AND   COALESCE(interval_start_time_utc, collection_time) < $6
             /* Chunk-exclusion bounds, NOT filters: neither can exclude a row the predicate above keeps in any
                realistic store. query_store_stats is a hypertable partitioned on collection_time, so without
                bounds on that column TimescaleDB opens every chunk from the window through the present.
