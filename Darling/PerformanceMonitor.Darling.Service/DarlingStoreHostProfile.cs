@@ -174,6 +174,20 @@ internal readonly record struct ManagedConfVerdictRow(
     DateTime ComputedAtUtc,
     DateTime PostmasterStartTimeUtc);
 
+/// <summary>One planner cost setting <c>get_store_host</c> reports (#9179): the live value, where it came from, and
+/// whether it equals the value the managed runtime writes. <see cref="SourceFile"/> is already redacted for a remote
+/// caller (a data-directory-relative path or a bare file name) and is null when the role cannot read
+/// <c>pg_settings.sourcefile</c> or the source is not a file. <see cref="ManagedValue"/> and
+/// <see cref="MatchesManaged"/> are null when the managed runtime sets no value for the key, and on a store that is
+/// not on the managed runtime.</summary>
+internal readonly record struct HostPlannerCostSetting(
+    string Name,
+    string Current,
+    string? Source,
+    string? SourceFile,
+    string? ManagedValue,
+    bool? MatchesManaged);
+
 /// <summary>The whole host/store/settings snapshot one <c>--check-settings</c> run or one service-start log
 /// line reports (#4214).</summary>
 internal sealed class HostProfile
@@ -186,6 +200,10 @@ internal sealed class HostProfile
     public required bool IsManagedStore { get; init; }
     public required HostStoreFacts Store { get; init; }
     public required IReadOnlyList<HostSettingProfile> Settings { get; init; }
+
+    /// <summary>The planner cost settings (#9179), read by <see cref="DarlingStoreHostProfile.GatherAsync"/> only.
+    /// Empty on a startup profile, which never reads them.</summary>
+    public IReadOnlyList<HostPlannerCostSetting> PlannerCosts { get; init; } = [];
 
     /// <summary>The EC2 instance type or Azure VM size (#4214 part 2b), or <see cref="CloudIdentity.None"/>
     /// when this host is not on either cloud, the probe failed, or (a <see cref="GatherStartupProfileAsync"/>
@@ -976,7 +994,7 @@ WHERE NOT is_compressed";
     /// the data directory, or <paramref name="dataDirectory"/> unresolved) — never a raw absolute path, and
     /// never a leading <c>..\</c>/<c>../</c> from <see cref="Path.GetRelativePath"/> for an outside file, which
     /// would still leak the parent directory tree.</summary>
-    private static string SanitizeSourcePathForMcp(string file, string? dataDirectory)
+    internal static string SanitizeSourcePathForMcp(string file, string? dataDirectory)
     {
         var fullFile = Path.GetFullPath(file);
         if (dataDirectory is not null)
@@ -1193,6 +1211,98 @@ WHERE NOT is_compressed";
         return results;
     }
 
+    /* ======================================= Planner costs (#9179) ======================================= */
+
+    /// <summary>The planner cost settings <c>get_store_host</c> reports, in report order (#9179).</summary>
+    internal static readonly string[] PlannerCostSettingNames = ["random_page_cost", "seq_page_cost", "effective_io_concurrency"];
+
+    /// <summary>The value the managed runtime writes to <c>darling-managed.conf</c> for <paramref name="name"/>, or
+    /// null when it writes none. Reads <see cref="DarlingManagedPostgres.RandomPageCostValue"/>, the one constant
+    /// <see cref="ManagedConfFile.RenderBody"/> renders, so the numbers have one home. Only
+    /// <c>random_page_cost</c> is managed today; a key added to the managed file is added here.</summary>
+    internal static string? ManagedPlannerCostValue(string name) =>
+        name == DarlingManagedPostgres.RandomPageCostSetting ? DarlingManagedPostgres.RandomPageCostValue : null;
+
+    /// <summary>Shapes one <c>pg_settings</c> row into a <see cref="HostPlannerCostSetting"/>. PURE. Pass a null
+    /// <paramref name="dataDirectory"/> for a store that is not on the managed runtime: the row then carries no
+    /// managed value and no match flag, the same as the sizing rows' not-managed verdict. A null
+    /// <paramref name="sourceFile"/> (a role without <c>pg_read_all_settings</c>, or a source that is not a file)
+    /// reports the source alone. A file path is redacted like the sizing rows' (see
+    /// <see cref="SanitizeSourcePathForMcp"/>).</summary>
+    internal static HostPlannerCostSetting ShapePlannerCost(
+        string name, string setting, string? source, string? sourceFile, string? dataDirectory)
+    {
+        var managedValue = dataDirectory is null ? null : ManagedPlannerCostValue(name);
+        bool? matches = managedValue is null
+            ? null
+            : double.TryParse(setting, NumberStyles.Float, CultureInfo.InvariantCulture, out var live)
+                && double.TryParse(managedValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var managed)
+                ? Math.Abs(live - managed) < 1e-9
+                : string.Equals(setting, managedValue, StringComparison.Ordinal);
+
+        return new HostPlannerCostSetting(
+            name, setting, source,
+            string.IsNullOrEmpty(sourceFile) ? null : SanitizeSourcePathForMcp(sourceFile, dataDirectory),
+            managedValue, matches);
+    }
+
+    /// <summary>The one plain sentence for a <c>random_page_cost</c> that is not the managed value, or null when it
+    /// matches, or when there is no managed value to compare with. PURE. It names where the value comes from
+    /// (the source, and the file when the role can read it) and says what the planner may do, without listing
+    /// reads.</summary>
+    internal static string? DescribeRandomPageCostMismatch(IReadOnlyList<HostPlannerCostSetting> costs)
+    {
+        foreach (var cost in costs)
+        {
+            if (cost.Name != DarlingManagedPostgres.RandomPageCostSetting || cost.MatchesManaged != false)
+            {
+                continue;
+            }
+
+            var from = cost.Source ?? "an unknown source";
+            var where = cost.SourceFile is null ? from : FormattableString.Invariant($"{from} ({cost.SourceFile})");
+            return FormattableString.Invariant(
+                $"random_page_cost is {cost.Current}, not the managed value {cost.ManagedValue}, so the planner may skip covering indexes and the shorter Query Store windows' plans on this store. The value comes from {where}.");
+        }
+
+        return null;
+    }
+
+    /// <summary>Reads the planner cost settings from <c>pg_settings</c> (#9179). <c>sourcefile</c> is NULL for a
+    /// role that is neither a superuser nor a member of <c>pg_read_all_settings</c>, and the row then reports the
+    /// source alone.</summary>
+    internal static async Task<IReadOnlyList<HostPlannerCostSetting>> GatherPlannerCostsAsync(
+        NpgsqlConnection connection, PostgresConfig postgres, CancellationToken cancellationToken)
+    {
+        var live = new Dictionary<string, (string Setting, string? Source, string? SourceFile)>(StringComparer.Ordinal);
+        await using (var cmd = new NpgsqlCommand(
+            "SELECT name, setting, source, sourcefile FROM pg_settings WHERE name = ANY($1)", connection)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds })
+        {
+            cmd.Parameters.AddWithValue(PlannerCostSettingNames);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                live[reader.GetString(0)] = (
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3));
+            }
+        }
+
+        var dataDirectory = postgres.Managed ? TryResolveProfileDataDirectory(postgres) : null;
+        var results = new List<HostPlannerCostSetting>(PlannerCostSettingNames.Length);
+        foreach (var name in PlannerCostSettingNames)
+        {
+            if (live.TryGetValue(name, out var row))
+            {
+                results.Add(ShapePlannerCost(name, row.Setting, row.Source, row.SourceFile, dataDirectory));
+            }
+        }
+
+        return results;
+    }
+
     /* ========================================== Orchestration ============================================ */
 
     internal static async Task<HostProfile> GatherAsync(
@@ -1203,6 +1313,7 @@ WHERE NOT is_compressed";
         var dataVolume = GatherDataVolume(ResolveVolumeAnchor(postgres));
         var store = await GatherStoreFactsAsync(connection, cancellationToken, useStoredStoreSize, reads);
         var settings = await GatherSettingProfilesAsync(connection, postgres, memory.EffectiveBytes, dataVolume.FreeBytes, cancellationToken);
+        var plannerCosts = await GatherPlannerCostsAsync(connection, postgres, cancellationToken);
 
         /* Ruling 3 (#4214 part 2b): the cloud identity probe is reached from HERE only — never from
            GatherStartupProfileAsync below, so a service start never pays an outbound HTTP call on every host,
@@ -1219,6 +1330,7 @@ WHERE NOT is_compressed";
             IsManagedStore = postgres.Managed,
             Store = store,
             Settings = settings,
+            PlannerCosts = plannerCosts,
             Cloud = cloud,
         };
     }
