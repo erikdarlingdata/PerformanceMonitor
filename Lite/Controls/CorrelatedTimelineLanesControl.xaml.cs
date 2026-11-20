@@ -855,7 +855,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
         foreach (var chart in charts)
         {
-            ApplyTheme(chart);
+            ChartStyle.Restyle(chart, ApplyTheme); // #9109: colours only, the load's axis limits and ticks stay
             chart.Refresh();
         }
         BackCaptions();

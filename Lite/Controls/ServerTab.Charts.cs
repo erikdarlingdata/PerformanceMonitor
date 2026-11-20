@@ -1620,7 +1620,7 @@ public partial class ServerTab : UserControl
         {
             if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
             {
-                ApplyTheme(chart);
+                ChartStyle.Restyle(chart); // #9109: colours only, the load's axis limits and ticks stay
                 chart.Refresh();
             }
         }
