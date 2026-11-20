@@ -308,14 +308,20 @@ public sealed class PgTargetReadsNoSpillLiveTests
         Assert.Equal(0, await ScalarAsync<long>(connection, $"SELECT count(*) FROM ((SELECT * FROM ({shipped}) AS n) EXCEPT ALL (SELECT * FROM ({OldShape}) AS o)) AS x", ct));
     }
 
-    /// <summary>Statements the module keeps an entry for each: the filler family of <see cref="PgStatementTable.Shape"/>.</summary>
+    /// <summary>
+    /// Statements the module keeps an entry for each: the filler family of <see cref="PgStatementTable.Shape"/>, as many as it
+    /// takes for the table to hold <see cref="FillerStatements"/> entries in all. The stock read spills when the module's
+    /// function returns that many rows, and the rows are every entry in the cluster, so on a table other classes have already
+    /// filled the body adds none and cannot overflow its headroom (#9106).
+    /// </summary>
     private static async Task FillAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        var toAdd = await PgStatementTable.EntriesToAddAsync(connection, ct, FillerStatements);
         var batch = new System.Text.StringBuilder();
-        for (var n = 0; n < FillerStatements; n++)
+        for (var n = 0; n < toAdd; n++)
         {
             batch.Append(PgStatementTable.Shape(n, 7)).Append(';');
-            if ((n + 1) % 100 == 0)
+            if ((n + 1) % 100 == 0 || n + 1 == toAdd)
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct, batch.ToString());
                 batch.Clear();

@@ -141,7 +141,8 @@ public class ServerCollectionFreshnessTests
         Assert.Null(card.CollectionFreshnessTooltip);
         /* The stamp and nothing after it: no band word. In Server Time the stamp itself ends with its clock's offset in brackets. */
         Assert.Equal(
-            ServerSummaryItem.FormatLastCollect(card.LastCollectionTime!.Value, ServerTimeHelper.CurrentDisplayMode, card.Clock, DateTime.UtcNow),
+            /* #9094: the card's own text keeps the offset label on one line (a word joiner inside it); the stamp is otherwise the same. */
+            PerformanceMonitor.Common.ZoneLabelText.KeepWhole(ServerSummaryItem.FormatLastCollect(card.LastCollectionTime!.Value, ServerTimeHelper.CurrentDisplayMode, card.Clock, DateTime.UtcNow)),
             card.LastCollectionDisplay);
     }
 
