@@ -62,18 +62,18 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
     /// rest, so a fleet that fits under the cap comes back whole and one busy server cannot fill the page alone. Without it the cut is
     /// the newest runs of the whole fleet, and the statement text is unchanged.
     /// </summary>
-    internal string BaseCutSql(string limitParam) => ShareCapPerServer
+    internal string BaseCutSql(string limitParam, string source = "top_by_server") => ShareCapPerServer
         ? $@"    SELECT ranked.*
     FROM (
         SELECT
             t.*,
             row_number() OVER (PARTITION BY t.server_id ORDER BY t.run_datetime_local DESC, t.instance_id DESC) AS server_rank
-        FROM top_by_server AS t
+        FROM {source} AS t
     ) AS ranked
-    ORDER BY ranked.server_rank > CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM top_by_server)), ranked.approx_run_utc DESC, ranked.instance_id DESC
+    ORDER BY ranked.server_rank > CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM {source})), ranked.approx_run_utc DESC, ranked.instance_id DESC
     LIMIT {limitParam}"
         : $@"    SELECT *
-    FROM top_by_server
+    FROM {source}
     ORDER BY approx_run_utc DESC, instance_id DESC
     LIMIT {limitParam}";
 
@@ -495,9 +495,20 @@ ORDER BY jh.category_name";
         var filterSql = filter?.Clauses(firstFilterParam) ?? string.Empty;
         var statsUntilSql = filter?.StatsClause(firstFilterParam) ?? string.Empty;
         var baseCutSql = filter is null ? new JobHistoryFilter().BaseCutSql(limitParam) : filter.BaseCutSql(limitParam);
+        /* #9110: where the narrow read is proven to hold the whole window's cut, that cut IS the answer, so base takes it as it stands
+           and the cut over top_by_server (a second sort of the same rows) is never run. */
+        if (narrowFirst)
+        {
+            baseCutSql = $@"    SELECT * FROM narrow_cut WHERE (SELECT ok FROM narrow_proof)
+    UNION ALL
+    SELECT * FROM (
+{baseCutSql}
+    ) AS full_cut WHERE NOT (SELECT ok FROM narrow_proof)";
+        }
+
         var latestOffsetSql = LatestOffsetSql("a.server_id");
         var offsetKnownSql = narrowFirst ? ", svr.utc_offset_minutes IS NOT NULL AS offset_known" : string.Empty;
-        var topByServerSql = narrowFirst ? BuildNarrowFirstTopByServerSql(floorParam, limitParam, filterSql) : $@"top_by_server AS (
+        var topByServerSql = narrowFirst ? BuildNarrowFirstTopByServerSql(floorParam, limitParam, filterSql, filter ?? new JobHistoryFilter()) : $@"top_by_server AS (
     SELECT
         so.server_id,
         COALESCE(so.display_name, top.server_name) AS server_name,
@@ -620,6 +631,18 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     }
 
     /// <summary>
+    /// #9110: the narrow-first statement cut short to one value, <c>ok</c>: whether the narrow read is proven to hold the whole window's cut,
+    /// so the statement reads nothing older than <see cref="NarrowReadSpan"/> for the page. The same parameters as
+    /// <see cref="BuildJobHistorySql"/>. For the live tests, which assert both the case where the proof holds and where it does not.
+    /// </summary>
+    internal static string BuildNarrowProofSql(bool scopedToServer, JobHistoryFilter? filter = null)
+    {
+        var sql = BuildJobHistorySql(scopedToServer, filter, narrowFirst: true);
+        var statsStart = sql.IndexOf("\njob_stats AS (", StringComparison.Ordinal);
+        return sql[..statsStart].TrimEnd().TrimEnd(',') + "\nSELECT ok FROM narrow_proof";
+    }
+
+    /// <summary>
     /// The <c>bounds</c>, <c>narrow</c>, <c>narrow_state</c> and <c>top_by_server</c> CTEs of <see cref="BuildJobHistorySql"/>'s
     /// narrow-first shape (#8549). It returns the same <c>top_by_server</c> rows as the single read, so the rest of the statement is
     /// unchanged.
@@ -640,8 +663,18 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     /// full read instead. The full read is driven from the servers that need it, so a server that filled its limit costs nothing there.
     /// The bound is strict, so the tie-break never has to be compared across the two reads.
     /// </para>
+    /// <para>
+    /// <b>The fleet-wide proof (#9110).</b> A fleet whose newest <c>limit</c> runs all sit in the narrow window needs no server to fill a
+    /// limit of its own. <c>narrow_cut</c> is the fleet's cut (<see cref="JobHistoryFilter.BaseCutSql"/>) over the narrow rows alone, and
+    /// <c>narrow_proof</c> holds when that cut has <c>limit</c> rows and its oldest row is later than anything a server can have collected
+    /// before the narrow window (the narrow start plus the hour of daylight-saving slack, or plus the 14 hours of a server with no stored
+    /// offset). Any run outside the narrow read ran earlier than that, so it cannot be in the cut. With the per-server share the proof
+    /// also needs every server with rows in the window to have its share-th newest run in the narrow read, past the same bound, because the
+    /// share guarantees each server its newest runs ahead of the fleet's. Where it holds, <c>base</c> is <c>narrow_cut</c> and no server
+    /// takes the full read; where it does not, each server is judged as before.
+    /// </para>
     /// </summary>
-    internal static string BuildNarrowFirstTopByServerSql(string floorParam, string limitParam, string filterSql)
+    internal static string BuildNarrowFirstTopByServerSql(string floorParam, string limitParam, string filterSql, JobHistoryFilter cutFilter)
     {
         const string columns = @"
             jh.server_name,
@@ -659,6 +692,28 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
             jh.retries_attempted,
             jh.message";
         var narrowStartSql = $"now() AT TIME ZONE 'UTC' - interval '{(int)NarrowReadSpan.TotalHours} hours'";
+
+        /* #9110: with the per-server share the fleet cut also guarantees every server its first share of rows (CEIL(limit / servers)), so the
+           proof adds: every server with rows in the window has a row in the narrow read (the server count, and so the share, is the
+           same), and each server's share-th newest narrow row is later than anything it collected before the narrow window. */
+        var shareProofSql = cutFilter.ShareCapPerServer
+            ? $@"
+        AND (SELECT count(*) FROM server_offsets) = (SELECT count(DISTINCT server_id) FROM narrow_top)
+        AND NOT EXISTS (
+            SELECT 1
+            FROM server_offsets AS so2
+            LEFT JOIN (
+                SELECT r.server_id, r.approx_run_utc
+                FROM (
+                    SELECT t.server_id, t.approx_run_utc, row_number() OVER (PARTITION BY t.server_id ORDER BY t.run_datetime_local DESC, t.instance_id DESC) AS rk
+                    FROM narrow_top AS t
+                ) AS r
+                WHERE r.rk = CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM narrow_top))
+            ) AS sth ON sth.server_id = so2.server_id
+            WHERE sth.approx_run_utc IS NULL
+            OR    sth.approx_run_utc < b.narrow_start + make_interval(mins => CASE WHEN so2.offset_known THEN 60 ELSE 840 + 60 END)
+        )"
+            : string.Empty;
 
         return $@"bounds AS (
     SELECT GREATEST({floorParam}::timestamp, {narrowStartSql}) AS narrow_start
@@ -681,13 +736,49 @@ narrow AS MATERIALIZED (
         LIMIT {limitParam}
     ) AS top
 ),
+narrow_top AS (
+    SELECT
+        n.server_id,
+        COALESCE(n.display_name, n.server_name) AS server_name,
+        n.instance_id,
+        n.job_id,
+        n.job_name,
+        n.job_enabled,
+        n.category_name,
+        n.step_id,
+        n.step_name,
+        n.run_status,
+        n.run_status_desc,
+        n.run_datetime AS run_datetime_local,
+        n.run_datetime - make_interval(mins => n.offset_minutes) AS approx_run_utc,
+        n.run_duration_seconds,
+        n.retries_attempted,
+        n.message
+    FROM narrow AS n
+),
+narrow_cut AS (
+{cutFilter.BaseCutSql(limitParam, "narrow_top")}
+),
+narrow_proof AS (
+    SELECT COALESCE(
+        b.narrow_start > {floorParam}::timestamp
+        AND (SELECT count(*) FROM narrow_cut) = {limitParam}
+        AND (SELECT min(approx_run_utc) FROM narrow_cut) >= b.narrow_start + make_interval(mins => sl.max_slack){shareProofSql},
+        false) AS ok
+    FROM bounds AS b
+    CROSS JOIN (
+        SELECT COALESCE(max(CASE WHEN offset_known THEN 60 ELSE 840 + 60 END), 0) AS max_slack
+        FROM server_offsets
+    ) AS sl
+),
 narrow_state AS (
     SELECT
         so.server_id,
         so.display_name,
         so.offset_minutes,
         (
-            b.narrow_start > {floorParam}::timestamp
+            NOT (SELECT ok FROM narrow_proof)
+            AND b.narrow_start > {floorParam}::timestamp
             AND NOT COALESCE(
                 c.row_count >= {limitParam}
                 AND c.oldest_run >= b.narrow_start + make_interval(mins => CASE WHEN so.offset_known THEN so.offset_minutes ELSE 840 END + 60),
