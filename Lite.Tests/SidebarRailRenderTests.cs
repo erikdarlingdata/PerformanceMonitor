@@ -149,6 +149,31 @@ public sealed class SidebarRailRenderTests
         Assert.True(clipped.Count == 0, $"{theme}: {clipped.Count} of {dots} status dots run past the {viewport:F1} px list: {string.Join(", ", clipped)}");
     }
 
+    // ── #9094: a disabled server's row ───────────────────────────────────────────────────────────
+
+    private static FleetRow SidebarRow(int id, string name, bool enabled) =>
+        new FleetServerRow(new FleetServer(id, name, false, new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = name, DisplayName = name, IsEnabled = enabled }), 0);
+
+    /// <summary>A server whose collection is off shows its name in the theme's dimmed text colour, where a reader sees it without hovering; an enabled server's name keeps the normal text colour.</summary>
+    [Theory]
+    [MemberData(nameof(Themes))]
+    public void ADisabledServersRow_ShowsItsNameDimmed_AndAnEnabledOneDoesNot(string theme)
+    {
+        var (disabled, enabled, normal, muted) = WithWindow(theme, 1200, (w, host) =>
+        {
+            var list = (ListBox)w.FindName("ServerListView");
+            list.ItemsSource = new List<FleetRow> { SidebarRow(1, "off-srv", enabled: false), SidebarRow(2, "on-srv", enabled: true) };
+            Open(w, host);
+            Brush? NameBrush(string name) => ClippedTextProbe.Descendants(list).OfType<TextBlock>().First(t => t.Text == name && t.IsVisible).Foreground;
+            return (Hex(NameBrush("off-srv") as SolidColorBrush), Hex(NameBrush("on-srv") as SolidColorBrush),
+                Hex((SolidColorBrush)w.FindResource("ForegroundBrush")), Hex((SolidColorBrush)w.FindResource("ForegroundMutedBrush")));
+        });
+
+        Assert.NotEqual(normal, muted);
+        Assert.Equal(muted, disabled);
+        Assert.Equal(normal, enabled);
+    }
+
     // ── Item 8: the footer ──────────────────────────────────────────────────────────────────────
 
     /// <summary>Each footer button in the rail shows its icon whole inside the button, in a colour that reads against the button's face.</summary>
