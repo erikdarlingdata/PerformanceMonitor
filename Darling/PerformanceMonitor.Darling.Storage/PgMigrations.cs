@@ -3726,6 +3726,9 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V281 (#9043): the Query Store text liveness stamp moves to collect.query_store_text_seen, so the touch no longer rewrites a
            text row and its trigrams. Creates the table, the insert trigger on the text table, the backfill and the two constraints. */
         new Migration(281, "query-store-text-seen", V281Sql),
+        /* V282 (#9110): the daily rollup of job_history's successful job outcomes, read by the Job History read's per-job average and last success.
+           Two new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
+        new Migration(JobOutcomeDaily.Version, "job-outcome-daily", JobOutcomeDaily.CreateSql),
     };
 
     /// <summary>
