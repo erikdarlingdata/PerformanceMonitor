@@ -158,16 +158,21 @@ namespace PerformanceMonitor.Ui
 
         /// <summary>
         /// Where the window's top edge belongs given its height and work area: unchanged while the bottom edge
-        /// fits, otherwise pulled up just enough to fit — and never above the work area's top, since a dialog
-        /// taller than the screen must lose its bottom rather than its title bar and the controls under it.
+        /// fits, otherwise pulled up just enough to fit — and never above the work area's top in either case,
+        /// since a dialog taller than the screen must lose its bottom rather than its title bar and the controls
+        /// under it. The fits case needs the floor too (#9093): <c>CenterOwner</c> places a window by its
+        /// DECLARED height before <see cref="Clamp"/> shrinks <c>MaxHeight</c>, so a window can start above the
+        /// work area and then fit once capped.
         ///
         /// <para>Split out from <see cref="Clamp"/> because it is the whole decision and the only part worth
         /// testing: a WPF <see cref="Window"/> needs an STA thread and an <c>Application</c>, while this is
         /// arithmetic.</para>
         /// </summary>
         internal static double ClampTop(double top, double actualHeight, Rect workArea) =>
-            top + actualHeight > workArea.Bottom
-                ? Math.Max(workArea.Top, workArea.Bottom - actualHeight)
-                : top;
+            Math.Max(
+                workArea.Top,
+                top + actualHeight > workArea.Bottom
+                    ? workArea.Bottom - actualHeight
+                    : top);
     }
 }
