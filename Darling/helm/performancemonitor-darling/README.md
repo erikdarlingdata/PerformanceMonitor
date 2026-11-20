@@ -207,7 +207,7 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 | `config` | `{}` | Your `darling.json`: servers, collection, alerts. The chart owns some keys (below). |
 | `configSubstitutions` | `[]` | `{ placeholder, secretKey }` pairs: secrets written into `darling.json` when the pod starts. |
 | `passwordKey.existingSecret`, `.secretKey`, `.source` | none, `password-key`, `file` | Keep the key that seals stored server passwords in a Secret. |
-| `secrets.existingSecret`, `.values`, `.webTokenKey`, `.mcpTokenKey` | none, `{}`, `web-token`, `mcp-token` | The chart Secret: tokens and your own keys. |
+| `secrets.existingSecret`, `.values`, `.webTokenKey`, `.mcpTokenKey`, `.metricsTokenKey` | none, `{}`, `web-token`, `mcp-token`, `metrics-token` | The chart Secret: tokens and your own keys. |
 | `store.mode` | `bundled` | `bundled` or `external`. |
 | `store.bundled.image`, `.persistence`, `.auth.existingSecret`, `.resources` | the image above, `10Gi`, none, requests 2Gi and limit 4Gi memory | The bundled store. |
 | `store.external.*` | empty | The external store (above). |
@@ -218,6 +218,8 @@ The verb sends no DDL, so a failure in `prepare` leaves the store untouched.
 | `web.network.*`, `web.ingress.*` | empty, disabled | Per-surface overrides, and the dashboard Ingress. |
 | `mcp.enabled`, `mcp.port` | `false`, `5152` | The MCP endpoint. |
 | `mcp.network.allowFrom`, `mcp.ingress.*` | empty, disabled | Override, and the MCP Ingress. |
+| `metrics.enabled`, `metrics.port` | `false`, `5155` | The Prometheus `/metrics` port (needs an image newer than 3.13.0). Its token comes from the chart Secret. |
+| `metrics.allowFrom` | empty | Addresses allowed to scrape; empty adds none. `network.allowFrom` never applies to metrics. |
 
 Fixed, not values: one replica, the `Recreate` strategy, and the pod security context (`runAsNonRoot`, user, group and `fsGroup` 1654, `fsGroupChangePolicy: OnRootMismatch`, `RuntimeDefault` seccomp). Every container drops all capabilities, forbids privilege escalation and has a read-only root filesystem. No container ever runs as root. The init container that writes `darling.json` has small fixed resources (requests 10m CPU and 16Mi, limit 64Mi), so a namespace with a ResourceQuota accepts the pod.
 
@@ -228,9 +230,10 @@ The chart owns exactly these keys of `darling.json`:
 - `postgres.managed` and `postgres.connectionString` (from `store.*`);
 - `web.enabled`, `web.port`, `web.publicBaseUrl`, `web.network.listen`, `web.network.allowFrom`, `web.network.trustedProxies` and `web.network.token`;
 - `mcp.enabled`, `mcp.port`, `mcp.network.listen`, `mcp.network.allowFrom` and `mcp.network.token`;
+- `metrics.enabled`, `metrics.port`, `metrics.listen`, `metrics.allowFrom` and `metrics.token`;
 - `health` and `passwordKey`.
 
-Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them, and `config` must spell the top-level `postgres`, `web` and `mcp` exactly so: a `Postgres` block would sit beside the chart's and Darling would read only one of the two, so the render fails. The same holds for `network` inside `web` and `mcp`: a `config.web.Network` block would sit beside the chart's `network` block, and its `tls` or `oidc` settings would be dropped without a message, so the render fails. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
+Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them, and `config` must spell the top-level `postgres`, `web`, `mcp` and `metrics` exactly so: a `Postgres` block would sit beside the chart's and Darling would read only one of the two, so the render fails. The same holds for `network` inside `web` and `mcp`: a `config.web.Network` block would sit beside the chart's `network` block, and its `tls` or `oidc` settings would be dropped without a message, so the render fails. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
 
 ### Through `config`
 

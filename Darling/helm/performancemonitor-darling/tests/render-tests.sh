@@ -797,3 +797,60 @@ assert_eq "$(doc ConfigMap "${DEPLOY}" | yq '.data | has("write-store-logins.sh"
 render -f "${CI_EXTERNAL}" --set store.provisionRoles.enabled=false
 assert_eq "$(dq '.spec.template.spec.initContainers | map(.name) | join(",")' | tr -d '"')" "render-config" "external, Job off: one init container"
 assert_eq "$(dq '[.spec.template.spec.volumes[] | select(.name == "store-logins" or .name == "role-passwords")] | length')" "0" "external, Job off: no wiring volumes"
+
+# ---- #9013: metrics ----
+
+t metrics_off_by_default
+render
+assert_eq "$(config_json '.metrics')" '{"enabled":false,"port":5155}' "metrics off"
+assert_eq "$(dq '[.spec.template.spec.containers[0].ports[] | select(.name == "metrics")] | length')" "0" "no metrics container port"
+case ",$(secret_items)," in *,metrics-token=*) echo "the metrics token is mounted while metrics is off" >&2; exit 1 ;; esac
+
+t metrics_on_renders_block
+render --set metrics.enabled=true
+assert_eq "$(config_json '.metrics | sort_keys(.)')" '{"enabled":true,"listen":"0.0.0.0","port":5155,"token":"file:/run/secrets/darling/metrics-token"}' "metrics block"
+assert_eq "$(dq '.spec.template.spec.containers[0].ports[] | select(.name == "metrics")')" '{"name":"metrics","containerPort":5155,"protocol":"TCP"}' "metrics container port"
+assert_eq "$(secret_items)" "metrics-token=metrics-token,web-token=web-token" "metrics token mounted"
+
+t metrics_token_generated
+render
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data | keys | join(",")')" "mcp-token,metrics-token,web-token" "generated token keys"
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data.metrics-token | @base64d | length')" "40" "generated metrics token length"
+render --set secrets.values.metrics-token=abcdefghijklmnopqrst
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data.metrics-token | @base64d')" "abcdefghijklmnopqrst" "given key wins over generation"
+
+t metrics_allow_from
+render --set metrics.enabled=true --set 'metrics.allowFrom={10.244.0.0/16}'
+assert_eq "$(config_json '.metrics.allowFrom')" '["10.244.0.0/16"]' "metrics.allowFrom"
+render --set metrics.enabled=true --set 'network.allowFrom={10.0.0.0/8}'
+assert_eq "$(config_json '.metrics | has("allowFrom")')" "false" "network.allowFrom does not apply to metrics"
+
+t metrics_token_key_renamed
+render --set metrics.enabled=true --set secrets.metricsTokenKey=scrape
+assert_eq "$(config_json '.metrics.token')" '"file:/run/secrets/darling/scrape"' "renamed token reference"
+assert_eq "$(secret_items)" "scrape=scrape,web-token=web-token" "renamed token mounted"
+
+t metrics_owned
+assert_fails "config.metrics is owned by the chart and cannot be set inside config; use the value metrics.*" --set config.metrics.enabled=true
+assert_fails "config.metrics is owned by the chart and cannot be set inside config; use the value metrics.*" --set config.Metrics.port=1
+
+t metrics_port_clash
+assert_fails "metrics.port" --set metrics.enabled=true --set metrics.port=5154
+assert_fails "5154" --set metrics.enabled=true --set metrics.port=5154
+assert_fails "web.port" --set metrics.enabled=true --set metrics.port=5153
+render --set metrics.enabled=true --set metrics.port=5152
+assert_fails "mcp.port" --set metrics.enabled=true --set metrics.port=5152 --set mcp.enabled=true
+
+t metrics_image_guard
+assert_fails "metrics" --set metrics.enabled=true --set image.tag=3.13.0
+assert_fails "3.13.0" --set metrics.enabled=true --set image.tag=3.13.0
+assert_fails "metrics" --set metrics.enabled=true --set image.tag=v3.12.9
+render --set metrics.enabled=true --set image.tag=3.13.1
+render --set metrics.enabled=true --set image.tag=nightly
+render --set metrics.enabled=true
+render --set image.tag=3.13.0
+
+t metrics_schema
+assert_fails "metrics" --set metrics.port=x
+assert_fails "metrics" --set metrics.bogus=1
+assert_fails "interval" --set metrics.serviceMonitor.interval=1minute

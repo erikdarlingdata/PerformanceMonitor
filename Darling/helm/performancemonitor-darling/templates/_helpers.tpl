@@ -37,6 +37,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and (regexMatch "^v?[0-9]+[.][0-9]+[.][0-9]+$" $tag) (semverCompare "<=3.12.0" $tag) -}}
 {{- fail (printf "image.tag %s is too old: the chart needs a Darling image newer than 3.12.0. The probes use the health port, which ships in the first release after 3.12.0; on 3.12.0 or older the startup probe fails and the kubelet restarts the pod in a loop. Pin a newer tag, or build the image from this checkout." $tag) -}}
 {{- end -}}
+{{- if and .Values.metrics.enabled (regexMatch "^v?[0-9]+[.][0-9]+[.][0-9]+$" $tag) (semverCompare "<=3.13.0" $tag) -}}
+{{- fail (printf "image.tag %s is too old for metrics.enabled: the /metrics port ships in the first release after 3.13.0. Pin a newer tag, or turn metrics off." $tag) -}}
+{{- end -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
 {{- else -}}
@@ -96,6 +99,7 @@ an empty value name means the chart sets the key itself and nothing overrides it
   (list (list "mcp" "network" "listen") "mcp.* or network.*")
   (list (list "mcp" "network" "allowFrom") "mcp.network.allowFrom or network.allowFrom")
   (list (list "mcp" "network" "token") "mcp.* or network.* (the token comes from the chart Secret)")
+  (list (list "metrics") "metrics.*")
   (list (list "health") "")
   (list (list "passwordKey") "passwordKey.*")
 -}}
@@ -120,7 +124,7 @@ an empty value name means the chart sets the key itself and nothing overrides it
 {{- /* The chart writes its own top-level blocks under these names. A copy spelled in another case would sit beside them in
 darling.json, and Darling, which reads keys ignoring case, would read only one of the two. */ -}}
 {{- range $key, $_ := .Values.config -}}
-{{- range $want := list "postgres" "web" "mcp" "health" "passwordKey" -}}
+{{- range $want := list "postgres" "web" "mcp" "metrics" "health" "passwordKey" -}}
 {{- if and (eq (lower $key) (lower $want)) (ne $key $want) -}}
 {{- fail (printf "config.%s must be spelled config.%s: the chart writes its own %s block, and Darling reads keys ignoring case, so it would read only one of the two" $key $want $want) -}}
 {{- end -}}
@@ -223,6 +227,30 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- toJson $block -}}
 {{- end -}}
 
+{{/* The owned metrics block of darling.json. Darling's own check refuses a metrics port that clashes with the health, web or
+MCP port while metrics is on, so the chart refuses it first. network.allowFrom never applies here: metrics has its own allowFrom. */}}
+{{- define "performancemonitor-darling.metricsJson" -}}
+{{- $m := .Values.metrics -}}
+{{- $block := dict "enabled" $m.enabled "port" (int $m.port) -}}
+{{- if $m.enabled -}}
+{{- if eq (int $m.port) 5154 -}}
+{{- fail "metrics.port (5154) is the health port: give the metrics listener its own port" -}}
+{{- end -}}
+{{- if and .Values.web.enabled (eq (int $m.port) (int .Values.web.port)) -}}
+{{- fail (printf "metrics.port (%d) is the same as web.port: give the metrics listener its own port" (int $m.port)) -}}
+{{- end -}}
+{{- if and .Values.mcp.enabled (eq (int $m.port) (int .Values.mcp.port)) -}}
+{{- fail (printf "metrics.port (%d) is the same as mcp.port: give the metrics listener its own port" (int $m.port)) -}}
+{{- end -}}
+{{- $_ := set $block "listen" "0.0.0.0" -}}
+{{- $_ := set $block "token" (printf "file:/run/secrets/darling/%s" .Values.secrets.metricsTokenKey) -}}
+{{- if $m.allowFrom -}}
+{{- $_ := set $block "allowFrom" $m.allowFrom -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $block -}}
+{{- end -}}
+
 {{/* darling.json: the operator's config with the chart-owned keys merged over it. */}}
 {{- define "performancemonitor-darling.darlingJson" -}}
 {{- include "performancemonitor-darling.checkOwnedKeys" . -}}
@@ -255,7 +283,7 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- fail (printf "%s.port must not be 5154: that port is fixed for the health endpoint the probes use, and Darling refuses a health port that clashes with the web or MCP port" $surface) -}}
 {{- end -}}
 {{- end -}}
-{{- $owned := dict "health" (dict "enabled" true "port" 5154 "listen" "0.0.0.0") "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
+{{- $owned := dict "health" (dict "enabled" true "port" 5154 "listen" "0.0.0.0") "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) "metrics" (include "performancemonitor-darling.metricsJson" . | fromJson) -}}
 {{- if .Values.passwordKey.existingSecret -}}
 {{- if eq .Values.passwordKey.source "env" -}}
 {{- $_ := set $owned "passwordKey" "env:DARLING_PASSWORD_KEY" -}}

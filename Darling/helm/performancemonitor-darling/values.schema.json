@@ -74,7 +74,8 @@
         "existingSecret": { "type": "string" },
         "values": { "type": "object" },
         "webTokenKey": { "type": "string", "minLength": 1 },
-        "mcpTokenKey": { "type": "string", "minLength": 1 }
+        "mcpTokenKey": { "type": "string", "minLength": 1 },
+        "metricsTokenKey": { "type": "string", "minLength": 1 }
       }
     },
     "network": {
@@ -123,6 +124,24 @@
             "hosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
             "tls": { "type": "array" },
             "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } }
           }
         }
       }
