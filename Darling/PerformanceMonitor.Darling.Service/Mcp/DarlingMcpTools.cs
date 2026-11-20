@@ -374,13 +374,13 @@ public sealed class DarlingMcpTools
             /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
                nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
             var noticeStart = windowEnd.AddHours(-hours_back);
-            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer)
+            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer, RetentionBoundary? retentionRemoved = null)
             {
                 /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
                 var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
                 return await DarlingMcpWindowNotice.ReadAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
-                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken, retentionRemoved: retentionRemoved);
             }
 
             /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
@@ -408,7 +408,7 @@ public sealed class DarlingMcpTools
                     collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
                     DarlingMcpWindowNotice.AttachToHints(
                         collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
-                        await NoticeAsync(emptyAnswer: true)));
+                        await NoticeAsync(emptyAnswer: true, removedWindow)));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -430,7 +430,7 @@ public sealed class DarlingMcpTools
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     DarlingMcpWindowNotice.AttachToHints(
                         collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
-                        await NoticeAsync(emptyAnswer: true)));
+                        await NoticeAsync(emptyAnswer: true, removedWindow)));
             }
 
             var filtered = facts.AsEnumerable();

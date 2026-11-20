@@ -808,7 +808,7 @@ public sealed class DarlingMcpTrendTools
     }
 
     /// <summary>#6303: adds <c>avg_cpu_ms</c> (the bucket's worker time over its executions) to each point of a one-procedure trend, by the
-    /// point's <c>time</c>. A point whose bucket executed nothing carries null, never 0.</summary>
+    /// point's <c>time</c>, rounded to two places. A point whose bucket executed nothing carries null, never 0.</summary>
     private static string WithAvgCpu(string json, Dictionary<string, double> avgCpuMsByBucket)
     {
         if (System.Text.Json.Nodes.JsonNode.Parse(json) is not System.Text.Json.Nodes.JsonObject payload
@@ -820,7 +820,7 @@ public sealed class DarlingMcpTrendTools
         foreach (var point in trend.OfType<System.Text.Json.Nodes.JsonObject>())
         {
             var time = point["time"]?.GetValue<string>();
-            point["avg_cpu_ms"] = time is not null && avgCpuMsByBucket.TryGetValue(time, out var avg) ? avg : null;
+            point["avg_cpu_ms"] = time is not null && avgCpuMsByBucket.TryGetValue(time, out var avg) ? Math.Round(avg, 2) : null; // #9103: two places, as get_top_procedures_by_cpu writes it
         }
 
         return payload.ToJsonString(McpHelpers.JsonOptions);
