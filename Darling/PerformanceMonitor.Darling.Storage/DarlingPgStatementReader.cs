@@ -190,7 +190,7 @@ public static class DarlingPgStatementReader
                 wal_bytes
             FROM pg_statement_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         /* #7909: each series' latest stored row before the window, the baseline the first in-window sample's block and
@@ -453,7 +453,7 @@ public static class DarlingPgStatementReader
         + "      FROM collection_log\n"
         + "      WHERE server_id = $1\n"
         + "      AND   collector_name = 'pg_statement_stats'\n"
-        + "      AND   collection_time >= $2\n"
+        + "      AND   collection_time > $2\n"
         + "      AND   collection_time <= $3\n"
         + "      AND   error_message LIKE '%" + ServerEpoch.StatementsDeallocMeasurement + "=%') AS m";
 

@@ -183,7 +183,7 @@ public static class DarlingRetentionHorizons
          AND   collector_name = 'trace_flags'
          AND   status = 'SUCCESS'
          AND   rows_collected = 0
-         AND   collection_time >= $2
+         AND   collection_time > $2
          AND   collection_time <= $3)
         UNION ALL
         (SELECT collection_time

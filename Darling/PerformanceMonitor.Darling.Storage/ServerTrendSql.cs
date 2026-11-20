@@ -41,7 +41,7 @@ public static class ServerTrendSql
                 extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS lag_seconds
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY collection_time
         ),
@@ -81,7 +81,7 @@ public static class ServerTrendSql
                 MAX(total_queued_request_count) AS total_queued_request_count
             FROM v_cpu_scheduler_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY server_id, collection_time
         )
@@ -107,7 +107,7 @@ public static class ServerTrendSql
                 CAST(SUM(multi_use_size_mb) AS double precision) AS multi_use_mb
             FROM v_plan_cache_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY collection_time
         )
@@ -140,7 +140,7 @@ public static class ServerTrendSql
                 COUNT(*) AS collection_count
             FROM v_memory_clerks
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   clerk_type IN ({{typeParams}})
             GROUP BY clerk_type, 2
@@ -157,7 +157,7 @@ public static class ServerTrendSql
             clerk_type
         FROM v_memory_clerks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY clerk_type
         ORDER BY SUM(memory_mb) DESC, clerk_type
@@ -217,7 +217,7 @@ public static class ServerTrendSql
                 top_host_connections
             FROM v_session_summary_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         agg AS
@@ -304,7 +304,7 @@ public static class ServerTrendSql
                     END AS interval_seconds
                 FROM {{view}}
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   {{nameColumn}} IN ({{nameParams}})
             )
@@ -341,7 +341,7 @@ public static class ServerTrendSql
                 COUNT(*) AS collection_count
             FROM v_collection_log
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   status = 'SUCCESS'
             AND   duration_ms IS NOT NULL
@@ -363,7 +363,7 @@ public static class ServerTrendSql
             COUNT(*) AS collection_count
         FROM v_tempdb_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY 1
         ORDER BY 1
@@ -392,7 +392,7 @@ public static class ServerTrendSql
                     CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 AND delta_writes IS NOT NULL AND delta_stall_write_ms IS NOT NULL THEN CAST(delta_stall_write_ms AS double precision) END AS rated_stall_write_ms
                 FROM v_file_io_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   database_name = 'tempdb'
                 AND   file_name IN ({{nameParams}})
@@ -439,7 +439,7 @@ public static class ServerTrendSql
                     END AS interval_seconds
                 FROM v_file_io_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   database_name || '.' || file_name IN ({{nameParams}})
             )
@@ -465,7 +465,7 @@ public static class ServerTrendSql
             file_name
         FROM v_file_io_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   database_name = 'tempdb'
         GROUP BY file_name
@@ -479,7 +479,7 @@ public static class ServerTrendSql
             database_name || '.' || file_name AS file_label
         FROM v_file_io_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
         GROUP BY database_name, file_name
@@ -518,7 +518,7 @@ public static class ServerTrendSql
             latch_class
         FROM v_latch_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY latch_class
         ORDER BY SUM(delta_wait_time_ms) DESC, latch_class
@@ -531,7 +531,7 @@ public static class ServerTrendSql
             spinlock_name
         FROM v_spinlock_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY spinlock_name
         ORDER BY SUM(delta_collisions) DESC, spinlock_name
@@ -544,7 +544,7 @@ public static class ServerTrendSql
             collector_name
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status = 'SUCCESS'
         AND   duration_ms IS NOT NULL

@@ -60,7 +60,7 @@ public static class DarlingPgSlotReader
                 inactive_since, invalidation_reason, conflicting
             FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY slot_name, collection_time DESC
         ),
@@ -71,7 +71,7 @@ public static class DarlingPgSlotReader
                 collection_time AS first_seen_at
             FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY slot_name, collection_time ASC
         )

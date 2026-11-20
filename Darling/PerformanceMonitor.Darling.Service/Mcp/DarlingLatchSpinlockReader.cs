@@ -88,7 +88,7 @@ internal static class DarlingLatchSpinlockReader
                 END AS interval_seconds
             FROM v_latch_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         agg AS
@@ -180,7 +180,7 @@ internal static class DarlingLatchSpinlockReader
                 MAX(collection_time) AS latest_collection_time
             FROM v_spinlock_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             /* The earlier read joined its newest-row CTE on spinlock_name = spinlock_name, which drops a NULL name before the
                LIMIT; the column is nullable, so the name is excluded here, ahead of the top-N cut, to keep that behavior. */

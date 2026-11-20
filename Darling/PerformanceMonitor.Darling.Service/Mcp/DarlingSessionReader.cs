@@ -137,7 +137,7 @@ internal static class DarlingSessionReader
                 (live_query_plan IS NOT NULL) AS has_live_query_plan
             FROM query_snapshots
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         heads AS (
@@ -467,7 +467,7 @@ internal static class DarlingSessionReader
             END AS blocking_session_ids
         FROM waiting_tasks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 5)}}

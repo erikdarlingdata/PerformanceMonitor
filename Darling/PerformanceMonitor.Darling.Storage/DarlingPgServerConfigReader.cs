@@ -269,7 +269,7 @@ public static class DarlingPgServerConfigReader
                 LAG(c.collection_time) OVER (PARTITION BY c.name ORDER BY c.collection_time) AS prev_time
             FROM pg_server_config AS c
             WHERE c.server_id = $1
-            AND   c.collection_time >= $2
+            AND   c.collection_time > $2
             AND   c.collection_time <= $3
             AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
             /* V138 (#3691): server-wide rows only, and here the reason is the WINDOW FUNCTION rather than a
@@ -354,7 +354,7 @@ public static class DarlingPgServerConfigReader
                 SELECT DISTINCT c.collection_time
                 FROM pg_server_config AS c
                 WHERE c.server_id = $1
-                AND   c.collection_time >= $2
+                AND   c.collection_time > $2
                 AND   c.collection_time <= $3
             ) AS s
         ),
@@ -368,7 +368,7 @@ public static class DarlingPgServerConfigReader
                 c.source
             FROM pg_server_config AS c
             WHERE c.server_id = $1
-            AND   c.collection_time >= $2
+            AND   c.collection_time > $2
             AND   c.collection_time <= $3
             AND   (c.database_name IS NOT NULL OR c.role_name IS NOT NULL)
             AND   c.name IS NOT NULL

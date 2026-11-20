@@ -398,7 +398,7 @@ public static class DataWindowFloor
                 sql.Append("        AND   f.collector_name = '").Append(logCollector).Append("'\n");
             }
 
-            sql.Append("        AND   f.").Append(time).Append(" >= $2\n");
+            sql.Append("        AND   f.").Append(time).Append(source.EndExclusive ? " >= $2\n" : " > $2\n");
             if (source.PairsCollectionTime)
             {
                 /* #5022: the table is partitioned on collection_time, so the time column's bound alone skips no chunk. The floor is
@@ -421,7 +421,7 @@ public static class DataWindowFloor
             if (collector is not null)
             {
                 sql.Append("\n           OR EXISTS (SELECT 1 FROM ").Append(schema).Append(".collection_log AS c WHERE c.server_id = s.server_id AND c.collector_name = '")
-                    .Append(collector).Append("' AND c.collection_time >= $2 AND c.collection_time <= $1)");
+                    .Append(collector).Append("' AND c.collection_time > $2 AND c.collection_time <= $1)");
             }
 
             sql.Append(")\n");

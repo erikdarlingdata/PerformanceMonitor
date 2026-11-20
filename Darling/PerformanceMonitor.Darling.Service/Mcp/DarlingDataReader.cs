@@ -348,7 +348,7 @@ internal static class DarlingDataReader
             other_process_cpu_utilization
         FROM cpu_utilization_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY sample_time
         """;
@@ -447,7 +447,7 @@ internal static class DarlingDataReader
             AVG(sqlserver_cpu_utilization)::double precision
         FROM cpu_utilization_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         """;
 
@@ -507,7 +507,7 @@ internal static class DarlingDataReader
                 SUM(delta_signal_wait_time_ms) AS signal_wait_time_ms
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY wait_type
         ) AS per_spelling
@@ -554,7 +554,7 @@ internal static class DarlingDataReader
                 SUM(delta_wait_time_ms) AS total_delta
             FROM v_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY wait_type
         ) AS per_spelling
@@ -649,7 +649,7 @@ internal static class DarlingDataReader
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type IN ($2, $2 || ' ')
-            AND   collection_time >= $3
+            AND   collection_time > $3
             AND   collection_time <= $4
         )
         """;
@@ -942,7 +942,7 @@ internal static class DarlingDataReader
             CAST(log_used_mb AS double precision) AS log_used_mb
         FROM v_tempdb_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time
         """;
@@ -1054,7 +1054,7 @@ internal static class DarlingDataReader
             log_reuse_wait_desc
         FROM v_tempdb_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time DESC
         LIMIT 1
@@ -1172,7 +1172,7 @@ internal static class DarlingDataReader
                 SUM(delta_worker_time) AS rank_cpu
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
            {DatabaseFilter.ExcludeClause("database_name", 8)}
@@ -1292,14 +1292,14 @@ internal static class DarlingDataReader
                    the exact NULL-safe match, so the groups and every figure are unchanged. */
                 SELECT * FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   query_hash IN (SELECT win_query_hash FROM winners)
                 UNION ALL
                 SELECT * FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   query_hash IS NULL
@@ -1373,7 +1373,7 @@ internal static class DarlingDataReader
                     AND q.query_hash IS NOT DISTINCT FROM o.query_hash
                     AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                 WHERE q.server_id = $1
-                AND   q.collection_time >= $2
+                AND   q.collection_time > $2
                 AND   q.collection_time <= $3
                 AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
@@ -1498,7 +1498,7 @@ internal static class DarlingDataReader
                 SUM(delta_worker_time) AS rank_cpu
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
            {DatabaseFilter.ExcludeClause("database_name", 8)}
@@ -1597,7 +1597,7 @@ internal static class DarlingDataReader
                 AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
                 AND CASE WHEN host_object_name IS NULL THEN query_hash END IS NOT DISTINCT FROM w.win_group_hash
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             /*TAG:hash:query_hash*/
@@ -1661,7 +1661,7 @@ internal static class DarlingDataReader
                     AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
                     AND CASE WHEN q.host_object_name IS NULL THEN q.query_hash END IS NOT DISTINCT FROM o.group_hash
                 WHERE q.server_id = $1
-                AND   q.collection_time >= $2
+                AND   q.collection_time > $2
                 AND   q.collection_time <= $3
                 /*TAG:hash:q.query_hash*/
                 AND   EXISTS (SELECT 1 FROM orphans)
@@ -2347,7 +2347,7 @@ internal static class DarlingDataReader
                 SUM(delta_worker_time) AS rank_cpu
             FROM procedure_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
@@ -2399,7 +2399,7 @@ internal static class DarlingDataReader
             AND object_name IS NOT DISTINCT FROM w.win_object_name
             AND object_type IS NOT DISTINCT FROM w.win_object_type
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
@@ -2740,7 +2740,7 @@ internal static class DarlingDataReader
         var sql = $"""
             SELECT
                 (SELECT COUNT(*) FROM query_stats
-                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+                 WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
                  AND   ($4::text[] IS NULL OR database_name = ANY($4))) AS snapshots,
                 (SELECT MAX(collection_time) FROM query_stats
                  WHERE server_id = $1 AND collection_time <= $3
@@ -3064,7 +3064,7 @@ internal static class DarlingDataReader
                                   retained chunk of query_store_stats on the time index looking for one. A query whose
                                   only inline text is older than the window now shows none, as a query with no text
                                   at all already did. Twins the other copy of this tail; keep them matching. */
-                               AND   s.collection_time >= $2
+                               AND   s.collection_time > $2
                                AND   s.collection_time <= $3
                                AND   s.query_text IS NOT NULL
                                ORDER BY s.collection_time DESC, s.collection_id DESC
@@ -4955,7 +4955,7 @@ FROM config.config_collector_schedules";
             read_source
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR collector_name = $5::text)
         AND   ($6::double precision IS NULL OR duration_ms >= $6::double precision)
@@ -5059,7 +5059,7 @@ FROM config.config_collector_schedules";
         SELECT COUNT(*)
         FROM v_collection_log
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text IS NULL OR collector_name = $4::text)
         AND   ($5::double precision IS NULL OR duration_ms >= $5::double precision)
@@ -5238,7 +5238,7 @@ FROM config.config_collector_schedules";
             cl.read_source
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
-        WHERE cl.collection_time >= $1
+        WHERE cl.collection_time > $1
         AND   cl.collection_time <= $2
         AND   ($4::text IS NULL OR cl.collector_name = $4::text)
         AND   ($5::double precision IS NULL OR cl.duration_ms >= $5::double precision)
@@ -5270,7 +5270,7 @@ FROM config.config_collector_schedules";
         SELECT COUNT(*)
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
-        WHERE cl.collection_time >= $1
+        WHERE cl.collection_time > $1
         AND   cl.collection_time <= $2
         AND   ($3::text IS NULL OR cl.collector_name = $3::text)
         AND   ($4::double precision IS NULL OR cl.duration_ms >= $4::double precision)
@@ -5372,7 +5372,7 @@ FROM config.config_collector_schedules";
                 CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
             FROM waiting_tasks
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   wait_type IS NOT NULL
             GROUP BY
@@ -5400,7 +5400,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1
             AND   collector_name = 'waiting_tasks'
             AND   status = 'SUCCESS'
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY
                 1
@@ -5424,7 +5424,7 @@ FROM config.config_collector_schedules";
         SELECT COUNT(DISTINCT rtrim(wait_type))
         FROM waiting_tasks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         """;
@@ -5516,7 +5516,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1
             AND   blocking_session_id > 0
             AND   blocking_session_id <> session_id
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   database_name IS NOT NULL
             {{DatabaseFilter.All.Clause("database_name", 4)}}
@@ -5545,7 +5545,7 @@ FROM config.config_collector_schedules";
             WHERE server_id = $1
             AND   collector_name = 'waiting_tasks'
             AND   status = 'SUCCESS'
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY
                 1
@@ -5571,7 +5571,7 @@ FROM config.config_collector_schedules";
         WHERE server_id = $1
         AND   blocking_session_id > 0
         AND   blocking_session_id <> session_id
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 4)}}
@@ -5650,7 +5650,7 @@ FROM config.config_collector_schedules";
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
                 'blocked-process-report' AS source
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             AND   {{BlockingWaits.NotSelfWaitSql}}
@@ -5665,7 +5665,7 @@ FROM config.config_collector_schedules";
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
                 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             AND   {{BlockingWaits.NotSelfWaitSql}}
@@ -5730,7 +5730,7 @@ FROM config.config_collector_schedules";
             deadlock_graph_xml
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
         ORDER BY deadlock_time

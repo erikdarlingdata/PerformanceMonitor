@@ -82,7 +82,7 @@ public static class DarlingQueryStoreHintReader
     public static string CapturesSql(DatabaseFilter databases) => $@"
 SELECT database_name, MAX(collection_time)
 FROM collect.query_store_hints
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND query_hint_id IS NULL{databases.Clause("database_name", 4)}
+WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND query_hint_id IS NULL{databases.Clause("database_name", 4)}
 GROUP BY database_name
 ORDER BY database_name";
 
@@ -130,7 +130,7 @@ GROUP BY h.database_name";
     SELECT database_name, collection_time, query_hint_id, query_id, query_hint_text, last_query_hint_failure_reason,
            query_hint_failure_count, source_desc
     FROM collect.query_store_hints
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
 hints AS (
     SELECT * FROM win WHERE query_hint_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5)),
 absent AS (
@@ -154,7 +154,7 @@ SELECT k.database_name, k.query_id, LEFT(COALESCE(
     (SELECT x.query_sql_text FROM query_store_text AS x WHERE x.server_id = $1 AND x.database_name = k.database_name AND x.query_id = k.query_id),
     (SELECT s.query_text FROM query_store_stats AS s
       WHERE s.server_id = $1 AND s.database_name = k.database_name AND s.query_id = k.query_id
-      AND s.collection_time >= $2 AND s.collection_time <= $3 AND s.query_text IS NOT NULL
+      AND s.collection_time > $2 AND s.collection_time <= $3 AND s.query_text IS NOT NULL
       ORDER BY s.collection_time DESC, s.collection_id DESC LIMIT 1)), 1001)
 FROM unnest($4::text[], $5::bigint[]) AS k(database_name, query_id)";
 

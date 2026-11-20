@@ -160,7 +160,7 @@ public static class DarlingPgDatabaseReader
                  AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here
             FROM pg_database_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             WINDOW series AS (
                 PARTITION BY database_name
@@ -321,7 +321,7 @@ public static class DarlingPgDatabaseReader
              FROM (SELECT DISTINCT collection_time
                    FROM pg_database_stats
                    WHERE server_id = $1
-                   AND   collection_time >= $2
+                   AND   collection_time > $2
                    AND   collection_time <= $3
                    LIMIT 2) AS windowed)                                  AS samples_in_window,
             EXISTS (SELECT 1 FROM pg_database_stats WHERE server_id = $1) AS ever_collected

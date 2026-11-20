@@ -186,7 +186,7 @@ internal static class DarlingQueryStoreRegressionReader
                 SELECT 1
                 FROM query_store_stats AS r
                 WHERE r.server_id = $1
-                AND   r.collection_time >= $4
+                AND   r.collection_time > $4
                 AND   r.collection_time <= $3
                 AND   r.last_execution_time >= $4
                 AND   r.last_execution_time < $2
@@ -202,7 +202,7 @@ internal static class DarlingQueryStoreRegressionReader
                     AND   s.first_execution_time IS NOT DISTINCT FROM r.first_execution_time
                     AND   s.execution_type_desc IS NOT DISTINCT FROM r.execution_type_desc
                     AND   s.replica_role IS NOT DISTINCT FROM r.replica_role
-                    AND   s.collection_time >= $2
+                    AND   s.collection_time > $2
                     AND   s.collection_time <= $3
                     AND   s.last_execution_time >= $2
                 )
@@ -211,7 +211,7 @@ internal static class DarlingQueryStoreRegressionReader
                 SELECT 1
                 FROM query_store_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   last_execution_time >= $2
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -608,7 +608,7 @@ internal static class DarlingQueryStoreRegressionReader
                     SELECT 1
                     FROM collect.{{table}}
                     WHERE server_id = $1
-                    AND   first_execution_time >= $2
+                    AND   first_execution_time > $2
                     AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
                     AND   last_execution_time >= $2
                     AND   collection_time <= $3

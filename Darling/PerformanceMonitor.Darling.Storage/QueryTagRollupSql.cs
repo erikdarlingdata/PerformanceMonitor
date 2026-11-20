@@ -56,7 +56,7 @@ public static class QueryTagRollupSql
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
         WHERE q.server_id = ANY($1)
-        AND   q.collection_time >= $2
+        AND   q.collection_time > $2
         AND   q.collection_time <= $3
         AND   q.{TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY q.server_id, m.tag_id
@@ -86,7 +86,7 @@ public static class QueryTagRollupSql
     /// per-server statement returned. Parameters differ from the other statements: $1 the allowed server ids (<c>integer[]</c>), $2 each
     /// server's read start in the same order (<c>timestamp[]</c>), $3 window end, $4 the earliest read start, which repeats the
     /// <c>first_execution_time</c> floor as a constant so the day partitions below it are pruned (the table is partitioned on that column).
-    /// <para>The per-server start on <c>collection_time</c> is written <c>collection_time - read_start &gt;= interval '0'</c> on purpose, and
+    /// <para>The per-server start on <c>collection_time</c> is written <c>collection_time - read_start &gt; interval '0'</c> on purpose, and
     /// there is no constant <c>collection_time</c> floor: either one lets the planner AND the partition's <c>collection_time</c> index into
     /// every server's scan, and that index is not keyed by server, so each of the 42 loops walked the whole day's entries (about 10 million
     /// per loop). Measured on one production store with 42 servers over 24 hours, warm: 13.0 s with the index, 6.0 s without; each server's
@@ -109,7 +109,7 @@ public static class QueryTagRollupSql
         FROM unnest($1::integer[], $2::timestamp[]) AS s(server_id, read_start)
         JOIN collect.query_store_interval_wide AS q
                ON q.server_id = s.server_id
-              AND q.collection_time - s.read_start >= interval '0'
+              AND q.collection_time - s.read_start > interval '0'
               AND q.first_execution_time >= s.read_start - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
@@ -301,7 +301,7 @@ public static class QueryTagRollupSql
                ON m.server_id = q.server_id AND m.key_kind = 'object'
               AND m.key = COALESCE(q.database_name, '') || '.' || COALESCE(q.schema_name, '') || '.' || COALESCE(q.object_name, '')
         WHERE q.server_id = ANY($1)
-        AND   q.collection_time >= $2
+        AND   q.collection_time > $2
         AND   q.collection_time <= $3
         AND   q.{TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY q.server_id, m.tag_id
@@ -373,7 +373,7 @@ public static class QueryTagRollupSql
             SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms, database_name,
                    blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name
             FROM collect.blocked_process_reports AS r
-            WHERE server_id = ANY($1) AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = ANY($1) AND event_time > $2 AND event_time <= $3
             """ + EventFloorPlaceholder,
             ["server_id"]) + "\n",
         "rw", string.Empty, "blocked_reports", "caused_reports");
@@ -381,14 +381,14 @@ public static class QueryTagRollupSql
     /// <summary>Blocking, DMV snapshots: the same two sides over the always-on DMV sample, one row per sample (a still-open wait repeats once per sample); a parallel query's self-wait rows are left out.</summary>
     public static readonly string BlockingSnapshotsSql = BlockingSql(
         string.Empty, "collect.dmv_blocking_snapshots",
-        " AND r.collection_time >= $2 AND r.collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql, "blocked_snapshots", "caused_snapshots");
+        " AND r.collection_time > $2 AND r.collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql, "blocked_snapshots", "caused_snapshots");
 
     /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML). $5 is the <c>collection_time</c> floor (<see cref="EventWindowFloor"/>, #7204): without it the fleet read opens and sorts every retained chunk.</summary>
     public const string DeadlockGraphsSql = """
         SELECT server_id, deadlock_id, deadlock_graph_xml, deadlock_time
         FROM collect.deadlocks
         WHERE server_id = ANY($1)
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $5
         ORDER BY deadlock_time DESC, deadlock_id DESC

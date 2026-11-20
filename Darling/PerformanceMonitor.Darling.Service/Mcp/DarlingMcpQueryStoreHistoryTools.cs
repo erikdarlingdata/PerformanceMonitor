@@ -86,7 +86,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                                          ORDER BY collection_time DESC, execution_count DESC) AS rn
             FROM query_store_stats
             WHERE server_id = $1 AND database_name = $2 AND query_id = $3
-            AND collection_time >= $4 AND collection_time <= $5)
+            AND collection_time > $4 AND collection_time <= $5)
         """;
 
     internal const string HistorySql = HistoryDedupeCte + "\n" + """
@@ -104,7 +104,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     internal static readonly string HistoryTableFromWhere = $$"""
         FROM query_store_interval_wide
         WHERE server_id = $1 AND database_name = $2 AND query_id = $3
-        AND collection_time >= $4 AND collection_time <= $5
+        AND collection_time > $4 AND collection_time <= $5
         AND first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         """;

@@ -177,7 +177,7 @@ public static class DarlingQueryStoreClutterReader
             FROM v_collection_log
             WHERE server_id = ANY($1::int[])
             AND   collector_name = $4
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   fanout_item_count IS NOT NULL
             AND   slowest_item IS NOT NULL
@@ -303,7 +303,7 @@ public static class DarlingQueryStoreClutterReader
             SELECT server_id, database_name, query_id, plan_id, collection_time
             FROM query_store_stats
             WHERE server_id = ANY($1::int[])
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
@@ -402,7 +402,7 @@ public static class DarlingQueryStoreClutterReader
             SELECT DISTINCT server_id, database_name, collection_time
             FROM query_store_stats
             WHERE server_id = ANY($1::int[])
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ) AS collections
@@ -511,7 +511,7 @@ public static class DarlingQueryStoreClutterReader
             query_capture_mode
         FROM v_query_store_health
         WHERE server_id = ANY($1::int[])
-        AND   capture_time >= $2
+        AND   capture_time > $2
         AND   capture_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ORDER BY server_id, database_name, capture_time DESC
@@ -590,7 +590,7 @@ public static class DarlingQueryStoreClutterReader
             MAX(collection_time) AS last_observed
         FROM v_wait_stats
         WHERE server_id = ANY($1::int[])
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   wait_type LIKE 'QDS\_%'
         GROUP BY server_id, wait_type
@@ -641,7 +641,7 @@ public static class DarlingQueryStoreClutterReader
             SELECT MAX(collection_time) AS latest_capture, COUNT(DISTINCT collection_time) AS captures
             FROM v_memory_clerks
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         clerk AS
@@ -650,7 +650,7 @@ public static class DarlingQueryStoreClutterReader
             FROM v_memory_clerks
             WHERE server_id = $1
             AND   clerk_type = $4
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         latest AS

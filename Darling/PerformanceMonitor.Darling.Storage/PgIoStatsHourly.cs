@@ -235,7 +235,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly_state (server_id integer P
                    NULL::double precision AS b_write_time_ms, NULL::numeric AS b_read_bytes, NULL::numeric AS b_write_bytes, NULL::numeric AS b_extend_bytes
             FROM pg_io_stats
             WHERE server_id = $1
-            AND   ((collection_time >= $2 AND collection_time < $5) OR (collection_time >= $6 AND collection_time <= $3))
+            AND   ((collection_time > $2 AND collection_time < $5) OR (collection_time >= $6 AND collection_time <= $3))
             UNION ALL
             SELECT last_ct, backend_type, object_type, context, true,
                    l_reads, l_read_time_ms, l_hits, l_extends, l_extend_time_ms, l_evictions, l_reuses, l_writes, l_write_time_ms,

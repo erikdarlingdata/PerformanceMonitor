@@ -153,17 +153,17 @@ SELECT n.database_name, n.scanned_at, c.schema_name, c.table_name, c.column_name
 FROM (
     SELECT DISTINCT ON (m.database_name) m.database_name, m.collection_time AS scanned_at
     FROM collect.identity_capacity AS m
-    WHERE m.server_id = $1 AND m.collection_time >= $2 AND m.collection_time <= $3
+    WHERE m.server_id = $1 AND m.collection_time > $2 AND m.collection_time <= $3
     AND   m.column_name IS NULL AND m.skip_reason IS NULL{databases.Clause("m.database_name", 4)}
     ORDER BY m.database_name, m.collection_time DESC) AS n
 LEFT JOIN collect.identity_capacity AS c
-  ON c.server_id = $1 AND c.collection_time = n.scanned_at AND c.collection_time >= $2 AND c.collection_time <= $3
+  ON c.server_id = $1 AND c.collection_time = n.scanned_at AND c.collection_time > $2 AND c.collection_time <= $3
   AND c.database_name = n.database_name AND c.column_name IS NOT NULL
 LEFT JOIN (
     SELECT DISTINCT ON (w.database_name, w.schema_name, w.table_name, w.column_name)
            w.database_name, w.schema_name, w.table_name, w.column_name, w.collection_time, w.last_value::text AS last_value
     FROM collect.identity_capacity AS w
-    WHERE w.server_id = $1 AND w.collection_time >= $2 AND w.collection_time <= $3 AND w.column_name IS NOT NULL{databases.Clause("w.database_name", 4)}
+    WHERE w.server_id = $1 AND w.collection_time > $2 AND w.collection_time <= $3 AND w.column_name IS NOT NULL{databases.Clause("w.database_name", 4)}
     ORDER BY w.database_name, w.schema_name, w.table_name, w.column_name, w.collection_time) AS f
   ON f.database_name = c.database_name AND f.schema_name = c.schema_name AND f.table_name = c.table_name AND f.column_name = c.column_name
 ORDER BY c.percent_used DESC NULLS LAST, n.database_name, c.schema_name, c.table_name, c.column_name";
@@ -186,7 +186,7 @@ SELECT d.database_name,
         WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.skip_reason IS NULL AND i.collection_time <= $2),
        (SELECT i.skip_reason FROM collect.identity_capacity AS i
         WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.skip_reason IS NOT NULL
-        AND   i.collection_time >= $5 AND i.collection_time <= $2
+        AND   i.collection_time > $5 AND i.collection_time <= $2
         ORDER BY i.collection_time DESC LIMIT 1),
        d.capture_time
 FROM (

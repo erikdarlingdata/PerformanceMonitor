@@ -71,7 +71,7 @@ public static class DarlingPgIndexUsageReader
                 index_method, column_count, index_definition, last_scan, stats_reset
             FROM pg_index_usage_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY database_name, schema_name, table_name, index_name, collection_time DESC
         ),
@@ -98,7 +98,7 @@ public static class DarlingPgIndexUsageReader
                            ORDER BY collection_time) AS fell
                 FROM pg_index_usage_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
             ) AS ordered
             ORDER BY database_name, schema_name, table_name, index_name, collection_time ASC
@@ -309,9 +309,9 @@ public static class DarlingPgIndexUsageReader
     public const string PgIndexUsageProbeSql = """
         SELECT
             (SELECT count(*) FROM pg_index_usage_stats
-             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS rows_in_window,
+             WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3) AS rows_in_window,
             (SELECT count(DISTINCT collection_time) FROM pg_index_usage_stats
-             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS snapshots_in_window,
+             WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3) AS snapshots_in_window,
             (SELECT count(*) FROM pg_index_usage_stats WHERE server_id = $1) AS rows_ever
         """;
 

@@ -54,7 +54,7 @@ internal static class DarlingSystemHealthReader
             event_xml
         FROM v_system_health_events
         WHERE server_id = $1
-        AND   event_time >= $2
+        AND   event_time > $2
         AND   event_time <= $3
         AND   event_type = $4
         AND   event_xml IS NOT NULL
