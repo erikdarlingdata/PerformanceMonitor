@@ -130,6 +130,23 @@ public sealed class WebStatusTextsTests
     }
 
     [Fact]
+    public void ConnectedReplicas_OnAnAuroraWriter_ShowsTheReadsOwnAuroraAnswer_AndOnAnyOtherServerKeepsTheFixedLine()
+    {
+        /* #9117: the page's fixed first line told a reader of an Aurora writer to look at the Slots panel, advice the read itself drops there. */
+        var run = Run();
+        var aurora = run.GetProperty("replicasAurora").GetString()!;
+        Assert.StartsWith("No standby was streaming from", aurora, StringComparison.Ordinal);
+        Assert.Contains("Aurora readers use the shared storage volume", aurora, StringComparison.Ordinal);
+        Assert.DoesNotContain("Slots", aurora, StringComparison.Ordinal);
+        Assert.DoesNotContain("More detail", aurora, StringComparison.Ordinal);
+
+        var stock = run.GetProperty("replicasStock").GetString()!;
+        Assert.StartsWith("No replica was connected in this window. That is expected on a server with no replicas.", stock, StringComparison.Ordinal);
+        Assert.Contains("look at the Slots panel above", stock, StringComparison.Ordinal);
+        Assert.Contains("More detail", stock, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheActiveQueriesLiveBar_ShowsAReadOnlySeatTheListOnlyNoteAndNoButton_AndASeatThatCanEditItsButton()
     {
         var readOnly = Run("readonly").GetProperty("liveBar");

@@ -1904,10 +1904,13 @@ export const POSTGRES_TABS = [
         "replicas",
         PG_REPLICATION_STATS_COLUMNS,
         ctx.label + ", worst-in-window beside latest; lag is spiky and one sample catches one instant",
-        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely.",
+        ctx.aurora === true
+          ? AURORA_NO_REPLICA_TEXT
+          : "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely.",
         2, null, null, null, null, null, null, false, null, false,
-        /* #7410: on this tab the message would send a reader to "the Slots section of the Replication tab", so the page says the one sentence and the message is behind "More detail". */
-        { emptyLine: "No replica was connected in this window. That is expected on a server with no replicas. If one should be attached, look at the Slots panel above, because a slot with nothing connected to it keeps WAL." }
+        /* #7410: on this tab the message would send a reader to "the Slots section of the Replication tab", so the page says the one sentence and the message is behind "More detail".
+           #9117: on an Aurora writer there is no such sentence: the read's own Aurora answer is the visible line, because the Slots advice does not apply there. */
+        ctx.aurora === true ? {} : { emptyLine: "No replica was connected in this window. That is expected on a server with no replicas. If one should be attached, look at the Slots panel above, because a slot with nothing connected to it keeps WAL." }
       ),
     ],
   },
@@ -2103,6 +2106,11 @@ export function findServerTab(id, tabs) {
   const registry = tabs || SERVER_TABS;
   return registry.find((t) => t.id === id) || registry[0];
 }
+
+/** #9117: the Connected Replicas panel's own text on an Aurora writer, shown when the table has no rows. Aurora readers use the shared
+ *  storage volume and never appear in pg_stat_replication, so the Slots advice (a slot with nothing connected keeps WAL) does not apply. The visible line of an empty
+ *  answer there is the read's own Aurora message (no `emptyLine`). */
+const AURORA_NO_REPLICA_TEXT = "No replica was connected in this window. Aurora readers use the shared storage volume instead of streaming replication, so they never appear here. That is not a replication fault.";
 
 /** What Running Jobs says when nothing is listed. "The normal state for most servers" is a claim about a server that is
  *  collecting; a server whose collection is stale (the fleet card's is_online false, the same signal the page header's
