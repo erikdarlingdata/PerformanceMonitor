@@ -223,6 +223,32 @@ public sealed class QueryStoreWindowEndIsExclusiveLiveTests
     }
 
     [Fact]
+    public async Task TheRollupRoutedDurationTrend_PlacesOnlyTheIntervalStartedBeforeTheEnd_ThroughItsRawTail()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9100 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await SeedRawAsync(connection, "Regular", ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        /* The rollup route with its raw boundary at the window's start: nothing is materialized below it, so the whole window is the raw tail. */
+        var csb = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
+        await using var postgres = NpgsqlDataSource.Create(csb.ConnectionString);
+        var route = new QueryStoreTrendRouting.QueryStoreTrendRoute(true, WindowStart, null);
+        var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(postgres, ServerId, WindowStart, AsOf, route, DatabaseFilter.All, ct);
+
+        var point = Assert.Single(points);
+        Assert.Equal(WindowStart, point.CollectionTime);
+    }
+
+    [Fact]
     public async Task TheViewerItemTimeline_PlotsOnlyTheIntervalStartedBeforeTheEnd_AndKeepsTheWindowStart()
     {
         var baseCs = BaseConnectionString;
