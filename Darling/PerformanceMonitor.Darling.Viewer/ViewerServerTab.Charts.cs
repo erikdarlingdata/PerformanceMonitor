@@ -169,30 +169,34 @@ public partial class ViewerServerTab : IDisposable
     }
 
     /// <summary>Loads the tempdb tab: usage/size trend and per-file I/O latency, read concurrently.</summary>
-    private async Task LoadTempDbAsync()
+    private async Task LoadTempDbAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
         using var readFanOut = ViewerReadFanOut.Of(3);
-        var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc);
-        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: every read is named on the load's clock, and the draws are named client steps. */
+        var trendTask = Timed(timer, "TempDB trend read", _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc));
+        var fileIoTask = Timed(timer, "TempDB file I/O read", _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc));
         /* #8881: who holds the oldest open tempdb log transaction as of the chart's newest collection. */
-        var holderTask = _dataService.GetNewestTempDbLogHolderAsync(_server.ServerId, startUtc, endUtc);
+        var holderTask = Timed(timer, "TempDB log holder read", _dataService.GetNewestTempDbLogHolderAsync(_server.ServerId, startUtc, endUtc));
         var trend = await trendTask;
         var fileIo = await fileIoTask;
         var holder = await holderTask;
 
         /* Both reads are bucketed (#4234/#4349) and already windowed server-side on endUtc; no client-side
            post-filter is needed for a custom range. */
-        RenderTempDbUsageChart(trend, startUtc, endUtc);
-        ViewerChartCards.SetSubtitle(TempDbChart, TempDbLogHolderLine.Build(holder));
-        RenderTempDbSizeChart(trend, startUtc, endUtc);
-        RenderTempDbFileIoChart(fileIo, startUtc, endUtc);
+        ClientStep(timer, "TempDB usage chart draw", () =>
+        {
+            RenderTempDbUsageChart(trend, startUtc, endUtc);
+            ViewerChartCards.SetSubtitle(TempDbChart, TempDbLogHolderLine.Build(holder));
+        });
+        ClientStep(timer, "TempDB size chart draw", () => RenderTempDbSizeChart(trend, startUtc, endUtc));
+        ClientStep(timer, "TempDB file I/O chart draw", () => RenderTempDbFileIoChart(fileIo, startUtc, endUtc));
 
         /* #6861: a refused tempdb_stats leaves the trend empty, and the note says why in the MCP's words, without its closing paragraph for an MCP client. The file I/O chart
            reads file_io_stats, so it neither feeds nor clears the note. */
-        await ShowEngineGapAsync(TempDbNoDataMessage, "tempdb_stats", trend.Count);
+        await Timed(timer, "TempDB engine gap read", ShowEngineGapAsync(TempDbNoDataMessage, "tempdb_stats", trend.Count));
 
         (TempDbFileIoNoDataMessage.Text, TempDbFileIoNoDataMessage.Visibility) =
             TempDbFileIoGapState(_server.DisplayName, _server.EngineEdition, fileIo.Count);

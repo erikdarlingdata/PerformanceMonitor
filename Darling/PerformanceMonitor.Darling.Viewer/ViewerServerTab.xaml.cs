@@ -585,7 +585,7 @@ public partial class ViewerServerTab : UserControl
             switch (tabIndex)
             {
                 case WaitStatsInnerTabIndex:
-                    await LoadWaitStatsAsync();
+                    await LoadWaitStatsAsync(timer);
                     break;
                 case LatchSpinlockInnerTabIndex:
                     await LoadLatchSpinlockAsync(timer);
@@ -599,22 +599,22 @@ public partial class ViewerServerTab : UserControl
                        default Overview reload, and so the auto-refresh timer leaves any open plan tabs alone. */
                     break;
                 case BlockingInnerTabIndex:
-                    await LoadBlockingAsync();
+                    await LoadBlockingAsync(timer);
                     break;
                 case PerfmonInnerTabIndex:
                     await LoadPerfmonAsync(timer);
                     break;
                 case SessionStatsInnerTabIndex:
-                    await LoadSessionStatsAsync();
+                    await LoadSessionStatsAsync(timer);
                     break;
                 case RunningJobsInnerTabIndex:
-                    await LoadRunningJobsAsync();
+                    await LoadRunningJobsAsync(timer);
                     break;
                 case ConfigurationInnerTabIndex:
-                    await LoadConfigurationAsync();
+                    await LoadConfigurationAsync(timer);
                     break;
                 case ConfigChangesInnerTabIndex:
-                    await LoadConfigChangesAsync();
+                    await LoadConfigChangesAsync(timer);
                     break;
                 case DailySummaryInnerTabIndex:
                     await LoadDailySummaryAsync(timer);
@@ -626,16 +626,16 @@ public partial class ViewerServerTab : UserControl
                     await LoadCpuAsync(timer);
                     break;
                 case MemoryInnerTabIndex:
-                    await LoadMemoryAsync();
+                    await LoadMemoryAsync(timer);
                     break;
                 case TempDbInnerTabIndex:
-                    await LoadTempDbAsync();
+                    await LoadTempDbAsync(timer);
                     break;
                 case FileIoInnerTabIndex:
                     await LoadFileIoAsync(timer);
                     break;
                 case SystemEventsInnerTabIndex:
-                    await LoadSystemEventsAsync();
+                    await LoadSystemEventsAsync(timer);
                     break;
                 case LongQueriesInnerTabIndex:
                     await LoadLongQueriesAsync(timer);
@@ -647,25 +647,25 @@ public partial class ViewerServerTab : UserControl
                    at a PostgreSQL server and paint four permanently empty lanes, which is the exact defect
                    this issue is about. */
                 case PgOverviewInnerTabIndex:
-                    await LoadPgOverviewAsync();
+                    await LoadPgOverviewAsync(timer);
                     break;
                 case PgActivityInnerTabIndex:
-                    await LoadPgActivityAsync();
+                    await LoadPgActivityAsync(timer);
                     break;
                 case PgVacuumInnerTabIndex:
-                    await LoadPgVacuumAsync();
+                    await LoadPgVacuumAsync(timer);
                     break;
                 case PgWaitsInnerTabIndex:
-                    await LoadPgWaitsAsync();
+                    await LoadPgWaitsAsync(timer);
                     break;
                 case PgIoInnerTabIndex:
-                    await LoadPgIoAsync();
+                    await LoadPgIoAsync(timer);
                     break;
                 case PgReplicationInnerTabIndex:
-                    await LoadPgReplicationAsync();
+                    await LoadPgReplicationAsync(timer);
                     break;
                 case PgStorageInnerTabIndex:
-                    await LoadPgStorageAsync();
+                    await LoadPgStorageAsync(timer);
                     break;
 
                 case OverviewInnerTabIndex:
