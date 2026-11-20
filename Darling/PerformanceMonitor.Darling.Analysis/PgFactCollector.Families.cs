@@ -63,14 +63,10 @@ public sealed partial class PgFactCollector
         for (var i = 0; i < families.Count; i++)
             tasks[i] = RunOne(i);
 
-        try
-        {
-            await Task.WhenAll(tasks);
-        }
-        catch
-        {
-            /* The earliest failure in family order is rethrown below, once the failures of the families before it are kept. */
-        }
+        /* Waits for every family to settle, failed or not. The earliest failure in family order is rethrown below, once the
+           failures of the families before it are kept. (A continuation, not a catch: every catch in this file family is a
+           classified one, and this is not a read.) */
+        await Task.WhenAll(tasks).ContinueWith(static _ => { }, TaskScheduler.Default);
 
         var firstFailed = Array.FindIndex(tasks, t => t.IsFaulted || t.IsCanceled);
         var merged = firstFailed < 0 ? families.Count : firstFailed;
@@ -89,22 +85,24 @@ public sealed partial class PgFactCollector
         async Task RunOne(int index)
         {
             await gate.WaitAsync(CancellationToken.None);
+            var finished = false;
             try
             {
                 if (Volatile.Read(ref stopStarting) != 0)
+                {
+                    finished = true;
                     return;
+                }
 
                 lists[index] = [];
                 failures[index] = context.BufferCollectionFailuresForThisFlow();
                 await families[index](context, lists[index]!);
-            }
-            catch
-            {
-                Volatile.Write(ref stopStarting, 1);
-                throw;
+                finished = true;
             }
             finally
             {
+                if (!finished)
+                    Volatile.Write(ref stopStarting, 1);
                 gate.Release();
             }
         }
