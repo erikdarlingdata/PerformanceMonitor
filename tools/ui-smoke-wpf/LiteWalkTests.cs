@@ -105,7 +105,7 @@ public sealed class LiteWalkTests : WalkBase
 
         Safely("lite finops high impact", () =>
         {
-            Step("FinOps tab", () => SelectMainTab(main, "FinOpsTab", "FinOps"));
+            Step("FinOps tab", () => SelectMainTab(main, "FinOpsTab"));
             // The tab's own selector starts on the first server in its list, which is the disabled one: pick the seeded server.
             Step("FinOps server", () =>
             {
@@ -120,7 +120,7 @@ public sealed class LiteWalkTests : WalkBase
 
         Safely("lite disabled server", () =>
         {
-            Step("Overview tab again", () => SelectMainTab(main, "OverviewTab", "Overview"));
+            Step("Overview tab again", () => SelectMainTab(main, "OverviewTab"));
             Step("disabled Overview card", () => WaitFor(() =>
                 main.FindAllDescendants(cf => cf.ByAutomationId("OverviewServerCardName"))
                     .FirstOrDefault(c => c.Name == LiteSeed.DisabledServerName), "an OverviewServerCardName reading " + LiteSeed.DisabledServerName));
@@ -142,17 +142,17 @@ public sealed class LiteWalkTests : WalkBase
     }
 
     /// <summary>Selects one of the main window's own tabs by its x:Name, which the server tab's same-named tabs do not share.
-    /// Falls back to the header text when the name is not in the automation tree.</summary>
-    private static bool SelectMainTab(AutomationElement main, string automationId, string header)
+    /// A missing name fails the step: selecting by header text instead could pick the server tab's tab of the same name.</summary>
+    private static bool SelectMainTab(AutomationElement main, string automationId)
     {
         var byId = main.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
-        if (byId is not null)
+        if (byId is null)
         {
-            byId.AsTabItem().Select();
-            return true;
+            Console.WriteLine("no main window tab with AutomationId " + automationId);
+            return false;
         }
-        Console.WriteLine("no tab with AutomationId " + automationId + "; selecting by header " + header);
-        return SelectTab(main, header);
+        byId.AsTabItem().Select();
+        return true;
     }
 
     /// <summary>The Alert rules tab (#8881, #8882, #8884): focuses the last of the four new switches so the page scrolls to show
