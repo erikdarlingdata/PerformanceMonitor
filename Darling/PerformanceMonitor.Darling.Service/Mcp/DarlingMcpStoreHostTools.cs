@@ -66,6 +66,13 @@ public sealed class DarlingMcpStoreHostTools
         + "settings never caught up with), operator_override (postgresql.auto.conf, or a hand-edited line after "
         + "every managed block, is what is actually in force), or not_managed (a bring-your-own store; nothing "
         + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). "
+        + "planner_costs is one row per planner cost setting (random_page_cost, seq_page_cost, effective_io_concurrency): "
+        + "current, source (pg_settings.source), source_file (the conf file when the role can read pg_settings.sourcefile, "
+        + "else null: the source alone is reported), managed_value and matches_managed (the managed file writes only "
+        + "random_page_cost, 1.1; both are null for the other two and on a store that is not managed). "
+        + "planner_cost_warning is one sentence when random_page_cost is not the managed value, saying the planner may "
+        + "skip covering indexes and the shorter Query Store windows' plans on this store and where the value comes from; "
+        + "null otherwise. "
         + "any_stale is true when one or more settings verdict is stale_after_hardware_change, so a caller can "
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
@@ -216,6 +223,20 @@ public sealed class DarlingMcpStoreHostTools
                     source = DarlingStoreHostProfile.FormatSourceForMcp(s, mcpDataDirectory),
                     verdict = DarlingStoreHostProfile.DescribeVerdict(s.Verdict).Replace('-', '_'),
                 }),
+                /* #9179: the planner cost settings, with the same current/source fields the sizing settings carry plus
+                   the file (null when the role cannot read pg_settings.sourcefile) and whether each matches the value
+                   the managed file writes. managed_value and matches_managed are null where the managed file sets none
+                   and on a store that is not managed. */
+                planner_costs = profile.PlannerCosts.Select(c => new
+                {
+                    name = c.Name,
+                    current = c.Current,
+                    source = c.Source,
+                    source_file = c.SourceFile,
+                    managed_value = c.ManagedValue,
+                    matches_managed = c.MatchesManaged,
+                }),
+                planner_cost_warning = DarlingStoreHostProfile.DescribeRandomPageCostMismatch(profile.PlannerCosts),
                 any_stale = anyStale,
                 /* Round-1 review, correcting the original plan: naive-UTC (no trailing Z), matching every
                    other "_at" timestamp on an MCP payload in this codebase (DarlingFleetReader.GeneratedAt,
