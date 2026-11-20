@@ -63,7 +63,7 @@ SELECT
     COUNT(*) AS sample_count
 FROM v_wait_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 {exclude}
 GROUP BY rtrim(wait_type)
@@ -139,7 +139,7 @@ SELECT
     SUM(delta_wait_time_ms) AS total_delta
 FROM v_wait_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 {exclude}
 GROUP BY rtrim(wait_type)
@@ -216,7 +216,7 @@ WITH raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   rtrim(wait_type) = rtrim($2)
-    AND   collection_time >= $3
+    AND   collection_time > $3
     AND   collection_time <= $4
 )
 SELECT
@@ -282,7 +282,7 @@ WITH raw AS
         END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   rtrim(wait_type) IN ({typeParams})
 ),
@@ -500,7 +500,7 @@ WITH per_collection AS
         extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS lag_seconds
     FROM v_wait_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     {exclude}
     GROUP BY collection_time
@@ -611,7 +611,7 @@ WITH blocked_counts AS (
     SELECT collection_time, blocking_session_id AS blocker_session_id, COUNT(*) AS blocked_session_count
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
     {MonitorSnapshotClause("program_name", false)}
@@ -659,7 +659,7 @@ LEFT JOIN blocked_counts bc
   ON  bc.collection_time = q.collection_time
   AND bc.blocker_session_id = q.session_id
 WHERE q.server_id = $1
-AND   q.collection_time >= $2
+AND   q.collection_time > $2
 AND   q.collection_time <= $3
 AND   rtrim(q.wait_type) = rtrim($4)
 {MonitorSnapshotClause("q.program_name", false)}
@@ -747,7 +747,7 @@ WITH blocked_counts AS (
     SELECT collection_time, blocking_session_id AS blocker_session_id, COUNT(*) AS blocked_session_count
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
     {MonitorSnapshotClause("program_name", false)}
@@ -795,7 +795,7 @@ LEFT JOIN blocked_counts bc
   ON  bc.collection_time = q.collection_time
   AND bc.blocker_session_id = q.session_id
 WHERE q.server_id = $1
-AND   q.collection_time >= $2
+AND   q.collection_time > $2
 AND   q.collection_time <= $3
 {MonitorSnapshotClause("q.program_name", includeMonitor)}
 ORDER BY q.collection_time DESC

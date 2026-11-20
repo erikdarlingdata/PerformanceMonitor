@@ -286,6 +286,25 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.True(contention!.Metadata["lock_wait_ms_delta"] >= 89_000);
     }
 
+    /// <summary>The two snapshots compared are the newest two at or before the window's end. A third snapshot, stored a day after
+    /// the end, repeats the latest one: a comparison that took it would find no growth and no new lock wait.</summary>
+    [Fact]
+    public async Task DetectObjectStatsAnomalies_ASnapshotStoredAfterTheWindowEnd_IsNotCompared()
+    {
+        await SeedScenarioAsync();
+        var afterEnd = _latest.AddDays(1);
+        await InsertObjectStat(afterEnd, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 600m, 3_000_000, 5000, 100, 10, 50, 0, 0);
+        await InsertObjectStat(afterEnd, "AppDb", 300, 1, "dbo", "HotTable", "PK_HotTable", 80m, 250_000, 200, 8, 0, 400, 100_000, 3);
+        for (int d = 1; d <= 5; d++)
+            await SeedCpuAsync(_latest.AddDays(-d), 10);
+
+        var context = new AnalysisContext { ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = _latest.AddHours(-4), TimeRangeEnd = _latest };
+        var anomalies = await _detector.DetectAnomaliesAsync(context);
+
+        Assert.Contains(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
+        Assert.Contains(anomalies, f => f.Key == "ANOMALY_OBJECT_CONTENTION");
+    }
+
     [Fact]
     public async Task DetectObjectStatsAnomalies_SingleSnapshot_NoFalsePositive()
     {

@@ -234,8 +234,8 @@ public sealed class TimeHonestyRungTests
 
         /* The rows selected do not depend on the frame: the same per-arm predicate, and the raw rows only gain the twin. */
         const string predicate =
-            "WHERE server_id = $1 AND ( (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3) " +
-            "OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5) )";
+            "WHERE server_id = $1 AND ( (sample_time_utc IS NOT NULL AND sample_time_utc > $2 AND sample_time_utc <= $3) " +
+            "OR (sample_time_utc IS NULL AND sample_time > $4 AND sample_time <= $5) )";
         Assert.Contains(predicate, serverLocal, StringComparison.Ordinal);
         Assert.Contains(predicate, utc, StringComparison.Ordinal);
         Assert.Contains("SELECT sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization FROM v_cpu_utilization_stats", utc, StringComparison.Ordinal);

@@ -20,12 +20,16 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
-    /// <summary>True when the hot table (not its archive view) holds a row for the server. <paramref name="table"/> is a literal from this file, never user text.</summary>
-    private static async Task<bool> HotTableHasServerAsync(LockedConnection connection, string table, int serverId)
+    /// <summary>True when the hot table (not its archive view) holds a row for the server: any row, or with
+    /// <paramref name="collectedAtOrBeforeUtc"/> a row whose collection_time is at or before it, which is the row a newest-snapshot
+    /// read bounded at that instant answers from. <paramref name="table"/> is a literal from this file, never user text.</summary>
+    private static async Task<bool> HotTableHasServerAsync(LockedConnection connection, string table, int serverId, DateTime? collectedAtOrBeforeUtc = null)
     {
         using var probe = connection.CreateCommand();
-        probe.CommandText = "SELECT EXISTS (SELECT 1 FROM " + table + " WHERE server_id = $1)";
+        probe.CommandText = "SELECT EXISTS (SELECT 1 FROM " + table + " WHERE server_id = $1" + (collectedAtOrBeforeUtc.HasValue ? " AND collection_time <= $2" : "") + ")";
         probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (collectedAtOrBeforeUtc is { } bound)
+            probe.Parameters.Add(new DuckDBParameter { Value = bound });
         return Convert.ToBoolean(await probe.ExecuteScalarAsync());
     }
 

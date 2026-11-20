@@ -47,7 +47,7 @@ WITH per_hash AS (
            SUM(delta_execution_count) AS executions
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY COALESCE(database_name, ''), query_hash
 ),
@@ -90,7 +90,7 @@ per_proc AS (
            SUM(q.delta_worker_time) AS cpu_us
     FROM v_procedure_stats AS q
     WHERE q.server_id = $1
-    AND   q.collection_time >= $2
+    AND   q.collection_time > $2
     AND   q.collection_time <= $3
     AND   COALESCE(q.database_name, '') IN (SELECT database_name FROM page)
     GROUP BY COALESCE(q.database_name, ''), COALESCE(q.schema_name, '') || '.' || COALESCE(q.object_name, '')
@@ -112,7 +112,7 @@ txt AS (
     FROM v_query_stats AS q
     JOIN page AS p ON p.database_name = COALESCE(q.database_name, '') AND p.top_query_hash = q.query_hash
     WHERE q.server_id = $1
-    AND   q.collection_time >= $2
+    AND   q.collection_time > $2
     AND   q.collection_time <= $3
     GROUP BY COALESCE(q.database_name, ''), q.query_hash
 )
@@ -203,7 +203,7 @@ WITH snap AS (
            query_text
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
     AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
@@ -352,7 +352,7 @@ WITH snap AS (
            COALESCE(wait_time_ms, 0) AS wait_time_ms, COALESCE(blocking_session_id, 0) AS blocking_session_id, query_text
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
     AND   query_hash IS NOT NULL

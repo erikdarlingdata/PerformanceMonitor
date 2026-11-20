@@ -123,7 +123,7 @@ FROM
     WHERE server_id = $1
     AND   collector_name = $2
     AND   status = $3
-    AND   collection_time >= $4
+    AND   collection_time > $4
     AND   collection_time <= $5
 ) t";
 

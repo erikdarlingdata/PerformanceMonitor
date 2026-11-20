@@ -276,7 +276,7 @@ public class AnalysisService
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken);
             if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
                 InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
@@ -1245,7 +1245,7 @@ ORDER BY event_time";
     /// </summary>
     internal async Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken);
+        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken: cancellationToken);
         if (hours is null)
             return null;
 
@@ -1255,20 +1255,21 @@ ORDER BY event_time";
     }
 
     /// <summary>
-    /// Returns the total span of collected data for a server (no time range filter).
+    /// Returns the total span of data collected for a server up to <paramref name="windowEndUtc"/> (all of it when null).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
-    /// be analyzed over a 4-hour window without dilution.
+    /// be analyzed over a 4-hour window without dilution. A pass gives its window's end, so a pass as of a past
+    /// instant measures the history the server had by then.
     /// </summary>
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
-    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
-        => await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken) ?? 0;
+    internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, DateTime? windowEndUtc = null, CancellationToken cancellationToken = default)
+        => await TryGetTotalDataSpanHoursAsync(serverId, windowEndUtc, cancellationToken) ?? 0;
 
     /// <summary>
     /// The same span, but null when the read failed (as opposed to 0 for a server with no rows).
     /// </summary>
-    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
+    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, DateTime? windowEndUtc = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1280,9 +1281,12 @@ ORDER BY event_time";
             cmd.CommandText = @"
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM v_wait_stats
-WHERE server_id = $1";
+WHERE server_id = $1" + (windowEndUtc.HasValue ? @"
+AND   collection_time <= $2" : "");
 
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            if (windowEndUtc is { } windowEnd)
+                cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd });
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)

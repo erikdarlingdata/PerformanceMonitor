@@ -738,8 +738,8 @@ COPY (
     /* The span window of the first #5381 revision, rebuilt from the current statement, as the control for the two pins below. */
     private static string SpanWindowProcedureStatsComparisonSql() =>
         LocalDataService.ProcedureStatsComparisonSql(string.Empty)
-            .Replace("((qs.collection_time >= $2 AND qs.collection_time <= $3)", "(qs.collection_time >= LEAST($2, $4) AND qs.collection_time <= GREATEST($3, $5)", StringComparison.Ordinal)
-            .Replace("OR (qs.collection_time >= $4 AND qs.collection_time <= $5))", ")", StringComparison.Ordinal);
+            .Replace("((qs.collection_time > $2 AND qs.collection_time <= $3)", "(qs.collection_time > LEAST($2, $4) AND qs.collection_time <= GREATEST($3, $5)", StringComparison.Ordinal)
+            .Replace("OR (qs.collection_time > $4 AND qs.collection_time <= $5))", ")", StringComparison.Ordinal);
 
     [Fact]
     public async Task ProcedureComparison_AFarBaselineOnAWideArchiveReadsAtTheLowLimit()

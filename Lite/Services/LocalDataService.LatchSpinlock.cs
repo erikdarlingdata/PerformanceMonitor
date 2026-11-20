@@ -44,7 +44,7 @@ WITH top_latches AS
     SELECT latch_class
     FROM v_latch_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY latch_class
     ORDER BY SUM(delta_wait_time_ms) DESC
@@ -64,7 +64,7 @@ raw AS
         END AS interval_seconds
     FROM v_latch_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   latch_class IN (SELECT latch_class FROM top_latches)
 )
@@ -130,7 +130,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_latch_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT
@@ -196,7 +196,7 @@ WITH top_spinlocks AS
     SELECT spinlock_name
     FROM v_spinlock_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     GROUP BY spinlock_name
     ORDER BY SUM(delta_collisions) DESC
@@ -216,7 +216,7 @@ raw AS
         END AS interval_seconds
     FROM v_spinlock_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   spinlock_name IN (SELECT spinlock_name FROM top_spinlocks)
 )
@@ -274,7 +274,7 @@ WITH latest AS
     SELECT MAX(collection_time) AS mx
     FROM v_spinlock_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 )
 SELECT

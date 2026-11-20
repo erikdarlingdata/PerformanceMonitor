@@ -60,7 +60,7 @@ public sealed class McpPlanCorrectionTools
                automatic-tuning snapshot, whose MAX(collection_time) anchor stays whole in the reader. */
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var databaseNames = database == null ? null : new[] { database };
-            var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId, databaseNames);
+            var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId, databaseNames, asOfUtc: windowEnd);
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 200 over per-cycle re-captures gave every window the same ~16-hour
                reach, and `total_recommendations` published that page as the window's count. */

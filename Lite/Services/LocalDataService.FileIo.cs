@@ -102,7 +102,7 @@ WITH file_totals AS (
         COALESCE(SUM(delta_writes), 0) AS total_writes
     FROM v_file_io_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3{dbClause}
     AND   (delta_reads > 0 OR delta_writes > 0)
     GROUP BY database_name, file_name
@@ -154,7 +154,7 @@ rated AS (
     FROM v_file_io_stats f
     JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
     WHERE f.server_id = $1
-    AND   f.collection_time >= $2
+    AND   f.collection_time > $2
     AND   f.collection_time <= $3
 )";
 
@@ -386,7 +386,7 @@ WITH top_files AS (
     SELECT database_name, file_name
     FROM v_file_io_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3{dbClause}
     AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
     GROUP BY database_name, file_name
@@ -411,7 +411,7 @@ with_interval AS (
     FROM v_file_io_stats f
     JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
     WHERE f.server_id = $1
-    AND   f.collection_time >= $2
+    AND   f.collection_time > $2
     AND   f.collection_time <= $3
 ),
 rated AS (
@@ -521,7 +521,7 @@ WITH rated AS (
         CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(delta_stall_write_ms AS DOUBLE PRECISION) END AS rated_stall_write_ms
     FROM v_file_io_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   database_name = 'tempdb'
 )

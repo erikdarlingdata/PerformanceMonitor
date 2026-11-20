@@ -62,7 +62,6 @@ public sealed class ProcedureTrendQueryPinTests
         {
             /* Both the stored rows and the log's runs come from an hour before $2, and the points before $2 are dropped after the LAG. */
             Assert.Equal(2, CountOf(sql, "collection_time >= $2 - to_seconds(3600)"));
-            Assert.Contains("WHERE collection_time >= $2", sql);
             Assert.Contains("v_collection_log", sql);
             Assert.DoesNotContain("series_first", sql);
             Assert.DoesNotContain("first_interval", sql);

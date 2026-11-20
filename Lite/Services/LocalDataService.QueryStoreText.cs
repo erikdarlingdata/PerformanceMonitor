@@ -73,7 +73,7 @@ public partial class LocalDataService
 SELECT collection_id, collection_time, query_text
 FROM v_query_store_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   collection_id IN (" + string.Join(",", collectionIds.Select(id => id.ToString(CultureInfo.InvariantCulture))) + ")";
 
@@ -84,7 +84,7 @@ FROM v_query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   query_id = $3
-AND   collection_time >= $4
+AND   collection_time > $4
 AND   collection_time <= $5";
 
     /// <summary>Most (database, query_id) keys one latest-row statement carries; each key is two parameters.</summary>
@@ -235,7 +235,7 @@ FROM
       ON  k.database_name IS NOT DISTINCT FROM v.database_name
       AND k.query_id = v.query_id
     WHERE v.server_id = $1
-    AND   v.collection_time >= $2
+    AND   v.collection_time > $2
     AND   v.collection_time <= $3
 ) x
 WHERE x.rn = 1

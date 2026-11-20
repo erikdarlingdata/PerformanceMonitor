@@ -114,7 +114,7 @@ FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
 AND   status = 'SUCCESS'
-AND   collection_time >= $3
+AND   collection_time > $3
 AND   collection_time <= $4";
 
     /// <summary>
