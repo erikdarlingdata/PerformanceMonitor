@@ -111,7 +111,7 @@ ALTER TABLE collect.job_outcome_daily_watermark ADD COLUMN IF NOT EXISTS gc_befo
 
     /// <summary>
     /// The most steps one tick runs: high enough that <see cref="MaxTickDuration"/> is the bound that holds (#9110). A step reads one
-    /// server-day of <c>collection_time</c> and is cheap: on a 19.3M-row, 172-chunk store of 120 servers the whole backfill took 20,576
+    /// server-day of <c>collection_time</c> and is cheap: on a seeded 19.3M-row, 172-chunk store the whole backfill took 20,576
     /// steps in 35 s (median 0.7 ms a step). A cap of 60 would have taken about 14 days of hourly ticks to catch that store up.
     /// </summary>
     public const int MaxStepsPerTick = 100_000;
