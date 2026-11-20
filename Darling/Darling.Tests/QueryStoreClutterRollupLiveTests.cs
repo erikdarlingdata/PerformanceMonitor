@@ -325,7 +325,7 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
         }
 
         /* A live batch is stamped now: its day is today, which is never late. */
-        var now = DateTime.UtcNow;
+        var now = LiveClock.Now();
         await WriteAsync(now, 9160001, now.AddMinutes(-1));
         Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection, MarkedSql, ct, ("server_id", A)));
 
