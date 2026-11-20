@@ -1494,6 +1494,18 @@ public partial class ViewerServerTab
                   : string.Empty);
     }
 
+    /// <summary>#9112: the PostgreSQL Storage tab's two store reads, so a test can hand the tab reads that take a known time. The product uses the data service's.</summary>
+    internal sealed record PgStorageTabReads(
+        Func<DateTime, DateTime, int, Task<List<DarlingPgTableBloatReader.PgTableBloatRow>>> TableBloat,
+        Func<DateTime, DateTime, int, Task<List<DarlingPgIndexUsageReader.PgIndexUsageRow>>> IndexUsage);
+
+    /// <summary>A test's stand-in for the Storage tab's reads; null in the product.</summary>
+    internal PgStorageTabReads? PgStorageReadsOverride { get; set; }
+
+    private PgStorageTabReads PgStorageReads => PgStorageReadsOverride ?? new PgStorageTabReads(
+        (startUtc, endUtc, limit) => _dataService.GetPgTableBloatAsync(_server.ServerId, startUtc, endUtc, limit),
+        (startUtc, endUtc, limit) => _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, limit));
+
     /// <summary>
     /// Storage - the per-table bloat estimate and per-index usage. Both reads fire together: they are one
     /// tab answering one question (where the space went, and whether it is earning its keep), so moving
@@ -1511,8 +1523,8 @@ public partial class ViewerServerTab
         /* Two reads, and the two data-start probes (#4966) started beside them: priced together. */
         using var readFanOut = ViewerReadFanOut.Of(4);
 
-        var bloatTask = Timed(timer, "PostgreSQL table bloat read", _dataService.GetPgTableBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit));
-        var indexTask = Timed(timer, "PostgreSQL index usage read", _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit));
+        var bloatTask = Timed(timer, "PostgreSQL table bloat read", PgStorageReads.TableBloat(startUtc, endUtc, PgGridRowLimit));
+        var indexTask = Timed(timer, "PostgreSQL index usage read", PgStorageReads.IndexUsage(startUtc, endUtc, PgGridRowLimit));
 
         var bloatStartTask = PgCollectorIsGatedOff("pg_table_bloat_stats") ? Task.FromResult<DateTime?>(null) : Timed(timer, "PostgreSQL table bloat stats data start read", StartPgDataStartProbe("pg_table_bloat_stats", startUtc, endUtc));
         var indexStartTask = PgCollectorIsGatedOff("pg_index_usage_stats") ? Task.FromResult<DateTime?>(null) : Timed(timer, "PostgreSQL index usage stats data start read", StartPgDataStartProbe("pg_index_usage_stats", startUtc, endUtc));

@@ -375,7 +375,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
         var tab = ViewerFile("ViewerServerTab.Blocking.cs");
 
         var load = MethodBody(tab, @"private async Task LoadBlockedProcessReportsAsync\(");
-        Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetBlockedProcessReportsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(load, @"var dataStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetBlockedProcessReportsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(load,
             @"await ShowEventDataStartAsync\(BlockedProcessReportsTruncationBanner,\s*dataStartTask,\s*""Blocked Process Reports"",\s*startUtc,\s*rows\.Select\(r => r\.EventTime\),\s*ViewerDataService\.BlockedProcessReportsRowCap,\s*read\.CappedSourceStartUtc\);"));
 
@@ -391,7 +391,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
         var tab = ViewerFile("ViewerServerTab.Blocking.cs");
 
         var load = MethodBody(tab, @"private async Task LoadDeadlocksAsync\(");
-        Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetDeadlocksDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(load, @"var dataStartTask = Timed\(timer,\s*""[^""]+"",\s*_dataService\.GetDeadlocksDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(load,
             @"await ShowEventDataStartAsync\(DeadlocksTruncationBanner,\s*dataStartTask,\s*""Deadlocks"",\s*startUtc,\s*rows\.Select\(r => r\.DeadlockTime\),\s*ViewerDataService\.DeadlocksRowCap\);"));
 

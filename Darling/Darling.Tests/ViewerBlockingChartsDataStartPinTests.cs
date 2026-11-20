@@ -26,7 +26,7 @@ public sealed class ViewerBlockingChartsDataStartPinTests
 
     private static string Case(string name)
     {
-        var load = Tab[Tab.IndexOf("private async Task LoadBlockingAsync()", StringComparison.Ordinal)..];
+        var load = Tab[Tab.IndexOf("private async Task LoadBlockingAsync(", StringComparison.Ordinal)..];
         var start = load.IndexOf($"case {name}:", StringComparison.Ordinal);
         Assert.True(start >= 0, name);
         var end = load.IndexOf("            case ", start + 10, StringComparison.Ordinal);
@@ -52,9 +52,9 @@ public sealed class ViewerBlockingChartsDataStartPinTests
             && rel < trends.IndexOf("await DataStartOrNullAsync", StringComparison.Ordinal));
         Assert.Matches(@"ShowEventDataStartAsync\(BlockingTrendTruncationBanner, blockingStartTask,", trends);
         Assert.Matches(@"ShowEventDataStartAsync\(DeadlockTrendTruncationBanner, deadlockStartTask,", trends);
-        Assert.Contains("lockWaitStartTask = _dataService.GetLockWaitTrendDataStartAsync(", trends, StringComparison.Ordinal);
-        Assert.Contains("blockingStartTask = _dataService.GetBlockingChartDataStartAsync(", trends, StringComparison.Ordinal);
-        Assert.Contains("deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(", trends, StringComparison.Ordinal);
+        Assert.Matches(@"lockWaitStartTask = Timed\(timer, ""[^""]+"", _dataService\.GetLockWaitTrendDataStartAsync\(", trends);
+        Assert.Matches(@"blockingStartTask = Timed\(timer, ""[^""]+"", _dataService\.GetBlockingChartDataStartAsync\(", trends);
+        Assert.Matches(@"deadlockStartTask = Timed\(timer, ""[^""]+"", _dataService\.GetDeadlocksDataStartAsync\(", trends);
         Assert.True(trends.IndexOf("GetLockWaitTrendDataStartAsync", StringComparison.Ordinal) < trends.IndexOf("await AwaitReadWatchingProbeAsync", StringComparison.Ordinal),
             "the probes start before the reads are awaited");
     }
@@ -72,8 +72,8 @@ public sealed class ViewerBlockingChartsDataStartPinTests
             && rel < stats.IndexOf("ShowEventDataStartAsync", StringComparison.Ordinal));
         Assert.Matches(@"BlockingStatsBlockingTruncationBanner, blockingStartTask,", stats);
         Assert.Matches(@"BlockingStatsDeadlockTruncationBanner, deadlockStartTask,", stats);
-        Assert.Contains("blockingStartTask = _dataService.GetBlockingChartDataStartAsync(", stats, StringComparison.Ordinal);
-        Assert.Contains("deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(", stats, StringComparison.Ordinal);
+        Assert.Matches(@"blockingStartTask = Timed\(timer, ""[^""]+"", _dataService\.GetBlockingChartDataStartAsync\(", stats);
+        Assert.Matches(@"deadlockStartTask = Timed\(timer, ""[^""]+"", _dataService\.GetDeadlocksDataStartAsync\(", stats);
     }
 
     [Fact]

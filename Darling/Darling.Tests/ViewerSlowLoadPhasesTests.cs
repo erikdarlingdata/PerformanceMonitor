@@ -14,6 +14,7 @@ using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -206,6 +207,125 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.True(ReadMs(line, "CPU scheduler snapshot read") >= snapshotMs - 100, line);
         Assert.Contains("CPU chart draw", line, StringComparison.Ordinal);
         /* Untimed, the 3.2 s of reads would all sit here. Only the draws after the last read remain. */
+        Assert.True(ClientWorkMs(line) < 1000, line);
+    }
+
+    /// <summary>Loads one inner tab of a server tab whose reads <paramref name="seam"/> has replaced, on a clock that always writes its line, and returns the line.</summary>
+    private static string LoadTabAndReadTheLine(DarlingServer server, Action<ViewerServerTab> seam, Func<ViewerServerTab, int> tabIndex)
+    {
+        string? line = null;
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(new ViewerDataService(ClosedStore(FreePort())), server);
+            seam(tab);
+            tab.SlowLoadSink = text => line = text;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(tabIndex(tab), new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.NotNull(line);
+        return line;
+    }
+
+    private static int InnerTabIndexOf(ViewerServerTab tab, string header)
+    {
+        var inner = (TabControl)tab.FindName("InnerTabs");
+        var index = inner.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, header));
+        Assert.True(index >= 0);
+        return index;
+    }
+
+    [Fact]
+    public void MemoryTab_ALoadWithSlowReads_NamesEachRead_NestedPlanCacheAndSemaphoreOnesToo()
+    {
+        /* #9112: the Memory tab's refresh read its summary, trends, pressure events, Plan Cache and Resource Semaphore sub-tabs with none
+           of them on the load's clock, so the whole read time was logged as "client work after the last read". */
+        var line = LoadTabAndReadTheLine(
+            new DarlingServer(1, "memory-slow-load", "memory-slow-load", true, null),
+            tab => tab.MemoryReadsOverride = new ViewerServerTab.MemoryTabReads(
+                async () => { await Task.Delay(1200); return null; },
+                async (_, _) => { await Task.Delay(900); return new List<MemoryTrendPoint>(); },
+                async (_, _) => { await Task.Delay(300); return new List<MemoryGrantTrendPoint>(); },
+                async (_, _) => { await Task.Delay(300); return new List<string>(); },
+                async (_, _) => { await Task.Delay(300); return new List<MemoryGrantChartPoint>(); },
+                async (_, _) => { await Task.Delay(300); return (DateTime?)null; },
+                async (_, _) => { await Task.Delay(600); return new List<MemoryPressureEventRow>(); },
+                async (_, _, _) => { await Task.Delay(300); return new Dictionary<string, List<MemoryClerkTrendPoint>>(); },
+                async (_, _) => { await Task.Delay(700); return new List<PlanCacheTrendPoint>(); },
+                async (_, _) => { await Task.Delay(500); return new List<PlanCacheGroupRow>(); },
+                async (_, _) => { await Task.Delay(600); return new PlanCacheSummary(0, 0, null); },
+                async (_, _) => { await Task.Delay(800); return new List<MemoryGrantWindowRow>(); },
+                async (_, _) => { await Task.Delay(400); return new List<ResourceSemaphoreRow>(); }),
+            tab => InnerTabIndexOf(tab, "Memory"));
+
+        Assert.True(ReadMs(line, "Memory summary read") >= 1200 - 100, line);
+        Assert.True(ReadMs(line, "Memory trend read") >= 900 - 100, line);
+        Assert.True(ReadMs(line, "Memory pressure events read") >= 600 - 100, line);
+        Assert.True(ReadMs(line, "Plan Cache trend read") >= 700 - 100, line);
+        Assert.True(ReadMs(line, "Plan Cache summary read") >= 600 - 100, line);
+        Assert.True(ReadMs(line, "Resource Semaphore window read") >= 800 - 100, line);
+        Assert.True(ReadMs(line, "Resource Semaphore snapshot read") >= 400 - 100, line);
+        Assert.Contains("Memory chart draw", line, StringComparison.Ordinal);
+        /* Untimed, about 3 s of reads would all sit here. Only the draws and the unseamed store probes (a closed port) remain. */
+        Assert.True(ClientWorkMs(line) < 1000, line);
+    }
+
+    [Fact]
+    public void WaitStatsTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
+    {
+        /* #9112: the Wait Stats tab's picker read and trend read were not on the load's clock. */
+        var line = LoadTabAndReadTheLine(
+            new DarlingServer(1, "waits-slow-load", "waits-slow-load", true, null),
+            tab => tab.WaitStatsReadsOverride = new ViewerServerTab.WaitStatsTabReads(
+                async (_, _) =>
+                {
+                    await Task.Delay(1500);
+                    return new List<string> { "CXPACKET", "PAGEIOLATCH_SH" };
+                },
+                async (_, _, _) =>
+                {
+                    await Task.Delay(1000);
+                    return new Dictionary<string, List<WaitStatsTrendPoint>>();
+                }),
+            tab => InnerTabIndexOf(tab, "Wait Stats"));
+
+        Assert.True(ReadMs(line, "Wait Stats picker read") >= 1500 - 100, line);
+        Assert.True(ReadMs(line, "Wait Stats trend read") >= 1000 - 100, line);
+        Assert.Contains("Wait Stats chart draw", line, StringComparison.Ordinal);
+        Assert.True(ClientWorkMs(line) < 1000, line);
+    }
+
+    [Fact]
+    public void PostgresStorageTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
+    {
+        /* #9112: a PostgreSQL tab's reads were not on the load's clock either. Storage is the one with two plain reads (they run side by side). */
+        var line = LoadTabAndReadTheLine(
+            new DarlingServer(1, "pg-storage-slow-load", "pg-storage-slow-load", true, sqlMajorVersion: 0,
+                engineKind: MonitoredEngineKind.Postgres, postgresMajorVersion: 17),
+            tab => tab.PgStorageReadsOverride = new ViewerServerTab.PgStorageTabReads(
+                async (_, _, _) =>
+                {
+                    await Task.Delay(1500);
+                    return new List<DarlingPgTableBloatReader.PgTableBloatRow>();
+                },
+                async (_, _, _) =>
+                {
+                    await Task.Delay(1000);
+                    return new List<DarlingPgIndexUsageReader.PgIndexUsageRow>();
+                }),
+            _ => ViewerServerTab.PgStorageInnerTabIndex);
+
+        Assert.True(ReadMs(line, "PostgreSQL table bloat read") >= 1500 - 100, line);
+        Assert.True(ReadMs(line, "PostgreSQL index usage read") >= 1000 - 100, line);
+        Assert.Contains("PostgreSQL table bloat grid build", line, StringComparison.Ordinal);
         Assert.True(ClientWorkMs(line) < 1000, line);
     }
 
