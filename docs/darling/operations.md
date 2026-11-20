@@ -271,3 +271,5 @@ SELECT coalesce(
 ```
 
 `collection_time` is stored in UTC, which is why the check compares it with `now() AT TIME ZONE 'UTC'`. The query reads one row per enabled server from the `(server_id, collection_time)` index. It returns `false` when no enabled server has a row, so treat a store with no enabled servers as a case for your own rule.
+
+Option 3 is to scrape the metrics port. If you already run Prometheus, turn on the `metrics` block and scrape `/metrics`. `darling_metrics_last_refresh_success`, `darling_metrics_snapshot_age_seconds` and each server's `darling_server_last_collection_age_seconds` say whether the service is up and collecting. The port is off by default and needs a bearer token. See [The metrics port](network-endpoints.md#the-metrics-port).

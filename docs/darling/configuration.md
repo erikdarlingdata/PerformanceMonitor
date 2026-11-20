@@ -20,7 +20,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 | `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the web dashboard's Admin page, or the MCP tools `add_servers` and `edit_server`. The one exception is the `remediation*` and `hypotheticalIndex*` login keys, which the service syncs from the file at every start |
 | `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set. Otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
 | `queryTextTrigramIndexEnabled` (default `false`), `queryStoreTextTrigramIndexEnabled` (default `false`) | Both. The store's value wins when it is set. Otherwise the file's value is used | The MCP tool `update_service_flags` (`query_text_trigram_index_enabled`, `query_store_text_trigram_index_enabled`), live and with no restart. Its `reset_to_file` clears a store value to hand the choice back to the file |
-| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `dailySummaryWarmerEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `xeRingBufferMaxEvents`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `passwordKey`, `peers`, `frontDoor`, `heartbeat`, `health`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
+| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `dailySummaryWarmerEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `xeRingBufferMaxEvents`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `passwordKey`, `peers`, `frontDoor`, `heartbeat`, `health`, `metrics`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
 
 ## queryTextTrigramIndexEnabled
 
@@ -261,6 +261,18 @@ On any of them, a login that is not a superuser cannot end a superuser's session
 | `health.listen` | *(empty)* | The address to bind. Empty means `0.0.0.0` inside a container and `127.0.0.1` outside one. It must be an IP address. |
 
 The port has no token, no `allowFrom` and no TLS, and serves only `/livez` and `/readyz`, each answering one word. See [The health port](network-endpoints.md#the-health-port). Nothing is checked while `health.enabled` is `false`. A bad value is not a configuration problem: it turns off the health port only. The service logs one Critical line that names the setting, does not open the port, and keeps collecting. A file-only block: the control plane never writes it, and a change needs a restart.
+
+## metrics (object, optional)
+
+| Key | Default | Notes |
+|---|---|---|
+| `metrics.enabled` | `false` | Turns on the metrics port, a Prometheus scrape endpoint ([#9013](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9013)). |
+| `metrics.port` | `5155` | The port. It must be 1 to 65535 and different from `web.port`, `mcp.port` and, when `health.enabled` is `true`, `health.port`. The check compares against the ports written in `darling.json` (or their defaults when the file omits them), not a port set later from the Viewer or the web dashboard. |
+| `metrics.listen` | *(empty)* | The address to bind. Empty means `0.0.0.0` inside a container and `127.0.0.1` outside one. It must be an IP address. |
+| `metrics.token` | *(unset)* | **Required** when `metrics.enabled` is `true`. The bearer token a scraper presents: a literal, `env:NAME` or `file:PATH`. It must be at least 16 characters and use at least 6 different ones. The service reads it once, at start, so a new token needs a restart. A literal logs one Warning: prefer `env:` or `file:`. |
+| `metrics.allowFrom` | *(empty)* | CIDRs, as a string separated by commas (for example `"10.0.0.0/8,192.168.1.0/24"`) or an array of strings (`["10.0.0.0/8", "192.168.1.0/24"]`), like `web.network.allowFrom`. An entry that is not a CIDR turns off the metrics port with a Critical line. Empty or unset means no address check. A client outside the list gets 403. Loopback is always admitted. |
+
+The port serves `GET /metrics` in the Prometheus text format and nothing else. See [The metrics port](network-endpoints.md#the-metrics-port) for the metric names and a sample scrape config. Nothing is checked while `metrics.enabled` is `false`, and `"metrics": null` means off. A bad value is not a configuration problem: it turns off the metrics port only. The service logs one Critical line that names the setting (never the token), does not open the port, and keeps collecting. With `frontDoor.enabled` set the port stays off too, because a front door has no store to read. A file-only block: the control plane never writes it, and a change needs a restart.
 
 ## peers
 

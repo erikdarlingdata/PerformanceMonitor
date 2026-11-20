@@ -366,3 +366,143 @@ readinessProbe:
 ```
 
 Never use `/readyz` for liveness. A service that stopped on a configuration problem answers `/readyz` 503 `stopped` until someone fixes the file. A liveness probe on it would restart the pod in a loop, and the restart cannot fix the file.
+
+## The metrics port
+
+The metrics port is a Prometheus scrape endpoint ([#9013](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9013)). It is off by default. Turn it on with a `metrics` block in `darling.json`, and restart the service. See [`metrics`](configuration.md#metrics-object-optional) for the five settings (`enabled`, `port` 5155, `listen`, `token` and `allowFrom`). Lite does not have this port.
+
+```json
+"metrics": { "enabled": true, "token": "file:/etc/darling/metrics-token" }
+```
+
+The port serves one route, `GET /metrics`, as `text/plain; version=0.0.4; charset=utf-8`. Every metric is a gauge, with its `# HELP` and `# TYPE` lines and no sample timestamps. Any other path gets a 404 with an empty body. Any other method on `/metrics` gets a 405 with an empty body.
+
+### What the port serves and never serves
+
+It serves the numbers in the tables below, labeled with the server's display name. It never serves a query text, a database name, a login name, a host name or an application name, and no text from a monitored server reaches a label. Besides `server`, the labels take only the fixed values named below.
+
+The `server` label is the server's display name, the one the dashboard shows. When two enabled servers share a display name, each one's label becomes `<name> #<server_id>`, and the service logs one Information line per shared name when the shared names change, not at every refresh.
+
+### The token and `allowFrom`
+
+Every request is checked in this order:
+
+1. **Address.** When `metrics.allowFrom` is set and the client's address is outside it, the answer is 403 with an empty body, whatever token it sends. The address is the TCP peer's. Forwarded headers are never trusted. Loopback is always admitted, as on the web and MCP endpoints. With `allowFrom` empty, there is no address check.
+2. **Token.** A missing or wrong bearer token gets 401 with an empty body and the header `WWW-Authenticate: Bearer`. The token is compared in constant time.
+
+Wrong tokens are throttled per address, as on the MCP endpoint: three wrong bearer tokens from one address go without delay, the fourth starts a wait of 2 seconds, and each further wrong token doubles it, up to 5 minutes. During the wait the port answers every request from that address that carries a bearer token with `429` and a `Retry-After` header, and compares no token, so a correct token is refused too. A request with no bearer token does not count as a wrong one. The address check comes first, so an address outside `allowFrom` gets its 403 and is never counted. One total budget of 60 wrong tokens an hour holds across all addresses that have not presented a correct token during the last hour, and its `429` says so. The wait is kept in memory: restarting the service clears it.
+
+The service reads `metrics.token` once, at start. To rotate it, change the secret and restart the service. Each refusal is logged with the client's address and the reason, never the token, and a repeating refusal from one address is rate limited in the log.
+
+The port has no TLS, so the token crosses the network in clear text. Keep the port on a trusted network, or put a TLS-terminating proxy in front of it. Behind a proxy, every client reaches the port from the proxy's address, so they all share one throttle: one client that sends wrong tokens holds out the scraper too, until the wait ends. Keep the proxy's other clients off this route, or give the scraper its own path to the port. When the port binds an address that is not loopback and `allowFrom` is empty, the service logs one Warning after it binds: the token alone guards the port. Set `allowFrom` to the scraper's addresses.
+
+### Limits
+
+The listener has the health port's limits: HTTP/1 only, at most 64 connections, a 15 second keep-alive, a 10 second limit to send the request headers, 8 KB of headers and no request body.
+
+### How the numbers are refreshed
+
+A scrape never reads the store. It returns an in-memory snapshot, and one background refresh rebuilds that snapshot.
+
+- A scrape starts a refresh only when the snapshot is at least 55 seconds old and the last refresh attempt started at least 55 seconds ago. So the store sees at most one refresh a minute, also after a failed one, and only while something scrapes. A refresh that takes longer than 30 seconds is cancelled and counts as failed.
+- The first scrape starts the first refresh and answers at once, so it carries only `darling_metrics_last_refresh_success` (0). The next scrape after the refresh finishes has the rest. Until the service is collecting (after the store migrations), no refresh starts, and a scrape carries only that series.
+- The refresh is read-admitted as the web dashboard's fleet page is (`/api/fleet`): when the read is classed as long, it takes one `reads.maxHeavyReads` slot (see [`reads`](configuration.md#reads-optional) for the rule). A refresh that the limit refuses fails like any other.
+- A failed refresh keeps the last snapshot. Once the snapshot is 5 minutes old, a scrape drops every per-server series, and only the three `darling_metrics_*` series remain. The service logs one Warning for a streak of failures and one Information line when a refresh succeeds again. Alert on `darling_metrics_last_refresh_success == 0` or on a large `darling_metrics_snapshot_age_seconds`.
+- A server that has never collected gets only `darling_server_health_band`.
+- A rate is the change between a collector's newest two collections, divided by the seconds between them. A reading is absent, never 0, when that interval is 0 or unknown, or when the newest collection is older than its limit. The limit is three times the interval the collector is scheduled at on that server (the server's own `--set-collector-frequency` setting, else the fleet-wide one, else the shipped default; `0`, once on load, counts as its daily re-run), and never less than 15 minutes for the one-minute collectors, 30 minutes for the session summary and 3 hours for the database sizes. So a `wait_stats` scheduled every 30 minutes keeps its series for 90 minutes after a collection. A collector that stops makes its series disappear instead of repeating its last value.
+
+On a service-managed store the port reads as the read-only `viewer` login (the web dashboard uses its `web` login there). On any other store it takes, in this order: `postgres.webConnectionString` when it is set; otherwise, in a container (the compose distribution), the read-only `viewer` login this start provisioned, then the `viewer` credential an earlier start left, then the `web` credential an earlier start left, then the owner connection (`postgres.connectionString`); outside a container, the owner connection. A `postgres.webConnectionString` that is set but cannot be resolved, or resolves blank, fails the refresh. The port never falls back to the owner login in its place. The service resolves the login at the first refresh. A refresh with no login yet fails, and the next one tries again. The log lines about the login start "The metrics port" and appear once per streak of failures.
+
+### Not in front-door mode
+
+A front door (see [The front door](front-door.md)) has no store of its own, so it has nothing to read. With `frontDoor.enabled` set, the port stays off and the service logs one Critical line: "metrics needs a store; not served in front-door mode". Turn the port on at each store.
+
+### When the port does not open
+
+In each case collection, web and MCP keep running:
+
+- **A bad `metrics` block.** A missing or unusable token (unset, an `env:` or `file:` reference that cannot be resolved, too short or too repetitive), a port outside 1 to 65535, a port equal to `web.port`, `mcp.port` or an enabled `health.port`, a `listen` that is not an IP address, or an `allowFrom` that is not a comma-separated list of CIDRs. The service logs one Critical line that names each setting and never the token.
+- **A bind failure.** The port is taken by another process, or `metrics.listen` is an IP address that is not on this machine. The service logs one Error line that names the address and port.
+- **A `darling.json` that cannot be read or parsed.** The service logs one Error line, and the port stays off for the life of the process.
+
+### The metrics
+
+The meta series describe the port itself. A meta series is left out while it has no value:
+
+| Name | Unit | Labels | Source | Notes |
+|---|---|---|---|---|
+| `darling_metrics_snapshot_age_seconds` | seconds | none | The port itself | Age of the snapshot at scrape time. Absent before the first snapshot. |
+| `darling_metrics_last_refresh_success` | 0 or 1 | none | The port itself | 1 when the last refresh succeeded. 0 before the first attempt. |
+| `darling_metrics_last_refresh_duration_seconds` | seconds | none | The port itself | How long the last refresh took. Absent before the first attempt. |
+
+The fleet metrics come from the same read as the dashboard's fleet page. A reading the fleet read does not have is left out:
+
+| Name | Unit | Labels | Source | Notes |
+|---|---|---|---|---|
+| `darling_server_health_band` | 0 to 3 | `server` | Fleet read | 0 healthy, 1 warning, 2 critical, 3 offline. Present for every enabled server. |
+| `darling_server_cpu_percent` | percent | `server` | Fleet read | Total CPU. |
+| `darling_server_memory_mb` | MB | `server` | Fleet read | Server memory in use. |
+| `darling_server_buffer_pool_mb` | MB | `server` | Fleet read | Buffer pool size. |
+| `darling_server_blocking_events` | count | `server` | Fleet read | Blocking events in the last hour. |
+| `darling_server_deadlocks` | count | `server` | Fleet read | Deadlocks in the last hour. Absent when deadlocks are not measured for the server. |
+| `darling_server_workers_current` | count | `server` | Fleet read | Current worker threads. |
+| `darling_server_workers_max` | count | `server` | Fleet read | Maximum worker threads. |
+| `darling_server_last_collection_age_seconds` | seconds | `server` | Fleet read | Age of the server's newest collection, taken at scrape time. |
+| `darling_server_failing_collectors` | count | `server` | Fleet read | Collectors currently failing. |
+| `darling_server_collectors` | count | `server` | Fleet read | Collectors configured. |
+
+The server metrics each read the newest collection of one collector, for every enabled SQL Server. A PostgreSQL target has none of them. `file_type` is `data` or `log`, and `scope` is `user` or `tempdb`. `category` is one of `cpu`, `parallelism`, `storage`, `memory`, `network`, `locks`, `latches` and `other`:
+
+| Name | Unit | Labels | Source | Notes |
+|---|---|---|---|---|
+| `darling_cpu_sql_percent` | percent | `server` | CPU ring buffer | SQL Server process CPU. |
+| `darling_cpu_other_percent` | percent | `server` | CPU ring buffer | Other processes on the host. |
+| `darling_scheduler_runnable_tasks` | count | `server` | CPU scheduler stats | Runnable tasks across the schedulers. |
+| `darling_batch_requests_per_second` | per second | `server` | Perfmon | Batch requests. |
+| `darling_compilations_per_second` | per second | `server` | Perfmon | SQL compilations. |
+| `darling_recompilations_per_second` | per second | `server` | Perfmon | SQL recompilations. |
+| `darling_transactions_per_second` | per second | `server` | Perfmon | Transactions. |
+| `darling_lock_waits_per_second` | per second | `server` | Perfmon | Lock waits. |
+| `darling_processes_blocked` | count | `server` | Perfmon | Processes blocked now. A gauge, not a rate. |
+| `darling_sessions` | count | `server`, `state` | Session summary | One series each for `running`, `sleeping`, `background` and `dormant`. |
+| `darling_memory_total_server_mb` | MB | `server` | Memory stats | Total server memory. |
+| `darling_memory_target_server_mb` | MB | `server` | Memory stats | Target server memory. |
+| `darling_memory_plan_cache_mb` | MB | `server` | Memory stats | Plan cache size. |
+| `darling_memory_os_available_mb` | MB | `server` | Memory stats | Physical memory available to the OS. |
+| `darling_memory_grants_pending` | count | `server` | Memory grants | Queries waiting for a grant, on the regular resource semaphore, summed over pools. |
+| `darling_memory_granted_mb` | MB | `server` | Memory grants | Memory granted to queries, on the regular resource semaphore, summed over pools. |
+| `darling_lazy_writes_per_second` | per second | `server` | Perfmon | Lazy writes. |
+| `darling_page_reads_per_second` | per second | `server` | Perfmon | Page reads. |
+| `darling_page_writes_per_second` | per second | `server` | Perfmon | Page writes. |
+| `darling_free_list_stalls_per_second` | per second | `server` | Perfmon | Free list stalls. |
+| `darling_disk_read_latency_ms` | ms | `server`, `file_type`, `scope` | File I/O | Average read latency. |
+| `darling_disk_write_latency_ms` | ms | `server`, `file_type`, `scope` | File I/O | Average write latency. |
+| `darling_disk_read_mb_per_second` | MB per second | `server`, `file_type`, `scope` | File I/O | Read throughput. |
+| `darling_disk_write_mb_per_second` | MB per second | `server`, `file_type`, `scope` | File I/O | Write throughput. |
+| `darling_disk_reads_per_second` | per second | `server`, `file_type`, `scope` | File I/O | Reads. |
+| `darling_disk_writes_per_second` | per second | `server`, `file_type`, `scope` | File I/O | Writes. |
+| `darling_log_flushes_per_second` | per second | `server` | Perfmon | Log flushes. |
+| `darling_log_bytes_flushed_per_second` | bytes per second | `server` | Perfmon | Log bytes flushed. |
+| `darling_disk_volume_min_free_percent` | percent | `server` | Database sizes | Free space on the fullest volume of the server. |
+| `darling_wait_ms_per_second` | ms per second | `server`, `category` | Wait stats | Wait time by category. One series per category that waited in the interval. |
+| `darling_signal_wait_percent` | percent | `server` | Wait stats | Signal wait time as a share of all wait time. |
+| `darling_tempdb_used_mb` | MB | `server`, `kind` | tempdb stats | One series each for `user_objects`, `internal_objects` and `version_store`. |
+| `darling_tempdb_unallocated_mb` | MB | `server` | tempdb stats | Unallocated space. |
+| `darling_tempdb_log_used_percent` | percent | `server` | tempdb stats | tempdb log space used. |
+
+### Prometheus scrape config
+
+Put the token in a file that only Prometheus can read, and point `credentials_file` at it. The file holds the token and nothing else.
+
+```yaml
+scrape_configs:
+  - job_name: darling
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/darling-metrics-token
+    static_configs:
+      - targets: ['darling.example:5155']
+```
+
+A scrape interval of 60 seconds or more matches the refresh. A shorter interval returns the same numbers until the next refresh.

@@ -162,6 +162,11 @@ public sealed class ComposeStoreRolesLiveTests
             await AssertLeastPrivilegeAsync(web.ConnectionString, "web", ct);
             await AssertLeastPrivilegeAsync(mcp.ConnectionString, "mcp", ct);
 
+            /* #9013: the metrics port, which only reads, connects as the viewer role this start provisioned. */
+            var metrics = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Metrics, owner, null, inContainer: true, verdict);
+            Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, metrics.Source);
+            Assert.Equal("viewer", await CurrentUserAsync(metrics.ConnectionString, ct));
+
             /* The continuous-aggregate case: a collect relation created AFTER provisioning — the TimescaleDB step
                builds the aggregates later in the same start — is readable to the MCP tools without a restart. */
             await ExecAsync(owner, "CREATE VIEW collect.zz_3914_after_provisioning AS SELECT 42 AS answer;", ct);
@@ -309,6 +314,13 @@ public sealed class ComposeStoreRolesLiveTests
             Assert.Contains("The web dashboard connects to the store as the web role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
             Assert.Contains("The MCP server connects to the store as the mcp role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("connects to the store as the owner login", refusedLog.Joined, StringComparison.Ordinal);
+
+            /* #9013: the metrics port takes the viewer credential the earlier start wrote, though a web one is there too. */
+            var metricsLog = new CapturingTestLogger();
+            var metricsLogin = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Metrics, postgres, metricsLog, ct);
+            Assert.True(metricsLogin is not null, metricsLog.Joined);
+            Assert.Equal("viewer", await CurrentUserAsync(metricsLogin!, ct));
+            Assert.Contains("The metrics port connects to the store as the read-only viewer role", metricsLog.Joined, StringComparison.Ordinal);
 
             /* 2. A collector that stood down before provisioning: the same. The verdict is the one a stand-down settles,
                   pointed at this test's directory (DarlingStoreLoginsTests pins that a real one names the shipped

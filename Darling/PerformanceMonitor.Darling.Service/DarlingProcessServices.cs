@@ -97,6 +97,16 @@ internal static class DarlingProcessServices
 
     services.AddHostedService<DarlingWorker>();
 
+    /* #9013: the opt-in Prometheus port (/metrics). Registered AFTER the worker because its snapshot is a store read: the worker
+       migrates the store and provisions the login it uses, and a scrape answers the meta series only until the worker collects. The
+       config loader is passed in so the host's own source never loads darling.json itself. Self-gating on metrics.enabled (default OFF). */
+    services.AddHostedService(provider => new PerformanceMonitor.Darling.Service.Hosting.DarlingMetricsHostService(
+        provider.GetRequiredService<CollectorRuntimeState>(),
+        provider.GetRequiredService<ReadAdmission>(),
+        provider.GetRequiredService<MonitoredServerRegistryState>(),
+        provider.GetRequiredService<ILogger<PerformanceMonitor.Darling.Service.Hosting.DarlingMetricsHostService>>(),
+        loadConfig: () => DarlingConfig.Load()));
+
     /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on
        darling.json's mcp.enabled (default OFF), so Program.cs stays config-free like the worker. */
     services.AddHostedService<DarlingMcpHostService>();

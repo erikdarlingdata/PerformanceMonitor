@@ -17,6 +17,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.FrontDoor;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
@@ -477,6 +478,21 @@ public sealed class DarlingConfig
     }
 
     private HealthConfig _health = new();
+
+    /// <summary>
+    /// #9013: the opt-in Prometheus <c>/metrics</c> port, gauges only behind a bearer token. FILE-ONLY: the control plane never
+    /// writes it, and a change needs a restart. Optional; omit the section entirely.
+    /// </summary>
+    [JsonPropertyName("metrics")]
+    public MetricsConfig Metrics
+    {
+        get => _metrics;
+
+        /* "metrics": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _metrics = value ?? new();
+    }
+
+    private MetricsConfig _metrics = new();
 
     /// <summary>
     /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
@@ -2369,6 +2385,142 @@ public sealed class HealthConfig
 
         return problems;
     }
+}
+
+/// <summary>
+/// #9013: the Prometheus <c>/metrics</c> port's config. Off by default. FILE-ONLY: the control plane never writes it, and a
+/// change needs a restart. Unlike the health port it serves fleet numbers, so it needs a bearer <see cref="Token"/> (a literal,
+/// <c>env:</c> or <c>file:</c>) and takes an optional <see cref="AllowFrom"/> address filter. There is no TLS in v1.
+/// </summary>
+public sealed class MetricsConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 5155;
+
+    /// <summary>
+    /// The address to bind. Empty means <c>0.0.0.0</c> inside a container and <c>127.0.0.1</c> outside one.
+    /// </summary>
+    [JsonPropertyName("listen")]
+    public string Listen { get; set; } = "";
+
+    /// <summary>
+    /// The bearer token a scraper presents: a literal, <c>env:NAME</c> or <c>file:PATH</c>. Required when the port is on.
+    /// </summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    /// <summary>
+    /// CIDRs separated by commas, or a JSON array of CIDR strings, like <c>web.network.allowFrom</c>: the converter joins an array
+    /// with commas and <see cref="Hosting.CidrAllowList"/> parses either. Empty or absent means no address filter.
+    /// </summary>
+    [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
+    public string? AllowFrom { get; set; }
+
+    /// <summary>
+    /// #9013: what makes the metrics host refuse to listen, empty when the block is usable or off. Not part of
+    /// <see cref="DarlingConfig.Validate"/>, for the reason given on <see cref="HealthConfig.Problems"/>: a bad block turns off only
+    /// the port, with one Critical line, and collection keeps running. <paramref name="healthPort"/> is null when
+    /// <c>health.enabled</c> is false (a disabled health port binds nothing to clash with). Problem texts name the key, never the
+    /// token value. <paramref name="resolveSecret"/> defaults to <see cref="DarlingSecretSource.Resolve"/>.
+    /// </summary>
+    internal static MetricsCheck Check(MetricsConfig m, int? webPort, int? mcpPort, int? healthPort, Func<string, string, string>? resolveSecret = null)
+    {
+        var problems = new List<string>();
+        if (!m.Enabled)
+        {
+            return new MetricsCheck(problems, null, default, false);
+        }
+
+        if (m.Port is < 1 or > 65535)
+        {
+            problems.Add($"metrics.port must be between 1 and 65535 (got {m.Port}).");
+        }
+        else if (m.Port == webPort)
+        {
+            problems.Add($"metrics.port ({m.Port}) is the same as web.port — give the metrics listener its own port.");
+        }
+        else if (m.Port == mcpPort)
+        {
+            problems.Add($"metrics.port ({m.Port}) is the same as mcp.port — give the metrics listener its own port.");
+        }
+        else if (m.Port == healthPort)
+        {
+            problems.Add($"metrics.port ({m.Port}) is the same as health.port — give the metrics listener its own port.");
+        }
+
+        if (HealthConfig.ResolveListenAddress(m.Listen, inContainer: false) is null)
+        {
+            problems.Add($"metrics.listen (\"{m.Listen}\") is not an IP address.");
+        }
+
+        string? token = null;
+        var tokenIsLiteral = false;
+        if (string.IsNullOrWhiteSpace(m.Token))
+        {
+            problems.Add("metrics.token is required when metrics.enabled is true.");
+        }
+        else
+        {
+            tokenIsLiteral = !DarlingSecretSource.IsReference(m.Token);
+            try
+            {
+                token = (resolveSecret ?? DarlingSecretSource.Resolve)(m.Token, "metrics.token");
+            }
+            catch (InvalidOperationException ex)
+            {
+                /* The resolver's message names the setting and the env var or file, never the secret. */
+                problems.Add($"metrics.token could not be resolved: {ex.Message}");
+            }
+
+            /* #9013: the floor is the shared one (DescribeTokenProblem decides), but the shared text points at --configure-network and
+               an "exposed surface", neither of which is the metrics port's, so the floor is named here in the port's own words. Like
+               the shared text it never gives the token's length. */
+            if (token is not null && DarlingHostBinding.DescribeTokenProblem(token) is not null)
+            {
+                problems.Add(string.IsNullOrWhiteSpace(token)
+                    ? "metrics.token resolves to an empty value."
+                    : $"metrics.token is too short or too repetitive: the metrics port needs a token of at least {DarlingHostBinding.MinimumTokenLength} characters, "
+                        + $"at least {DarlingHostBinding.MinimumDistinctTokenCharacters} of them different (to make one, see the token note in the README).");
+                token = null;
+            }
+        }
+
+        var allowList = default(CidrAllowList);
+        if (!string.IsNullOrWhiteSpace(m.AllowFrom) && !CidrAllowList.TryParse(m.AllowFrom, out allowList))
+        {
+            problems.Add("metrics.allowFrom is not a comma-separated list of CIDRs (for example \"10.0.0.0/8,192.168.1.0/24\").");
+        }
+
+        return new MetricsCheck(problems, problems.Count == 0 ? token : null, allowList, tokenIsLiteral);
+    }
+}
+
+/// <summary>
+/// #9013: the outcome of <see cref="MetricsConfig.Check"/>. <see cref="Token"/> is the resolved token, set only when there are no
+/// <see cref="Problems"/>; <see cref="AllowList"/> is <c>default</c> (Count 0, no address filter) when <c>allowFrom</c> is blank.
+/// A class, not a record, so no generated <c>ToString</c> can print the resolved token into a log line.
+/// </summary>
+internal sealed class MetricsCheck
+{
+    internal MetricsCheck(IReadOnlyList<string> problems, string? token, CidrAllowList allowList, bool tokenIsLiteral)
+    {
+        Problems = problems;
+        Token = token;
+        AllowList = allowList;
+        TokenIsLiteral = tokenIsLiteral;
+    }
+
+    internal IReadOnlyList<string> Problems { get; }
+
+    internal string? Token { get; }
+
+    internal CidrAllowList AllowList { get; }
+
+    internal bool TokenIsLiteral { get; }
 }
 
 /// <summary>
