@@ -29,27 +29,11 @@ internal static partial class DarlingDataReader
     /// </summary>
     internal sealed record HostHourlyMid(DateTime MidStart, DateTime MidEnd);
 
-    /// <summary>
-    /// The rollup mid of a raw top-queries window, or null to read raw alone. The mid starts at the first hour boundary after
-    /// <paramref name="startUtc"/> and ends at the last hour boundary at or before <paramref name="endUtc"/> and before the newest hour the
-    /// tick has closed (<paramref name="nowUtc"/> less <see cref="QueryStatsHostHourly.Grace"/>): a window that ends now would otherwise name an
-    /// hour nobody has built yet and fall back to raw every time. A mid shorter than <see cref="MinHourlyMid"/> saves little.
-    /// </summary>
-    internal static HostHourlyMid? PlanTopQueriesHostHourlyMid(DateTime startUtc, DateTime endUtc, DateTime nowUtc)
-    {
-        var midStart = new DateTime(startUtc.Year, startUtc.Month, startUtc.Day, startUtc.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1);
-        var closed = nowUtc - QueryStatsHostHourly.Grace;
-        var limit = endUtc < closed ? endUtc : closed;
-        var midEnd = new DateTime(limit.Year, limit.Month, limit.Day, limit.Hour, 0, 0, DateTimeKind.Unspecified);
-        return midEnd - midStart < MinHourlyMid ? null : new HostHourlyMid(midStart, midEnd);
-    }
+    /// <summary>The rollup mid of a raw top-queries window, or null to read raw alone: <see cref="QueryStatsHostHourly.PlanMid"/>, which names the rules.</summary>
+    internal static HostHourlyMid? PlanTopQueriesHostHourlyMid(DateTime startUtc, DateTime endUtc, DateTime nowUtc) =>
+        QueryStatsHostHourly.PlanMid(startUtc, endUtc, nowUtc) is var (midStart, midEnd) ? new HostHourlyMid(midStart, midEnd) : null;
 
     /// <summary>The raw statement the mid replaces keeps its tail: the representative text, the orphan fallback, the WAITFOR trim, the page order.</summary>
-    /// <summary>True when the store has the rollup, its build ledger and the hour ledger the coverage check reads (a store below V287 has no rollup).</summary>
-    private const string RollupTablesExistSql =
-        "SELECT to_regclass('collect.query_stats_host_hourly') IS NOT NULL AND to_regclass('collect.query_stats_host_hourly_built') IS NOT NULL " +
-        "AND to_regclass('collect.query_stats_hour_ledger') IS NOT NULL AND to_regclass('collect.query_stats_hour_ledger_state') IS NOT NULL";
-
     private const string HostHourlyTailMarker = "latest_text AS MATERIALIZED (";
 
     /// <summary>#9164: <see cref="TopQueriesSql"/>, ranked and widened from the host-hourly rollup plus the raw edges. A property, not a field: the two raw statements live in the other file of this class, and the order static fields of a partial class run in across files is not defined. Binds $1 to $8 as the raw statement does, then $9 <c>MidStart</c> and $10 <c>MidEnd</c>.</summary>
@@ -237,8 +221,9 @@ internal static partial class DarlingDataReader
 
     /// <summary>
     /// #9164: reads a raw top-queries window through the hourly host rollup, or returns null when the read must run the raw statement:
-    /// a store without the rollup (below V287), or an hour of the mid that the rollup does not hold whole
-    /// (<see cref="QueryStatsHostHourly.IsCompleteAsync"/>). The coverage check and the statement run in one repeatable-read
+    /// a store without the rollup (below V287), an hour of the mid that the rollup does not hold whole anywhere but at the end, or an end that
+    /// shrinks the mid below <see cref="QueryStatsHostHourly.MinMid"/> (<see cref="QueryStatsHostHourly.UsableMidEndAsync"/>). Hours at the end of the mid the
+    /// tick has not built yet move to the raw edge: the mid ends at the last built hour. The coverage check and the statement run in one repeatable-read
     /// transaction, so a build or a late row between them cannot change what the check answered.
     /// </summary>
     private static async Task<List<TopQueryRow>?> TryReadTopQueriesHostHourlyAsync(
@@ -247,18 +232,14 @@ internal static partial class DarlingDataReader
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
-        await using (var probe = new NpgsqlCommand(RollupTablesExistSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
-        {
-            if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
-            {
-                return null;
-            }
-        }
-
-        if (!await QueryStatsHostHourly.IsCompleteAsync(connection, transaction, serverId, mid.MidStart, mid.MidEnd, McpCommandDeadlines.ReadSeconds, cancellationToken))
+        /* The newest closed hours may not be built yet (the tick builds an hour on its first hourly run after the grace): those move to
+           the raw edge. Any other hole or stale hour, or a store without the rollup, sends the whole read to raw. */
+        if (await QueryStatsHostHourly.UsableMidEndAsync(connection, transaction, serverId, mid.MidStart, mid.MidEnd, McpCommandDeadlines.ReadSeconds, cancellationToken) is not DateTime midEnd)
         {
             return null;
         }
+
+        mid = mid with { MidEnd = midEnd };
 
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($7), as the raw read does. */
         return await TopFill.RunAsync(top, async candidates =>

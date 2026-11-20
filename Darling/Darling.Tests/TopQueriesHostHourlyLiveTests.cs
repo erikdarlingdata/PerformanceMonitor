@@ -17,6 +17,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Darling.Tests;
 using Xunit;
 
@@ -205,6 +206,118 @@ public sealed class TopQueriesHostHourlyLiveTests
         });
 
     [Fact]
+    public Task AWindowEndingNow_WithTheNewestClosedHoursNotBuiltYet_StillRoutesAndEqualsRaw() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            /* The window ends now. The newest closed hours (past the grace) are not built until the tick's next hourly run, so the planned
+               mid names hours the rollup does not hold yet. Those hours belong to the raw edge; the rest of the mid is still whole. */
+            var now = end;
+            var midEnd = new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0);
+            Assert.Equal(midEnd, DarlingDataReader.PlanTopQueriesHostHourlyMid(start, end, now)!.MidEnd);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "DELETE FROM collect.query_stats_host_hourly_built WHERE server_id = $1 AND bucket >= $2", ServerId, midEnd.AddHours(-2));
+
+            var cases = Cases.Where(c => c.Label is "cpu" or "duration" or "executions" or "host objects cpu" or "parallel_only").ToArray();
+            var routed = new Dictionary<string, Page>();
+            foreach (var c in cases)
+            {
+                routed[c.Label] = await ReadAsync(scratch, c, start, end, ct, now);
+                Assert.True(routed[c.Label].ServedByHostHourly, $"{c.Label}: an unbuilt tail of a window that ends now sent the read to raw");
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_host_hourly_built");
+            foreach (var c in cases)
+            {
+                var raw = await ReadAsync(scratch, c, start, end, ct, now);
+                Assert.False(raw.ServedByHostHourly);
+                Assert.NotEqual("[]", raw.Json);
+                Assert.Equal(raw.Json, routed[c.Label].Json);
+            }
+        });
+
+    [Fact]
+    public Task AnUnbuiltTail_WithAHoleBeforeIt_OrLeavingTooShortAMid_ReadsRaw() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            var c = Cases[0];
+            var now = end;
+            var midEnd = new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0);
+            var midStart = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0).AddHours(1);
+            var whole = await ReadAsync(scratch, c, start, end, ct, now);
+            Assert.True(whole.ServedByHostHourly);
+
+            /* The tail is unbuilt, and so is an hour well before it: the hole sends the whole read to raw, with the raw answer. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "DELETE FROM collect.query_stats_host_hourly_built WHERE server_id = $1 AND (bucket >= $2 OR bucket = $3)", ServerId, midEnd.AddHours(-1), midEnd.AddHours(-9));
+            var hole = await ReadAsync(scratch, c, start, end, ct, now);
+            Assert.False(hole.ServedByHostHourly);
+            Assert.Equal(whole.Json, hole.Json);
+
+            /* Only the first hour of the mid is built: the shrunk mid is one hour, under the minimum, so the read is raw. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "DELETE FROM collect.query_stats_host_hourly_built WHERE server_id = $1 AND bucket > $2", ServerId, midStart);
+            Assert.True(await QueryStatsHostHourly.IsCompleteAsync(connection, null, ServerId, midStart, midStart.AddHours(1), 30, ct));
+            var tooShort = await ReadAsync(scratch, c, start, end, ct, now);
+            Assert.False(tooShort.ServedByHostHourly);
+            Assert.Equal(whole.Json, tooShort.Json);
+        });
+
+    [Fact]
+    public Task TheViewersTopQueries_AreTheRawPageRowForRow_WhenRankedFromTheRollup() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            /* A restart row (interval 0) in a whole hour, after the build: raw's ranking sums it, the rollup's sums leave it out, so the
+               statement reads such rows from raw. It outweighs every other statement, so it must lead the page. */
+            var at = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0).AddHours(12).AddMinutes(30);
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
+                INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count,
+                                                 delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+                VALUES (916430000001, $1, {ServerId}, '{ServerName}', 'dbV', 'V_RESTART', 1, 1, 9000000000, 0)
+                """, at);
+
+            var routed = await ViewerPageAsync(viewer, start, end, ct);
+            Assert.Contains("V_RESTART", routed);
+            Assert.Contains("H003", routed);
+
+            /* The rollup must be what ranked it: twelve statements the rollup calls enormous crowd the real top five (H003 among them, ranked there by its restart rows) out of the candidates. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE collect.query_stats_host_hourly SET total_elapsed_us = 1000000000000 WHERE query_hash >= 'H029'");
+            Assert.DoesNotContain("H003", await ViewerPageAsync(viewer, start, end, ct));
+
+            /* With the build rows gone the read is the raw statement, and its page is the page the rollup ranked before it was altered. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_host_hourly_built");
+            Assert.Equal(await ViewerPageAsync(viewer, start, end, ct), routed);
+        });
+
+    [Fact]
+    public Task TheViewersTopQueries_WithAHoleInTheRollup_ReadRawWithTheRawAnswer() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            var whole = await ViewerPageAsync(viewer, start, end, ct);
+
+            /* An hour with no build sends the read to raw: an altered rollup changes nothing, and the answer is the same page. */
+            var hour = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0).AddHours(9);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_host_hourly_built WHERE server_id = $1 AND bucket = $2", ServerId, hour);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE collect.query_stats_host_hourly SET total_elapsed_us = 1000000000000 WHERE query_hash >= 'H029'");
+            Assert.Equal(whole, await ViewerPageAsync(viewer, start, end, ct));
+        });
+
+    /// <summary>The Viewer's Top Queries page as JSON, every column of every row, in page order.</summary>
+    private static async Task<string> ViewerPageAsync(ViewerDataService viewer, DateTime start, DateTime end, CancellationToken ct)
+    {
+        /* Every plain column of every row (the row also carries a tag-label member that is not data). */
+        var columns = typeof(ViewerQueryStatsRow).GetProperties()
+            .Where(p => (Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) is { } t && (t.IsPrimitive || t == typeof(string) || t == typeof(DateTime) || t == typeof(decimal)))
+            .ToArray();
+        var rows = await viewer.GetTopQueriesByCpuAsync(ServerId, start, end, 5, null, null, ct);
+        return JsonSerializer.Serialize(rows.Select(r => columns.ToDictionary(c => c.Name, c => c.GetValue(r))));
+    }
+
+    [Fact]
     public Task AStoreWithoutTheRollupTables_ReadsRaw() =>
         WithStoreAsync(async (scratch, connection, start, end, ct) =>
         {
@@ -255,11 +368,11 @@ public sealed class TopQueriesHostHourlyLiveTests
     private sealed record Page(string Json, bool ServedByHostHourly, string[] Hashes);
 
     /// <summary>The routed read through a fresh data source (coverage and availability are cached per source).</summary>
-    private static async Task<Page> ReadAsync(ScratchPostgres scratch, Case c, DateTime start, DateTime end, CancellationToken ct)
+    private static async Task<Page> ReadAsync(ScratchPostgres scratch, Case c, DateTime start, DateTime end, CancellationToken ct, DateTime? nowUtc = null)
     {
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         var result = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-            source, ServerId, start, end, c.Top, c.Databases, c.ByHostObject, c.MinDop, c.Ranking, ct);
+            source, ServerId, start, end, c.Top, c.Databases, c.ByHostObject, c.MinDop, c.Ranking, ct, nowUtc: nowUtc);
         Assert.Equal(RetentionTier.Raw, result.Tier);
         return new Page(JsonSerializer.Serialize(result.Rows), result.ServedByHostHourly, result.Rows.Select(r => r.QueryHash).ToArray());
     }

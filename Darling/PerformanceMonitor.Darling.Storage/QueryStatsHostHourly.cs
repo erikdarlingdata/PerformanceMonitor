@@ -259,7 +259,7 @@ WHERE bucket < date_trunc('hour', $1::timestamp - make_interval(days => $2)) + i
     /// build, or built from a different number of raw rows than the ledger holds now (a late row). $2 and $3 are whole hours.
     /// </summary>
     public const string IncompleteHoursSql = @"
-SELECT h.bucket
+SELECT h.bucket, b.server_id IS NOT NULL AS built
 FROM generate_series($2::timestamp, $3::timestamp - interval '1 hour', interval '1 hour') AS h(bucket)
 LEFT JOIN collect.query_stats_host_hourly_built AS b
   ON b.server_id = $1 AND b.bucket = h.bucket
@@ -268,6 +268,54 @@ WHERE NOT (
     AND b.server_id IS NOT NULL
     AND b.raw_rows = COALESCE((SELECT SUM(l.n) FROM collect.query_stats_hour_ledger AS l WHERE l.server_id = $1 AND l.bucket = h.bucket), 0))
 ORDER BY h.bucket;";
+
+    /// <summary>The fewest whole hours worth reading from the rollup. A shorter mid saves little.</summary>
+    public static readonly TimeSpan MinMid = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// The whole hours <c>[MidStart, MidEnd)</c> of a raw top-queries window <c>(startUtc, endUtc]</c> that the rollup may serve, or null to
+    /// read raw alone. The read is (start, end] on <c>collection_time</c>, so an hour bucket <c>[h, h + 1h)</c> is whole only when
+    /// <c>h &gt; start</c> and <c>h + 1h &lt;= end</c>. The mid starts at the first hour boundary after <paramref name="startUtc"/> and ends at
+    /// the last hour boundary at or before <paramref name="endUtc"/> and before the newest hour the tick may have closed
+    /// (<paramref name="nowUtc"/> less <see cref="Grace"/>). The tick builds a closed hour only on its first hourly run after that, so a reader
+    /// shrinks the mid again to the last built hour (<see cref="UsableMidEndAsync"/>). A mid shorter than <see cref="MinMid"/> saves little.
+    /// </summary>
+    public static (DateTime MidStart, DateTime MidEnd)? PlanMid(DateTime startUtc, DateTime endUtc, DateTime nowUtc)
+    {
+        var midStart = new DateTime(startUtc.Year, startUtc.Month, startUtc.Day, startUtc.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1);
+        var closed = nowUtc - Grace;
+        var limit = endUtc < closed ? endUtc : closed;
+        var midEnd = new DateTime(limit.Year, limit.Month, limit.Day, limit.Hour, 0, 0, DateTimeKind.Unspecified);
+        return midEnd - midStart < MinMid ? null : (midStart, midEnd);
+    }
+
+    /// <summary>True when the store has the rollup, its build ledger and the hour ledger the coverage check reads (a store below V287 has no rollup).</summary>
+    public const string TablesExistSql =
+        "SELECT to_regclass('collect.query_stats_host_hourly') IS NOT NULL AND to_regclass('collect.query_stats_host_hourly_built') IS NOT NULL " +
+        "AND to_regclass('collect.query_stats_hour_ledger') IS NOT NULL AND to_regclass('collect.query_stats_hour_ledger_state') IS NOT NULL";
+
+    /// <summary>
+    /// Where the rollup's mid ends for a read: null when the store has no rollup, when an hour of <c>[midStart, midEnd)</c> is not whole
+    /// anywhere but at the end, or when the end that is left is under <see cref="MinMid"/> (<see cref="BuiltThroughAsync"/>). Run it on the
+    /// read's own repeatable-read transaction and run the read's statement on the same one, so a build or a late row between the two cannot
+    /// change what this answered.
+    /// </summary>
+    public static async Task<DateTime?> UsableMidEndAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime midStart, DateTime midEnd, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using (var probe = new NpgsqlCommand(TablesExistSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
+            {
+                return null;
+            }
+        }
+
+        var through = await BuiltThroughAsync(connection, transaction, serverId, midStart, midEnd, commandTimeoutSeconds, cancellationToken);
+        return through is DateTime end && end - midStart >= MinMid ? end : null;
+    }
 
     /// <summary>One planned hour and the servers due in it.</summary>
     public readonly record struct Build(DateTime Bucket, int[] ServerIds);
@@ -283,11 +331,36 @@ ORDER BY h.bucket;";
     /// hour of the range that is not listed from the rollup and every listed hour from raw.
     /// </summary>
     public static async Task<IReadOnlyList<DateTime>> IncompleteHoursAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime from, DateTime to, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        (await ReadIncompleteHoursAsync(connection, transaction, serverId, from, to, commandTimeoutSeconds, cancellationToken)).Select(h => h.Bucket).ToList();
+
+    /// <summary>
+    /// #9164: where the whole hours of <c>[from, to)</c> the rollup holds stop, for a read whose window ends now. The tick builds an hour on its
+    /// first hourly run after <see cref="Grace"/>, so the newest closed hours of a window that ends now have no build yet. Those hours, at the
+    /// END of the range and with no build row at all, are not a defect: the read takes them from raw, as it takes its edges. Returns the end of
+    /// the usable range (<paramref name="to"/> when every hour is whole), or null when any other hour is not whole: a hole, a stale hour or an
+    /// hour before the ledger's start anywhere but in that unbuilt tail. A hole in the middle sends the whole read to raw even when the tail is unbuilt.
+    /// </summary>
+    public static async Task<DateTime?> BuiltThroughAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime from, DateTime to, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var incomplete = await ReadIncompleteHoursAsync(connection, transaction, serverId, from, to, commandTimeoutSeconds, cancellationToken);
+        var through = to;
+        for (var i = incomplete.Count - 1; i >= 0 && incomplete[i].Bucket == through.AddHours(-1) && !incomplete[i].Built; i--)
+        {
+            through = incomplete[i].Bucket;
+            incomplete.RemoveAt(i);
+        }
+
+        return incomplete.Count == 0 ? through : null;
+    }
+
+    private static async Task<List<(DateTime Bucket, bool Built)>> ReadIncompleteHoursAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime from, DateTime to, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        var hours = new List<DateTime>();
+        var hours = new List<(DateTime Bucket, bool Built)>();
         await using var command = new NpgsqlCommand(IncompleteHoursSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(from) });
@@ -295,7 +368,7 @@ ORDER BY h.bucket;";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            hours.Add(reader.GetDateTime(0));
+            hours.Add((reader.GetDateTime(0), reader.GetBoolean(1)));
         }
 
         return hours;

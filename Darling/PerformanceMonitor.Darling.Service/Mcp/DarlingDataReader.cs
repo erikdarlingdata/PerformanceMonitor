@@ -2059,7 +2059,7 @@ internal static partial class DarlingDataReader
     public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default,
-        QueryTagFilter? tags = null)
+        QueryTagFilter? tags = null, DateTime? nowUtc = null)
     {
     #pragma warning restore CA1068
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
@@ -2128,7 +2128,7 @@ internal static partial class DarlingDataReader
             TopRankings.Apply(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql, ranking, hourly: false), serverId, tags);
         /* #9164: a window with whole hours the hourly host rollup holds ranks them from the rollup and reads raw only for the edges.
            The answer is the raw answer, row for row; a hole in the rollup (or a store below V287) reads the raw statement below. */
-        var hostMid = PlanTopQueriesHostHourlyMid(startUtc, endUtc, DateTime.UtcNow);
+        var hostMid = PlanTopQueriesHostHourlyMid(startUtc, endUtc, nowUtc ?? DateTime.UtcNow);
         if (hostMid is not null)
         {
             var hostHourlySql = QueryTagReadJoin.Apply(

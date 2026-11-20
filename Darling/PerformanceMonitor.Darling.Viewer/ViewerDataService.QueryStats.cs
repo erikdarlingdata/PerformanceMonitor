@@ -536,6 +536,75 @@ public sealed partial class ViewerDataService
         ORDER BY p.page_ord
         """;
 
+    /// <summary>
+    /// #9164: <see cref="TopQueriesSql"/> with its ranking pass (pass 1) read from the hourly host rollup. The statement's second pass, the
+    /// wide row of the winners, still reads the window from raw by the winners' hashes, so every column of the page is the raw statement's. Only
+    /// the question "which groups win" changes, and it has to come out the same, so the ranking sums every raw row exactly once: the whole hours
+    /// <c>[$8, $9)</c> from the rollup (its sums count the interval-honest rows), the zero-interval rows of those hours from raw (restart rows
+    /// are rare, and raw's sum counts them), and the two edges, <c>(start, $8)</c> and <c>[$9, end]</c>, from raw. Binds $1 to $7 as
+    /// <see cref="TopQueriesSql"/> does, then $8 the first whole hour and $9 the end of the last. A property, not a field, so it never reads
+    /// the raw statement before that field has run.
+    /// </summary>
+    internal static string TopQueriesHostHourlySql => BuildTopQueriesHostHourlySql(TopQueriesSql);
+
+    private static string BuildTopQueriesHostHourlySql(string raw)
+    {
+        const string rankedMarker = "ranked AS MATERIALIZED (";
+        var tailAt = raw.IndexOf(rankedMarker, StringComparison.Ordinal);
+        if (!raw.TrimStart().StartsWith("WITH winners AS MATERIALIZED (", StringComparison.Ordinal) || tailAt < 0 || tailAt != raw.LastIndexOf(rankedMarker, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The raw top-queries statement no longer starts with its winners step and carries its ranked step exactly once.");
+        }
+
+        var unitFilters = $"""
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+               {DatabaseFilter.ExcludeClause("database_name", 7)}
+                /*TAG:hash:query_hash*/
+            """;
+        var head = $"""
+            WITH units AS MATERIALIZED (
+                /* The whole hours of the window, from the hourly host rollup: the interval-honest rows' sums. */
+                SELECT database_name, query_hash, host_object_name, total_executions AS executions, total_elapsed_us AS elapsed
+                FROM collect.query_stats_host_hourly
+                WHERE server_id = $1
+                AND   bucket >= $8
+                AND   bucket < $9
+            {unitFilters}
+                UNION ALL
+                /* The edges of the window, every row of them. */
+                SELECT database_name, query_hash, host_object_name, SUM(delta_execution_count), SUM(delta_elapsed_time)
+                FROM query_stats
+                WHERE server_id = $1
+                AND   ((collection_time > $2 AND collection_time < $8) OR (collection_time >= $9 AND collection_time <= $3))
+            {unitFilters}
+                GROUP BY database_name, query_hash, host_object_name
+                UNION ALL
+                /* The zero-interval rows of the whole hours, which the rollup's sums leave out and raw's sum counts (the partial restart-row index serves it). */
+                SELECT database_name, query_hash, host_object_name, SUM(delta_execution_count), SUM(delta_elapsed_time)
+                FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $8
+                AND   collection_time < $9
+                AND   sample_interval_seconds = 0
+            {unitFilters}
+                GROUP BY database_name, query_hash, host_object_name
+            ),
+            winners AS MATERIALIZED (
+                /* Pass 1 of the raw statement over the units: the same groups, the same HAVING, the same order with its tie-break. */
+                SELECT
+                    database_name AS win_database_name,
+                    query_hash AS win_query_hash,
+                    host_object_name AS win_host_object_name
+                FROM units
+                GROUP BY database_name, query_hash, host_object_name
+                HAVING SUM(executions) > 0 OR SUM(elapsed) > 0
+                ORDER BY SUM(elapsed) DESC, database_name, query_hash, host_object_name
+                LIMIT $6
+            ),
+            """ + "\n        ";
+        return head + raw[tailAt..];
+    }
+
     /// <summary>Grid cell preview cap for query/SQL text (single line).</summary>
     public const int CellTextCap = 160;
 
@@ -824,13 +893,21 @@ public sealed partial class ViewerDataService
     private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
+        /* #9164: a window with whole hours the hourly host rollup holds ranks them from the rollup (pass 1 only) and reads raw for
+           the edges. The answer is the raw answer, row for row; a hole in the rollup, or a store below V287, reads the statement below. */
+        if (QueryStatsHostHourly.PlanMid(startUtc, endUtc, DateTime.UtcNow) is var (midStart, midEnd))
+        {
+            var routed = await TryReadTopQueriesHostHourlyAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, midStart, midEnd, cancellationToken);
+            if (routed is not null)
+            {
+                return routed;
+            }
+        }
+
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
            while more candidates exist, under its bound. */
         return await TopFill.RunAsync(top, async candidates =>
         {
-        var rows = new List<ViewerQueryStatsRow>();
-        var candidateCount = 0;
-
         await using var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(TopQueriesSql, serverId, tags));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
@@ -838,6 +915,48 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
         command.Parameters.Add(databases.ExcludeParameter());
+        return await ReadTopQueriesPageAsync(command, cancellationToken);
+        });
+    }
+
+    /// <summary>
+    /// #9164: the Raw-tier read for a window with whole hours the hourly host rollup holds, or null when the read must run
+    /// <see cref="TopQueriesSql"/>: a store without the rollup (below V287), or an hour of the mid the rollup does not hold whole anywhere but at
+    /// the end (<see cref="QueryStatsHostHourly.UsableMidEndAsync"/>). Hours at the end that the tick has not built yet move to the raw edge. The
+    /// coverage check and the statement run in one repeatable-read transaction, so a build or a late row between them cannot change what the check
+    /// answered.
+    /// </summary>
+    private async Task<List<ViewerQueryStatsRow>?> TryReadTopQueriesHostHourlyAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags,
+        DateTime midStart, DateTime midEnd, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        if (await QueryStatsHostHourly.UsableMidEndAsync(connection, transaction, serverId, midStart, midEnd, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is not DateTime usableEnd)
+        {
+            return null;
+        }
+
+        var sql = QueryTagReadJoin.Apply(TopQueriesHostHourlySql, serverId, tags);
+        return await TopFill.RunAsync(top, async candidates =>
+        {
+            await using var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            AddServerWindowParameters(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
+            command.Parameters.Add(databases.ExcludeParameter());
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(midStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(usableEnd, DateTimeKind.Unspecified) });
+            return await ReadTopQueriesPageAsync(command, cancellationToken);
+        });
+    }
+
+    /// <summary>Reads the rows of a <see cref="TopQueriesSql"/> page, or of its host-hourly twin (the same columns), and the candidate count that rides on a row of its own.</summary>
+    private static async Task<(List<ViewerQueryStatsRow> Rows, int CandidateCount)> ReadTopQueriesPageAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var rows = new List<ViewerQueryStatsRow>();
+        var candidateCount = 0;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -900,7 +1019,6 @@ public sealed partial class ViewerDataService
         }
 
         return (rows, candidateCount);
-        });
     }
 
     /// <summary>
