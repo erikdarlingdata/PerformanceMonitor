@@ -67,7 +67,7 @@ public sealed class PgTableTuningTests
 
         /* Every remaining index is idempotent (no-op where a field box already hand-applied it, or a prior
            start made it); every #4247 drop is idempotent the same way (IF EXISTS no-ops once it is gone). */
-        Assert.Equal(9, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #8570 the procedure name index; #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index */
+        Assert.Equal(10, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* #8570 the procedure name index; #7147 the plain-store wait_stats daily-summary cover; server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #4605 two restart-row partial indexes; #3934 store-metrics skip-scan index; #9151 the Query Store panel covering index */
         Assert.Equal(5, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #4247: the two handle indexes + the three composer covering indexes */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
