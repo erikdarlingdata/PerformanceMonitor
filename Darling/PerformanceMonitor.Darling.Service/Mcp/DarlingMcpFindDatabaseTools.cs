@@ -41,7 +41,7 @@ public sealed class DarlingMcpFindDatabaseTools
 
     /// <summary>One row per server that has a database list in the look-back: the newest list's time and the stored spelling of
     /// the database when that list names it. $1 the name, $2 the look-back floor (naive UTC). The lateral MAX reads
-    /// <c>idx_database_states_time (server_id, collection_time)</c> once per server.</summary>
+    /// <c>idx_database_states_server_time_cover (server_id, collection_time) INCLUDE (database_name)</c> once per server.</summary>
     public const string FindDatabaseSql = @"
 SELECT s.server_id,
        s.server_name,
