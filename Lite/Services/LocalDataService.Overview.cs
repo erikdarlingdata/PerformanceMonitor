@@ -482,7 +482,7 @@ public static class ServerCardStatusRules
         ServerCardStatus.CollectorErrors => "Warning",
         ServerCardStatus.Online => "Online",
         ServerCardStatus.Offline => "Offline",
-        ServerCardStatus.Disabled => "Disabled",
+        ServerCardStatus.Disabled => ServerHealthClassifier.DisabledServerStatus,
         _ => "Connecting"
     };
 

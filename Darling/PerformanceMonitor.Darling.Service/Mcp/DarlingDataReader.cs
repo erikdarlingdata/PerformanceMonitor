@@ -300,7 +300,8 @@ internal static class DarlingDataReader
         decimal MonthlyCostUsd = 0m,
         DateTime? ConnectDownSince = null,
         string? LastConnectError = null,
-        bool Attempted = false);
+        bool Attempted = false,
+        bool IsEnabled = true);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -3864,7 +3865,8 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// Every enabled server plus its newest successful collection instant — the list_servers read. #8464: only a
+    /// Every configured server plus its newest successful collection instant — the list_servers read. #9087: a server whose collection is
+    /// turned off is a row too (<c>is_enabled</c> false), which the tool lists as Disabled; the read used to leave it out without saying so. #8464: only a
     /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a
     /// failed one included, so a read over every row moved a dark server's <c>last_collection</c> forward on each failed
     /// attempt, and the freshness-derived status with it. Drives the
@@ -3910,7 +3912,8 @@ internal static class DarlingDataReader
             COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
             {ConnectDownSinceSql.Healed} AS connect_down_since,
             s.last_connect_error,
-            {CollectionAttemptSql.Attempted} AS attempted
+            {CollectionAttemptSql.Attempted} AS attempted,
+            c.is_enabled
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3922,7 +3925,6 @@ internal static class DarlingDataReader
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
-        WHERE c.is_enabled
         ORDER BY s.server_name
         """;
 
@@ -3949,7 +3951,8 @@ internal static class DarlingDataReader
                 reader.GetDecimal(10),
                 reader.IsDBNull(11) ? null : reader.GetDateTime(11),
                 reader.IsDBNull(12) ? null : reader.GetString(12),
-                reader.GetBoolean(13)));
+                reader.GetBoolean(13),
+                reader.GetBoolean(14)));
         }
 
         return rows;
