@@ -58,6 +58,15 @@ public partial class App : Application
     private SingleInstanceSignal? _instanceSignal;
     private MainWindow? _mainWindow;
 
+    /// <summary>#9142: what this start does (--headless, --stop), read once from the command line.</summary>
+    private LiteStartupPlan _startupPlan = new(Headless: false, Stop: false);
+
+    /// <summary>#9142: the plan of this process, for the parts of the app that build the tray and the window.</summary>
+    internal static LiteStartupPlan StartupPlan { get; private set; } = new(Headless: false, Stop: false);
+
+    /// <summary>#9142: true when this process runs with no window and no tray icon (<c>--headless</c>).</summary>
+    public static bool IsHeadless => HeadlessUi.IsHeadless;
+
     /// <summary>
     /// Gets the application data directory where config and data files are stored.
     /// </summary>
@@ -603,6 +612,27 @@ public partial class App : Application
     {
         SetCurrentProcessExplicitAppUserModelID("DarlingData.PerformanceMonitor.Lite");
 
+        _startupPlan = LiteStartupPlan.FromArgs(e.Args);
+        StartupPlan = _startupPlan;
+        HeadlessUi.IsHeadless = _startupPlan.Headless;
+        HeadlessUi.Info = message => AppLogger.Info("Headless", message);
+
+        /* #9142: --stop asks the running instance to shut down through the exit channel the upgrade handoff uses, so it runs
+           its real shutdown (DuckDB close, MCP unbind) where a scheduled task's End would end the process with none of it. It
+           starts nothing: no mutex, no window, no data folder. The exit code says what happened (0 stopped, 1 nothing was
+           listening, 2 still running after the wait). */
+        if (_startupPlan.Stop)
+        {
+            var stopCode = StopCommand.Run(
+                () => SingleInstanceSignal.TrySignal(ExitForUpgradeEventName),
+                () => StopCommand.OtherInstanceRunning("PerformanceMonitorLite"),
+                TimeSpan.FromSeconds(60),
+                System.Threading.Thread.Sleep,
+                msg => System.Diagnostics.Debug.WriteLine(msg));
+            Shutdown(stopCode);
+            return;
+        }
+
         /* Single-instance with upgrade handoff. Runs synchronously, at the top of OnStartup before
            base.OnStartup and any window/data init, so we only open the shared DuckDB / bind the MCP
            port after any older instance has released them. A newer build closes an older tray-resident
@@ -614,9 +644,12 @@ public partial class App : Application
             ProcessName = "PerformanceMonitorLite",
             ExitEventName = ExitForUpgradeEventName,
             SurfaceRunningInstance = () => SingleInstanceSignal.TrySignal(ShowWindowEventName),
-            GracefulSelfExit = () => Dispatcher.BeginInvoke(new Action(Shutdown)),
-            Prompts = new MessageBoxHandoffPrompts("Performance Monitor Lite"),
-            AutoConfirm = Array.Exists(e.Args, a => string.Equals(a, HandoffArgs.AutoConfirm, StringComparison.OrdinalIgnoreCase)),
+            GracefulSelfExit = () => Dispatcher.BeginInvoke(new Action(RequestShutdown)),
+            /* #9142: a headless start has no one to answer a dialog, so it takes over from an older instance without asking and
+               never raises a prompt. */
+            Prompts = _startupPlan.Headless ? new HeadlessHandoffPrompts() : new MessageBoxHandoffPrompts("Performance Monitor Lite"),
+            AutoConfirm = _startupPlan.ConfirmsHandoffWithoutAsking
+                || Array.Exists(e.Args, a => string.Equals(a, HandoffArgs.AutoConfirm, StringComparison.OrdinalIgnoreCase)),
             Log = msg => { try { AppLogger.Info("SingleInstance", msg); } catch { /* logger not yet initialized */ } },
         });
 
@@ -767,7 +800,18 @@ public partial class App : Application
 
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
-        _mainWindow.Show();
+        if (_startupPlan.ShowsMainWindow)
+        {
+            _mainWindow.Show();
+        }
+        else
+        {
+            /* #9142: headless. MainWindow also hosts the collection, alert and MCP wiring, so it is built as that host and
+               never shown: no window handle exists, no tray icon is created, and its Loaded event (which would start the
+               wiring) never fires, so the wiring is started directly. */
+            AppLogger.Info("App", "Headless start: no window is shown and no tray icon is created.");
+            _ = _mainWindow.StartHeadlessAsync();
+        }
 
         /* #2425. The log line for this was written back in LoadDefaultTimeRange/LoadAlertSettings and has
            been sitting in AppLogger's buffer since; this is the visible half, and it is here rather than
@@ -794,6 +838,13 @@ public partial class App : Application
     {
         var app = Current;
         var dispatcher = app?.Dispatcher;
+
+        /* #9142: nobody is there to read the code, so the sign-in cannot finish. Cancelling now beats waiting three minutes. */
+        if (HeadlessUi.Skips("the Entra device-code sign-in prompt (sign-in is cancelled)"))
+        {
+            attempt.Cancel();
+            return;
+        }
 
         if (app is null || dispatcher is null)
         {
@@ -907,7 +958,35 @@ public partial class App : Application
     /// </summary>
     private void OnSurfaceWindowRequested()
     {
+        /* #9142: a headless instance has no window to surface. A second normal start finds this one running and asks for it;
+           showing a window here would put the headless instance's UI on a desktop nobody is signed in to. */
+        if (HeadlessUi.Skips("the request from a second start to show the window"))
+            return;
+
         Dispatcher.BeginInvoke(new Action(() => _mainWindow?.RestoreFromTray()));
+    }
+
+    /// <summary>
+    /// The shutdown the exit channel asks for (an upgrade handoff or <c>--stop</c>). With a window this is
+    /// <see cref="Application.Shutdown()"/>, which closes the window and runs its closing cleanup, as before. A headless
+    /// instance has no window to close, so it runs that same cleanup itself and then shuts the application down (#9142).
+    /// </summary>
+    private async void RequestShutdown()
+    {
+        if (_startupPlan.Headless && _mainWindow is { } host)
+        {
+            try
+            {
+                AppLogger.Info("App", "Headless instance asked to shut down.");
+                await host.RunShutdownCleanupAsync();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("App", "Headless shutdown cleanup failed", ex);
+            }
+        }
+
+        Shutdown();
     }
 
     /// <summary>
@@ -1120,6 +1199,9 @@ public partial class App : Application
             return;
         }
 
+        if (HeadlessUi.Skips("the settings.json could-not-be-read dialog (the log holds the same text)"))
+            return;
+
         MessageBox.Show(
             "settings.json could not be read, so Performance Monitor Lite started with default settings.\n\n" +
             $"{Path.Combine(ConfigDirectory, "settings.json")}\n{problem}\n\n" +
@@ -1151,6 +1233,9 @@ public partial class App : Application
         {
             return;
         }
+
+        if (HeadlessUi.Skips("the dialog that names the setting values that could not be read"))
+            return;
 
         MessageBox.Show(
             $"{CountText.Plural(s_badSettingValues.Count, "setting")} in settings.json could not be read and {(s_badSettingValues.Count == 1 ? "is at its" : "are at their")} " +
@@ -1831,6 +1916,9 @@ public partial class App : Application
         AppLogger.Error("AppDomain", "Unhandled exception (terminating=" + e.IsTerminating + ")", exception);
         AppLogger.Flush();
 
+        if (HeadlessUi.Skips("the fatal-error dialog (the log holds the exception)"))
+            return;
+
         MessageBox.Show(
             ErrorDialogText.Fatal(exception, AppLogger.GetCurrentLogFile()),
             "Fatal Error",
@@ -1852,6 +1940,12 @@ public partial class App : Application
 
         AppLogger.Error("Dispatcher", "Unhandled exception", e.Exception);
         AppLogger.Flush();
+
+        if (HeadlessUi.Skips("the error dialog (the log holds the exception)"))
+        {
+            e.Handled = true;
+            return;
+        }
 
         MessageBox.Show(
             ErrorDialogText.Recoverable(e.Exception, AppLogger.GetCurrentLogFile()),

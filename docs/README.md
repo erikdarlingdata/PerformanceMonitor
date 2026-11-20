@@ -16,6 +16,7 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 
 ## Run
 
+- [Run Lite headless](lite-guide.md#run-lite-headless): collect with no window, no tray and no signed-in user, started by a scheduled task.
 - [Running Darling day to day](darling/admin.md): the routine tasks after the first week.
 - [Command line reference](darling/cli.md): every verb that the Darling service exe accepts.
 - [The WPF viewer](darling/viewer.md): open the desktop viewer on the service host or on another machine.

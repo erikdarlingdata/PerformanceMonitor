@@ -403,10 +403,24 @@ public partial class MainWindow : Window
         if (_hostRecordProblemShown)
             return;
         _hostRecordProblemShown = true;
+        if (HeadlessUi.Skips("the server-settings-not-saved dialog"))
+        {
+            AppLogger.Warn("MainWindow", message);
+            return;
+        }
+
         MessageBox.Show(this, message, "Server settings not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
-    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e) => await InitializeServicesAsync();
+
+    /// <summary>
+    /// #9142: starts the store, collection, alert engine and MCP server of a headless instance. A window that is never shown
+    /// never raises Loaded, so <see cref="App"/> calls this in its place. It is the same method Loaded runs.
+    /// </summary>
+    internal Task StartHeadlessAsync() => InitializeServicesAsync();
+
+    private async Task InitializeServicesAsync()
     {
         var rebuildNoticeQueued = false;
         try
@@ -421,8 +435,15 @@ public partial class MainWindow : Window
             {
                 rebuildNoticeQueued = true;
                 var notice = rebuild.Describe();
-                _ = Dispatcher.BeginInvoke(() =>
-                    MessageBox.Show(this, notice, DatabaseRebuildOutcome.NoticeTitle, MessageBoxButton.OK, MessageBoxImage.Warning));
+                if (HeadlessUi.Skips("the notice that the store was rebuilt"))
+                {
+                    AppLogger.Warn("MainWindow", notice);
+                }
+                else
+                {
+                    _ = Dispatcher.BeginInvoke(() =>
+                        MessageBox.Show(this, notice, DatabaseRebuildOutcome.NoticeTitle, MessageBoxButton.OK, MessageBoxImage.Warning));
+                }
             }
 
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
@@ -543,12 +564,25 @@ public partial class MainWindow : Window
             _investigationSweepLoop = Task.Run(() => investigationSweep.RunAsync(_backgroundCts.Token));
 
             // Initialize system tray
-            _trayService = new SystemTrayService(this, RestoreFromTray, _backgroundService);
-            _trayService.Initialize();
+            /* #9142: no tray icon for a headless start, and none when the icon cannot be created (no taskbar). Either way the
+               rest of this start goes on: collection, the alert engine and every non-tray channel do not need it. */
+            _trayService = TrayIconStarter.TryStart(
+                App.StartupPlan,
+                () =>
+                {
+                    var tray = new SystemTrayService(this, RestoreFromTray, _backgroundService);
+                    tray.Initialize();
+                    return tray;
+                },
+                message => AppLogger.Info("Tray", message),
+                message => AppLogger.Warn("Tray", message));
 
             /* #1050: restore the window from the tray on resume/unlock if a sleep- or lock-driven
                minimize hid it. ??= so a repeated Loaded can't double-subscribe (static SystemEvents). */
-            _resumeGuard ??= new WindowResumeGuard(this, RestoreFromTray);
+            if (!App.IsHeadless)
+            {
+                _resumeGuard ??= new WindowResumeGuard(this, RestoreFromTray);
+            }
 
             // Initialize data service for overview
             _dataService = new LocalDataService(_databaseInitializer);
@@ -683,6 +717,11 @@ public partial class MainWindow : Window
             AppLogger.Error("MainWindow", "Failed to initialize the application", ex);
             AppLogger.Flush();
             StatusText.Text = $"Error: {ex.Message}";
+            if (HeadlessUi.Skips("the initialization-error dialog (the log holds the exception)"))
+            {
+                return;
+            }
+
             /* #7812: a rebuild that moved the old file aside before the start failed says where it went, in this one message
                (unless the notice for it is already on its way). */
             MessageBox.Show(
@@ -774,6 +813,13 @@ public partial class MainWindow : Window
     /// </summary>
     private void AnnounceUpdate(string? version)
     {
+        /* #9142: a headless instance cannot show the balloon, and nobody could click About. The log carries the news. */
+        if (HeadlessUi.Skips("the update balloon"))
+        {
+            AppLogger.Info("Update", $"Performance Monitor Lite {version} is available. This instance runs headless: stop it with --stop, update, and start it again.");
+            return;
+        }
+
         _trayService?.ShowNotification(
             "Update Available",
             $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it. "
@@ -793,6 +839,26 @@ public partial class MainWindow : Window
            completion, then Close() again; the second pass returns early and closes for real. */
         if (_closingCleanupDone) return;
         e.Cancel = true;
+        if (_closingCleanupStarted) return;
+
+        await RunShutdownCleanupAsync();
+
+        /* Re-close on the next dispatcher cycle, not synchronously here. If the awaits above all
+           completed without ever suspending (MCP off, collector already idle), we're still inside
+           WPF's Closing event with Window._isClosing == true, and a synchronous Close() re-enters
+           InternalClose → VerifyNotClosing() throws "Cannot ... call Close ... while a Window is
+           closing" (#1050 follow-up). BeginInvoke lets this Closing event fully unwind — clearing
+           _isClosing — before the real close runs; the second pass returns early on
+           _closingCleanupDone and the window closes for real. */
+        _ = Dispatcher.BeginInvoke(new Action(Close));
+    }
+
+    /// <summary>
+    /// The shutdown work: stop the tray, collection, MCP and timers, then close the store. Runs once. The window's Closing
+    /// handler runs it, and a headless instance (no window to close) runs it directly when it is asked to stop (#9142).
+    /// </summary>
+    internal async Task RunShutdownCleanupAsync()
+    {
         if (_closingCleanupStarted) return;
         _closingCleanupStarted = true;
 
@@ -853,15 +919,6 @@ public partial class MainWindow : Window
         _databaseInitializer.Dispose();
 
         _closingCleanupDone = true;
-
-        /* Re-close on the next dispatcher cycle, not synchronously here. If the awaits above all
-           completed without ever suspending (MCP off, collector already idle), we're still inside
-           WPF's Closing event with Window._isClosing == true, and a synchronous Close() re-enters
-           InternalClose → VerifyNotClosing() throws "Cannot ... call Close ... while a Window is
-           closing" (#1050 follow-up). BeginInvoke lets this Closing event fully unwind — clearing
-           _isClosing — before the real close runs; the second pass returns early on
-           _closingCleanupDone and the window closes for real. */
-        _ = Dispatcher.BeginInvoke(new Action(Close));
     }
 
     private void ServerTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
