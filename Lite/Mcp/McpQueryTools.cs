@@ -337,15 +337,20 @@ public sealed class McpQueryTools
             var droppedDatabases = string.IsNullOrEmpty(database_name)
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
+            /* Read for top + 1 rows: the extra row is the observed signal that the window held more procedures than top, and the first top
+               rows are the same rows in the same order (Darling's twin reads the same way). */
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top + 1, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
             /* #7725: the databases the server still lists rank first, as above. What the limit leaves is filled from the left-out databases,
                ranked the same way and marked database_dropped (Darling twin does the same), so a dropped database rows never push out a
                listed row and the grid is not empty while the work is on record. databases_left_out then names only the databases with no row. */
-            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top + 1)
             {
-                var fill = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, tags: tagScope);
+                var fill = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top + 1 - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, tags: tagScope);
                 rows = [.. rows, .. fill];
             }
+
+            var moreThanTop = rows.Count > top;
+            if (moreThanTop) rows = rows.GetRange(0, top);
 
             /* #5633 review (finding D): the narrowing is disclosed, never silent (Darling's twin does the same, in the same words). The names
                it left out ride the envelope of an empty page and of a page with rows, and an empty page's sentence claims only the databases
@@ -443,7 +448,9 @@ public sealed class McpQueryTools
                 databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
                 databases_left_out_count = DatabasesLeftOut.Count(leftOutWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
-                procedures = result
+                procedures = result,
+                /* True when the window held more procedures than top; the page is the heaviest top of them. */
+                truncated = moreThanTop
             }, tagScope.Named, node =>
             {
                 if (node["procedures"] is JsonArray procedureRows)
