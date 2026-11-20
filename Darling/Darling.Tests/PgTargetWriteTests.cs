@@ -1007,7 +1007,7 @@ public sealed class PgTargetWriteTests
         {
             var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
             var windowStart = windowEnd.AddHours(-4);
-            var seriesStart = windowStart.AddSeconds(-30); /* no row sits on the window's start: the first row inside it is the series' second */
+            var seriesStart = windowStart.AddMinutes(-1);
             var longAgo = windowStart.AddDays(-30);
             var restartedAt = seriesStart.AddMinutes(120).AddSeconds(-30);
 

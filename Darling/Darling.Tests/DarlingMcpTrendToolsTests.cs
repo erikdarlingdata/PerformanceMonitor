@@ -284,7 +284,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            point clamped to the window's start. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", trend, StringComparison.Ordinal);
         Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", trend, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", trend, StringComparison.Ordinal);
+        Assert.Matches(@"collection_time >=? \$2", trend);
         Assert.Contains("collection_time <= $3", trend, StringComparison.Ordinal);
         Assert.Contains("GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", trend, StringComparison.Ordinal);
         Assert.Equal(TrendBuckets.OriginSql, TrendBucketSql.OriginSql);
