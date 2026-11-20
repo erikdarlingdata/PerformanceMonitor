@@ -512,9 +512,9 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
             /* The bound must be on the scan itself (a Filters line of the parquet scan), not only in a later FILTER. */
             Assert.Matches(@"(?s)(READ_PARQUET|PARQUET_SCAN|TABLE_SCAN).*Filters:.*collection_time", text);
             /* Both bounds must be literal comparisons on the column, which is what DuckDB turns into a row-group skip: a bound
-               wrapped in a function (epoch_ms(collection_time) >= ...) still prints under Filters: but skips nothing. */
+               wrapped in a function (epoch_ms(collection_time) > ...) still prints under Filters: but skips nothing. */
             var bare = Regex.Replace(text, @"[\s│┌┐└┘├┤┬┴┼─]+", "");
-            Assert.Contains("collection_time>=", bare, StringComparison.Ordinal);
+            Assert.Contains("collection_time>", bare, StringComparison.Ordinal);
             Assert.Contains("collection_time<=", bare, StringComparison.Ordinal);
         }
     }

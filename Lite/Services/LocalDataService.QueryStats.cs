@@ -787,8 +787,11 @@ WHERE server_id = $1
 AND   database_name = $2
 AND   schema_name = $3
 AND   object_name = $4
-AND   collection_time > $5
+/* A pre-v61 row takes its interval from the row before it, so the row stamped on $5 is read as that predecessor only:
+   QUALIFY drops it after the LAG, and every row returned was collected in ($5, $6]. */
+AND   collection_time >= $5
 AND   collection_time <= $6
+QUALIFY collection_time > $5
 ORDER BY collection_time";
 
         command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);

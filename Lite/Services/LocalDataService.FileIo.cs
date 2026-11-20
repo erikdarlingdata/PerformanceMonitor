@@ -411,7 +411,9 @@ with_interval AS (
     FROM v_file_io_stats f
     JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
     WHERE f.server_id = $1
-    AND   f.collection_time > $2
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
+    AND   f.collection_time >= $2
     AND   f.collection_time <= $3
 ),
 rated AS (
@@ -422,6 +424,7 @@ rated AS (
         CASE WHEN interval_seconds > 0 THEN CAST(delta_write_bytes AS DOUBLE PRECISION) END AS rated_write_bytes,
         CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
     FROM with_interval
+    WHERE collection_time > $2
 )
 SELECT
     file_label,

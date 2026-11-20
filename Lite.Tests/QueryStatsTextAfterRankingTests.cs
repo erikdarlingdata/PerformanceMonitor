@@ -630,7 +630,7 @@ COPY (
 
         /* The control: the statement it replaced has a scan of the whole archive, so this pin can fail. */
         var oldScans = await ParquetScanFiltersAsync(LegacyTopQueriesByCpuSql(string.Empty, 100), ServerId, from, to, 50, 0, 0);
-        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>=", StringComparison.Ordinal));
+        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>", StringComparison.Ordinal));
     }
 
     /* ---- procedure comparison ---- */
@@ -715,7 +715,7 @@ COPY (
 
         /* The control: the statement it replaced has a scan of the whole archive, so this pin can fail. */
         var oldScans = await ParquetScanFiltersAsync(LegacyProcedureStatsComparisonSql(string.Empty), ServerId, curStart, curEnd, baseStart, baseEnd);
-        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>=", StringComparison.Ordinal));
+        Assert.Contains(oldScans, scan => !scan.Contains("collection_time>", StringComparison.Ordinal));
     }
 
     /* A far baseline (#5381): the text lookup reads the two compared ranges, not the span from the earlier range's start to
@@ -871,10 +871,10 @@ COPY (
         Assert.NotEmpty(scans);
         foreach (var scan in scans)
         {
-            /* A plain range prints as "collection_time>=..." and an OR of two ranges as an expression with spaces; compare without them. */
+            /* A plain range prints as "collection_time>..." and an OR of two ranges as an expression with spaces; compare without them. */
             var squeezed = scan.Replace(" ", string.Empty, StringComparison.Ordinal);
             Assert.True(
-                squeezed.Contains("collection_time>=", StringComparison.Ordinal) && squeezed.Contains("collection_time<=", StringComparison.Ordinal),
+                squeezed.Contains("collection_time>", StringComparison.Ordinal) && squeezed.Contains("collection_time<=", StringComparison.Ordinal),
                 "a read_parquet scan whose pushed-down filters lack the collection_time window: '" + scan + "'");
         }
     }

@@ -235,7 +235,9 @@ raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type LIKE 'LCK%'
-    AND   collection_time > $2
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
+    AND   collection_time >= $2
     AND   collection_time <= $3
 ),
 rated AS
@@ -248,6 +250,7 @@ rated AS
     FROM raw
     WHERE interval_seconds > 0
     AND   delta_wait_time_ms >= 0
+    AND   collection_time > $2
 )";
 
     /// <summary>
@@ -518,7 +521,9 @@ WITH raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   rtrim(wait_type) = rtrim($2)
-    AND   collection_time > $3
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $3 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($3, $4]. */
+    AND   collection_time >= $3
     AND   collection_time <= $4
     {exclude}
 ),
@@ -531,6 +536,7 @@ rated AS
         CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
         CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
     FROM raw
+    WHERE collection_time > $3
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST($5 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $3) AS bucket_start,

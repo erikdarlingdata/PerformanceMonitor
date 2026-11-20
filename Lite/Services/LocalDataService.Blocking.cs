@@ -1518,7 +1518,9 @@ WITH raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type LIKE 'LCK%'
-    AND   collection_time > $2
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
+    AND   collection_time >= $2
     AND   collection_time <= $3
 ),
 rated AS
@@ -1529,6 +1531,7 @@ rated AS
         CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms,
         CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds
     FROM raw
+    WHERE collection_time > $2
 )
 SELECT
     wait_type,

@@ -587,6 +587,8 @@ deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    -- $4 is the window's end: the rows collected by then, the same slice the PLAN_REGRESSION fact reads.
+    AND   collection_time <= $4
     -- #3902: the PLAN_REGRESSION fact's offenders when the fact ran this pass ($5/$6, from
     -- AnalysisContext.PlanRegressionOffenders), otherwise every query ($5 NULL). The top five this read
     -- returns are the head of the ranking the fact has already computed -- the same detection over the same
