@@ -72,7 +72,7 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No statement CPU for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: the plan cache collector wrote no interval with executions in the window. "
                         + "Procedure stats are not a substitute, because they count the same work.",
@@ -186,7 +186,7 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_snapshots")
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}: nothing was running at a capture, or the collector did not run in the window.",
                         notice.AsHints()), start);
@@ -287,7 +287,7 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_snapshots")
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No capture {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",

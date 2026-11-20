@@ -24,7 +24,7 @@ public sealed class McpServerInfoTools
         {
             var row = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             if (row == null)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_properties", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "server_properties")
                     ?? McpHelpers.Status("unavailable", $"No server properties available for {resolved.DisplayName}. The properties collector may not have run yet. Check get_collection_health for {resolved.DisplayName} to see if the collector is failing or still waiting for its first run.");
 
             return ServerPropertiesPayload(resolved.DisplayName, row);
@@ -116,7 +116,7 @@ public sealed class McpServerInfoTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_size_stats", awsRdsKind: AwsRdsKind.None),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "database_size_stats"),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", McpDatabaseSelection.Describe(names));
             }

@@ -544,7 +544,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
         string? engineKind;
         try
         {
-            (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, cancellationToken);
+            (_, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -137,7 +137,7 @@ public static class DarlingServerConnector
     public const string DetectionQueryText = @"
 SELECT /* PerformanceMonitorLite */
     @@VERSION AS sql_version,
-    CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
+    COALESCE(CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')), CONVERT(integer, PARSENAME(CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), 4))) AS major_version,
     DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
     CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,

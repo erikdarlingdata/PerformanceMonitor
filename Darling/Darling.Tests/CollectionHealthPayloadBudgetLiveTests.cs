@@ -426,12 +426,19 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
         }
     }
 
+    /// <summary>
+    /// SQL Server 2025 (major 17): every SQL Server collector in the catalog runs on it, which is what this class's fixture needs, since it
+    /// logs a run for each one. On an older major a collector the version does not run (query_store_hints needs 2022) is listed once as
+    /// not_collected instead of as a row of its own (#9099), so it neither compacts nor takes part in the worst-case row arithmetic.
+    /// </summary>
+    private const int FixtureSqlMajorVersion = 17;
+
     private static async Task RegisterServerAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        using var command = new NpgsqlCommand(@"
+        using var command = new NpgsqlCommand($@"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
-VALUES ($1, $2, $3, TRUE, 15, $4, $4)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;", connection);
+VALUES ($1, $2, $3, TRUE, {FixtureSqlMajorVersion}, $4, $4)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = {FixtureSqlMajorVersion};", connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(ServerName);

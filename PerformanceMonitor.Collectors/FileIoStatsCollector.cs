@@ -150,7 +150,9 @@ OPTION(RECOMPILE);";
 
     public override string? WatermarkColumn => null;
 
-    public override bool AppliesTo(CollectorTargetInfo target) => true;
+    /// <summary>Whole-collector version floor (#9099): io_stall_queued_read_ms and io_stall_queued_write_ms do not exist before SQL Server 2016, so a target below the supported floor reads as not collected instead of failing every cycle. Unknown (0) assumes newest and Azure is never version-gated.</summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB scopes dm_io_virtual_file_stats to the connected database.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;

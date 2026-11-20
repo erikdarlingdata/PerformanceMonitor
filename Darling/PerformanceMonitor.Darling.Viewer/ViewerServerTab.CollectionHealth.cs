@@ -99,7 +99,7 @@ public partial class ViewerServerTab
 
         _extensionsNotOffered = notOfferedTask.Result;
 
-        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered);
+        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered, _server.SqlMajorVersion ?? 0);
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
@@ -184,9 +184,9 @@ public partial class ViewerServerTab
     /// </summary>
     internal static void ApplyEngineGate(
         List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind,
-        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null)
+        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null, int sqlMajorVersion = 0)
     {
-        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind, extensionsNotOffered);
+        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind, extensionsNotOffered, sqlMajorVersion);
         if (gated.Count == 0)
         {
             return;
@@ -197,7 +197,7 @@ public partial class ViewerServerTab
             if (gated.Contains(row.CollectorName))
             {
                 row.EngineGated = true;
-                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind, extensionsNotOffered);
+                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind, extensionsNotOffered, sqlMajorVersion);
             }
         }
     }
@@ -212,7 +212,7 @@ public partial class ViewerServerTab
         try
         {
             /* #6912: the same gate get_collection_health leaves the gated collectors' runs out with, so the panel and the tool name the same peak collector. */
-            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered);
+            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered, _server.SqlMajorVersion ?? 0);
             ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId, engineGated: engineGated));
         }
         catch (OperationCanceledException)
