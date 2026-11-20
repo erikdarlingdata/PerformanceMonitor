@@ -448,6 +448,9 @@ public partial class AddServerDialog : Window
     /// <summary>#6459: SERVERPROPERTY('EngineEdition') the last connection test read, or 0 before one succeeded.</summary>
     private int _testedEngineEdition;
 
+    /// <summary>#9099: the SQL Server major version the last connection test read (0 before one succeeded), for <see cref="SupportedVersionConnectionNote"/>.</summary>
+    private int _testedMajorVersion;
+
     private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool SignInCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
@@ -505,6 +508,7 @@ public partial class AddServerDialog : Window
             using var cmd = new SqlCommand(ServerManager.DetectionQueryText, connection);
             string? version = null;
             _testedEngineEdition = 0;
+            _testedMajorVersion = 0;
             using (var reader = await cmd.ExecuteReaderAsync())
             {
                 if (await reader.ReadAsync())
@@ -513,6 +517,8 @@ public partial class AddServerDialog : Window
                     var editionOrdinal = reader.GetOrdinal("engine_edition");
                     version = reader.IsDBNull(versionOrdinal) ? null : reader.GetString(versionOrdinal);
                     _testedEngineEdition = reader.IsDBNull(editionOrdinal) ? 0 : reader.GetInt32(editionOrdinal);
+                    var majorOrdinal = reader.GetOrdinal("major_version");
+                    _testedMajorVersion = reader.IsDBNull(majorOrdinal) ? 0 : Convert.ToInt32(reader.GetValue(majorOrdinal));
                 }
             }
 
@@ -764,6 +770,12 @@ public partial class AddServerDialog : Window
             var message = serverVersion != null
                 ? $"Successfully connected to {ServerNameBox.Text.Trim()}!\n\n{serverVersion}"
                 : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
+
+            /* #9099: a server older than the supported versions connects fine and then has collectors that never run; say so now. */
+            if (SupportedVersionConnectionNote.For(_testedMajorVersion, _testedEngineEdition) is { } versionNote)
+            {
+                message += "\n\n" + versionNote;
+            }
 
             /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
                replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */

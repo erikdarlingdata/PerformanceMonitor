@@ -21,6 +21,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using static PerformanceMonitor.Ui.DataGridHelpers;
@@ -906,6 +907,9 @@ public partial class FinOpsTab : UserControl
         }
     }
 
+    /// <summary>The Database Sizes grid's own empty sentence, which <see cref="ServerTab.EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string)"/> falls back to.</summary>
+    internal const string NoDbSizesOwnText = "No database size data collected yet";
+
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
     {
         if (_dataService == null) return;
@@ -915,6 +919,11 @@ public partial class FinOpsTab : UserControl
         try
         {
             var sizesFilter = SelectedDatabaseFilter();
+            var sizesServerName = (ServerSelector.SelectedItem as ServerConnection)?.DisplayName ?? "";
+            var (sizesMajorVersion, sizesAwsRdsKind) = _serverManager is null
+                ? (0, AwsRdsKind.None)
+                : (PerformanceMonitorLite.Mcp.McpEngineCapability.SqlMajorVersionOf(_serverManager, serverId),
+                   PerformanceMonitorLite.Mcp.McpEngineCapability.AwsRdsKindOf(_serverManager, serverId));
             /* Compute proportional cost shares. The share is of the whole server's allocated size, so a database filter narrows the
                rows without shrinking the total (#7174). */
             var monthlyCost = _currentServerMonthlyCost;
@@ -924,6 +933,10 @@ public partial class FinOpsTab : UserControl
             _dbSizesFilterMgr!.UpdateData(data);
             _dbSizesNeedReload = data.Count == 0;
 
+            /* #9099: a SQL Server older than the supported floor does not run database_size_stats, and the grid says so instead of "not collected yet".
+               The version is the connection check's, since that collector's own server_properties read does not run there either. */
+            NoDbSizesMessage.Text = ServerTab.EmptyPanelText(
+                sizesServerName, isAzureSqlDatabase: false, "database_size_stats", data.Count, sizesAwsRdsKind, sizesMajorVersion, NoDbSizesOwnText);
             NoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
             /* #2640: on Azure SQL DB this grid can only ever show ONE database, and saying so is the whole

@@ -1079,6 +1079,9 @@ public partial class ServerTab : UserControl
 
             UpdateFileIoCharts(fileIoTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateFileIoThroughputCharts(fileIoThroughputTask.Result, hoursBack, fromDate, toDate);
+            /* #9099: a SQL Server older than the supported floor does not run file_io_stats, so the empty charts say why. */
+            ShowEngineGap(FileIoNoDataMessage, "file_io_stats", fileIoTrendTask.Result.Count, engineAxisOnly: true);
+            ShowEngineGap(FileIoThroughputNoDataMessage, "file_io_stats", fileIoThroughputTask.Result.Count, engineAxisOnly: true);
         }
         catch (Exception ex)
         {
