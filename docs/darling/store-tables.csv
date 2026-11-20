@@ -45,7 +45,8 @@ job_history_category_coverage,internal,no,coverage of the job history rollup
 job_history_category_hourly,derived,derived,hourly job history by category
 job_history_oldest_daily,derived,derived,rollup view
 job_outcome_daily,derived,derived,daily successful job outcomes by job
-job_outcome_daily_built,internal,no,which days of the job outcome rollup are built
+job_outcome_daily_days,internal,no,newest collection time added to each day of the job outcome rollup
+job_outcome_daily_watermark,internal,no,how far the job outcome rollup has read job history for each server
 latch_stats,collected,yes,
 long_query_completions,collected,yes,
 managed_conf_verdicts,internal,no,managed settings check results
