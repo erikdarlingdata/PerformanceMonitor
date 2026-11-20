@@ -343,8 +343,7 @@ VALUES ($1, $2, $3, $4, 'SOS_SCHEDULER_YIELD', 1, 1, 0)", connection);
             async Task<int> PeakOfAsync(Func<DarlingAnalysisService, Task> run)
             {
                 var probe = new OverlapProbeCollector();
-                var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
-                service.WrapSqlServerCollector(_ => probe);
+                var service = new DarlingAnalysisService(postgres, sqlServerCollectorWrapper: _ => probe) { MinimumDataHours = 0 };
                 await run(service);
                 return probe.Peak;
             }

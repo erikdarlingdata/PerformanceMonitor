@@ -130,7 +130,7 @@ public sealed class DarlingAnalysisService
     private readonly NpgsqlDataSource _postgres;
     private readonly PgFindingStore _findingStore;
     private readonly FactScorer _scorer;
-    private AnalysisEngineSet _sqlServerEngine;
+    private readonly AnalysisEngineSet _sqlServerEngine;
     private readonly AnalysisEngineSet _pgTargetEngine;
     private readonly ILogger? _logger;
 
@@ -317,12 +317,15 @@ public sealed class DarlingAnalysisService
     /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
     /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
     /// — today's behavior, byte-for-byte.</param>
+    /// <param name="sqlServerCollectorWrapper">#9149 test seam: wraps the SQL Server set's fact collector so a test can watch the
+    /// context a pass hands it (how many family reads it lets run at once). Null (every production caller) keeps the collector as is.</param>
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
         ILogger? logger = null,
         BaselineCache? baselineCache = null,
-        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
+        Func<IFactCollector, IFactCollector>? sqlServerCollectorWrapper = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -333,7 +336,9 @@ public sealed class DarlingAnalysisService
         /* The SQL Server set: the five objects this service always composed, in the same order. */
         var sqlServerBaselines = new PgBaselineProvider(postgres, logger, baselineCache);
         _sqlServerEngine = new AnalysisEngineSet(
-            new PgFactCollector(postgres, logger, analyzerConfig),
+            sqlServerCollectorWrapper is null
+                ? new PgFactCollector(postgres, logger, analyzerConfig)
+                : sqlServerCollectorWrapper(new PgFactCollector(postgres, logger, analyzerConfig)),
             new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
             new InferenceEngine(new RelationshipGraph()),
             new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
@@ -1787,11 +1792,6 @@ WHERE server_id = $1";
         var kind = await cmd.ExecuteScalarAsync(cancellationToken) as string;
         return (EngineFor(kind), kind);
     }
-
-    /// <summary>Test seam (#9149): wraps the SQL Server set's fact collector, so a test can watch the context a pass hands it
-    /// (how many family reads it lets run at once) without reading the store's facts.</summary>
-    internal void WrapSqlServerCollector(Func<IFactCollector, IFactCollector> wrap) =>
-        _sqlServerEngine = _sqlServerEngine with { Collector = wrap(_sqlServerEngine.Collector) };
 
     /// <summary>The set <see cref="ResolveEngineAsync"/> answers for a token, without a store — the mapping
     /// itself, exposed so the engine-routing pins can assert it on every token in <see cref="MonitoredEngineKind"/>.</summary>
