@@ -108,6 +108,44 @@ public sealed class McpEveryReadSaysWhatItLeftOutLiveTests : IClassFixture<McpEv
             + Environment.NewLine + string.Join(Environment.NewLine, notMeasured));
     }
 
+    /// <summary>
+    /// The two ranked query reads cut a page two ways, and each cut has its own name. A page cut by <c>top</c> alone says
+    /// <c>truncated</c> and does not say the budget cut it: <c>budget_truncated</c> is false and <c>budget_note</c> is null. The
+    /// reading guide the server gives for the read names both keys, so a caller who reads it knows which cut a flag means.
+    /// </summary>
+    [Theory]
+    [InlineData("get_top_queries_by_cpu")]
+    [InlineData("get_query_store_top")]
+    public async Task APageCutByTopAlone_SaysTruncated_AndNotBudgetTruncated_AndTheGuideNamesBothCuts(string name)
+    {
+        Assert.SkipWhen(!_store.Available, McpEveryReadStore.SkipReason);
+
+        var tool = _store.Tools.Single(t => t.Name == name);
+        var (wideArguments, wide) = await _store.WideReadAsync(tool);
+        Assert.True(wide.NotDataReason is null, $"{name} did not answer data: {wide.NotDataReason} [{McpEveryReadStore.Describe(wideArguments)}]");
+        using (var wideDocument = JsonDocument.Parse(wide.Text))
+        {
+            Assert.True(wideDocument.RootElement.GetProperty("queries").GetArrayLength() >= 2,
+                $"{name} needs two queries in the window for top 1 to leave one out [{McpEveryReadStore.Describe(wideArguments)}]");
+        }
+
+        var (arguments, capped) = await _store.WideReadAsync(tool, new Dictionary<string, object?> { ["top"] = 1 });
+        Assert.True(capped.NotDataReason is null, $"{name} did not answer data: {capped.NotDataReason} [{McpEveryReadStore.Describe(arguments)}]");
+        using var document = JsonDocument.Parse(capped.Text);
+        var root = document.RootElement;
+        Assert.Equal(1, root.GetProperty("queries").GetArrayLength());
+        Assert.True(root.GetProperty("truncated").GetBoolean(), $"{name} top 1 left queries out and truncated is false");
+        Assert.True(root.TryGetProperty("budget_truncated", out var budgetCut) && budgetCut.ValueKind == JsonValueKind.False,
+            $"{name} top 1 fits the response budget, so budget_truncated is false: {capped.Text[..Math.Min(capped.Text.Length, 300)]}");
+        Assert.True(root.TryGetProperty("budget_note", out var budgetNote) && budgetNote.ValueKind == JsonValueKind.Null,
+            $"{name} top 1 fits the response budget, so budget_note is null");
+
+        var guide = await _store.CallAsync("get_tool_guide", new Dictionary<string, object?> { ["tools"] = new[] { name } });
+        Assert.False(guide.IsError, $"get_tool_guide answered an error for {name}: {guide.Text[..Math.Min(guide.Text.Length, 300)]}");
+        Assert.Contains("by the top cap or by the budget", guide.Text, StringComparison.Ordinal);
+        Assert.Contains("budget_truncated", guide.Text, StringComparison.Ordinal);
+    }
+
     /// <summary>The path and length of the reply's longest array of objects: the rows a cap would cut.</summary>
     private static (string Path, int Rows) LargestArray(string reply)
     {
