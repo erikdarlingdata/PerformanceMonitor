@@ -483,16 +483,21 @@ public static class ComposeCompiler
     private static readonly HashSet<string> s_noTimeOnlyIndexSources = new(StringComparer.Ordinal) { "procedure_stats", "query_stats" };
 
     /// <summary>
-    /// Every server_id the raw table holds, read with one index probe per server (a loose index scan over (server_id, collection_time)).
-    /// An unscoped panel adds <c>server_id = ANY(this)</c> so the planner has a server list to drive the (server_id, collection_time)
-    /// index with and reads only the window, as a scoped panel always did. The list is every id the table holds, so it excludes no
-    /// row: server_id is NOT NULL, and a server missing from the registry (a removed server's history, #5525) is still in it.
-    /// The table name is a compile-time catalog constant, never a caller string.
+    /// Every server_id the raw table holds a row for inside the panel's window, read with one index probe per server (a loose index scan
+    /// over (server_id, collection_time)). An unscoped panel adds <c>server_id = ANY(this)</c> so the planner has a server list to drive
+    /// the (server_id, collection_time) index with and reads only the window, as a scoped panel always did. Both arms of the walk carry the
+    /// window, so TimescaleDB leaves only the chunks the window touches: unbounded, the walk probed every chunk of the table, which a cold
+    /// store with many chunks paid for on every panel run (#9151). A server with no row in the window adds nothing to the panel, and
+    /// the panel's own predicate follows the list, so the answer is the same; a server missing from the registry (a removed server's
+    /// history, #5525) is still in the list when it has rows in the window. server_id is NOT NULL. The bounds are the panel's exact
+    /// bounds (<paramref name="startParam"/> inclusive, <paramref name="endParam"/> inclusive, as the WHERE below it).
+    /// The table and column names are compile-time catalog constants, never caller strings.
     /// </summary>
-    private static string DistinctServerIdsSql(string sourceTable)
+    private static string DistinctServerIdsSql(string sourceTable, string timeColumn, string startParam, string endParam)
     {
         var table = $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
-        return $"ARRAY(WITH RECURSIVE ids(id) AS (SELECT min(server_id) FROM {table} UNION ALL SELECT (SELECT min(server_id) FROM {table} WHERE server_id > ids.id) FROM ids WHERE ids.id IS NOT NULL) SELECT id FROM ids WHERE id IS NOT NULL)";
+        var window = $"{timeColumn} >= {startParam} AND {timeColumn} <= {endParam}";
+        return $"ARRAY(WITH RECURSIVE ids(id) AS (SELECT min(server_id) FROM {table} WHERE {window} UNION ALL SELECT (SELECT min(server_id) FROM {table} WHERE server_id > ids.id AND {window}) FROM ids WHERE ids.id IS NOT NULL) SELECT id FROM ids WHERE id IS NOT NULL)";
     }
 
     /// <summary>True when two normalized server scopes are the same set under ordinal comparison (the case rule of
@@ -743,7 +748,7 @@ public static class ComposeCompiler
             }
             else if (route.Tier == ComposeSourceTier.Raw && s_noTimeOnlyIndexSources.Contains(plan.Measure.SourceTable))
             {
-                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_id = ANY(").Append(DistinctServerIdsSql(plan.Measure.SourceTable)).Append(")\n");
+                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_id = ANY(").Append(DistinctServerIdsSql(plan.Measure.SourceTable, timeColumn, startParam, endParam)).Append(")\n");
             }
 
             foreach (var clause in filterClauses)
