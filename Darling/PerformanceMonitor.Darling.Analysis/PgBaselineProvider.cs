@@ -1155,6 +1155,20 @@ LIMIT 1";
                 windowStart = supplyFloor;
             }
 
+            /* #9152: a replay whose analysis time falls between now minus the retention and the oldest row the store keeps
+               has no window left once the two floors above move the start up: the start lands at or after the end. That
+               is the expected answer for such a replay (nothing is kept for the metric that far back), not a fault: it is
+               "no baseline for this metric", the way a metric with no arm answers, and it must not reach
+               BaselineLocalClock.Resolve (which throws on an end before the start) or the catch below (which logs a
+               failed baseline). Not Faulted, so the answer is cached like any other empty one. */
+            if (windowStart >= windowEnd)
+            {
+                _logger?.LogDebug(
+                    "[PgBaselineProvider] No baseline for {MetricName}: the retained history starts at {WindowStart:o}, at or after the window end {WindowEnd:o}",
+                    metricName, windowStart, windowEnd);
+                return (null, clock, null, null, false);
+            }
+
 
             /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
