@@ -426,6 +426,14 @@ ORDER BY
     ds.file_id
 OPTION(RECOMPILE);";
 
+    /// <summary>
+    /// Whole-collector version floor (#9099): the SQL below reads columns or objects that SQL Server 2014 and older do not have
+    /// (sys.dm_db_log_info), so on a target below the supported floor the collector does not run and reads as not collected, instead of failing
+    /// every cycle. Unknown version (0) assumes newest, and Azure SQL Database and Managed Instance are never version-gated.
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
+
     public override string Name => "database_size_stats";
 
     public override string TargetTable => "database_size_stats";

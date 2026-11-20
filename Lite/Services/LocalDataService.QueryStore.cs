@@ -99,7 +99,7 @@ WITH deduped AS
     -- whose closing fetch lands after the range ends -- was dropped entirely, which is the collection lag
     -- #1841 set out to remove showing up one layer down.
     AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
     -- Pruning bounds, NOT filters: neither can exclude a row the predicate above keeps in any realistic
     -- store. They earn their place because v_query_store_stats unions the live table with the parquet
     -- archive, and bounds on collection_time are what let the reader skip archive row groups instead of
@@ -251,7 +251,7 @@ WITH latest AS (
            Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
            bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
         AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-        AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+        AND   COALESCE(interval_start_time_utc, collection_time) < $3
         AND   collection_time >= $2 - INTERVAL '1 day'
         AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
     ) w
@@ -276,7 +276,7 @@ deduped AS (
     WHERE server_id = $1
     /* #7776: the same window as the ranking above; the join on (id, time) already picks the winning snapshots, so this only has to keep them. */
     AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
     AND   collection_time >= $2 - INTERVAL '1 day'
     AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
 ),
@@ -901,7 +901,7 @@ WITH deduped AS
     -- collection_time while placing on the interval start disagrees at both edges, and disagrees with the
     -- bars about whether an interval is in the window at all.
     AND   COALESCE(interval_start_time_utc, collection_time) >= $5
-    AND   COALESCE(interval_start_time_utc, collection_time) <= $6
+    AND   COALESCE(interval_start_time_utc, collection_time) < $6
     -- Pruning bounds, NOT filters: v_query_store_stats unions the live table with the parquet archive, and
     -- bounds on collection_time are what let the reader skip archive row groups instead of scanning the whole
     -- glob. Same shipped shape and reasoning as the slicer's (#1892/#1923) — the floor is free because an
@@ -1241,7 +1241,7 @@ WITH placed AS
         -- collection_time here put a point outside the range the caller asked for, and dropped the range's
         -- final interval because its closing fetch had not happened yet.
         AND   interval_start_time_utc >= $2
-        AND   interval_start_time_utc <= $3
+        AND   interval_start_time_utc < $3
         -- Pruning bounds only; see the slicer above for why the floor is free and why the ceiling is a
         -- month rather than tight.
         AND   collection_time >= $2 - INTERVAL '1 day'
@@ -1267,7 +1267,7 @@ WITH placed AS
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time < $3
     AND   interval_start_time_utc IS NULL" + dbClause + @"
 ),
 raw AS

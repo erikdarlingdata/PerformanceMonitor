@@ -468,7 +468,7 @@ ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS starts_at_u
             @"
 ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_store_fetch_top_n;"),
 
-        // /// V210 (#6281): the guard on the MCP tag writes. The trigger on the map is the probe's newest sentinel. The rewind drops both
+        // /// V210 (#6281): the guard on the MCP tag writes. The trigger on the map is the probe's newest sentinel. The rewind drops all three
         // triggers and the function, so a re-run of V210 builds them again. Safe on a store that never had them.
         new(210, "hasAgentRouteTagGuard",
             @"
@@ -476,7 +476,7 @@ DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
 DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
 
-        // V211 (#5736): the relative Client Timeouts bars' two multiples. The warning multiple column is the probe's newest sentinel. The rewind drops both,
+        // V211 (#5736): the relative Client Timeouts bars' two multiples. The warning multiple column is the probe's newest sentinel. The rewind drops all three,
         // so a re-run of V211 adds them again at their defaults. Safe on a store that never had them.
         new(211, "hasClientTimeoutsMultiples",
             @"
@@ -487,7 +487,7 @@ ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_
             @"
 ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
 
-        // V213 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops both new columns;
+        // V213 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops all three new columns;
         // collect.v_collection_log freezes its column list at CREATE, so it is dropped first and made again over the table without read_source
         // (the shape V210 left), and a re-run of V213 appends the column to it again. Safe on a store that never had them.
         new(213, "hasQueryStoreReplica",
@@ -547,7 +547,7 @@ DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_se
         new(220, "hasJobHistorySuccessIndex",
             "DROP INDEX IF EXISTS collect.idx_job_history_job_success;"),
         // V221 (#6800): the Query Store hash-hourly table, the day tables and the ledger's hash_built_seq column. The table is the probe's newest sentinel.
-        // The rewind drops both, so a re-run of V221 builds them again. Safe on a store that never had them.
+        // The rewind drops all three, so a re-run of V221 builds them again. Safe on a store that never had them.
         new(221, "hasQueryStoreHashHourly",
             @"DROP TABLE IF EXISTS collect.query_store_hash_hourly, collect.query_store_hash_daily, collect.query_store_hash_daily_built, collect.query_store_hash_daily_failures;
 ALTER TABLE collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS hash_built_seq;"),
@@ -602,7 +602,7 @@ ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id
 ALTER TABLE IF EXISTS config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
 ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
         // V230 (#7028): the two snapshot wait tiers of the blocking band on the alert settings row. The warn tier column is the probe's newest
-        // sentinel. The rewind drops both, so a re-run of V230 adds them again. Safe on a store that never had them.
+        // sentinel. The rewind drops all three, so a re-run of V230 adds them again. Safe on a store that never had them.
         new(230, "hasBlockingSnapshotBands",
             @"ALTER TABLE config.config_alert_settings
     DROP COLUMN IF EXISTS blocking_warn_snapshot_wait_seconds,
@@ -880,6 +880,11 @@ DROP TABLE IF EXISTS collect.column_stats_runs;"),
         new(281, "hasQueryStoreTextSeen", @"DROP TRIGGER IF EXISTS trg_query_store_text_seen_ins ON collect.query_store_text;
 DROP FUNCTION IF EXISTS collect.query_store_text_seen_track();
 DROP TABLE IF EXISTS collect.query_store_text_seen;"),
+        // V282 (#9110): the job outcome daily rollup's three tables. The three are the probe's newest sentinel. The rewind drops all three, so a re-run of V282
+        // creates them empty and the service builds the days again. Safe on a store that never had them.
+        new(282, "hasJobOutcomeDaily", @"DROP TABLE IF EXISTS collect.job_outcome_daily;
+DROP TABLE IF EXISTS collect.job_outcome_daily_days;
+DROP TABLE IF EXISTS collect.job_outcome_daily_watermark;"),
     ];
 
     /// <summary>

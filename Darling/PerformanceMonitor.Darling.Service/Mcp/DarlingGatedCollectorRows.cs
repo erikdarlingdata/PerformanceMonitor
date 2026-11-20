@@ -92,7 +92,7 @@ internal static class DarlingGatedCollectorRows
     /// </summary>
     internal sealed record EngineGate(
         string ServerName, int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind, IReadOnlySet<string> Names,
-        IReadOnlyCollection<string>? ExtensionsNotOffered = null)
+        IReadOnlyCollection<string>? ExtensionsNotOffered = null, int SqlMajorVersion = 0)
     {
         /// <summary>True when <paramref name="collectorName"/> does not run on this server's engine.</summary>
         internal bool IsGated(string collectorName) => Names.Contains(collectorName);
@@ -112,7 +112,7 @@ internal static class DarlingGatedCollectorRows
                 {
                     collector = n,
                     status = NotCollectedStatus,
-                    message = CollectorEngineCapability.NotCollectedMessage(ServerName, EngineEdition, EngineKind, n, AwsRdsKind, ExtensionsNotOffered),
+                    message = CollectorEngineCapability.NotCollectedMessage(ServerName, EngineEdition, EngineKind, n, AwsRdsKind, ExtensionsNotOffered, SqlMajorVersion),
                 })
                 .ToList();
     }
@@ -126,13 +126,13 @@ internal static class DarlingGatedCollectorRows
     {
         try
         {
-            var (edition, kind, rds) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            var (edition, kind, rds, major) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
             /* #8913: an Aurora server that does not offer an optional extension gates the collector that reads it. */
             var notOffered = MonitoredEngineKind.IsAurora(kind)
                 ? (await ExtensionsNotOffered.ReadAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, cancellationToken)).GetValueOrDefault(serverId)
                 : null;
-            var names = FleetEngineGatedCollectors.For(edition, kind, rds, notOffered);
-            return names.Count == 0 ? null : new EngineGate(serverName, edition, kind, rds, names, notOffered);
+            var names = FleetEngineGatedCollectors.For(edition, kind, rds, notOffered, major);
+            return names.Count == 0 ? null : new EngineGate(serverName, edition, kind, rds, names, notOffered, major);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -274,9 +274,10 @@ internal static class DarlingGatedCollectorRows
         int engineEdition;
         string? engineKind;
         AwsRdsKind awsRdsKind;
+        int sqlMajorVersion;
         try
         {
-            (engineEdition, engineKind, awsRdsKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            (engineEdition, engineKind, awsRdsKind, sqlMajorVersion) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -289,7 +290,7 @@ internal static class DarlingGatedCollectorRows
             loggedRows.Select(r => r.CollectorName).ToHashSet(StringComparer.Ordinal),
             /* The RDS kind is inert here while Rows admits PostgreSQL definitions only (the kind axis returns before the RDS axis
                is reached). It is passed so the answer stays right if that filter ever widens. */
-            name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name, awsRdsKind));
+            name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name, awsRdsKind, sqlMajorVersion: sqlMajorVersion));
     }
 
     /// <summary>

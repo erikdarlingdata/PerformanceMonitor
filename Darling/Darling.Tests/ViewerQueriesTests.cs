@@ -347,11 +347,16 @@ public sealed class ViewerQueriesSqlTests
     /// (#1892). Filtering on one instant while bucketing on another puts rows in bars outside the range the
     /// caller asked for; the delta slicers never had the problem because for them the two are one column.
     /// </param>
+    /// <param name="endOperator">
+    /// How the window's end is compared. The delta slicers read a closed range of collection times; Query Store's slicer
+    /// places an interval by its start and ends before the window's end, so the interval that starts at the end belongs to
+    /// the next window (#9100).
+    /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
-    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time", "<=")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time", "<=")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)", "<")]
+    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter, string endOperator)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
@@ -359,7 +364,7 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains(distinctCount, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains($"{windowFilter} >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains($"{windowFilter} <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains($"{windowFilter} {endOperator} $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY bucket", sql, StringComparison.Ordinal);
 
         /* The bucket key and the window filter agree, stated as the invariant rather than left implicit in

@@ -67,7 +67,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "database_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database configuration data available. The config collector may not have run yet.");
@@ -145,7 +145,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseScopedConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_scoped_config", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "database_scoped_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database-scoped configuration data available. The config collector may not have run yet.");
@@ -202,7 +202,7 @@ public sealed class McpConfigTools
                 ?? PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["query_store_health"].FrequencyMinutes;
             var rows = await dataService.GetLatestQueryStoreHealthAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store_health", awsRdsKind: AwsRdsKind.None)
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "query_store_health")
                     ?? McpHelpers.Status(
                         "unavailable",
                         QueryStoreSnapshotStaleness.NoCaptureMessage("query_store_health", healthIntervalMinutes));

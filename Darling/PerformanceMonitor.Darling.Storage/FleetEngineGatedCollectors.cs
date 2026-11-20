@@ -26,19 +26,21 @@ public static class FleetEngineGatedCollectors
 {
     /// <summary>The registry's engine facts for every server, the columns <c>DarlingEngineCapability.ServerEngineSql</c> reads for one.</summary>
     public const string Sql = @"
-SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
+SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express, sql_major_version, postgres_major_version
 FROM servers";
 
     /// <summary>
     /// The catalog collectors that do not run on a server with these engine facts. Empty when the facts make no claim (an unknown
-    /// edition, no kind, no RDS fact), so a server nobody has connected to yet is judged by its log as before.
+    /// edition, no kind, no RDS fact), so a server nobody has connected to yet is judged by its log as before. A SQL Server older than
+    /// the supported floor also has the collectors its version is too old for (#9099): the runner skips them, so a read of them is not collected.
     /// </summary>
-    public static HashSet<string> For(int engineEdition, string? engineKind, AwsRdsKind awsRdsKind, IReadOnlyCollection<string>? extensionsNotOffered = null)
+    public static HashSet<string> For(
+        int engineEdition, string? engineKind, AwsRdsKind awsRdsKind, IReadOnlyCollection<string>? extensionsNotOffered = null, int sqlMajorVersion = 0)
     {
         var gated = new HashSet<string>(StringComparer.Ordinal);
         foreach (var definition in CollectorCatalog.All)
         {
-            if (CollectorEngineCapability.NotCollectedMessage(string.Empty, engineEdition, engineKind, definition.Name, awsRdsKind, extensionsNotOffered) is not null)
+            if (CollectorEngineCapability.NotCollectedMessage(string.Empty, engineEdition, engineKind, definition.Name, awsRdsKind, extensionsNotOffered, sqlMajorVersion) is not null)
             {
                 gated.Add(definition.Name);
             }
@@ -67,7 +69,8 @@ FROM servers";
                 var edition = reader.IsDBNull(1) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(1);
                 var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
                 var rds = CollectorEngineCapability.AwsRdsKindOf(!reader.IsDBNull(3) && reader.GetBoolean(3), !reader.IsDBNull(4) && reader.GetBoolean(4));
-                var gated = For(edition, kind, rds, notOffered.GetValueOrDefault(reader.GetInt32(0)));
+                var major = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
+                var gated = For(edition, kind, rds, notOffered.GetValueOrDefault(reader.GetInt32(0)), major);
                 if (gated.Count > 0)
                 {
                     byServer[reader.GetInt32(0)] = gated;

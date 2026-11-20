@@ -121,14 +121,14 @@ public partial class ViewerServerTab : IDisposable
         {
             if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
             {
-                ApplyTheme(chart);
+                ChartStyle.Restyle(chart); // #9109: colours only, the load's axis limits and ticks stay
                 chart.Refresh();
             }
         }
 
         foreach (var (chart, _) in _pgTrendCharts.Values)
         {
-            ApplyTheme(chart);
+            ChartStyle.Restyle(chart);
             chart.Refresh();
         }
 

@@ -89,7 +89,7 @@ public partial class ServerTab : UserControl
             _activeQueriesSlicerMetric = "Sessions";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, queryFrom, queryTo, DateTime.UtcNow);
             if (data.Count == 0)
-                ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
+                ActiveQueriesSlicer.ShowEmpty(EmptyPanelText("query_snapshots", data.Count, "No active query samples in the selected time window."));
             else
                 ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
@@ -152,7 +152,7 @@ public partial class ServerTab : UserControl
             _queryStatsSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(0, startUtc, endUtc, DateTime.UtcNow);
             if (data.Count == 0)
-                QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
+                QueryStatsSlicer.ShowEmpty(EmptyPanelText("query_stats", data.Count, "No query statistics in the selected time window."));
             else
                 QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
             UpdateQueryStatsEmptyMessage();
@@ -306,7 +306,7 @@ public partial class ServerTab : UserControl
             _procStatsSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count == 0)
-                ProcStatsSlicer.ShowEmpty("No procedure statistics in the selected time window.");
+                ProcStatsSlicer.ShowEmpty(EmptyPanelText("procedure_stats", data.Count, "No procedure statistics in the selected time window."));
             else
                 ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }

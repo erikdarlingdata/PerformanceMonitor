@@ -221,7 +221,10 @@ OPTION(RECOMPILE);";
     /// Gated off for Azure SQL Database only, matching <see cref="AgReplicaStatesCollector"/> —
     /// see that definition for the reasoning.
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
+    // #9099: also off below the supported version floor, because is_distributed and secondary_lag_seconds do not exist before SQL Server 2016.
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        !target.IsAzureSqlDb
+        && target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 

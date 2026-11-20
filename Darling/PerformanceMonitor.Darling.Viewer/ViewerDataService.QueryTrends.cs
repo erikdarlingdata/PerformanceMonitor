@@ -246,7 +246,7 @@ public sealed partial class ViewerDataService
                    Filtering on collection_time here put a point outside the range the caller asked for, and
                    dropped the range's final interval because its closing fetch had not happened yet. */
                 AND   interval_start_time_utc >= $2
-                AND   interval_start_time_utc <= $3
+                AND   interval_start_time_utc < $3
                 /* Chunk-exclusion bounds only; see the slicer for why the floor is free and why the ceiling
                    is a month rather than tight. */
                 AND   collection_time >= $2 - interval '1 day'
@@ -273,7 +273,7 @@ public sealed partial class ViewerDataService
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2
-            AND   collection_time <= $3
+            AND   collection_time < $3
             AND   interval_start_time_utc IS NULL
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
@@ -368,7 +368,7 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 2 keeps that floor.</para>
     /// <para><b>Arm 1's range comes from the window itself (#5523).</b> Its rows are placed by
-    /// <c>interval_start_time_utc</c> in [$2, $3], and <c>first_execution_time</c> lies inside the interval (the monitored
+    /// <c>interval_start_time_utc</c> in [$2, $3), and <c>first_execution_time</c> lies inside the interval (the monitored
     /// server's clock for both), so <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.IntervalStartSlackSql"/>
     /// and <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/>
     /// (an interval spans at most a day, plus the hour of slack) hold for every row it returns. The floor is safe because
@@ -394,7 +394,7 @@ public sealed partial class ViewerDataService
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   interval_start_time_utc >= $2
-            AND   interval_start_time_utc <= $3
+            AND   interval_start_time_utc < $3
             AND   interval_start_time_utc IS NOT NULL
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.IntervalStartSlackSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
@@ -416,7 +416,7 @@ public sealed partial class ViewerDataService
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $2
-            AND   collection_time <= $4
+            AND   collection_time < $4
             AND   interval_start_time_utc IS NULL
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $4 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}

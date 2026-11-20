@@ -182,7 +182,8 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
         }
     }
 
-    /// <summary>A raw snapshot at the rollup's boundary, from a pair the rollup never held: the tail both statements read the same way.</summary>
+    /// <summary>A raw snapshot of an interval that starts at the rollup's boundary and at the window's end, from a pair the rollup never held: a window
+    /// ends before it, so neither statement counts it (#9100).</summary>
     private static Task InsertTailAsync(NpgsqlConnection c, CancellationToken ct, Timeline t)
         => Snapshot(c, ct, 0, "Eps", NextInterval(), t.End, t.End.AddMinutes(5), 1, 100, 200);
 
@@ -274,7 +275,9 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
 
             var all = await RunAsync(pg, DarlingMcpQueryFleetSummaryTools.BuildQueryStoreSql(true), t, rawFrom, 200, null, ct);
             Assert.Contains(all, r => r.Database is null);
-            Assert.Contains(all, r => r.Database == "Eps");
+            Assert.DoesNotContain(all, r => r.Database == "Eps");   /* #9100: an interval that starts at the window end belongs to the next window */
+            var midRows = await RunAsync(pg, DarlingMcpQueryFleetSummaryTools.BuildQueryStoreMidSql(), t, rawFrom, 200, plan, ct);
+            Assert.DoesNotContain(midRows, r => r.Database == "Eps");
             var ties = all.Where(r => r.Database is "TieA" or "TieB").ToArray();
             Assert.Equal(2, ties.Length);
             Assert.Equal(ties[0].CpuUs, ties[1].CpuUs);

@@ -165,7 +165,10 @@ OPTION(RECOMPILE);";
     /// server_config and trace_flags use. Managed Instance and RDS keep it: both expose the AG
     /// objects, and on an instance without AGs the query is simply a zero-row read.
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
+    // #9099: also off below the supported version floor, because is_distributed does not exist before SQL Server 2016.
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        !target.IsAzureSqlDb
+        && target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 

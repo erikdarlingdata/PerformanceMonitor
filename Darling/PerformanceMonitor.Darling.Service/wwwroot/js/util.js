@@ -685,6 +685,21 @@ export function effectiveSpanText(hours) {
 }
 
 /**
+ * #9116: "The heat map covers the last 4 days, not the whole time range." for a window-floor read that carries `effective_start` and the window's
+ * end under `desc.floorSpan.endKey`, as the Query Store clutter strips say it from `effective_hours_back`. Null when the descriptor names no
+ * subject, or either instant is missing or unreadable, or the data starts at or after the window's end.
+ */
+function floorSpanLead(source, desc) {
+  const named = desc && desc.floorSpan;
+  if (!named || typeof named.subject !== "string" || typeof named.endKey !== "string" || !source) return null;
+  const start = parseUtc(source.effective_start);
+  const end = parseUtc(source[named.endKey]);
+  if (!start || !end) return null;
+  const span = effectiveSpanText((end.getTime() - start.getTime()) / 3600000);
+  return span ? named.subject + " covers " + span + ", not the whole time range." : null;
+}
+
+/**
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
  * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
  * read reaches here: readTool composes it with windowNoteText). Null for any other response,
@@ -707,7 +722,13 @@ export function windowFloorStrip(data, desc) {
     if (typeof note !== "string" || !note.trim()) return null;
     /* #8929: a note written for an MCP caller says "covers effective_hours_back"; this page says the span the reply states. */
     const span = effectiveSpanText(source.effective_hours_back);
-    if (!chart) return noticeStrip(span ? note.replace(/\beffective_hours_back, not hours_back\b/g, span + ", not the whole time range").replace(/\beffective_hours_back\b/g, span) : note);
+    if (!chart) {
+      if (span) return noticeStrip(note.replace(/\beffective_hours_back, not hours_back\b/g, span + ", not the whole time range").replace(/\beffective_hours_back\b/g, span));
+      /* #9116: a read that sends no `effective_hours_back` (the heat map's reply carries `effective_start` and `window_end`) names where its data starts in
+         the same form, from those two instants, when the panel's descriptor says what to call itself (`floorSpan`). */
+      const lead = floorSpanLead(source, desc);
+      return noticeStrip(lead ? lead + " " + note : note);
+    }
     /* A chart draws only the row-capped note (#5644 W12): its time axis already shows the empty span of a data start that
        falls after the window's start, but a chart built from the newest N rows plots nothing before its oldest row while
        the axis and the title claim the whole window. That note names the oldest row shown (oldest_shown_utc). */
