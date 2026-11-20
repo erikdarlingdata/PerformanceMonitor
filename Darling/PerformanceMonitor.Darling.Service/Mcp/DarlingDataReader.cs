@@ -3104,14 +3104,14 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// <see cref="QueryStoreTopDailyTableSql"/>'s trailing edge, <c>[E, $3]</c> of the wide table, as
+    /// <see cref="QueryStoreTopDailyTableSql"/>'s trailing edge, <c>[E, $3)</c> of the wide table, as
     /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading one. $3 window end, $9 <c>E</c>.
     /// </summary>
     private static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $9::date
-            AND   collection_time <= $3
+            AND   collection_time < $3
             AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -3132,13 +3132,13 @@ internal static class DarlingDataReader
     /// <summary>
     /// The long-window read (#5094): <see cref="QueryStoreTopTableSql"/>'s answer, with a run of whole UTC days taken
     /// from <c>collect.query_store_top_daily</c> instead of the wide table. $1 server_id, $2 the gate's
-    /// <c>ReadStart</c>, $3 the window end (the trailing edge arm's own bound is inclusive, by <c>collection_time</c>), $4 top, $5 database, $6 execution
+    /// <c>ReadStart</c>, $3 the window end (exclusive, as in the table read), $4 top, $5 database, $6 execution
     /// outcome, $7 module, $8 <c>S</c> and $9 <c>E</c> (dates): the days <c>[S, E)</c> come from the summary, and the
-    /// edges <c>[$2, S)</c> and <c>[E, $3]</c> from the wide table by <c>collection_time</c> (the inclusive $3 is the
-    /// edge's own, placed by collection and not by the interval's start), with the table read's <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
+    /// edges <c>[$2, S)</c> and <c>[E, $3)</c> from the wide table by <c>collection_time</c> with the table read's
+    /// predicates (the exclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
     /// upper bound too (#5523): each edge range ends at its own window end plus
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
-    /// every row newer than it, so a partial first or last day, and any day without a built row, is exact.
+    /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
     /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
     /// execution-weighted sum <c>avg * execution_count</c> as <c>numeric</c> (the summary stores the same thing as
     /// <c>&lt;col&gt;_wsum</c>, V240, #7169). <c>ranked</c> then groups the unioned rows by the table read's own

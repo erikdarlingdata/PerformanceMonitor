@@ -103,21 +103,22 @@ public sealed class QueryStoreCollectionCeilingTests
 
     private static string TextOf(long query) => $"SELECT {query} AS ceiling_probe";
 
-    /// <summary>One interval plainly inside the window; day-long intervals starting at the window's end whose rows are collected
+    /// <summary>One interval plainly inside the window; day-long intervals starting in the window's last minute whose rows are collected
     /// at an interval's length plus the catch-up cap plus the look-back of an hour-long flush, and at the longest lag the collector
     /// produces (the same with <see cref="QueryStoreReplicaRouting.MaxLookBack"/>); one starting there whose row is collected a minute
     /// past the ceiling, which no raw read reaches; and the same on another server, whose only row it is.</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var lagged = QueryStoreIntervalWide.IntervalSpanMargin + WatermarkPolicy.MaxCatchup;
+        var lastStart = WindowEnd.AddMinutes(-1);
         var pastTheCeiling = WindowEnd + QueryStoreIntervalWide.CollectionCeiling + TimeSpan.FromMinutes(1);
         (int Server, long Query, DateTime Started, DateTime Collected)[] rows =
         [
             (Server, Inside, Day.AddHours(13), Day.AddHours(14).AddMinutes(5)),
-            (Server, SlowFlushLookBack, WindowEnd, WindowEnd + lagged + QueryStoreReplicaRouting.LookBackFor(3600, hasCapturingSecondary: false)),
-            (Server, LongestLag, WindowEnd, WindowEnd + lagged + QueryStoreReplicaRouting.MaxLookBack),
-            (Server, PastTheCeiling, WindowEnd, pastTheCeiling),
-            (OtherServer, OtherServerPastTheCeiling, WindowEnd, pastTheCeiling),
+            (Server, SlowFlushLookBack, lastStart, lastStart + lagged + QueryStoreReplicaRouting.LookBackFor(3600, hasCapturingSecondary: false)),
+            (Server, LongestLag, lastStart, lastStart + lagged + QueryStoreReplicaRouting.MaxLookBack),
+            (Server, PastTheCeiling, lastStart, pastTheCeiling),
+            (OtherServer, OtherServerPastTheCeiling, lastStart, pastTheCeiling),
         ];
         foreach (var (server, q, started, collected) in rows)
         {
