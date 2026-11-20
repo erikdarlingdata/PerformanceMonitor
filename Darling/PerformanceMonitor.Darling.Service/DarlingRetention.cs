@@ -594,7 +594,7 @@ public static class DarlingRetention
 
                         if (outcome == DropChunksOutcome.GaveWay)
                         {
-                            /* #9102: another session held a lock on one of the expired chunks through every try (logged). The
+                            /* #9102: another session held a lock on one of the expired chunks through every try (warned). The
                                table is a hypertable and its chunks are whole, so the DELETE below is not for it: the next pass
                                drops them. Counted as neither purged nor failed. */
                             continue;
@@ -974,7 +974,7 @@ public static class DarlingRetention
                 }
                 else if (logOutcome == DropChunksOutcome.GaveWay)
                 {
-                    /* #9102: a lock holder kept the expired chunks through every try (logged). They are whole chunks of a
+                    /* #9102: a lock holder kept the expired chunks through every try (warned). They are whole chunks of a
                        hypertable, so the next pass drops them and no DELETE runs in their place. */
                     logTakesDelete = false;
                 }
@@ -2382,7 +2382,7 @@ SELECT pg_catalog.current_setting('{DropChunksAnswerSetting}')::integer";
         /// <summary>The statement ran; the count is the chunks it dropped, zero when none had expired.</summary>
         Dropped,
 
-        /// <summary>Every try waited out its <c>lock_timeout</c> behind another session's lock. Nothing was dropped.</summary>
+        /// <summary>Every try waited out its <c>lock_timeout</c> behind another session's lock (warned). Nothing was dropped.</summary>
         GaveWay,
 
         /// <summary>The statement failed for any other reason (warned).</summary>
@@ -2468,7 +2468,7 @@ $do$";
 
             if (attempt >= DropChunksLockAttempts)
             {
-                logger?.LogInformation(
+                logger?.LogWarning(
                     "Retention purge (drop_chunks) for {Table} gave way to another session's lock {Attempts} times; its expired chunks stay until the next retention pass.",
                     tableName, DropChunksLockAttempts);
                 return (DropChunksOutcome.GaveWay, 0);
