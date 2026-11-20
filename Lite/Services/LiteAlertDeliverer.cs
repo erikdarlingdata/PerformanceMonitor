@@ -53,8 +53,19 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
         bool muted, string? detailText, AlertNotificationMode deliveryMode, CancellationToken cancellationToken);
 
-    private readonly ShowToast _showToast;
-    private readonly SendAlert _sendAlert;
+    /* #9142: the same send, told whether the tray toast was shown, so the history row names the tray only when a balloon
+       really appeared. A headless start, an unavailable tray and a toast that threw are not a tray delivery. */
+    internal delegate Task<AlertDelivery?> SendAlertWithTray(
+        string metricName, string serverName, string currentValue, string thresholdValue,
+        int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
+        bool muted, string? detailText, AlertNotificationMode deliveryMode, bool trayShown, CancellationToken cancellationToken);
+
+    private readonly Func<string, string, BalloonIcon, string, string, bool> _showToast;
+    private readonly SendAlertWithTray _sendAlert;
+
+    /* #9142: the tray is one channel among several. A toast that throws must not stop the send that follows it, and a tray
+       that has no taskbar is logged once and skipped, not logged as an error for every alert. */
+    private readonly TrayChannelGate _trayGate;
     private readonly Func<int, AlertNotificationMode?> _resolveServerDeliveryOverride;
     private readonly RecordHeld? _recordHeld;
 
@@ -77,12 +88,15 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         ArgumentNullException.ThrowIfNull(trayService);
         ArgumentNullException.ThrowIfNull(dispatcher);
 
+        _trayGate = new TrayChannelGate(message => AppLogger.Warn("Alerts", message));
+
         _showToast = (title, message, icon, serverName, metricName) =>
         {
             var tray = trayService();
             if (tray == null)
             {
-                return;
+                /* #9142: no tray (a headless start, or an icon that could not be created) is not a delivery. */
+                return false;
             }
 
             /* The tray icon is a WPF element; the engine's continuations normally resume on the
@@ -90,21 +104,19 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                defensively so a pool-thread caller can't crash the balloon. */
             if (dispatcher.CheckAccess())
             {
-                tray.ShowSnoozableNotification(title, message, icon, serverName, metricName, muteRuleService);
+                return tray.ShowSnoozableNotification(title, message, icon, serverName, metricName, muteRuleService);
             }
-            else
-            {
-                dispatcher.Invoke(() =>
-                    tray.ShowSnoozableNotification(title, message, icon, serverName, metricName, muteRuleService));
-            }
+
+            return dispatcher.Invoke(() =>
+                tray.ShowSnoozableNotification(title, message, icon, serverName, metricName, muteRuleService));
         };
 
         _sendAlert = (metricName, serverName, currentValue, thresholdValue, serverId, context,
-                numericCurrentValue, numericThresholdValue, muted, detailText, deliveryMode, cancellationToken) =>
+                numericCurrentValue, numericThresholdValue, muted, detailText, deliveryMode, trayShown, cancellationToken) =>
             emailAlertService.TrySendAlertEmailAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context,
                 numericCurrentValue: numericCurrentValue, numericThresholdValue: numericThresholdValue,
-                muted: muted, detailText: detailText, deliveryMode: deliveryMode,
+                muted: muted, detailText: detailText, deliveryMode: deliveryMode, trayShown: trayShown,
                 cancellationToken: cancellationToken);
 
         /* #1236: the per-server delivery-mode override for serverId, or null to inherit the global
@@ -121,17 +133,44 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 numericCurrentValue, numericThresholdValue, detailText, hold, cancellationToken);
     }
 
-    /// <summary>Test ctor: injected toast/send/override seams, no WPF or SMTP dependencies.</summary>
+    /// <summary>Test ctor: injected toast/send/override seams, no WPF or SMTP dependencies. The toast counts as shown unless it throws.</summary>
     internal LiteAlertDeliverer(
         ShowToast showToast,
         SendAlert sendAlert,
         Func<int, AlertNotificationMode?> resolveServerDeliveryOverride,
         RecordHeld? recordHeld = null)
+        : this(
+            (title, message, icon, serverName, metricName) =>
+            {
+                showToast(title, message, icon, serverName, metricName);
+                return true;
+            },
+            (metricName, serverName, currentValue, thresholdValue, serverId, context, numericCurrentValue, numericThresholdValue,
+                muted, detailText, deliveryMode, _, cancellationToken) =>
+                sendAlert(metricName, serverName, currentValue, thresholdValue, serverId, context, numericCurrentValue,
+                    numericThresholdValue, muted, detailText, deliveryMode, cancellationToken),
+            resolveServerDeliveryOverride,
+            recordHeld,
+            trayGate: null)
+    {
+    }
+
+    /// <summary>
+    /// Test ctor for the tray as a channel (#9142): the toast says whether it was shown, the send is told, and the gate's
+    /// log is the caller's.
+    /// </summary>
+    internal LiteAlertDeliverer(
+        Func<string, string, BalloonIcon, string, string, bool> showToast,
+        SendAlertWithTray sendAlert,
+        Func<int, AlertNotificationMode?> resolveServerDeliveryOverride,
+        RecordHeld? recordHeld,
+        TrayChannelGate? trayGate)
     {
         _showToast = showToast;
         _sendAlert = sendAlert;
         _resolveServerDeliveryOverride = resolveServerDeliveryOverride;
         _recordHeld = recordHeld;
+        _trayGate = trayGate ?? new TrayChannelGate(message => AppLogger.Warn("Alerts", message));
     }
 
     /// <summary>
@@ -194,15 +233,19 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                     AlertDetailText.WithSampleAge(outcome.DetailText, outcome.Context), hold, cancellationToken);
             }
 
-            /* Toast BEFORE the send, matching the old loop's order in every branch. */
+            /* Toast BEFORE the send, matching the old loop's order in every branch. #9142: the toast is one channel, not the
+               gate to the others. A tray that throws (no taskbar in a session no one is signed in to) used to land in the catch
+               below, so the email and webhook sends and the history row never happened and the engine retried the whole alert
+               on its failed-send backoff. The gate contains the throw, and the send is told whether a balloon really appeared. */
+            var trayShown = false;
             if (!outcome.Muted)
             {
-                _showToast(
+                trayShown = _trayGate.Run(() => _showToast(
                     outcome.MetricName,
                     $"{outcome.ServerName}: {outcome.ShortMessage}",
                     ToastIconFor(outcome.MetricName),
                     outcome.ServerName,
-                    outcome.MetricName);
+                    outcome.MetricName));
             }
 
             /* #1236: a per-server override (Manage Servers -> Edit) wins over the global delivery mode;
@@ -227,13 +270,13 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 return await SendPerEventAsync(
                     outcome.MetricName, outcome.ServerName, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue, outcome.Muted,
-                    deliveryMode, cancellationToken);
+                    deliveryMode, trayShown, cancellationToken);
             }
 
             return await _sendAlert(
                 outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                 serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                outcome.Muted, detailText, deliveryMode, cancellationToken);
+                outcome.Muted, detailText, deliveryMode, trayShown, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -264,7 +307,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     private async Task<AlertDelivery?> SendPerEventAsync(
         string metricName, string serverName, string thresholdValue,
         int serverId, AlertContext context, double? numericCurrentValue, double? numericThresholdValue,
-        bool isMuted, AlertNotificationMode deliveryMode, CancellationToken cancellationToken)
+        bool isMuted, AlertNotificationMode deliveryMode, bool trayShown, CancellationToken cancellationToken)
     {
         var deliveries = new List<AlertDelivery?>();
         foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
@@ -279,7 +322,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
                 msg.Context, numericCurrentValue ?? msg.NumericValue, numericThresholdValue, isMuted,
                 AlertDetailText.WithSampleAge(AlertContextBuilders.ContextToDetailText(msg.Context), msg.Context),
-                deliveryMode, cancellationToken));
+                deliveryMode, trayShown, cancellationToken));
         }
 
         /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */

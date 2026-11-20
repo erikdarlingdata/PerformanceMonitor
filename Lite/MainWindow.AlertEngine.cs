@@ -79,9 +79,10 @@ public partial class MainWindow : Window
     /// </summary>
     private async void CheckPerformanceAlerts(ServerSummaryItem summary)
     {
-        /* Same early return as the pre-forwarding loop: alerts off or no tray yet — leave badge
-           state untouched. (_alertEngine is wired right after the tray in MainWindow_Loaded.) */
-        if (!App.AlertsEnabled || _trayService == null || _alertEngine == null) return;
+        /* Alerts off or the engine not wired yet — leave badge state untouched. The tray is not part of the test: a headless
+           start, and a start whose tray icon could not be created, have none, and the engine's other channels still deliver
+           (#9142). */
+        if (!App.AlertsEnabled || _alertEngine == null) return;
 
         var key = summary.ServerId.ToString();
 
