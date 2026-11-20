@@ -68,7 +68,7 @@ public sealed class QueryStoreWideUpperBoundLiveTests
     {
         (21, W0, W0, W0.AddMinutes(30)),                                        // starts at the window start
         (22, W0.AddMinutes(10), W0.AddMinutes(-59), W0.AddHours(1)),            // first execution 59 minutes below the window start: inside the 1 h floor
-        (23, W1, W1.AddHours(24), W1.AddHours(25)),                             // starts at the end, spans the whole day
+        (23, W1.AddMinutes(-1), W1.AddHours(24).AddMinutes(-1), W1.AddHours(25)),  // starts a minute before the end, spans the whole day
         (24, W1.AddMinutes(-10), W1.AddHours(23).AddMinutes(50), W1.AddHours(24)),
         (25, W0.AddMinutes(-1), W0.AddMinutes(-1), W0.AddMinutes(10)),          // starts just before the window
         (26, W1.AddMinutes(1), W1.AddMinutes(1), W1.AddMinutes(5)),             // starts just after the window
@@ -83,13 +83,13 @@ public sealed class QueryStoreWideUpperBoundLiveTests
     private static readonly int[] ExpectedDaily = { 1, 2, 4, 5, 9, 12 };
     private static readonly DateTime[] ExpectedTrendPoints =
     {
-        W0, W0.AddMinutes(10), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1,
+        W0, W0.AddMinutes(10), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-1),
     };
 
     /* What the same trend statement returns with its new bounds cut out: the two rows the bounds exist to drop come back. */
     private static readonly DateTime[] OldTrendPoints =
     {
-        W0, W0.AddMinutes(10), W0.AddMinutes(20), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-3), W1,
+        W0, W0.AddMinutes(10), W0.AddMinutes(20), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-3), W1.AddMinutes(-1),
     };
 
     [Fact]
