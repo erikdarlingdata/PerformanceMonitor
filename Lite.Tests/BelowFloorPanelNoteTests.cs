@@ -67,6 +67,38 @@ public sealed class BelowFloorPanelNoteTests
         Assert.Equal(OwnText, PanelText(collector, rowCount: 0, major: 12, isAzure: true));
     }
 
+    /* #9113: the tab hands the panel the server's real engine edition. A Managed Instance and an Azure SQL Database both report major 12 on the
+       probe, and neither is SQL Server 2014, so no floored panel says so; a SQL Server 2012 box (major 11, edition 2) still does. */
+    [Theory]
+    [MemberData(nameof(FlooredPanelCollectors))]
+    public void AnEmptyPanel_GivenTheProbedEdition_SaysNothingOfAVersion_OnAManagedInstanceOrAnAzureSqlDatabase(string collector)
+    {
+        const int Edition = CollectorEngineCapability.AzureManagedInstanceEngineEdition;
+        Assert.Equal(OwnText, ServerTab.EmptyPanelText(ServerName, isAzureSqlDatabase: false, collector, 0, AwsRdsKind.None, 12, OwnText, Edition));
+
+        var azure = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
+        Assert.Equal(OwnText, ServerTab.EmptyPanelText(ServerName, isAzureSqlDatabase: true, collector, 0, AwsRdsKind.None, 12, OwnText, azure));
+
+        var floored = ServerTab.EmptyPanelText(ServerName, isAzureSqlDatabase: false, collector, 0, AwsRdsKind.None, 11, OwnText, engineEdition: 2);
+        Assert.NotEqual(OwnText, floored);
+        Assert.Contains(CollectorEngineCapability.SupportedVersionsDescription, floored, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNoteFromTheRuns_OnAManagedInstance_IsTheSameAsWithNoVersionKnown()
+    {
+        var withMajor = ServerTab.EngineGapStateFromRuns(
+            ServerName, isAzureSqlDatabase: false, "file_io_stats", rowCount: 0, skipped: null, CollectorRunHistory.Empty, AwsRdsKind.None,
+            sqlMajorVersion: 12, engineEdition: CollectorEngineCapability.AzureManagedInstanceEngineEdition);
+        var noVersion = ServerTab.EngineGapStateFromRuns(
+            ServerName, isAzureSqlDatabase: false, "file_io_stats", rowCount: 0, skipped: null, CollectorRunHistory.Empty, AwsRdsKind.None,
+            sqlMajorVersion: 0, engineEdition: CollectorEngineCapability.AzureManagedInstanceEngineEdition);
+
+        Assert.Equal(noVersion, withMajor);
+        Assert.Null(ServerTab.EngineGapNote(
+            ServerName, isAzureSqlDatabase: false, "file_io_stats", AwsRdsKind.None, sqlMajorVersion: 12, engineEdition: CollectorEngineCapability.AzureManagedInstanceEngineEdition));
+    }
+
     [Theory]
     [MemberData(nameof(FlooredPanelCollectors))]
     public void APanelWithRows_KeepsItsOwnText_OnABelowFloorServer(string collector)

@@ -129,10 +129,10 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs,
-        AwsRdsKind awsRdsKind, int sqlMajorVersion = 0)
+        AwsRdsKind awsRdsKind, int sqlMajorVersion = 0, int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
     {
         var noRun = NoRunNote(serverName, collectorName, skipped, runs);
-        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind, noRun, sqlMajorVersion);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, awsRdsKind, noRun, sqlMajorVersion, engineEdition);
     }
 
     /// <summary>
@@ -142,16 +142,18 @@ public partial class ServerTab : UserControl
     /// not read it must not say "never collected" from a history that may be stale.
     /// </summary>
     internal static string EmptyPanelText(
-        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, AwsRdsKind awsRdsKind, int sqlMajorVersion, string ownText)
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, AwsRdsKind awsRdsKind, int sqlMajorVersion, string ownText,
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
     {
-        var gap = EngineGapState(serverName, isAzureSqlDatabase, collectorNeverRan: false, collectorName, rowCount, awsRdsKind, sqlMajorVersion: sqlMajorVersion);
+        var gap = EngineGapState(
+            serverName, isAzureSqlDatabase, collectorNeverRan: false, collectorName, rowCount, awsRdsKind, sqlMajorVersion: sqlMajorVersion, engineEdition: engineEdition);
         return gap.Visibility == Visibility.Visible ? gap.Text : ownText;
     }
 
-    /// <summary><see cref="EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string)"/> for this tab's server, for a panel whose
+    /// <summary><see cref="EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string, int)"/> for this tab's server, for a panel whose
     /// empty sentence is the time-range strip's message (Active Queries, Top Queries by CPU, Procedure Stats).</summary>
     private string EmptyPanelText(string collectorName, int rowCount, string ownText) =>
-        EmptyPanelText(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, _awsRdsKind, _sqlMajorVersion, ownText);
+        EmptyPanelText(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, _awsRdsKind, _sqlMajorVersion, ownText, _engineEdition);
 
     /// <summary>
     /// Whether an empty surface says its collector does not collect for this server, and with what sentence. The note
@@ -171,9 +173,10 @@ public partial class ServerTab : UserControl
         int rowCount,
         AwsRdsKind awsRdsKind,
         string? neverRanNote = null,
-        int sqlMajorVersion = 0)
+        int sqlMajorVersion = 0,
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
     {
-        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, awsRdsKind, sqlMajorVersion)
+        var text = EngineGapNote(serverName, isAzureSqlDatabase, collectorName, awsRdsKind, sqlMajorVersion, engineEdition)
             ?? (collectorNeverRan ? neverRanNote ?? NeverCollectedNote(serverName, collectorName) : null);
 
         return text is not null && rowCount == 0 ? (text, Visibility.Visible) : ("", Visibility.Collapsed);
@@ -207,7 +210,7 @@ public partial class ServerTab : UserControl
 
         var gap = EngineGapStateFromRuns(
             _server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, engineAxisOnly ? CollectorRunHistory.Empty : _collectorRuns,
-            _awsRdsKind, _sqlMajorVersion);
+            _awsRdsKind, _sqlMajorVersion, _engineEdition);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;

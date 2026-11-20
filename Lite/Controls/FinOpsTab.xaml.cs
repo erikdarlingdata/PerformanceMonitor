@@ -907,7 +907,7 @@ public partial class FinOpsTab : UserControl
         }
     }
 
-    /// <summary>The Database Sizes grid's own empty sentence, which <see cref="ServerTab.EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string)"/> falls back to.</summary>
+    /// <summary>The Database Sizes grid's own empty sentence, which <see cref="ServerTab.EmptyPanelText(string, bool, string, int, AwsRdsKind, int, string, int)"/> falls back to.</summary>
     internal const string NoDbSizesOwnText = "No database size data collected yet";
 
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
