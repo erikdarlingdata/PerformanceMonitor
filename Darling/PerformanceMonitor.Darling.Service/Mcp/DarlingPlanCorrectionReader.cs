@@ -101,32 +101,20 @@ LIMIT $4";
     /// Used by the web read only; the MCP tool keeps the per-capture rows its contract documents.
     /// </summary>
     public const string PlanCorrectionsCollapsedSql = @"
-WITH captured AS (
+/* #8570: rank on the narrow columns only. The first form carried query_text and about twenty other columns through the window
+   sorts to keep one row per recommendation, so a compressed week of captures decompressed and sorted every row's wide text to
+   throw nearly all of it away. The tie-break columns stay in the rank, so a tie resolves exactly as before. The wide columns are
+   fetched for the page's rows only, by that row's own key (NULL-safe: a nullable key column must still find its row, and a full
+   tie on the key takes one row, as the rank's own pick of one did). */
+WITH ranked AS (
     SELECT
         collection_time,
         database_name,
-        query_text,
-        recommendation_state,
-        recommendation_state_reason,
-        recommendation_reason,
-        score,
-        estimated_gain_seconds,
+        recommendation_name,
         query_id,
+        score,
         regressed_plan_id,
-        last_good_plan_id,
-        last_good_plan_forcing_type,
-        last_good_plan_is_forced,
-        last_good_plan_force_failure_reason,
-        regressed_plan_execution_count,
-        regressed_plan_cpu_time_average_ms,
-        last_good_plan_execution_count,
-        last_good_plan_cpu_time_average_ms,
-        valid_since,
         last_refresh,
-        execute_action_initiated_by,
-        execute_action_initiated_time,
-        revert_action_initiated_by,
-        revert_action_initiated_time,
         ROW_NUMBER() OVER (PARTITION BY database_name, recommendation_name, query_id ORDER BY collection_time DESC, score DESC NULLS LAST, regressed_plan_id DESC NULLS LAST, last_refresh DESC NULLS LAST) AS newest_rank,
         MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name, query_id) AS first_seen,
         COUNT(*) OVER (PARTITION BY database_name, recommendation_name, query_id) AS capture_count
@@ -136,38 +124,93 @@ WITH captured AS (
     AND   collection_time <= $3
     AND   recommendation_name IS NOT NULL
     AND   ($5::text[] IS NULL OR database_name = ANY($5))
+),
+page AS (
+    SELECT
+        collection_time,
+        database_name,
+        recommendation_name,
+        query_id,
+        score,
+        regressed_plan_id,
+        last_refresh,
+        first_seen,
+        capture_count
+    FROM ranked
+    WHERE newest_rank = 1
+    ORDER BY collection_time DESC, score DESC, database_name, query_id
+    LIMIT $4
+),
+wide AS (
+    SELECT DISTINCT ON (collection_time, database_name, recommendation_name, query_id, score, regressed_plan_id, last_refresh)
+        collection_time,
+        database_name,
+        recommendation_name,
+        query_id,
+        score,
+        regressed_plan_id,
+        last_refresh,
+        query_text,
+        recommendation_state,
+        recommendation_state_reason,
+        recommendation_reason,
+        estimated_gain_seconds,
+        last_good_plan_id,
+        last_good_plan_forcing_type,
+        last_good_plan_is_forced,
+        last_good_plan_force_failure_reason,
+        regressed_plan_execution_count,
+        regressed_plan_cpu_time_average_ms,
+        last_good_plan_execution_count,
+        last_good_plan_cpu_time_average_ms,
+        valid_since,
+        execute_action_initiated_by,
+        execute_action_initiated_time,
+        revert_action_initiated_by,
+        revert_action_initiated_time
+    FROM plan_correction
+    WHERE server_id = $1
+    AND   recommendation_name IS NOT NULL
+    AND   collection_time = ANY (ARRAY(SELECT collection_time FROM page))
+    ORDER BY collection_time, database_name, recommendation_name, query_id, score, regressed_plan_id, last_refresh
 )
 SELECT
-    collection_time,
-    database_name,
-    query_text,
-    recommendation_state,
-    recommendation_state_reason,
-    recommendation_reason,
-    score,
-    estimated_gain_seconds,
-    query_id,
-    regressed_plan_id,
-    last_good_plan_id,
-    last_good_plan_forcing_type,
-    last_good_plan_is_forced,
-    last_good_plan_force_failure_reason,
-    regressed_plan_execution_count,
-    regressed_plan_cpu_time_average_ms,
-    last_good_plan_execution_count,
-    last_good_plan_cpu_time_average_ms,
-    valid_since,
-    last_refresh,
-    execute_action_initiated_by,
-    execute_action_initiated_time,
-    revert_action_initiated_by,
-    revert_action_initiated_time,
-    first_seen,
-    capture_count
-FROM captured
-WHERE newest_rank = 1
-ORDER BY collection_time DESC, score DESC, database_name, query_id
-LIMIT $4";
+    page.collection_time,
+    page.database_name,
+    wide.query_text,
+    wide.recommendation_state,
+    wide.recommendation_state_reason,
+    wide.recommendation_reason,
+    page.score,
+    wide.estimated_gain_seconds,
+    page.query_id,
+    page.regressed_plan_id,
+    wide.last_good_plan_id,
+    wide.last_good_plan_forcing_type,
+    wide.last_good_plan_is_forced,
+    wide.last_good_plan_force_failure_reason,
+    wide.regressed_plan_execution_count,
+    wide.regressed_plan_cpu_time_average_ms,
+    wide.last_good_plan_execution_count,
+    wide.last_good_plan_cpu_time_average_ms,
+    wide.valid_since,
+    page.last_refresh,
+    wide.execute_action_initiated_by,
+    wide.execute_action_initiated_time,
+    wide.revert_action_initiated_by,
+    wide.revert_action_initiated_time,
+    page.first_seen,
+    page.capture_count
+FROM page
+JOIN wide
+    ON  wide.collection_time = page.collection_time
+    AND wide.database_name IS NOT DISTINCT FROM page.database_name
+    AND wide.recommendation_name = page.recommendation_name
+    AND wide.query_id IS NOT DISTINCT FROM page.query_id
+    AND wide.score IS NOT DISTINCT FROM page.score
+    AND wide.regressed_plan_id IS NOT DISTINCT FROM page.regressed_plan_id
+    AND wide.last_refresh IS NOT DISTINCT FROM page.last_refresh
+ORDER BY page.collection_time DESC, page.score DESC, page.database_name, page.query_id";
 
     /// <summary>
     /// The latest FORCE_LAST_GOOD_PLAN enablement snapshot per database. The enablement columns repeat on
