@@ -496,6 +496,27 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
                 await DarlingMcpTestData.RegisterServerAsync(c, -858000 - i, "p8570-" + i, ct);
             }
 
+            /* #9149: V284's covering hash index lets the hourly-only statement answer from the index alone once a vacuum has set the visibility map of
+               the rollup's pages, and then it reads a fraction of the pages this test counts it on. An autovacuum between the refresh and the EXPLAIN
+               does that on a slow runner. No autovacuum on the rollups' relations keeps the old statement on a heap fetch per row, as #8725 does for
+               the Query Store twin. A table option set on the hypertable is copied to the chunks created after it, so it goes on before the seed. */
+            await using (var relations = new NpgsqlCommand(@"SELECT 'collect.query_stats'
+                UNION ALL SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) FROM timescaledb_information.continuous_aggregates", c))
+            await using (var reader = await relations.ExecuteReaderAsync(ct))
+            {
+                var tables = new List<string>();
+                while (await reader.ReadAsync(ct))
+                {
+                    tables.Add(reader.GetString(0));
+                }
+
+                await reader.CloseAsync();
+                foreach (var table in tables)
+                {
+                    await Exec(c, $"ALTER TABLE {table} SET (autovacuum_enabled = false)", ct);
+                }
+            }
+
             await Exec(c, $@"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
                   delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
                 SELECT 800000000::bigint + row_number() OVER (), h.ts + interval '10 minutes', -858000 - s, 'p8570-' || s, 'db' || (g % 10),
