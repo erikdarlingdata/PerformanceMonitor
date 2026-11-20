@@ -458,7 +458,7 @@ t names_fit_with_the_longest_release_name
 # 53 characters, Helm's longest release name. Every object name must stay a valid label value (63), and the store
 # StatefulSet at most 52, because its pods get a controller-revision-hash label of the name plus 11 characters.
 LONG="$(printf 'r%.0s' $(seq 1 53))"
-helm template "${LONG}" "${CHART_DIR}" --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' \
+helm template "${LONG}" "${CHART_DIR}" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' \
   --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.allowFrom={10.1.0.0/16}' \
   --set 'network.trustedProxies={10.1.0.0/16}' > "${OUT}"
 assert_eq "$(yq '.metadata.name | select(length > 63)' "${OUT}" | grep -v -- '---' || true)" "" "names over 63 characters"
@@ -467,6 +467,8 @@ assert_eq "$(yq 'select(.kind == "StatefulSet") | .spec.serviceName | length <= 
 assert_eq "$(yq 'select(.kind == "StatefulSet") | ("data-" + .metadata.name + "-0") | length <= 63' "${OUT}")" "true" "store PVC name fits"
 assert_eq "$(yq '[.. | select(has("app.kubernetes.io/name")) | .["app.kubernetes.io/name"] | select(length > 63)] | length' "${OUT}" | grep -v -- '---' | sort -u)" "0" "name labels fit"
 # Every Service and Ingress name is distinct, and each Ingress backend names a rendered Service.
+assert_eq "$(yq 'select(.kind == "Service" and (.metadata.name | test("-metrics$"))) | .metadata.name | length' "${OUT}" | grep -v -- '---')" "63" "metrics Service name at the limit"
+assert_eq "$(yq 'select(.kind == "ServiceMonitor") | .metadata.name | length' "${OUT}" | grep -v -- '---')" "63" "ServiceMonitor name at the limit"
 assert_eq "$(yq 'select(.kind == "Service" or .kind == "Ingress") | .kind + "/" + .metadata.name' "${OUT}" | grep -v -- '---' | sort | uniq -d)" "" "duplicate names"
 for b in $(yq 'select(.kind == "Ingress") | .spec.rules[].http.paths[].backend.service.name' "${OUT}" | grep -v -- '---'); do
   assert_eq "$(yq "select(.kind == \"Service\" and .metadata.name == \"${b}\") | .metadata.name" "${OUT}")" "${b}" "Ingress backend ${b} is a Service"
@@ -854,3 +856,41 @@ t metrics_schema
 assert_fails "metrics" --set metrics.port=x
 assert_fails "metrics" --set metrics.bogus=1
 assert_fails "interval" --set metrics.serviceMonitor.interval=1minute
+
+t metrics_service
+render
+assert_eq "$(yq 'select(.kind == "Service" and .metadata.name == "'"${DEPLOY}-metrics"'") | .metadata.name' "${OUT}")" "" "no metrics Service by default"
+render --set metrics.enabled=true
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq -o=json -I=0 '.spec.ports')" '[{"name":"metrics","port":5155,"targetPort":5155}]' "metrics Service ports"
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq '.metadata.labels."app.kubernetes.io/component"')" "metrics" "component label"
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq -o=json -I=0 '.spec.selector')" "$(doc Service "${DEPLOY}-web" | yq -o=json -I=0 '.spec.selector')" "same selector as web"
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq '.spec.type')" "ClusterIP" "metrics Service type"
+render --set metrics.enabled=true --set metrics.port=9100
+assert_eq "$(doc Service "${DEPLOY}-metrics" | yq -o=json -I=0 '.spec.ports')" '[{"name":"metrics","port":9100,"targetPort":9100}]' "moved metrics port"
+
+t service_monitor_shape
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true
+sm() { doc ServiceMonitor "${DEPLOY}-metrics" | yq -o=json -I=0 "$1"; }
+assert_eq "$(sm '.apiVersion')" '"monitoring.coreos.com/v1"' "ServiceMonitor apiVersion"
+assert_eq "$(sm '.spec.selector.matchLabels | sort_keys(.)')" '{"app.kubernetes.io/component":"metrics","app.kubernetes.io/instance":"'"${RELEASE}"'","app.kubernetes.io/name":"performancemonitor-darling"}' "ServiceMonitor selector"
+assert_eq "$(sm '.spec.endpoints')" '[{"port":"metrics","path":"/metrics","interval":"60s","authorization":{"type":"Bearer","credentials":{"name":"'"${DEPLOY}"'","key":"metrics-token"}}}]' "ServiceMonitor endpoints"
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set secrets.existingSecret=s --set metrics.serviceMonitor.interval=30s --set metrics.serviceMonitor.labels.release=kps
+assert_eq "$(sm '.spec.endpoints[0].authorization.credentials.name')" '"s"' "existing Secret name"
+assert_eq "$(sm '.spec.endpoints[0].interval')" '"30s"' "interval reaches the endpoint"
+assert_eq "$(sm '.metadata.labels.release')" '"kps"' "extra label"
+
+t service_monitor_off
+render --set metrics.enabled=true
+assert_eq "$(yq 'select(.kind == "ServiceMonitor") | .kind' "${OUT}")" "" "no ServiceMonitor while off"
+
+t service_monitor_needs_metrics
+assert_fails "metrics.serviceMonitor.enabled needs metrics.enabled=true" --set metrics.serviceMonitor.enabled=true
+
+t notes_metrics
+n="$(notes --set metrics.enabled=true)"
+grep -qF metrics-token <<<"${n}" || { echo "NOTES lack the metrics token key" >&2; exit 1; }
+grep -qF 5155 <<<"${n}" || { echo "NOTES lack the metrics port" >&2; exit 1; }
+n="$(notes --set metrics.enabled=true --set secrets.existingSecret=s)"
+grep -qF "Secret s must hold metrics-token" <<<"${n}" || { echo "NOTES lack the existing Secret's key" >&2; exit 1; }
+n="$(notes)"
+if grep -qF metrics-token <<<"${n}"; then echo "NOTES mention the metrics token while metrics is off" >&2; exit 1; fi

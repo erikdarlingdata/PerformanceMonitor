@@ -23,6 +23,14 @@ create the Secrets yourself and set secrets.existingSecret and store.bundled.aut
 Read the web token (it is never printed here; the key is {{ .Values.secrets.webTokenKey }}):
   kubectl get secret {{ include "performancemonitor-darling.secretName" . }} --namespace {{ .Release.Namespace }} -o jsonpath='{.data.{{ .Values.secrets.webTokenKey }}}' | base64 -d
 {{- end }}
+{{- if .Values.metrics.enabled }}
+
+Prometheus scrapes the metrics Service {{ include "performancemonitor-darling.surfaceName" (dict "ctx" . "surface" "metrics") }} on port {{ .Values.metrics.port }} (path /metrics) with a bearer token. Read it (the key is {{ .Values.secrets.metricsTokenKey }}):
+  kubectl get secret {{ include "performancemonitor-darling.secretName" . }} --namespace {{ .Release.Namespace }} -o jsonpath='{.data.{{ .Values.secrets.metricsTokenKey }}}' | base64 -d
+{{- if .Values.secrets.existingSecret }}
+The Secret {{ .Values.secrets.existingSecret }} must hold {{ .Values.secrets.metricsTokenKey }}.
+{{- end }}
+{{- end }}
 {{- if eq (toString (default .Chart.AppVersion .Values.image.tag)) "latest" }}
 
 WARNING: the image tag is "latest", a tag that moves with every release. Set image.tag to a release version (or image.digest) so an upgrade or a pod restart cannot change the collector by itself. The chart needs a Darling image newer than 3.12.0 (the health port the probes use first shipped in the release after it), so 3.12.0 and older do not work. "latest" moves with each release; pin image.tag to a release you have tested.

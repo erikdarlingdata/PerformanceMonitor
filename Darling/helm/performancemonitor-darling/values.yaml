@@ -270,7 +270,7 @@ metrics:
   # Addresses allowed to scrape the port (CIDRs). Empty adds no allowFrom to darling.json; network.allowFrom never applies to metrics.
   allowFrom: []
   serviceMonitor:
-    # Create a Prometheus Operator ServiceMonitor for the metrics Service. Off by default.
+    # Create a Prometheus Operator ServiceMonitor for the metrics Service, scraping with the chart's token. Needs metrics.enabled and the ServiceMonitor CRD where you apply it. Off by default.
     enabled: false
     # Scrape interval of the ServiceMonitor, such as 30s or 1m.
     interval: 60s

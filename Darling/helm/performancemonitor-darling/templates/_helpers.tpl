@@ -232,6 +232,9 @@ MCP port while metrics is on, so the chart refuses it first. network.allowFrom n
 {{- define "performancemonitor-darling.metricsJson" -}}
 {{- $m := .Values.metrics -}}
 {{- $block := dict "enabled" $m.enabled "port" (int $m.port) -}}
+{{- if and $m.serviceMonitor.enabled (not $m.enabled) -}}
+{{- fail "metrics.serviceMonitor.enabled needs metrics.enabled=true" -}}
+{{- end -}}
 {{- if $m.enabled -}}
 {{- if eq (int $m.port) 5154 -}}
 {{- fail "metrics.port (5154) is the health port: give the metrics listener its own port" -}}
@@ -320,9 +323,9 @@ of the name plus 11 characters (63 at most), and the headless Service appends "-
 {{- printf "%s-store" (include "performancemonitor-darling.fullname" . | trunc 46 | trimSuffix "-") -}}
 {{- end -}}
 
-{{/* Name of a surface's Service and Ingress: <fullname>-web or <fullname>-mcp, at most 63 characters. Argument: dict "ctx" <root> "surface" "web"|"mcp". */}}
+{{/* Name of a surface's Service, Ingress and ServiceMonitor: <fullname>-web, -mcp or -metrics, at most 63 characters. Argument: dict "ctx" <root> "surface" "web"|"mcp"|"metrics". */}}
 {{- define "performancemonitor-darling.surfaceName" -}}
-{{- printf "%s-%s" (include "performancemonitor-darling.fullname" .ctx | trunc 59 | trimSuffix "-") .surface -}}
+{{- printf "%s-%s" (include "performancemonitor-darling.fullname" .ctx | trunc (int (sub 62 (len .surface))) | trimSuffix "-") .surface -}}
 {{- end -}}
 
 {{/* Selector labels of the bundled store pod. The name label differs from the Darling pod's, so the Darling Deployment's selector never matches the store pod. */}}

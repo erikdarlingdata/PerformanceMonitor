@@ -263,6 +263,27 @@ Darling listens on `0.0.0.0` inside the pod, and `allowFrom` decides who it serv
 - `trustedProxies` set to the controller pods' CIDR trusts every pod in that CIDR: any of them can claim any client address in `X-Forwarded-For`. The health port, 5154, answers anyone who can route to the pod. A NetworkPolicy that admits only the ingress controller to the web and MCP ports, and nothing else to the pod, closes both (the kubelet's probes come from the node, which most network plugins always admit).
 - IPv4 is assumed: the chart sets `listen` to `0.0.0.0`. IPv6-only clusters are not supported in this version.
 
+### Prometheus metrics
+
+`metrics.enabled=true` opens Darling's `/metrics` port (default 5155) and adds a ClusterIP Service for it, named `<fullname>-metrics`. The port serves the collector's own state in the Prometheus text format; `docs/darling/network-endpoints.md` lists what it returns. It needs a Darling image newer than 3.13.0, and the chart refuses an older release tag.
+
+- The port is protected by a bearer token, `secrets.metricsTokenKey` (default `metrics-token`) in the chart Secret, generated like the web and MCP tokens. With `secrets.existingSecret`, that Secret must hold the key. Read it with `kubectl get secret <fullname> -o jsonpath='{.data.metrics-token}' | base64 -d`.
+- `network.allowFrom` never applies to metrics. `metrics.allowFrom` is the address filter of this port: empty adds none, so the token is the only gate; when you set it, list the Prometheus pods' CIDR.
+- The snapshot behind the metrics refreshes every 60 seconds, so the default `metrics.serviceMonitor.interval` is `60s`; scraping faster returns the same values.
+- With the Prometheus Operator, `metrics.serviceMonitor.enabled=true` renders a ServiceMonitor that scrapes the Service with the chart's token (a `monitoring.coreos.com/v1` object, rendered without asking the cluster, so the CRD must exist where you apply it). Put the label your Prometheus selects on in `metrics.serviceMonitor.labels` (for kube-prometheus-stack, `release: <its release name>`). Enabling it without `metrics.enabled` fails the render.
+- Without the Operator, point a plain scrape job at the Service, with the token in a file Prometheus can read:
+
+```yaml
+scrape_configs:
+  - job_name: darling
+    metrics_path: /metrics
+    scrape_interval: 60s
+    authorization:
+      credentials_file: /etc/prometheus/secrets/darling-metrics-token
+    static_configs:
+      - targets: ["<fullname>-metrics.<namespace>.svc:5155"]
+```
+
 ## Which values the store overrides after the first start
 
 `darling.json` is only a seed for some keys. On first start the service copies them into its store; from then on the store holds the only copy, and changing the value in the chart does nothing. The rest are read from the file at every start, and a chart change reaches them through the ConfigMap, which restarts the pod.
