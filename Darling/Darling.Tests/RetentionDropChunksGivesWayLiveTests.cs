@@ -87,17 +87,23 @@ public sealed class RetentionDropChunksGivesWayLiveTests
             Assert.Equal("1,40,45", await AgesAsync(connection, ct));
             Assert.Equal(3L, await ChunkCountAsync(connection, ct));
             Assert.True(await RelationExistsAsync(connection, older, ct), "the older expired chunk was dropped while the reader held the newer one");
-            Assert.Empty(log.Problems(Table));
-            Assert.Contains(log.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal) && Names(l, Table));
 
-            /* The reader lets go, and the next pass drops both expired chunks. */
+            /* Each try that gave way is said at Information. Leaving the table for the next pass is said once at Warning:
+               a reader that holds its lock on every pass stops this table's retention, and that must show above Information. */
+            Assert.Contains(log.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal) && Names(l, Table));
+            var leftForNextPass = log.Problems(Table);
+            Assert.True(leftForNextPass.Count == 1 && leftForNextPass[0].StartsWith("Warning:", StringComparison.Ordinal),
+                $"the pass must say once, at Warning, that it left the table's expired chunks for the next pass. {log.For(Table)}");
+
+            /* The reader lets go, and the next pass drops both expired chunks and has nothing to warn about. */
             await ExecAsync(holder, "ROLLBACK", ct);
-            var next = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, log, ct);
+            var nextLog = new HookLogger();
+            var next = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, nextLog, ct);
 
             Assert.Equal("1", await AgesAsync(connection, ct));
             Assert.Equal(1L, await ChunkCountAsync(connection, ct));
-            Assert.True(next.ChunksDropped >= 2, $"the next pass dropped {next.ChunksDropped} chunk(s). {log.For(Table)}");
-            Assert.Empty(log.Problems(Table));
+            Assert.True(next.ChunksDropped >= 2, $"the next pass dropped {next.ChunksDropped} chunk(s). {nextLog.For(Table)}");
+            Assert.Empty(nextLog.Problems(Table));
 
             bodySucceeded = true;
         }
