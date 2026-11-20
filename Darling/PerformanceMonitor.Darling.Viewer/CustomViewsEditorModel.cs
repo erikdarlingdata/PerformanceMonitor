@@ -66,6 +66,15 @@ public static class CustomViewsEditorModel
     /// <summary>A starting definition for a new dashboard that passes the validator as it stands.</summary>
     public const string NewViewTemplate = "{\n  \"panels\": [\n    { \"read\": \"get_wait_stats\", \"viz\": \"table\" }\n  ]\n}";
 
+    /// <summary>
+    /// The row the manager must load into the editor once the list is bound (#9108): the row the grid shows as selected (the one just
+    /// saved, or the first row its collection view makes current), when the editor holds nothing yet. A bind raises no load of its own
+    /// because the window silences selection changes while it fills the grid, and a click on an already-selected row raises none either.
+    /// Null when the grid shows no selection or the editor already holds a stored or new view.
+    /// </summary>
+    public static CustomViewRow? RowToLoad(object? selectedItem, bool editorHoldsAView) =>
+        editorHoldsAView ? null : selectedItem as CustomViewRow;
+
     /// <summary>The list in the web sidebar's order: top-level views first, then each folder in name order, views by name inside it.</summary>
     public static IReadOnlyList<CustomViewRow> Rows(IEnumerable<CustomViewSummary> views) =>
         views.Select(v => new CustomViewRow(v))
