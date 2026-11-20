@@ -2331,7 +2331,10 @@ internal static class DarlingDataReader
     /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database list (NULL = all), $6 databases to leave out (NULL = none;
     /// #5633 review: the ones the server dropped, see CurrentDatabaseScope.NarrowAsync).
     /// </summary>
-    public const string TopProceduresSql = $"""
+    public const string TopProceduresSql = TopProceduresRawWinnersSql + "\n" + TopProceduresWideSql;
+
+    /// <summary>Pass 1 of <see cref="TopProceduresSql"/>: the winners ranked over raw <c>procedure_stats</c>.</summary>
+    private const string TopProceduresRawWinnersSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -2363,6 +2366,70 @@ internal static class DarlingDataReader
             ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_schema_name, win_object_name, win_object_type
             LIMIT $4
         )
+        """;
+
+    /// <summary>
+    /// #9147: pass 1 of <see cref="TopProceduresSql"/> with the window's settled whole hours read from the interval-honest hourly
+    /// rollup and only the two edges from raw. <c>$HOURLY$</c> is the FROM item <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// returned (the successor alone, see <see cref="PlanProceduresHourlyMid"/>). $7/$8 are the mid's whole hours <c>[$7, $8)</c>:
+    /// raw keeps <c>($2, $7)</c> and <c>[$8, $3]</c>, so the three parts split the raw window <c>($2, $3]</c> with no overlap.
+    /// The rollup sums the same deltas under the same interval filter, so each part's sums add up to the raw sums.
+    /// The rollup has no <c>object_type</c>, so this ranks (database, schema, object). Pass 2 then groups the winners' raw rows by
+    /// the full key: when a winner holds two object types the caller reads the raw statement instead
+    /// (<see cref="GetTopProceduresByCpuRoutedAsync(NpgsqlDataSource,int,DateTime,DateTime,int,DatabaseFilter,TopRanking,CancellationToken,QueryTagFilter)"/>).
+    /// </summary>
+    internal const string TopProceduresMidWinnersSql = $"""
+        WITH parts AS (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                worker_time_sum,
+                elapsed_time_sum,
+                execution_count_sum
+            FROM $HOURLY$
+            WHERE server_id = $1
+            AND   f.bucket >= $7
+            AND   f.bucket < $8
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            /*TAG:object:database_name,schema_name,object_name*/
+            UNION ALL
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                delta_worker_time,
+                delta_elapsed_time,
+                delta_execution_count
+            FROM procedure_stats
+            WHERE server_id = $1
+            AND   ((collection_time > $2 AND collection_time < $7) OR (collection_time >= $8 AND collection_time <= $3))
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            /*TAG:object:database_name,schema_name,object_name*/
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+        ),
+        winners AS MATERIALIZED (
+            SELECT
+                database_name AS win_database_name,
+                schema_name AS win_schema_name,
+                object_name AS win_object_name,
+                $RANK$ AS rank_metric,
+                SUM(worker_time_sum) AS rank_cpu
+            FROM parts
+            GROUP BY database_name, schema_name, object_name
+            HAVING SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_schema_name, win_object_name
+            LIMIT $4
+        )
+        """;
+
+    /// <summary>Pass 2 of <see cref="TopProceduresSql"/> and of <see cref="TopProceduresMidWinnersSql"/>: the wide row for the
+    /// winners, from raw. On the mid route <c>win_object_type</c> does not exist, so the caller drops that one match line
+    /// (<see cref="MidObjectTypeMatch"/>).</summary>
+    private const string MidObjectTypeMatch = "AND object_type IS NOT DISTINCT FROM w.win_object_type";
+    private const string TopProceduresWideSql = $"""
         /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters, matched on the
            full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). The
            COALESCE equality is only the hashable pre-filter (see TopQueriesSql); IS NOT DISTINCT FROM makes the
@@ -2563,16 +2630,111 @@ internal static class DarlingDataReader
             return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket, ceiling, IoRoute: ioRoute);
         }
 
-        var rows = new List<TopProcedureRow>();
         /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
            UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(QueryTagReadJoin.Apply(TopRankings.Apply(TopProceduresSql, ranking, hourly: false), serverId, tags));
+
+        /* #9147: a raw window whose whole hours the interval-honest hourly rollup has settled ranks those hours from the rollup
+           and reads raw only for the edges, then builds the winners' rows from raw as before. The totals are the raw totals:
+           the rollup sums the same deltas under the same interval filter. A winner that holds two object types (the rollup ranks
+           without object_type) reads the raw statement instead, so the page is the raw page. */
+        var mid = tier == RetentionTier.Raw ? PlanProceduresHourlyMid(rollups, coverage, ranking, startUtc, endUtc) : null;
+        if (mid is not null && await ProceduresMidHasNoHoleAsync(postgres, mid, cancellationToken))
+        {
+            var midSql = QueryTagReadJoin.Apply(BuildProceduresMidSql(ranking, mid), serverId, tags);
+            var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken);
+            if (midRows.Select(r => (r.DatabaseName, r.SchemaName, r.ObjectName)).Distinct().Count() == midRows.Count)
+            {
+                return new TopProceduresReadResult(midRows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
+            }
+        }
+
+        var rows = await ReadTopProcedureRowsAsync(
+            postgres, QueryTagReadJoin.Apply(TopRankings.Apply(TopProceduresSql, ranking, hourly: false), serverId, tags),
+            serverId, startUtc, endUtc, top, databases, mid: null, clock, cancellationToken);
+        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
+    }
+
+    /// <summary>The FROM-item placeholder of <see cref="TopProceduresMidWinnersSql"/>.</summary>
+    internal const string HourlyMidRelationPlaceholder = "$HOURLY$";
+
+    /// <summary>#9147: the mid route's statement: <see cref="TopProceduresMidWinnersSql"/> over the mid's relation, then the raw
+    /// wide pass matched on (database, schema, object), the key the rollup ranks. The query tag token is still in it.</summary>
+    internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid) =>
+        TopRankings.Apply(TopProceduresMidWinnersSql, ranking, hourly: true).Replace(HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
+        + "\n" + TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal);
+
+    /// <summary>#9147: the whole hours <c>[MidStart, MidEnd)</c> a raw top-procedures read takes from <c>Relation</c>.</summary>
+    internal sealed record HourlyMid(string Relation, string View, DateTime MidStart, DateTime MidEnd);
+
+    /// <summary>#9147: the fewest whole hours worth reading from the rollup. A shorter mid saves little.</summary>
+    internal static readonly TimeSpan MinHourlyMid = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// #9147: the rollup mid of a raw top-procedures window, or null to read raw alone. The mid is the whole hours that start after
+    /// <paramref name="startUtc"/> (a bucket stamped at the window's start would hold a row the raw bound excludes) and end at or
+    /// before both <paramref name="endUtc"/> and the rollup's materialization ceiling. Only the interval-honest successor serves it:
+    /// the legacy rollup keeps the first-collection rows raw leaves out, so a stitch that names it, or a successor floor after the
+    /// mid's start, reads raw. Reads has no column in that rollup, so a reads ranking reads raw as before.
+    /// </summary>
+    internal static HourlyMid? PlanProceduresHourlyMid(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc, DateTime endUtc)
+    {
+        const string view = TimescaleSupport.ProcedureStatsIntervalHourlyView;
+        if (ranking == TopRanking.Reads || !rollups.ProcedureGrainIntervalHourly
+            || coverage.FloorOf(view) is not DateTime floor || coverage.CeilingOf(view) is not DateTime ceiling)
+        {
+            return null;
+        }
+
+        var midStart = new DateTime(startUtc.Year, startUtc.Month, startUtc.Day, startUtc.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1);
+        var limit = endUtc < ceiling ? endUtc : ceiling;
+        var midEnd = new DateTime(limit.Year, limit.Month, limit.Day, limit.Hour, 0, 0, DateTimeKind.Unspecified);
+        if (floor > midStart || midEnd - midStart < MinHourlyMid)
+        {
+            return null;
+        }
+
+        var relation = coverage.StitchedRelationSql(TimescaleSupport.ProcedureStatsHourlyView, "f", midStart, RollupCoverage.StitchTier.Hourly);
+        return string.Equals(relation, $"collect.{view} AS f", StringComparison.Ordinal)
+            ? new HourlyMid(relation, view, midStart, midEnd)
+            : null;
+    }
+
+    /// <summary>#9147: true when every whole hour of the mid that raw holds rows for has a rollup bucket: the repair pass's own hole
+    /// scan, as the fleet summary's daily mid checks its days (#8570). A hole (a refresh that never ran over an hour raw holds)
+    /// would drop that hour's work, so the read takes raw instead.</summary>
+    private static async Task<bool> ProceduresMidHasNoHoleAsync(NpgsqlDataSource postgres, HourlyMid mid, CancellationToken cancellationToken)
+    {
+        var targets = TimescaleSupport.RollupCoverageProbeTargets.Where(t => string.Equals(t.View, mid.View, StringComparison.Ordinal)).ToArray();
+        if (targets.Length != 1)
+        {
+            return false;
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        return await TimescaleSupport.HoleFreeThroughAsync(
+            connection, targets[0],("collect", mid.View), mid.MidStart, mid.MidEnd, Array.Empty<(DateTime Start, DateTime End)>(), cancellationToken);
+    }
+
+    /// <summary>Runs a top-procedures statement (<see cref="TopProceduresSql"/>, or the mid route's) and reads its rows. The mid's
+    /// two hours bind at $7 and $8.</summary>
+    private static async Task<List<TopProcedureRow>> ReadTopProcedureRowsAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
+        HourlyMid? mid, ServerClock clock, CancellationToken cancellationToken)
+    {
+        var rows = new List<TopProcedureRow>();
+        await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddDatabases(command, databases);
         command.Parameters.Add(databases.ExcludeParameter());
+        if (mid is not null)
+        {
+            AddTimestamp(command, mid.MidStart);
+            AddTimestamp(command, mid.MidEnd);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2597,7 +2759,7 @@ internal static class DarlingDataReader
                 ReadTopProcedureDetail(reader, 17, clock)));
         }
 
-        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
+        return rows;
     }
 
     /// <summary>The detail columns of <see cref="TopProceduresSql"/>, ten consecutive fields from
