@@ -2474,14 +2474,16 @@ public sealed class MetricsConfig
                 problems.Add($"metrics.token could not be resolved: {ex.Message}");
             }
 
-            if (token is not null)
+            /* #9013: the floor is the shared one (DescribeTokenProblem decides), but the shared text points at --configure-network and
+               an "exposed surface", neither of which is the metrics port's, so the floor is named here in the port's own words. Like
+               the shared text it never gives the token's length. */
+            if (token is not null && DarlingHostBinding.DescribeTokenProblem(token) is not null)
             {
-                var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);
-                if (tokenProblem is not null)
-                {
-                    problems.Add($"metrics.token {tokenProblem}");
-                    token = null;
-                }
+                problems.Add(string.IsNullOrWhiteSpace(token)
+                    ? "metrics.token resolves to an empty value."
+                    : $"metrics.token is too short or too repetitive: the metrics port needs a token of at least {DarlingHostBinding.MinimumTokenLength} characters, "
+                        + $"at least {DarlingHostBinding.MinimumDistinctTokenCharacters} of them different (to make one, see the token note in the README).");
+                token = null;
             }
         }
 

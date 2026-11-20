@@ -73,6 +73,7 @@ public class MetricsConfigTests
     [InlineData("{\"enabled\":true,\"listen\":\"nope\",\"token\":\"" + GoodToken + "\"}", "metrics.listen")]
     [InlineData("{\"enabled\":true}", "metrics.token")]
     [InlineData("{\"enabled\":true,\"token\":\"env:DARLING_TEST_UNSET_9013\"}", "metrics.token")]
+    [InlineData("{\"enabled\":true,\"token\":\"file:darling-test-9013-no-such-dir/metrics-token\"}", "metrics.token")]
     [InlineData("{\"enabled\":true,\"token\":\"short\"}", "metrics.token")]
     [InlineData("{\"enabled\":true,\"token\":\"" + GoodToken + "\",\"allowFrom\":\"10.0.0.0/33\"}", "metrics.allowFrom")]
     public void Problems_Cases(string metricsJson, string expected)
@@ -108,6 +109,10 @@ public class MetricsConfigTests
 
         var problem = Assert.Single(check.Problems);
         Assert.DoesNotContain(ShortToken, problem, StringComparison.Ordinal);
+
+        /* #9013: the floor in the port's own words, not the network wizard's hint for the web and MCP binds. */
+        Assert.Contains("metrics port", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("--configure-network", problem, StringComparison.Ordinal);
     }
 
     [Fact]
