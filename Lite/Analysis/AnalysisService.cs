@@ -354,10 +354,22 @@ public class AnalysisService
                 WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count, retention);
                 WindowEmptyRemovedByRetention = retention?.RemovedWindow(context.TimeRangeEnd) == true;
 
-                AppLogger.Warn("AnalysisService",
-                    $"No observed collection in the analysis window for {context.ServerName} " +
-                    $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
-                    $"despite {dataSpanHours:F1}h of total history: collection may be down ({facts.Count} point-in-time fact(s) only)");
+                /* #9152: the same check that words the MCP answer words the log line. A window retention removed is not a
+                   collector that is down, so it is Info and says so. */
+                if (retention is not null && WindowEmptyRemovedByRetention)
+                {
+                    AppLogger.Info("AnalysisService",
+                        $"No collection in the analysis window for {context.ServerName} " +
+                        $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                        $"because retention removed it, not because collection is down ({facts.Count} point-in-time fact(s) only). {retention.Describe()}");
+                }
+                else
+                {
+                    AppLogger.Warn("AnalysisService",
+                        $"No observed collection in the analysis window for {context.ServerName} " +
+                        $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                        $"despite {dataSpanHours:F1}h of total history: collection may be down ({facts.Count} point-in-time fact(s) only)");
+                }
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
