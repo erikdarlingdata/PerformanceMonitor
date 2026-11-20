@@ -126,12 +126,15 @@ query_stats_hourly,derived,derived,rollup view
 query_stats_interval_daily,derived,derived,rollup view
 query_stats_interval_hourly,derived,derived,rollup view
 query_stats_io_hourly,derived,derived,rollup view
+query_store_closed_day_built,internal,no,which days of the Query Store closed-day rollups are built
+query_store_closed_day_tick,internal,no,when the closed-day rollups last looked for new rows
 query_store_compose_fleet,derived,derived,fleet rollup of the compose stamp
 query_store_compose_stamp,derived,derived,rollup of the Query Store interval rows by stamp
 query_store_compose_stamp_built,internal,no,which stamps are built
 query_store_compose_stamp_failures,internal,no,failed stamp builds
 query_store_compose_stamp_hours,internal,no,hours covered by stamps
 query_store_forced_plans,collected,yes,
+query_store_grid_daily,derived,derived,daily Query Store grid rows by plan
 query_store_hash_daily,derived,derived,daily Query Store hash rollup
 query_store_hash_daily_built,internal,no,which days are built
 query_store_hash_daily_failures,internal,no,failed daily builds
@@ -147,6 +150,7 @@ query_store_interval_wide_pending,internal,no,rows waiting to be applied
 query_store_plan_map,internal,no,plan key cache
 query_store_self_keys,internal,no,keys of the monitor own Query Store statements
 query_store_self_keys_state,internal,no,progress
+query_store_slicer_hourly,derived,derived,hourly Query Store slicer sums by query
 query_store_stats,collected,yes,
 query_store_stats_corrected_daily,derived,derived,rollup view
 query_store_stats_corrected_hourly,derived,derived,rollup view
@@ -157,10 +161,6 @@ query_store_stats_interval_daily,derived,derived,rollup view
 query_store_stats_interval_hourly,derived,derived,rollup view
 query_store_text,collected,yes,Query Store statement text
 query_store_text_seen,internal,no,liveness stamp of each Query Store statement text
-query_store_closed_day_built,internal,no,which days of the Query Store closed-day rollups are built
-query_store_closed_day_tick,internal,no,when the closed-day rollups last looked for new rows
-query_store_grid_daily,derived,derived,daily Query Store grid rows by plan
-query_store_slicer_hourly,derived,derived,hourly Query Store slicer sums by query
 query_store_top_daily,derived,derived,per-day top Query Store statements
 query_store_top_daily_built,internal,no,which days are built
 query_store_watermarks,internal,no,Query Store read progress

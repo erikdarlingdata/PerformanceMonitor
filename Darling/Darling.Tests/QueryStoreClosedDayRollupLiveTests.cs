@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -29,8 +30,9 @@ namespace Darling.Tests;
 /// about seven interval rows), reads a set of windows from the interval table alone, builds the days, and reads the same windows
 /// again: every grid column and every slicer value must be the same text, digit for digit.
 /// </summary>
+[Collection(ViewerLoggerStaticsCollection.Name)]
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
-public sealed class QueryStoreClosedDayRollupLiveTests
+public sealed class QueryStoreClosedDayRollupLiveTests : IDisposable
 {
     private const int ServerId = -9111283;
     private const int Top = 50;
@@ -433,6 +435,168 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         /* Then the slicer's hourly table goes too. */
         await ExecuteAsync(store.Connection, "DROP TABLE collect.query_store_slicer_hourly", ct);
         AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "with both rollups gone");
+    }
+
+    /// <summary>The marker the grid's and slicer's fallback line carries when a read that held no rollup gives up on the interval table.</summary>
+    private const string TableFallbackMarker = "the interval-table read failed";
+
+    /// <summary>The marker of the line a read writes when it starts again on the interval table after a rollup statement faulted.</summary>
+    private const string RollupRetryMarker = "closed-day rollup read failed";
+
+    private readonly string _logDir =
+        Path.Combine(Path.GetTempPath(), "darling-viewerlog-tests", Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
+    {
+        try
+        {
+            ViewerLogger.Shutdown();
+            if (Directory.Exists(_logDir))
+            {
+                Directory.Delete(_logDir, recursive: true);
+            }
+        }
+        catch
+        {
+            /* Best-effort test cleanup. */
+        }
+    }
+
+    private static string LogText()
+    {
+        ViewerLogger.Flush();
+        var file = ViewerLogger.GetCurrentLogFile();
+        return File.Exists(file) ? File.ReadAllText(file) : "";
+    }
+
+    /// <summary>
+    /// Gives the store a viewer role that is not the tables' owner, because row-level security reaches only such a role. One policy
+    /// makes a statement that names a rollup table sleep thirty seconds, once per transaction, when <paramref name="rollupSleeps"/>
+    /// is set. Another makes the interval table refuse a statement that reads its measure columns and names neither rollup table,
+    /// which is a read on the interval table alone (the gate's own statements read other columns), when <paramref name="intervalRefuses"/> is set.
+    /// </summary>
+    private static async Task<(string ConnectionString, string Role)> GatedViewerRoleAsync(Store store, bool rollupSleeps, bool intervalRefuses, CancellationToken ct)
+    {
+        var role = "qs_roll_" + Guid.NewGuid().ToString("N")[..12];
+        await ExecuteAsync(store.Connection, "CREATE ROLE " + role + " LOGIN", ct);
+        await ExecuteAsync(store.Connection, "GRANT USAGE ON SCHEMA collect, config, public TO " + role, ct);
+        await ExecuteAsync(store.Connection, "GRANT SELECT ON ALL TABLES IN SCHEMA collect, config TO " + role, ct);
+        if (intervalRefuses)
+        {
+            await ExecuteAsync(store.Connection, @"CREATE FUNCTION public.qs_interval_gate() RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+    IF current_query() LIKE '%avg_cpu_time_us%' AND current_query() NOT LIKE '%query_store_grid_daily%' AND current_query() NOT LIKE '%query_store_slicer_hourly%' THEN
+        RAISE EXCEPTION 'interval table read refused';
+    END IF;
+    RETURN true;
+END $$", ct);
+            await ExecuteAsync(store.Connection, "ALTER TABLE collect.query_store_interval_wide ENABLE ROW LEVEL SECURITY", ct);
+            await ExecuteAsync(store.Connection, "CREATE POLICY qs_interval ON collect.query_store_interval_wide FOR SELECT TO " + role + " USING (public.qs_interval_gate())", ct);
+        }
+
+        if (rollupSleeps)
+        {
+            await ExecuteAsync(store.Connection, @"CREATE FUNCTION public.qs_rollup_gate() RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+    IF COALESCE(current_setting('qs.rolled', true), '') <> 'y' THEN
+        PERFORM set_config('qs.rolled', 'y', true);
+        PERFORM pg_sleep(30);
+    END IF;
+    RETURN true;
+END $$", ct);
+            foreach (var table in new[] { "query_store_grid_daily", "query_store_slicer_hourly" })
+            {
+                await ExecuteAsync(store.Connection, $"ALTER TABLE collect.{table} ENABLE ROW LEVEL SECURITY", ct);
+                await ExecuteAsync(store.Connection, $"CREATE POLICY qs_rollup ON collect.{table} FOR SELECT TO {role} USING (public.qs_rollup_gate())", ct);
+            }
+        }
+
+        var connectionString = new NpgsqlConnectionStringBuilder(store.Scratch.ConnectionString) { Username = role, Password = null }.ConnectionString;
+        return (connectionString, role);
+    }
+
+    private static async Task DropRoleAsync(Store store, string role)
+    {
+        await ExecuteAsync(store.Connection, "DROP OWNED BY " + role, CancellationToken.None);
+        await ExecuteAsync(store.Connection, "DROP ROLE IF EXISTS " + role, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// A rollup read the store cancels at its own statement_timeout arrives as a PostgresException (57014), not a client TimeoutException.
+    /// It is a deadline: the read gives up on the table and reads raw history, and it does not first read the interval table, which
+    /// would only wait another deadline. The grid and the slicer each leave the one fallback line and no rollup-retry line.
+    /// </summary>
+    [Fact]
+    public async Task ARollupReadThatHitsTheStoresStatementTimeout_FailsOnce_AndIsNotRetriedOnTheIntervalTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        await TickAsync(store, KeepEverything, ct);
+        Assert.NotNull(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
+
+        var (connectionString, role) = await GatedViewerRoleAsync(store, rollupSleeps: true, intervalRefuses: false, ct);
+        try
+        {
+            await ExecuteAsync(store.Connection, "ALTER ROLE " + role + " SET statement_timeout = '2s'", ct);
+            ViewerLogger.Initialize(_logDir);
+            await using var viewer = new ViewerDataService(connectionString);
+
+            var grid = await viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, DataEnd.AddDays(-30), DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+            Assert.Null(grid.Plan);
+            await viewer.GetQueryStoreSlicerDataAsync(ServerId, DataEnd.AddDays(-30), DataEnd, null, ct);
+
+            var log = LogText();
+            Assert.Equal(2, CountOf(log, TableFallbackMarker));
+            Assert.DoesNotContain(RollupRetryMarker, log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await DropRoleAsync(store, role);
+        }
+    }
+
+    /// <summary>
+    /// A fault in a read that holds no rollup (no day of the window is built) is not the rollups' to retry: the interval-table read runs
+    /// once, then the read goes to raw history. The grid and the slicer each leave the one fallback line and no rollup-retry line.
+    /// </summary>
+    [Fact]
+    public async Task AFaultedIntervalTableRead_WithNoBuiltDayInTheWindow_RunsOnce()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        Assert.Null(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
+
+        var (connectionString, role) = await GatedViewerRoleAsync(store, rollupSleeps: false, intervalRefuses: true, ct);
+        try
+        {
+            ViewerLogger.Initialize(_logDir);
+            await using var viewer = new ViewerDataService(connectionString);
+
+            var grid = await viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, DataEnd.AddDays(-30), DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+            Assert.Null(grid.Plan);
+            await viewer.GetQueryStoreSlicerDataAsync(ServerId, DataEnd.AddDays(-30), DataEnd, null, ct);
+
+            var log = LogText();
+            Assert.Equal(2, CountOf(log, TableFallbackMarker));
+            Assert.DoesNotContain(RollupRetryMarker, log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await DropRoleAsync(store, role);
+        }
+    }
+
+    private static int CountOf(string text, string marker)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(marker, StringComparison.Ordinal); at >= 0; at = text.IndexOf(marker, at + marker.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]

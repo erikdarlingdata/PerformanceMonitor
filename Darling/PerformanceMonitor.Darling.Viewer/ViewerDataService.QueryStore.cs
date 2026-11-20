@@ -968,10 +968,13 @@ public sealed partial class ViewerDataService
                explains it), one extra round trip per table-served read. An open end reads to now. */
             /* #9111: a run of whole built days inside the window comes from the closed-day rollup, in this read's snapshot; the window's
                edges, the open days and any day that is not built stay on the interval table. No run reads the interval table alone. */
+            /* The built-day lookup itself reads the rollup bookkeeping tables, so a fault in it counts. Once it says no day is served, the
+               rest of the read is the interval table alone and a fault there is not the rollups' to retry. */
             rollupsTried = useRollups && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
             var served = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken)
                 : null;
+            rollupsTried = served is not null;
             var keysSql = served is null ? QueryStoreTopTableKeysSql : QueryStoreTopRollupKeysSql;
             var topSql = served is null ? QueryStoreTopTableByKeysSql : QueryStoreTopRollupByKeysSql;
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
@@ -1030,7 +1033,7 @@ public sealed partial class ViewerDataService
             /* #9111: a fault with the closed-day rollups in the read (a table the viewer role cannot read, a missing relation) aborts this
                snapshot, so the read starts again on the interval table alone and gives that read's answer. A deadline is not retried: the
                second read would only wait another one. */
-            if (rollupsTried && !IsDeadline(ex))
+            if (rollupsTried && !IsCommandTimeout(ex))
             {
                 LogRollupReadFallback("Query Store grid", elapsed, ex);
                 return await TryGetQueryStoreTopQueriesFromTableAsync(
@@ -1125,9 +1128,6 @@ public sealed partial class ViewerDataService
     /// <summary>#9111: a read that took whole days from the closed-day rollups faulted and starts again on the interval table.</summary>
     private static void LogRollupReadFallback(string read, System.Diagnostics.Stopwatch elapsed, Exception ex) =>
         ViewerLogger.Warn("QueryStore", $"{read}: the closed-day rollup read failed after {elapsed.ElapsedMilliseconds} ms ({ex.GetType().Name}: {ex.Message}); reading the interval table instead (#9111)");
-
-    /// <summary>Whether <paramref name="ex"/> is a command running past its deadline, which a second read would only repeat.</summary>
-    private static bool IsDeadline(Exception ex) => ex is TimeoutException || ex.InnerException is TimeoutException;
 
     /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
     /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
@@ -1771,6 +1771,7 @@ public sealed partial class ViewerDataService
             var served = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken)
                 : null;
+            rollupsTried = served is not null;
             await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
@@ -1788,7 +1789,7 @@ public sealed partial class ViewerDataService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #9111: as the grid's: a fault with the hourly rollup in the read starts it again on the interval table alone. */
-            if (rollupsTried && !IsDeadline(ex))
+            if (rollupsTried && !IsCommandTimeout(ex))
             {
                 LogRollupReadFallback("Query Store slicer", elapsed, ex);
                 return await TryGetQueryStoreSlicerFromTableAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken, useRollups: false);
