@@ -897,6 +897,16 @@ public sealed partial class DarlingCollectorRunner
                    are summarised in memory per database: the COPY above is a straight binary import, so every row of the batch is in
                    raw once this transaction commits, and no read-back of the shared collection_time is needed (#5707). A batch of 0
                    rows writes nothing. Only QueryStoreCollector.Row rows are summarised; any other row type writes no side row (safe, as above). */
+                /* #9148: a query_store_stats batch stamped in a day the closed-day pass may already have built (a backfill or an import)
+                   marks that day for a rebuild, in THIS transaction behind its own savepoint, so the clutter rollups never serve the day
+                   without these rows. A live batch is stamped now and sends nothing. A fault is logged and never fails the batch. */
+                if (watermarkBatch && rowsWritten > 0)
+                {
+                    await QueryStoreClosedDayRollup.TryMarkLateCollectionDayAsync(
+                        pgConnection, transaction!, server.ServerId, storedCollectionTime, DateTime.UtcNow,
+                        ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
+                }
+
                 if (watermarkBatch && rowsWritten > 0)
                 {
                     await QueryStoreWatermarks.TryUpsertBatchAsync(

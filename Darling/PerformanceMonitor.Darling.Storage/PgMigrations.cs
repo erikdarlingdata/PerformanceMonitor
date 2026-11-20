@@ -3754,6 +3754,10 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V284 (#9149): covering hash indexes on the hourly rollups the fleet summary reads (plan cache and Query Store), so the read answers from the index
            instead of one heap page per row. Catalog-only for the data: no row moves. An older build ignores the indexes. */
         new Migration(284, "fleet-summary-covering-indexes", V284Sql),
+        /* V285 (#9148): the Query Store clutter rollups get_query_store_clutter's plan-churn arm reads whole UTC days from, built by the V283
+           pass, and the built table's clutter_built_at column. Two new plain tables created empty and a nullable column: no data moves, so the
+           upgrade stays fast. The next ticks build the clutter rows of the days already built. An older build ignores them. */
+        new Migration(QueryStoreClosedDayRollup.ClutterVersion, "query-store-clutter-daily", QueryStoreClosedDayRollup.ClutterCreateSql),
     };
 
     /// <summary>

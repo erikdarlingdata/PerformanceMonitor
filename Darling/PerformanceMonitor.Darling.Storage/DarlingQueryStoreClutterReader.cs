@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -297,7 +298,10 @@ public static class DarlingQueryStoreClutterReader
     /// $1 server_id array, $2/$3 window (naive UTC), $4 the chosen databases (#5244: one text[], NULL for every database;
     /// every figure here is per database, so the predicate narrows the source rows).
     /// </summary>
-    public const string PlanChurnSql = """
+    public const string PlanChurnSql = RawPlanChurnHead + "\n" + PlanChurnTail;
+
+    /// <summary>#9148: <see cref="PlanChurnSql"/> up to <c>per_plan</c>, read from raw alone.</summary>
+    private const string RawPlanChurnHead = """
         WITH rows_in_window AS NOT MATERIALIZED
         (
             SELECT server_id, database_name, query_id, plan_id, collection_time
@@ -319,6 +323,10 @@ public static class DarlingQueryStoreClutterReader
             FROM rows_in_window
             GROUP BY server_id, database_name, query_id, plan_id
         ),
+        """;
+
+    /// <summary>#9148: <see cref="PlanChurnSql"/> from <c>per_query</c> on, shared with <see cref="PlanChurnClosedDaysSql"/>.</summary>
+    private const string PlanChurnTail = """
         per_query AS
         (
             SELECT server_id, database_name, query_id, COUNT(*) AS plans
@@ -409,6 +417,150 @@ public static class DarlingQueryStoreClutterReader
         GROUP BY server_id, database_name
         """;
 
+    /// <summary>
+    /// #9148: the raw arms of the closed-day statements. $5/$6 are the whole UTC days <c>[$5, $6)</c> the clutter rollups serve. The raw
+    /// table is read for the rest of the window only, as two ranges of <c>collection_time</c>, so the chunks of the served days are never walked.
+    /// </summary>
+    private static string RawOutsideServedDays(string columns) => $"""
+            SELECT {columns}
+            FROM query_store_stats
+            WHERE server_id = ANY($1::int[])
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time < $5
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            UNION ALL
+            SELECT {columns}
+            FROM query_store_stats
+            WHERE server_id = ANY($1::int[])
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time >= $6
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        """;
+
+    /// <summary>
+    /// #9148: <see cref="PlanChurnSql"/> with the whole UTC days <c>[$5, $6)</c> taken from <c>collect.query_store_clutter_plan_daily</c>
+    /// and the rest of the window from raw. A plan's first sighting is the minimum of its daily first sightings and its raw rows, and its
+    /// last sighting the maximum, so every figure from <c>per_plan</c> on is the raw statement's. $1 to $4 mean what they mean there.
+    /// </summary>
+    public static readonly string PlanChurnClosedDaysSql = $"""
+        WITH sightings AS NOT MATERIALIZED
+        (
+        {RawOutsideServedDays("server_id, database_name, query_id, plan_id, collection_time AS first_seen, collection_time AS last_seen")}
+            UNION ALL
+            SELECT server_id, database_name, query_id, plan_id, first_seen, last_seen
+            FROM collect.query_store_clutter_plan_daily
+            WHERE server_id = ANY($1::int[])
+            AND   day_utc >= $5::date
+            AND   day_utc < $6::date
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        per_plan AS
+        (
+            SELECT
+                server_id,
+                database_name,
+                query_id,
+                plan_id,
+                MIN(first_seen) AS first_seen,
+                MAX(last_seen) AS last_seen
+            FROM sightings
+            GROUP BY server_id, database_name, query_id, plan_id
+        ),
+        """ + "\n" + PlanChurnTail;
+
+    /// <summary>
+    /// #9148: <see cref="PlanChurnCollectionsSql"/> with the whole UTC days <c>[$5, $6)</c> taken from
+    /// <c>collect.query_store_clutter_collections_daily</c>. A collection belongs to one day and the raw ranges hold no served day, so the
+    /// daily counts and the raw distinct count add up to the raw statement's count.
+    /// </summary>
+    public static readonly string PlanChurnCollectionsClosedDaysSql = $"""
+        SELECT
+            server_id,
+            database_name,
+            SUM(collections)::bigint AS collections_observed
+        FROM
+        (
+            SELECT server_id, database_name, COUNT(*) AS collections
+            FROM
+            (
+                SELECT DISTINCT server_id, database_name, collection_time
+                FROM
+                (
+        {RawOutsideServedDays("server_id, database_name, collection_time")}
+                ) AS raw_rows
+            ) AS raw_collections
+            GROUP BY server_id, database_name
+            UNION ALL
+            SELECT server_id, database_name, collections
+            FROM collect.query_store_clutter_collections_daily
+            WHERE server_id = ANY($1::int[])
+            AND   day_utc >= $5::date
+            AND   day_utc < $6::date
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ) AS parts
+        GROUP BY server_id, database_name
+        """;
+
+    /// <summary>
+    /// #9148: the whole UTC days every server of the read can take from the clutter rollups, or null to read raw alone: a store below
+    /// <see cref="QueryStoreClosedDayRollup.ClutterVersion"/>, a server with no served run in the window, or no run common to all of them.
+    /// Each server's run is its served clutter days (built, not marked, heartbeat fresh), cut to the days its raw rows still reach whole:
+    /// the raw tier is purged sooner than the rollups, and a day raw no longer holds must not come from the rollup, which would answer
+    /// more than raw does. The window is <c>(start, end]</c>, so a start at midnight leaves its own day out.
+    /// </summary>
+    internal static async Task<QueryStoreClosedDayRollup.ServedDays?> ResolveClosedDaysAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        if (serverIds.Length == 0)
+        {
+            return null;
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using (var probe = new NpgsqlCommand(
+            "SELECT to_regclass('collect.query_store_clutter_collections_daily') IS NOT NULL", connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+        {
+            if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
+            {
+                return null;
+            }
+        }
+
+        var readStart = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified).AddTicks(1);
+        var end = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified);
+        DateTime commonStart = DateTime.MinValue, commonEnd = DateTime.MaxValue;
+        foreach (var serverId in serverIds.Distinct())
+        {
+            var served = await QueryStoreClosedDayRollup.ResolveServedClutterDaysAsync(
+                connection, null, serverId, readStart, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+            if (served is not { } run)
+            {
+                return null;
+            }
+
+            await using var floorCommand = new NpgsqlCommand(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats), connection)
+            {
+                CommandTimeout = StorageCommandDeadlines.McpReadSeconds,
+            };
+            floorCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            AddTimestamp(floorCommand, startUtc);
+            AddTimestamp(floorCommand, endUtc);
+            if (await floorCommand.ExecuteScalarAsync(cancellationToken) is not DateTime floor)
+            {
+                return null;
+            }
+
+            var firstWhole = floor.TimeOfDay == TimeSpan.Zero ? floor.Date : floor.Date.AddDays(1);
+            var start = run.Start > firstWhole ? run.Start : firstWhole;
+            commonStart = start > commonStart ? start : commonStart;
+            commonEnd = run.End < commonEnd ? run.End : commonEnd;
+        }
+
+        return commonStart < commonEnd ? new QueryStoreClosedDayRollup.ServedDays(commonStart, commonEnd) : null;
+    }
+
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<PlanChurnRow>> GetPlanChurnAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
@@ -417,16 +569,20 @@ public static class DarlingQueryStoreClutterReader
         /* #8570: the two statements read the window's index entries independently, so they run together on two pooled
            connections. A statement on a connection of its own cannot share a transaction with the other, and each one is a
            single read, so there is no snapshot to keep consistent between them beyond the window both name. */
-        var collectionsTask = ReadChurnCollectionsAsync(postgres, serverIds, startUtc, endUtc, databases, cancellationToken);
+        /* #9148: the whole UTC days the clutter rollups serve for every server of the read, read from the rollups; null reads raw alone,
+           with the statements as they were. */
+        var closedDays = await ResolveClosedDaysAsync(postgres, serverIds, startUtc, endUtc, cancellationToken);
+        var collectionsTask = ReadChurnCollectionsAsync(postgres, serverIds, startUtc, endUtc, databases, closedDays, cancellationToken);
         var rows = new List<PlanChurnRow>();
         try
         {
-            await using var command = postgres.CreateCommand(PlanChurnSql);
+            await using var command = postgres.CreateCommand(closedDays is null ? PlanChurnSql : PlanChurnClosedDaysSql);
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             AddServers(command, serverIds);
             AddTimestamp(command, startUtc);
             AddTimestamp(command, endUtc);
             command.Parameters.Add(databases.Parameter());
+            AddClosedDays(command, closedDays);
             var facts = new List<(int ServerId, string Database, DateTime First, DateTime Last, int Queries, int Plans, int P95, int Max, int Once, int AfterFirst)>();
             await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
@@ -458,15 +614,17 @@ public static class DarlingQueryStoreClutterReader
     }
 
     private static async Task<Dictionary<(int ServerId, string Database), int>> ReadChurnCollectionsAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
+        QueryStoreClosedDayRollup.ServedDays? closedDays, CancellationToken cancellationToken)
     {
         var counts = new Dictionary<(int ServerId, string Database), int>();
-        await using var command = postgres.CreateCommand(PlanChurnCollectionsSql);
+        await using var command = postgres.CreateCommand(closedDays is null ? PlanChurnCollectionsSql : PlanChurnCollectionsClosedDaysSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddServers(command, serverIds);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         command.Parameters.Add(databases.Parameter());
+        AddClosedDays(command, closedDays);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -735,6 +893,16 @@ public static class DarlingQueryStoreClutterReader
     }
 
     /// <summary>Binds the server-id array every arm takes as <c>$1</c>.</summary>
+    /// <summary>#9148: $5/$6, the served days, on a closed-day statement; nothing on a raw one.</summary>
+    private static void AddClosedDays(NpgsqlCommand command, QueryStoreClosedDayRollup.ServedDays? closedDays)
+    {
+        if (closedDays is { } days)
+        {
+            AddTimestamp(command, days.Start);
+            AddTimestamp(command, days.End);
+        }
+    }
+
     private static void AddServers(NpgsqlCommand command, int[] serverIds) =>
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
 

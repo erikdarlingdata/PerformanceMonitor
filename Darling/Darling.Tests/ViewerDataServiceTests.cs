@@ -736,28 +736,36 @@ public sealed class ViewerSchemaVersionGateTests
            copy) is the one before that, so a store without it (and without the two above) is a V276 store. #9000: the V276 sentinel (the Store Growth
            settings on the alert settings) is the one before that, #8737: the V275 sentinel (the personal token table) the one before that,
            and #8978: the V274 sentinel the one before that. */
-        /* #9110: the V282 sentinel (the job outcome daily rollup's tables) is the one before the last, so a store that has every sentinel but
-           that one and V283's is a V281 store and maps to 281, not 282. */
-        /* #9111: the V283 sentinel (the Query Store closed-day rollups' tables) is the last parameter, so a store that has every sentinel but
-           that one is a V282 store and maps to 282, not 283. Each sentinel below shifts one place from the end. */
-        /* #9149: the V284 sentinel (the covering hash index on the interval hourly plan cache rollup) is the last parameter, so a store that has every
-           sentinel but that one is a V283 store and maps to 283, not 284. Each sentinel below shifts one place from the end. */
+        /* #9110: the V282 sentinel (the job outcome daily rollup's tables) is the one before V283's, so a store that has every sentinel but
+           that one and the three above it is a V281 store and maps to 281, not 282. */
+        /* #9148: the V285 sentinel (the Query Store clutter rollups' tables) is the last parameter, so a store that has every sentinel but
+           that one is a V284 store and maps to 284, not 285. #9149: the V284 sentinel (the covering hash index on the interval hourly plan cache rollup) is
+           the one before it, so a store without it (and without V285's) is a V283 store. #9111: the V283 sentinel (the Query Store closed-day rollups'
+           tables) is the one before that, so a store without it (and without the two above) is a V282 store. Each sentinel below shifts one place from the end. */
+        var allButV285 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV285[^1] = false;
+        Assert.Equal("hasQueryStoreClutterDaily", map.GetParameters()[^1].Name);
+        Assert.Equal(284, (int)map.Invoke(null, allButV285)!);
+
         var allButV284 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV284[^1] = false;
-        Assert.Equal("hasFleetSummaryCoveringIndexes", map.GetParameters()[^1].Name);
+        allButV284[^2] = false;
+        Assert.Equal("hasFleetSummaryCoveringIndexes", map.GetParameters()[^2].Name);
         Assert.Equal(283, (int)map.Invoke(null, allButV284)!);
 
         var allButV283 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV283[^1] = false;
         allButV283[^2] = false;
-        Assert.Equal("hasQueryStoreClosedDayRollups", map.GetParameters()[^2].Name);
+        allButV283[^3] = false;
+        Assert.Equal("hasQueryStoreClosedDayRollups", map.GetParameters()[^3].Name);
         Assert.Equal(282, (int)map.Invoke(null, allButV283)!);
 
         var allButV282 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         allButV282[^1] = false;
         allButV282[^2] = false;
         allButV282[^3] = false;
-        Assert.Equal("hasJobOutcomeDaily", map.GetParameters()[^3].Name);
+        allButV282[^4] = false;
+        Assert.Equal("hasJobOutcomeDaily", map.GetParameters()[^4].Name);
         Assert.Equal(281, (int)map.Invoke(null, allButV282)!);
 
         var allButV281 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -765,7 +773,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV281[^2] = false;
         allButV281[^3] = false;
         allButV281[^4] = false;
-        Assert.Equal("hasQueryStoreTextSeen", map.GetParameters()[^4].Name);
+        allButV281[^5] = false;
+        Assert.Equal("hasQueryStoreTextSeen", map.GetParameters()[^5].Name);
         Assert.Equal(280, (int)map.Invoke(null, allButV281)!);
 
         var allButV280 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -774,7 +783,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV280[^3] = false;
         allButV280[^4] = false;
         allButV280[^5] = false;
-        Assert.Equal("hasPlanCorrectionServerDbQueryIndex", map.GetParameters()[^5].Name);
+        allButV280[^6] = false;
+        Assert.Equal("hasPlanCorrectionServerDbQueryIndex", map.GetParameters()[^6].Name);
         Assert.Equal(279, (int)map.Invoke(null, allButV280)!);
 
         var allButV279 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -784,7 +794,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV279[^4] = false;
         allButV279[^5] = false;
         allButV279[^6] = false;
-        Assert.Equal("hasAggregateCompressionOrderHistory", map.GetParameters()[^6].Name);
+        allButV279[^7] = false;
+        Assert.Equal("hasAggregateCompressionOrderHistory", map.GetParameters()[^7].Name);
         Assert.Equal(278, (int)map.Invoke(null, allButV279)!);
 
         var allButV278 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -795,7 +806,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV278[^5] = false;
         allButV278[^6] = false;
         allButV278[^7] = false;
-        Assert.Equal("hasDatabaseProtectionErrorLog", map.GetParameters()[^7].Name);
+        allButV278[^8] = false;
+        Assert.Equal("hasDatabaseProtectionErrorLog", map.GetParameters()[^8].Name);
         Assert.Equal(277, (int)map.Invoke(null, allButV278)!);
 
         var allButV277 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -807,7 +819,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV277[^6] = false;
         allButV277[^7] = false;
         allButV277[^8] = false;
-        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^8].Name);
+        allButV277[^9] = false;
+        Assert.Equal("hasAttentionLegacyCopy", map.GetParameters()[^9].Name);
         Assert.Equal(276, (int)map.Invoke(null, allButV277)!);
 
         var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -820,7 +833,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV276[^7] = false;
         allButV276[^8] = false;
         allButV276[^9] = false;
-        Assert.Equal("hasStoreGrowthAlertSettings", map.GetParameters()[^9].Name);
+        allButV276[^10] = false;
+        Assert.Equal("hasStoreGrowthAlertSettings", map.GetParameters()[^10].Name);
         Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
 
         var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -834,7 +848,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV275[^8] = false;
         allButV275[^9] = false;
         allButV275[^10] = false;
-        Assert.Equal("hasPersonalTokens", map.GetParameters()[^10].Name);
+        allButV275[^11] = false;
+        Assert.Equal("hasPersonalTokens", map.GetParameters()[^11].Name);
         Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
 
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
@@ -849,7 +864,8 @@ public sealed class ViewerSchemaVersionGateTests
         allButV274[^9] = false;
         allButV274[^10] = false;
         allButV274[^11] = false;
-        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^11].Name);
+        allButV274[^12] = false;
+        Assert.Equal("hasTrigramIndexStoreOptions", map.GetParameters()[^12].Name);
         Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
 
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes
