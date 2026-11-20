@@ -448,15 +448,16 @@ public sealed class McpQueryTools
                 databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
                 databases_left_out_count = DatabasesLeftOut.Count(leftOutWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
-                procedures = result,
-                /* True when the window held more procedures than top; the page is the heaviest top of them. */
-                truncated = moreThanTop
+                procedures = result
             }, tagScope.Named, node =>
             {
                 if (node["procedures"] is JsonArray procedureRows)
                 {
                     DroppedDatabaseMark.Mark(procedureRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
                 }
+
+                /* True when the window held more procedures than top; the page is the heaviest top of them. */
+                node["truncated"] = moreThanTop;
             });
         }
         catch (Exception ex)
