@@ -21,7 +21,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #9164: the hourly host rollup's migration and the tick that fills it. The migration applied twice leaves the same schema. One tick on a
-/// seeded store builds the rows of a closed hour and builds nothing for an hour that closed less than the grace ago.
+/// seeded store builds the rows of a closed hour and builds nothing for an hour that closed less than the grace ago. Every rollup column equals the
+/// raw aggregate, the distinct digests of a range equal the raw distinct texts, a late row makes an hour incomplete until the next tick builds it
+/// again, and the tick prunes the hours raw's retention took.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
 public sealed class QueryStatsHostHourlyLiveTests
@@ -116,6 +118,372 @@ public sealed class QueryStatsHostHourlyLiveTests
             ("id", ServerId), ("bucket", GraceHour)));
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built WHERE server_id = @id AND bucket = @bucket", ct,
             ("id", ServerId), ("bucket", GraceHour)));
+    }
+
+    private const int OtherServerId = ServerId - 1;
+
+    private static readonly DateTime Hour8 = new(2026, 9, 15, 8, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime Hour9 = new(2026, 9, 15, 9, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime Hour10 = new(2026, 9, 15, 10, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>The rows the raw top-queries statement reads for its measures.</summary>
+    private const string Honest = TimescaleSupport.IntervalHonestSourceFilter;
+
+    /// <summary>
+    /// Every rollup column equals the raw statement's aggregate for the same server, hour and key, over closed hours of two servers. The
+    /// seed holds zero-interval rows that carry extreme values (the filter must drop them from every measure and keep them for the
+    /// observations), keys with a NULL database, hash or host object, NULL <c>max_dop</c>, a key whose rows are all zero-interval, and two
+    /// groups tied on CPU.
+    /// </summary>
+    [Fact]
+    public async Task EveryRollupColumn_EqualsTheRawAggregate_ForClosedHoursOfTwoServers()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        var seeder = new RawSeeder(connection, ct);
+        foreach (var serverId in new[] { ServerId, OtherServerId })
+        {
+            foreach (var hour in new[] { Hour8, Hour9, Hour10 })
+            {
+                await seeder.SeedHourAsync(serverId, hour);
+            }
+        }
+
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour8, Hour10.AddHours(1), ct);
+        var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+        Assert.Equal(0, result.Failed);
+
+        var compared = await AssertRollupEqualsRawAsync(connection, ct);
+        Assert.Equal(2 * 3 * 6, compared);
+
+        // The seed bites: a group of only zero-interval rows is a row of NULL sums, a group's max_dop is NULL where no honest row had one,
+        // a NULL database and host object is a key like any other, and two groups of an hour tie on CPU.
+        Assert.Equal(6L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE raw_rows = 0 AND total_cpu_us IS NULL", ct));
+        Assert.True(await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE raw_rows > 0 AND max_dop IS NULL", ct) >= 6);
+        Assert.True(await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE database_name IS NULL AND host_object_name IS NULL", ct) >= 6);
+        Assert.True(await ScalarAsync<long>(connection, "SELECT count(*) FROM (SELECT server_id, bucket, total_cpu_us FROM collect.query_stats_host_hourly WHERE total_cpu_us IS NOT NULL GROUP BY 1, 2, 3 HAVING count(*) > 1) AS t", ct) >= 6);
+    }
+
+    /// <summary>
+    /// The distinct texts of a range, taken as the distinct union of the hours' <c>digests</c>, equal the raw statement's distinct text
+    /// count over the same hours, for the whole server and for each group, including a text that appears in two hours and one that only
+    /// a zero-interval row carries.
+    /// </summary>
+    [Fact]
+    public async Task DistinctDigests_OfARangeOfHours_EqualTheRawDistinctTextCount()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        var seeder = new RawSeeder(connection, ct);
+
+        // Text 1 is in hours 8 and 9 and in two groups of hour 8, text 2 is in hours 9 and 10, text 3 is in two groups of hour 10. Text 9 is only on a zero-interval row.
+        await seeder.InsertAsync(ServerId, Hour8.AddMinutes(5), "DbA", "0xQ1", null, digest: 1);
+        await seeder.InsertAsync(ServerId, Hour8.AddMinutes(6), "DbA", "0xQ1", "hostA", digest: 1);
+        await seeder.InsertAsync(ServerId, Hour8.AddMinutes(7), "DbA", "0xQ1", null, digest: 4);
+        await seeder.InsertAsync(ServerId, Hour9.AddMinutes(5), "DbA", "0xQ1", null, digest: 1);
+        await seeder.InsertAsync(ServerId, Hour9.AddMinutes(15), "DbA", "0xQ2", null, digest: 2);
+        await seeder.InsertAsync(ServerId, Hour9.AddMinutes(25), "DbA", "0xQ2", null, digest: 9, interval: 0);
+        await seeder.InsertAsync(ServerId, Hour10.AddMinutes(5), "DbA", "0xQ2", null, digest: 2);
+        await seeder.InsertAsync(ServerId, Hour10.AddMinutes(8), "DbA", "0xQ2", null, digest: 3);
+        await seeder.InsertAsync(ServerId, Hour10.AddMinutes(9), "DbB", "0xQ3", null, digest: 3);
+        await seeder.InsertAsync(ServerId, Hour10.AddMinutes(10), "DbB", "0xQ3", null, digest: null);
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour8, Hour10.AddHours(1), ct);
+        var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+        Assert.Equal(0, result.Failed);
+
+        var overlap = 0L;
+        foreach (var (from, to) in new[] { (Hour8, Hour10), (Hour8, Hour10.AddHours(1)), (Hour9, Hour10.AddHours(1)), (Hour10, Hour10.AddHours(1)) })
+        {
+            var raw = await ScalarAsync<long>(connection, $"SELECT count(DISTINCT query_text_digest) FILTER (WHERE {Honest}) FROM collect.query_stats WHERE server_id = @id AND collection_time >= @from AND collection_time < @to", ct,
+                ("id", ServerId), ("from", from), ("to", to));
+            var rolled = await ScalarAsync<long>(connection, "SELECT count(*) FROM (SELECT DISTINCT unnest(digests) FROM collect.query_stats_host_hourly WHERE server_id = @id AND bucket >= @from AND bucket < @to) AS t", ct,
+                ("id", ServerId), ("from", from), ("to", to));
+            var partsSum = await ScalarAsync<long>(connection, "SELECT COALESCE(sum(cardinality(digests)), 0)::bigint FROM collect.query_stats_host_hourly WHERE server_id = @id AND bucket >= @from AND bucket < @to", ct,
+                ("id", ServerId), ("from", from), ("to", to));
+            Assert.True(rolled > 0, "Each range holds at least one text.");
+            Assert.Equal(raw, rolled);
+            overlap += partsSum - rolled;
+        }
+
+        Assert.True(overlap > 0, "The seed should carry a text in two hours or two groups, so that summing the parts over-counts.");
+
+        // Per group over the whole range: the union of the group's hours equals the raw distinct count of the group.
+        var badGroups = await ScalarAsync<long>(connection, $@"
+SELECT count(*) FROM (SELECT DISTINCT database_name, query_hash, host_object_name FROM collect.query_stats WHERE server_id = @id) AS g
+WHERE (SELECT count(DISTINCT q.query_text_digest) FILTER (WHERE {Honest}) FROM collect.query_stats AS q
+       WHERE q.server_id = @id AND q.database_name IS NOT DISTINCT FROM g.database_name AND q.query_hash IS NOT DISTINCT FROM g.query_hash AND q.host_object_name IS NOT DISTINCT FROM g.host_object_name)
+   <> (SELECT count(*) FROM (SELECT DISTINCT unnest(h.digests) FROM collect.query_stats_host_hourly AS h
+       WHERE h.server_id = @id AND h.database_name IS NOT DISTINCT FROM g.database_name AND h.query_hash IS NOT DISTINCT FROM g.query_hash AND h.host_object_name IS NOT DISTINCT FROM g.host_object_name) AS u)", ct,
+            ("id", ServerId));
+        Assert.Equal(0L, badGroups);
+    }
+
+    /// <summary>
+    /// A raw row that arrives for an hour after it was built makes the hour incomplete (its build counted fewer rows than the ledger holds
+    /// now), the next tick builds it again with no help from the settle rule, and the hour is complete and equal to raw once more.
+    /// </summary>
+    [Fact]
+    public async Task ALateRow_MakesTheHourIncomplete_UntilTheNextTickRebuildsIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        var seeder = new RawSeeder(connection, ct);
+        foreach (var hour in new[] { Hour8, Hour9, Hour10 })
+        {
+            await seeder.SeedHourAsync(ServerId, hour);
+        }
+
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour8, Hour10.AddHours(1), ct);
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+
+        Assert.Empty(await QueryStatsHostHourly.IncompleteHoursAsync(connection, null, ServerId, Hour8, Hour10.AddHours(1), 30, ct));
+        await AssertRollupEqualsRawAsync(connection, ct);
+
+        // The collector's late batch: a new honest row for hour 9, counted in the ledger as the writer would.
+        await seeder.InsertAsync(ServerId, Hour9.AddMinutes(50), "DbA", "0xLATE", null, digest: 7);
+        await QueryStatsLedgerSeed.RecountAsync(connection, Hour9, Hour9.AddHours(1), ct);
+
+        Assert.False(await QueryStatsHostHourly.IsCompleteAsync(connection, null, ServerId, Hour8, Hour10.AddHours(1), 30, ct));
+        Assert.Equal(new[] { Hour9 }, await QueryStatsHostHourly.IncompleteHoursAsync(connection, null, ServerId, Hour8, Hour10.AddHours(1), 30, ct));
+        Assert.True(await QueryStatsHostHourly.IsCompleteAsync(connection, null, ServerId, Hour10, Hour10.AddHours(1), 30, ct), "The hours around the late row stay complete.");
+
+        var second = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+        Assert.Equal(0, second.Failed);
+        Assert.True(await QueryStatsHostHourly.IsCompleteAsync(connection, null, ServerId, Hour8, Hour10.AddHours(1), 30, ct));
+        await AssertRollupEqualsRawAsync(connection, ct);
+        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE server_id = @id AND bucket = @bucket AND query_hash = '0xLATE'", ct,
+            ("id", ServerId), ("bucket", Hour9)));
+    }
+
+    /// <summary>
+    /// A tick removes the rollup and built rows of the hours before the first whole hour inside raw's retention, one of them the hour
+    /// that straddles the cutoff, and keeps the first whole hour inside it and the hour the same tick built.
+    /// </summary>
+    [Fact]
+    public async Task ATick_PrunesHoursOlderThanRawRetention_AndKeepsTheRest()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        var seeder = new RawSeeder(connection, ct);
+        await seeder.SeedHourAsync(ServerId, Hour9);
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour8, Hour10, ct);
+
+        // TickNow less 30 days is 08-16 12:05, so 08-16 13:00 is the first whole hour inside retention and 08-16 12:00 straddles the cutoff.
+        var firstKept = new DateTime(2026, 8, 16, 13, 0, 0, DateTimeKind.Unspecified);
+        var straddling = firstKept.AddHours(-1);
+        var wayOld = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        foreach (var bucket in new[] { wayOld, straddling, firstKept })
+        {
+            await ExecuteAsync(connection, "INSERT INTO collect.query_stats_host_hourly (server_id, bucket, database_name, query_hash, host_object_name, raw_rows) VALUES (@id, @bucket, 'DbOld', '0xOLD', NULL, 1)", ct,
+                ("id", ServerId), ("bucket", bucket));
+            await ExecuteAsync(connection, "INSERT INTO collect.query_stats_host_hourly_built (server_id, bucket, built_at, raw_rows, ledger_rows) VALUES (@id, @bucket, @built, 1, 0)", ct,
+                ("id", ServerId), ("bucket", bucket), ("built", TickNow));
+        }
+
+        var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+        Assert.Equal(0, result.Failed);
+        Assert.Equal(2L, result.RowsRemoved);
+
+        foreach (var table in new[] { QueryStatsHostHourly.Table, QueryStatsHostHourly.BuiltTable })
+        {
+            var kept = new List<DateTime>();
+            await using (var read = new NpgsqlCommand($"SELECT DISTINCT bucket FROM {table} WHERE server_id = @id ORDER BY 1", connection))
+            {
+                read.Parameters.AddWithValue("id", ServerId);
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    kept.Add(reader.GetDateTime(0));
+                }
+            }
+
+            Assert.DoesNotContain(wayOld, kept);
+            Assert.DoesNotContain(straddling, kept);
+            Assert.Contains(firstKept, kept);
+            Assert.Contains(Hour9, kept);
+        }
+    }
+
+    private static Task<int> EnableServersAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        ExecuteAsync(connection, @"
+INSERT INTO collect.servers (server_id, server_name, is_enabled)
+SELECT s, 'hourly-9164-' || s::text, TRUE FROM unnest(ARRAY[@a, @b]) AS s
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ("a", ServerId), ("b", OtherServerId));
+
+    /// <summary>
+    /// The aggregates of the raw statement's wide-row pass (<c>DarlingDataReader.TopQueriesSql</c>), written out here, over each (server,
+    /// hour, database, hash, host object) of <c>collect.query_stats</c>, set against the rollup's rows by column name as JSON. Both
+    /// directions are compared, so a rollup column with no raw counterpart here fails too. Returns the number of groups compared.
+    /// </summary>
+    private static async Task<int> AssertRollupEqualsRawAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var sums = new[] { ("total_executions", "delta_execution_count"), ("total_cpu_us", "delta_worker_time"), ("total_elapsed_us", "delta_elapsed_time"), ("total_reads", "delta_logical_reads"),
+            ("total_writes", "delta_logical_writes"), ("total_physical_reads", "delta_physical_reads"), ("total_rows", "delta_rows"), ("total_spills", "delta_spills") };
+        var mins = new[] { "min_dop", "min_worker_time", "min_elapsed_time", "min_physical_reads", "min_rows", "min_grant_kb", "min_used_grant_kb", "min_ideal_grant_kb", "min_spills", "min_reserved_threads", "min_used_threads" };
+        var maxes = new[] { "max_dop", "max_worker_time", "max_elapsed_time", "query_plan_hash", "sql_handle", "plan_handle", "creation_time", "max_physical_reads", "max_rows", "max_grant_kb", "max_used_grant_kb",
+            "max_ideal_grant_kb", "max_spills", "max_reserved_threads", "max_used_threads", "total_clr_time", "plan_generation_num" };
+
+        var columns = new List<string> { $"COUNT(*) FILTER (WHERE {Honest}) AS raw_rows" };
+        columns.AddRange(sums.Select(s => $"CAST(SUM({s.Item2}) FILTER (WHERE {Honest}) AS bigint) AS {s.Item1}"));
+        columns.AddRange(mins.Select(c => $"MIN({c}) FILTER (WHERE {Honest}) AS {c}"));
+        columns.AddRange(maxes.Select(c => $"MAX({c}) FILTER (WHERE {Honest}) AS {c}"));
+        columns.Add("MAX(last_execution_time) AS last_execution_time");
+        columns.Add("MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second");
+        columns.Add($"array_agg(DISTINCT query_text_digest) FILTER (WHERE {Honest} AND query_text_digest IS NOT NULL) AS digests");
+        columns.Add(@"MAX(timestamp_send(collection_time) || int8send(collection_id)
+            || CASE WHEN query_text IS NOT NULL THEN '\x00'::bytea || convert_to(query_text, 'UTF8') ELSE '\x01'::bytea || query_text_digest END)
+            FILTER (WHERE query_text IS NOT NULL OR query_text_digest IS NOT NULL) AS latest_text_key");
+
+        var reference = await ReadJsonByKeyAsync(connection, @$"
+SELECT concat_ws('|', r.server_id, r.bucket, COALESCE(r.database_name, '<null>'), COALESCE(r.query_hash, '<null>'), COALESCE(r.host_object_name, '<null>')),
+       (to_jsonb(r) - 'server_id' - 'bucket' - 'database_name' - 'query_hash' - 'host_object_name')::text
+FROM (
+    SELECT server_id, date_trunc('hour', collection_time) AS bucket, database_name, query_hash, host_object_name,
+           {string.Join(",\n           ", columns)}
+    FROM collect.query_stats
+    WHERE server_id = ANY(@servers)
+    GROUP BY server_id, date_trunc('hour', collection_time), database_name, query_hash, host_object_name
+) AS r", ct);
+        var rolled = await ReadJsonByKeyAsync(connection, @"
+SELECT concat_ws('|', h.server_id, h.bucket, COALESCE(h.database_name, '<null>'), COALESCE(h.query_hash, '<null>'), COALESCE(h.host_object_name, '<null>')),
+       (to_jsonb(h) - 'server_id' - 'bucket' - 'database_name' - 'query_hash' - 'host_object_name')::text
+FROM collect.query_stats_host_hourly AS h
+WHERE h.server_id = ANY(@servers)", ct);
+
+        Assert.NotEmpty(reference);
+        Assert.Equal(reference.Keys.OrderBy(k => k, StringComparer.Ordinal), rolled.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        foreach (var (key, want) in reference)
+        {
+            var got = rolled[key];
+            Assert.Equal(want.Keys.OrderBy(k => k, StringComparer.Ordinal), got.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            foreach (var column in want.Keys)
+            {
+                Assert.True(want[column] == got[column], $"Column {column} of group {key}: raw {want[column]}, rollup {got[column]}.");
+            }
+        }
+
+        return reference.Count;
+    }
+
+    private static async Task<Dictionary<string, Dictionary<string, string>>> ReadJsonByKeyAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        var rows = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("servers", new[] { ServerId, OtherServerId });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(reader.GetString(1));
+            rows.Add(reader.GetString(0), document.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetRawText(), StringComparer.Ordinal));
+        }
+
+        return rows;
+    }
+
+    /// <summary>Plants raw rows of known shape. Values are drawn from a fixed seed, so a run is repeatable.</summary>
+    private sealed class RawSeeder(NpgsqlConnection connection, CancellationToken ct)
+    {
+        private readonly Random _random = new(9164);
+        private long _collectionId = 9_164_000;
+
+        /// <summary>
+        /// Six groups for one server and hour: a group with an honest run and a newest zero-interval row of extreme values; a group tied
+        /// with it on CPU under a host object; a NULL database and hash-bearing group with no <c>max_dop</c>; a NULL hash group with some;
+        /// a group of only zero-interval rows; and a group whose interval is NULL.
+        /// </summary>
+        public async Task SeedHourAsync(int serverId, DateTime hour)
+        {
+            await InsertAsync(serverId, hour.AddMinutes(1), "DbA", "0xG1", null, digest: 1, cpu: 200);
+            await InsertAsync(serverId, hour.AddMinutes(2), "DbA", "0xG1", null, digest: 2, cpu: 400);
+            await InsertAsync(serverId, hour.AddMinutes(3), "DbA", "0xG1", null, digest: 1, cpu: 600);
+            await InsertAsync(serverId, hour.AddMinutes(50), "DbA", "0xG1", null, digest: 3, interval: 0, cpu: 700, extreme: true);
+            await InsertAsync(serverId, hour.AddMinutes(4), "DbA", "0xG2", "procX", digest: 2, cpu: 1200);
+            await InsertAsync(serverId, hour.AddMinutes(5), null, "0xG3", null, digest: 4, cpu: 50, noDop: true);
+            await InsertAsync(serverId, hour.AddMinutes(6), null, "0xG3", null, digest: null, cpu: 60, noDop: true);
+            await InsertAsync(serverId, hour.AddMinutes(7), "DbB", null, null, digest: 5, cpu: 80, noDop: true);
+            await InsertAsync(serverId, hour.AddMinutes(8), "DbB", null, null, digest: 5, cpu: 90);
+            await InsertAsync(serverId, hour.AddMinutes(9), "DbA", "0xG5", "procY", digest: 6, interval: 0, cpu: 300, extreme: true);
+            await InsertAsync(serverId, hour.AddMinutes(10), "DbA", "0xG5", "procY", digest: 7, interval: 0, cpu: 301, extreme: true);
+            await InsertAsync(serverId, hour.AddMinutes(11), null, "0xG6", "procZ", digest: 8, interval: null, cpu: 70);
+        }
+
+        public async Task InsertAsync(int serverId, DateTime at, string? database, string? hash, string? host, int? digest = null, int? interval = 300, long cpu = 100, bool noDop = false, bool extreme = false)
+        {
+            var id = ++_collectionId;
+            var values = new List<(string Column, object? Value)>
+            {
+                ("collection_id", id), ("collection_time", at), ("server_id", serverId), ("server_name", $"hourly-9164-{serverId}"),
+                ("database_name", database), ("query_hash", hash), ("host_object_name", host), ("sample_interval_seconds", interval),
+                ("delta_worker_time", cpu), ("delta_elapsed_time", cpu * 2), ("delta_execution_count", extreme ? 7 : 1 + _random.Next(0, 5)),
+                ("delta_logical_reads", Draw(1000)), ("delta_logical_writes", Draw(50)), ("delta_physical_reads", Draw(20)), ("delta_rows", Draw(500)), ("delta_spills", Draw(3)),
+                ("query_plan_hash", extreme ? "zzzz" : $"0xP{_random.Next(1, 9)}"), ("sql_handle", extreme ? "zzzz" : $"0xS{_random.Next(1, 9)}"), ("plan_handle", extreme ? "zzzz" : $"0xH{_random.Next(1, 9)}"),
+                ("last_execution_time", at), ("creation_time", extreme ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) : at.AddDays(-3).AddMinutes(_random.Next(0, 600))),
+                ("min_dop", noDop ? null : Bound(1, 4, extreme, low: true)), ("max_dop", noDop ? null : Bound(4, 16, extreme, low: false)),
+                ("total_clr_time", Bound(0, 900, extreme, low: false)), ("plan_generation_num", Bound(1, 9, extreme, low: false)),
+                ("query_text", digest is null || id % 4 == 0 ? $"select {id}" : null),
+                ("query_text_digest", digest is { } d ? Enumerable.Repeat((byte)d, 32).ToArray() : null),
+            };
+            foreach (var pair in new[] { "worker_time", "elapsed_time", "physical_reads", "rows", "grant_kb", "used_grant_kb", "ideal_grant_kb", "spills", "reserved_threads", "used_threads" })
+            {
+                values.Add(($"min_{pair}", Bound(1, 100, extreme, low: true)));
+                values.Add(($"max_{pair}", Bound(100, 1000, extreme, low: false)));
+            }
+
+            var named = values.Where(v => v.Value is not null).ToList();
+            var sql = $"INSERT INTO collect.query_stats ({string.Join(", ", values.Select(v => v.Column))}) VALUES ({string.Join(", ", values.Select(v => v.Value is null ? "NULL" : "@" + v.Column))})";
+            await using var command = new NpgsqlCommand(sql, connection);
+            foreach (var (column, value) in named)
+            {
+                command.Parameters.AddWithValue(column, value!);
+            }
+
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        private long? Draw(int max) => _random.Next(0, 6) == 0 ? null : _random.Next(0, max);
+
+        /// <summary>A min or max column. A zero-interval row ("extreme") holds a value no honest row has, below every minimum and above every maximum.</summary>
+        private long? Bound(int from, int to, bool extreme, bool low)
+        {
+            if (extreme)
+            {
+                return low ? 0 : 5_000_000 + _random.Next(0, 1000);
+            }
+
+            return _random.Next(0, 8) == 0 ? null : _random.Next(from, to);
+        }
     }
 
     private static async Task InsertRawAsync(NpgsqlConnection connection, long collectionId, DateTime at, string database, string hash, CancellationToken ct) =>
