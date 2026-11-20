@@ -2836,11 +2836,12 @@ internal static class DarlingDataReader
     /// The raw read's window, collection-time and database predicates, shared by <see cref="QueryStoreTopRawPrefix"/> and
     /// <see cref="QueryStoreWindowProbeRawRowsSql"/>, so the existence probe reads the rows the top read ranks. Each line
     /// carries the indentation it renders with inside the top read, which interpolates it at its literal's left margin.
-    /// $2/$3 window (naive UTC), $5 databases (NULL = all).
+    /// $2/$3 window (naive UTC), $5 databases (NULL = all). The window is the half-open range <c>[$2, $3)</c> by the interval's
+    /// start: the interval that starts at $3 belongs to the next window, so back-to-back windows share no interval.
     /// </summary>
     private const string QueryStoreTopRawWindowSql = $$"""
             AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
             AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -2851,11 +2852,11 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreTopTablePrefix"/> and <see cref="QueryStoreWindowProbeTableRowsSql"/>. The floor carries
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>, which <see cref="QueryStoreIntervalWide.WithEdgeMargin"/>
     /// narrows in both. Indented as <see cref="QueryStoreTopRawWindowSql"/> is. $2 the gate's <c>ReadStart</c>, $3 window
-    /// end, $5 databases. A static readonly declared above its users: static initializers run in textual order.
+    /// end (exclusive, as the raw read's is), $5 databases. A static readonly declared above its users: static initializers run in textual order.
     /// </summary>
     private static readonly string QueryStoreTopTableWindowSql = $$"""
             AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -3131,13 +3132,13 @@ internal static class DarlingDataReader
     /// <summary>
     /// The long-window read (#5094): <see cref="QueryStoreTopTableSql"/>'s answer, with a run of whole UTC days taken
     /// from <c>collect.query_store_top_daily</c> instead of the wide table. $1 server_id, $2 the gate's
-    /// <c>ReadStart</c>, $3 the window end (inclusive, as in the table read), $4 top, $5 database, $6 execution
+    /// <c>ReadStart</c>, $3 the window end (the trailing edge arm's own bound is inclusive, by <c>collection_time</c>), $4 top, $5 database, $6 execution
     /// outcome, $7 module, $8 <c>S</c> and $9 <c>E</c> (dates): the days <c>[S, E)</c> come from the summary, and the
-    /// edges <c>[$2, S)</c> and <c>[E, $3]</c> from the wide table with exactly the table read's predicates (the
-    /// inclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
+    /// edges <c>[$2, S)</c> and <c>[E, $3]</c> from the wide table by <c>collection_time</c> (the inclusive $3 is the
+    /// edge's own, placed by collection and not by the interval's start), with the table read's <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
     /// upper bound too (#5523): each edge range ends at its own window end plus
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
-    /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
+    /// every row newer than it, so a partial first or last day, and any day without a built row, is exact.
     /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
     /// execution-weighted sum <c>avg * execution_count</c> as <c>numeric</c> (the summary stores the same thing as
     /// <c>&lt;col&gt;_wsum</c>, V240, #7169). <c>ranked</c> then groups the unioned rows by the table read's own
