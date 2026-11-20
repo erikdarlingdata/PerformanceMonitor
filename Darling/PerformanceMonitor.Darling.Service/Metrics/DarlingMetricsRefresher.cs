@@ -40,6 +40,10 @@ internal sealed class DarlingMetricsRefresher
     private long _fleetTicks = -1;
     private long _serverSetTicks = -1;
 
+    /* #9013: the collision sets last logged, so the Information line comes once per change, not once a minute. Only the
+       refresh that holds the cache's single-flight slot runs RefreshAsync, so one writer at a time. */
+    private string _loggedCollisions = string.Empty;
+
     public DarlingMetricsRefresher(
         Func<CancellationToken, Task<NpgsqlDataSource?>> dataSource,
         ReadAdmission admission,
@@ -100,11 +104,16 @@ internal sealed class DarlingMetricsRefresher
 
         var labels = DarlingMetricsFleetMapper.AssignServerLabels(
             fleet.Cards.Select(card => (card.ServerId, card.DisplayName)), out var collisions);
-        foreach (var set in collisions)
+        var collisionKey = string.Join(";", collisions.Select(set => string.Join(",", set)));
+        if (!string.Equals(collisionKey, _loggedCollisions, StringComparison.Ordinal))
         {
-            _logger.LogInformation(
-                "Metrics: servers {ServerIds} share a display name, so each one's server label carries \" #<server_id>\".",
-                string.Join(", ", set));
+            _loggedCollisions = collisionKey;
+            foreach (var set in collisions)
+            {
+                _logger.LogInformation(
+                    "Metrics: servers {ServerIds} share a display name, so each one's server label carries \" #<server_id>\".",
+                    string.Join(", ", set));
+            }
         }
 
         var (fleetSamples, stamps) = DarlingMetricsFleetMapper.Map(fleet.Cards, labels);

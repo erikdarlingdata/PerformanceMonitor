@@ -89,6 +89,44 @@ public sealed class DarlingMetricsRefresherLiveTests
         Assert.DoesNotContain(snapshot.LastCollections, s => s.Server == EmptyName);
     }
 
+    /// <summary>The display-name collision line comes once per change in the collision sets, not on every refresh.</summary>
+    [Fact]
+    public async Task ACollision_IsLoggedOnce_AndAgainOnlyWhenTheCollisionsChange()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live metrics refresher tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        const string shared = "metrics-refresher-shared";
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        {
+            await InsertServerAsync(connection, 11, shared, ct);
+            await InsertServerAsync(connection, 12, shared, ct);
+            await InsertServerAsync(connection, 13, "metrics-refresher-alone", ct);
+        }
+
+        var log = new CapturingTestLogger();
+        var refresher = new DarlingMetricsRefresher(
+            _ => Task.FromResult<NpgsqlDataSource?>(postgres), new ReadAdmission(), registry: null, Collecting(), TimeProvider.System, log);
+        int CollisionLines() => log.Lines.Count(l => l.Contains("share a display name", StringComparison.Ordinal));
+
+        await refresher.RefreshAsync(ct);
+        await refresher.RefreshAsync(ct);
+        Assert.Equal(1, CollisionLines());
+
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        await using (var rename = new NpgsqlCommand("UPDATE servers SET display_name = $1 WHERE server_id = 13", connection))
+        {
+            rename.Parameters.AddWithValue(shared);
+            await rename.ExecuteNonQueryAsync(ct);
+        }
+
+        await refresher.RefreshAsync(ct);
+        Assert.Equal(2, CollisionLines());
+        Assert.Contains(log.Lines, l => l.Contains("11, 12, 13", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task AdmissionRefused_IsAFailedRefresh()
     {

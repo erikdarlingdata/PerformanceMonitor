@@ -381,7 +381,7 @@ The port serves one route, `GET /metrics`, as `text/plain; version=0.0.4; charse
 
 It serves the numbers in the tables below, labeled with the server's display name. It never serves a query text, a database name, a login name, a host name or an application name, and no text from a monitored server reaches a label. Besides `server`, the labels take only the fixed values named below.
 
-The `server` label is the server's display name, the one the dashboard shows. When two enabled servers share a display name, each one's label becomes `<name> #<server_id>`, and the service logs one Information line per shared name at each refresh.
+The `server` label is the server's display name, the one the dashboard shows. When two enabled servers share a display name, each one's label becomes `<name> #<server_id>`, and the service logs one Information line per shared name when the shared names change, not at every refresh.
 
 ### The token and `allowFrom`
 
@@ -409,7 +409,7 @@ A scrape never reads the store. It returns an in-memory snapshot, and one backgr
 - A server that has never collected gets only `darling_server_health_band`.
 - A rate is the change between a collector's newest two collections, divided by the seconds between them. A reading is absent, never 0, when that interval is 0 or unknown, or when the newest collection is older than its limit: 15 minutes for the one-minute collectors, 30 minutes for the session summary and 3 hours for the database sizes. A collector that stops makes its series disappear instead of repeating its last value.
 
-The store login is the web dashboard's. On a service-managed store it is the read-only viewer login. Otherwise it is `postgres.webConnectionString`, then the compose viewer login, then the owner connection, in that order. A `postgres.webConnectionString` that is set but cannot be resolved, or resolves blank, fails the refresh. The port never falls back to the owner login in its place. The service resolves the login at the first refresh. A refresh with no login yet fails, and the next one tries again. The log lines about the login start "The metrics port" and appear once per streak of failures.
+On a service-managed store the port reads as the read-only `viewer` login (the web dashboard uses its `web` login there). On any other store it takes the web dashboard's login, in this order: `postgres.webConnectionString` when it is set; otherwise, in a container (the compose distribution), the `web` role login this start provisioned, then the `web` credential an earlier start left, then the `viewer` credential an earlier start left, then the owner connection (`postgres.connectionString`); outside a container, the owner connection. A `postgres.webConnectionString` that is set but cannot be resolved, or resolves blank, fails the refresh. The port never falls back to the owner login in its place. The service resolves the login at the first refresh. A refresh with no login yet fails, and the next one tries again. The log lines about the login start "The metrics port" and appear once per streak of failures.
 
 ### Not in front-door mode
 
