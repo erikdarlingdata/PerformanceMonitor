@@ -51,7 +51,8 @@ public sealed partial class ChangeWatchEvaluator
     }
 
     /* A window is closed at its end and open at its start, so a sample on the boundary of two windows counts in one. The statements in this
-       file bound the start with >=, so they take the instant one microsecond after it; the shared readers leave out the row at their start themselves. */
+       file bound the start with >=, so they take the instant one microsecond after it, and so does the sampled-profile reader, which reads the
+       row on its start as a baseline; the other shared readers leave out the row at their start themselves. */
     private static DateTime Open(DateTime start) => start.AddTicks(10);
 
     private async Task<long> CountRowsAsync(string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
@@ -160,7 +161,9 @@ FROM d";
             return default;
         }
 
-        var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(_dataSource, serverId, start, end, PostgresWaitSamplingRows, cancellationToken);
+        /* The reader differences against the row on its start as the baseline. The coverage above starts at the first collection after
+           the window's start, so the reader is given the same instant and both figures cover the same span. */
+        var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(_dataSource, serverId, Open(start), end, PostgresWaitSamplingRows, cancellationToken);
         var waitedMs = page.Rows.Where(r => !string.Equals(r.EventType, "CPU", StringComparison.OrdinalIgnoreCase)).Sum(r => (double)r.EstimatedWaitMs);
         return new RateSample(coverage.First > 0 ? waitedMs / coverage.First : 0, coverage.Second, coverage.Rows);
     }
