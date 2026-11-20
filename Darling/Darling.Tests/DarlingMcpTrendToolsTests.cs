@@ -314,7 +314,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var sql = DarlingTrendReader.QueryDurationTrendFilteredSql;
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);                       /* base table, like the merged data reader */
         Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(elapsed)", sql, StringComparison.Ordinal);                       /* #9147: the per-collection CTE sums the rows or the summary rows it reads, aliased elapsed */
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("elapsed_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("executions_per_second", sql, StringComparison.Ordinal);
@@ -578,7 +578,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             /* #7161: the seconds are the gap to the previous collection (the #5449 rule), three states — every row stored 0
                is unrated, a previous collection within the collector's 3600 s gives the gap, and only the store's first
                collection keeps its stored interval — never MAX(sample_interval_seconds) over the collection. */
-            Assert.Contains("MAX(sample_interval_seconds) AS stored_interval", sql, StringComparison.Ordinal);
+            Assert.Contains("MAX(seconds) AS stored_interval", sql, StringComparison.Ordinal);
             Assert.Contains("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds", sql, StringComparison.Ordinal);
             Assert.Contains("WHEN stored_interval = 0 THEN NULL", sql, StringComparison.Ordinal);
             Assert.Contains($"WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
@@ -604,9 +604,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Equal(
             Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
+                            && !l.Contains("SUM(elapsed)", StringComparison.Ordinal) && !l.Contains("SUM(executions)", StringComparison.Ordinal) && !l.Contains("SUM(row_count)", StringComparison.Ordinal)
                             && !l.Contains("matched_rows", StringComparison.Ordinal) && !l.Contains("total_executions", StringComparison.Ordinal)).ToArray(),
             Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
+                            && !l.Contains("SUM(elapsed)", StringComparison.Ordinal) && !l.Contains("SUM(executions)", StringComparison.Ordinal)
                             && !l.Contains("total_executions", StringComparison.Ordinal)).ToArray());
 
         /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's

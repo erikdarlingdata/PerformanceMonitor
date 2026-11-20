@@ -48,7 +48,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// #1767 payload dimensions — the base table's inline columns are NULL on every row written since.
 /// </para>
 /// </summary>
-internal static class DarlingDataReader
+internal static partial class DarlingDataReader
 {
     /* ─────────────────────────── result records ─────────────────────────── */
 
@@ -2025,7 +2025,13 @@ internal static class DarlingDataReader
         /* #5329: true only when the reads ranking itself sent the read to raw, because the io rollup was absent, empty or
            reached no further back than raw. A raw read forced by parallel_only / min_dop / host_object grouping leaves it
            false: those filters are the reason, and the io rollup was never consulted. */
-        bool ReadsForcedRaw = false);
+        bool ReadsForcedRaw = false)
+    {
+        /// <summary>#9164: true when the raw-tier page was served by the hourly host rollup plus the raw edges, false when the raw statement
+        /// served it (no whole hours, a hole in the rollup, or a store below V287). Internal: a test reads it, and neither the MCP tool nor
+        /// the web mirror carries it in a reply.</summary>
+        internal bool ServedByHostHourly { get; init; }
+    }
 
     /// <summary>
     /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
@@ -2053,7 +2059,7 @@ internal static class DarlingDataReader
     public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default,
-        QueryTagFilter? tags = null)
+        QueryTagFilter? tags = null, DateTime? nowUtc = null)
     {
     #pragma warning restore CA1068
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
@@ -2120,13 +2126,71 @@ internal static class DarlingDataReader
         /* #5984: the query tag filter sits in the ranking pass (and, rolled up, in the wide pass), ahead of the cap. */
         var rawSql = QueryTagReadJoin.Apply(
             TopRankings.Apply(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql, ranking, hourly: false), serverId, tags);
+        /* #9164: a window with whole hours the hourly host rollup holds ranks them from the rollup and reads raw only for the edges.
+           The answer is the raw answer, row for row; a hole in the rollup (or a store below V287) reads the raw statement below. */
+        var hostMid = PlanTopQueriesHostHourlyMid(startUtc, endUtc, nowUtc ?? DateTime.UtcNow);
+        if (hostMid is not null)
+        {
+            var hostHourlySql = QueryTagReadJoin.Apply(
+                TopRankings.ApplyHostHourly(rollUpByHostObject ? TopQueriesByHostObjectHostHourlySql : TopQueriesHostHourlySql, ranking), serverId, tags);
+            var routedRows = await TryReadTopQueriesHostHourlyAsync(
+                postgres, hostMid, hostHourlySql, serverId, startUtc, endUtc, top, databases, minMaxDop, clock, cancellationToken);
+            if (routedRows is not null)
+            {
+                return new TopQueriesReadResult(routedRows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw) { ServedByHostHourly = true };
+            }
+        }
+
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($7)
            while more candidates exist, under its bound. */
         var rows = await TopFill.RunAsync(top, async candidates =>
         {
-        var page = new List<TopQueryRow>();
-        var candidateCount = 0;
         await using var command = postgres.CreateCommand(rawSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        BindTopQueriesParameters(command, serverId, startUtc, endUtc, top, databases, minMaxDop, candidates);
+        return await ReadTopQueryPageAsync(command, clock, cancellationToken);
+        });
+
+        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw);
+    }
+
+    /// <summary>
+    /// #5329: <see cref="TopRankings.ChooseHourlyRoute"/> over what the store measured. The io floor counts only when
+    /// <paramref name="rollups"/> says the relation exists (an absent relation has no floor, and is never named in
+    /// SQL); an empty one answers a null floor, which never covers.
+    /// </summary>
+    public static HourlyRoute ChooseQueriesHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
+    {
+        var ioFloor = rollups.Has(TimescaleSupport.QueryStatsIoHourlyView)
+            ? coverage.FloorOf(TimescaleSupport.QueryStatsIoHourlyView)
+            : null;
+        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.QueryStatsHourlyView) is string rawTable
+            ? coverage.RawOldestOf(rawTable)
+            : null;
+        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
+    }
+
+    /// <summary>
+    /// #5329: <see cref="ChooseQueriesHourlyRoute"/>'s procedure_stats twin. The same route table
+    /// (<see cref="TopRankings.ChooseHourlyRoute"/>) over <c>procedure_stats_io_hourly</c>'s floor and
+    /// <c>procedure_stats</c>'s oldest row.
+    /// </summary>
+    public static HourlyRoute ChooseProceduresHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
+    {
+        var ioFloor = rollups.Has(TimescaleSupport.ProcedureStatsIoHourlyView)
+            ? coverage.FloorOf(TimescaleSupport.ProcedureStatsIoHourlyView)
+            : null;
+        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.ProcedureStatsHourlyView) is string rawTable
+            ? coverage.RawOldestOf(rawTable)
+            : null;
+        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
+    }
+
+    /// <summary>Binds the eight parameters the raw top-queries statements share: $1 to $3 the window, $4 the page size, $5 the databases,
+    /// $6 the parallelism floor, $7 the candidate limit and $8 the databases left out (#7725).</summary>
+    private static void BindTopQueriesParameters(
+        NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases, int minMaxDop, int candidates)
+    {
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
@@ -2135,6 +2199,13 @@ internal static class DarlingDataReader
         AddInt(command, candidates);
         /* #7725: $8, the databases this ranking leaves out (NULL = none), in the ranking pass of both raw statements. */
         command.Parameters.Add(databases.ExcludeParameter());
+    }
+
+    /// <summary>Runs a top-queries statement (raw or host-hourly: the same columns) and reads its page and its candidate count.</summary>
+    private static async Task<(List<TopQueryRow> Page, int CandidateCount)> ReadTopQueryPageAsync(NpgsqlCommand command, ServerClock clock, CancellationToken cancellationToken)
+    {
+        var page = new List<TopQueryRow>();
+        var candidateCount = 0;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2173,41 +2244,6 @@ internal static class DarlingDataReader
         }
 
         return (page, candidateCount);
-        });
-
-        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw);
-    }
-
-    /// <summary>
-    /// #5329: <see cref="TopRankings.ChooseHourlyRoute"/> over what the store measured. The io floor counts only when
-    /// <paramref name="rollups"/> says the relation exists (an absent relation has no floor, and is never named in
-    /// SQL); an empty one answers a null floor, which never covers.
-    /// </summary>
-    public static HourlyRoute ChooseQueriesHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
-    {
-        var ioFloor = rollups.Has(TimescaleSupport.QueryStatsIoHourlyView)
-            ? coverage.FloorOf(TimescaleSupport.QueryStatsIoHourlyView)
-            : null;
-        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.QueryStatsHourlyView) is string rawTable
-            ? coverage.RawOldestOf(rawTable)
-            : null;
-        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
-    }
-
-    /// <summary>
-    /// #5329: <see cref="ChooseQueriesHourlyRoute"/>'s procedure_stats twin. The same route table
-    /// (<see cref="TopRankings.ChooseHourlyRoute"/>) over <c>procedure_stats_io_hourly</c>'s floor and
-    /// <c>procedure_stats</c>'s oldest row.
-    /// </summary>
-    public static HourlyRoute ChooseProceduresHourlyRoute(RollupAvailability rollups, RollupCoverage coverage, TopRanking ranking, DateTime startUtc)
-    {
-        var ioFloor = rollups.Has(TimescaleSupport.ProcedureStatsIoHourlyView)
-            ? coverage.FloorOf(TimescaleSupport.ProcedureStatsIoHourlyView)
-            : null;
-        var rawOldest = RollupCoverage.RawTableFor(TimescaleSupport.ProcedureStatsHourlyView) is string rawTable
-            ? coverage.RawOldestOf(rawTable)
-            : null;
-        return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);
     }
 
     /// <summary>The detail columns of <see cref="TopQueriesSql"/> / <see cref="TopQueriesByHostObjectSql"/>, 21

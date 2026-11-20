@@ -317,7 +317,31 @@ public class AnalysisContext
     /// into a record this project serves to MCP clients. There is no string parameter left to do that with.</para>
     /// </summary>
     public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, Exception exception) =>
-        CollectionFailures.Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
+        (_failureBuffer.Value ?? CollectionFailures).Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
+
+    /// <summary>
+    /// How many family reads a collector may run at the same time on this pass (#9149). 1, the default, is the serial
+    /// pass every caller had before: the scheduled worker keeps it, because its sweeps already share the store's
+    /// connection pool. An on-demand read (<c>analyze_server</c>, <c>get_analysis_facts</c>) sets it above 1 so a
+    /// store that is a network away answers in the longest chain of reads rather than the sum of them. A collector
+    /// clamps the figure to its own ceiling.
+    /// </summary>
+    public int FamilyParallelism { get; set; } = 1;
+
+    private readonly AsyncLocal<List<CollectionFailure>?> _failureBuffer = new();
+
+    /// <summary>
+    /// Starts collecting the failures that the current async flow records into its own list instead of
+    /// <see cref="CollectionFailures"/> (#9149). Families that run at the same time use it so the list reads in family
+    /// order, as the serial pass wrote it, and not in the order the failures happened to land. The caller appends the
+    /// returned list to <see cref="CollectionFailures"/> itself, in the order it wants.
+    /// </summary>
+    public List<CollectionFailure> BufferCollectionFailuresForThisFlow()
+    {
+        var buffer = new List<CollectionFailure>();
+        _failureBuffer.Value = buffer;
+        return buffer;
+    }
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>

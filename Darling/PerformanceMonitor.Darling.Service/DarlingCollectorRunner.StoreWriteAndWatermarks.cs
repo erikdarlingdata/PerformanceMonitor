@@ -839,6 +839,20 @@ public sealed partial class DarlingCollectorRunner
                         writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
                 }
 
+                /* #9147: the collection's per-database summary (QueryStatsCollectionSummary, V286), read back from the rows the store now holds
+                   for this collection_time and set, on THIS transaction right after the ledger and with its failure behaviour: no savepoint and
+                   no catch, so a fault throws out of the batch, the transaction rolls back and the rows are not stored, because rows the summary
+                   never saw would make the duration trend's summary read disagree with its raw read. Recomputed, never added, so a second batch
+                   at this collection_time, a late batch for an older collection or a re-attempt is exact. A batch of 0 rows writes nothing. */
+                if (ledgerBatch)
+                {
+                    await QueryStatsCollectionSummary.UpsertBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        rowsWritten, ServiceCommandDeadlines.CollectionSweepSeconds,
+                        QueryStatsCollectionSummary.DatabaseNamesOf(rows),
+                        cancellationToken);
+                }
+
                 /* #6009: a watched module's modify_date, onto the rows just copied, on this transaction behind its own savepoint.
                    Nothing runs unless a row carries a date, which is a batch of a server with a watched module. */
                 if (totalsBatch)
@@ -897,6 +911,16 @@ public sealed partial class DarlingCollectorRunner
                    are summarised in memory per database: the COPY above is a straight binary import, so every row of the batch is in
                    raw once this transaction commits, and no read-back of the shared collection_time is needed (#5707). A batch of 0
                    rows writes nothing. Only QueryStoreCollector.Row rows are summarised; any other row type writes no side row (safe, as above). */
+                /* #9148: a query_store_stats batch stamped in a day the closed-day pass may already have built (a backfill or an import)
+                   marks that day for a rebuild, in THIS transaction behind its own savepoint, so the clutter rollups never serve the day
+                   without these rows. A live batch is stamped now and sends nothing. A fault is logged and never fails the batch. */
+                if (watermarkBatch && rowsWritten > 0)
+                {
+                    await QueryStoreClosedDayRollup.TryMarkLateCollectionDayAsync(
+                        pgConnection, transaction!, server.ServerId, storedCollectionTime, DateTime.UtcNow,
+                        ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
+                }
+
                 if (watermarkBatch && rowsWritten > 0)
                 {
                     await QueryStoreWatermarks.TryUpsertBatchAsync(

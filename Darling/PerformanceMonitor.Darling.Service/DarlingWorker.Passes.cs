@@ -1260,6 +1260,23 @@ public sealed partial class DarlingWorker
         {
             _logger.LogWarning("Query Store closed-day rollups could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+
+        /* #9164: the hourly host rollup of query_stats the top-queries read ranks whole hours from. It reads query_stats and the count ledger,
+           and writes its own two tables, so it has its own catch and a failure leaves the passes above standing. Its prune follows the retention
+           query_stats' raw rows are purged on, resolved the way the purge resolves it. */
+        try
+        {
+            await QueryStatsHostHourly.RunTickAsync(
+                _postgres!,
+                DateTime.UtcNow,
+                DarlingRetention.EffectivePurgeRetentionDays("query_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_stats", _scheduleOverrides)),
+                _logger,
+                stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query stats host hourly rollup could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
     }
 
     /// <summary>

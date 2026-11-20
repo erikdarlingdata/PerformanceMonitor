@@ -34,20 +34,20 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and works entirely inside it. */
 public sealed class QueryStoreClosedDayRollupLiveTests : IDisposable
 {
-    private const int ServerId = -9111283;
+    internal const int ServerId = -9111283;
     private const int Top = 50;
 
     /// <summary>The seed helper's own anchor; the bulk rows run from 30 days before it to 8 days after it.</summary>
     private static readonly DateTime Anchor = new(2026, 9, 15, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime DataStart = Anchor.AddDays(-30);
-    private static readonly DateTime DataEnd = DataStart.AddDays(38);
+    internal static readonly DateTime DataEnd = DataStart.AddDays(38);
 
     /// <summary>The tick's clock: two days after the last seeded day, so every seeded day is closed.</summary>
-    private static readonly DateTime TickNow = DataEnd.AddDays(2);
+    internal static readonly DateTime TickNow = DataEnd.AddDays(2);
 
-    private const int KeepEverything = 400;
+    internal const int KeepEverything = 400;
 
-    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    internal static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>The windows every comparison reads: label, start, end, database filter.</summary>
     private static readonly (string Label, DateTime Start, DateTime End, string[]? Databases)[] Windows =
@@ -98,7 +98,7 @@ CROSS JOIN generate_series(1, 60) AS q
 CROSS JOIN LATERAL (SELECT @data_start + make_interval(days => d, hours => h) AS starts) AS i
 CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS bigint) AS n) AS v;";
 
-    private sealed class Store : IAsyncDisposable
+    internal sealed class Store : IAsyncDisposable
     {
         public required ScratchPostgres Scratch { get; init; }
         public required NpgsqlConnection Connection { get; init; }
@@ -115,7 +115,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         }
     }
 
-    private static async Task<Store> SeedAsync(CancellationToken ct)
+    internal static async Task<Store> SeedAsync(CancellationToken ct)
     {
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -146,7 +146,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         };
     }
 
-    private static async Task<int> ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    internal static async Task<int> ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         foreach (var (name, value) in parameters)
@@ -157,7 +157,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         return await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    internal static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         foreach (var (name, value) in parameters)
@@ -214,11 +214,11 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
 
     /// <summary>Builds every due day at the tick's clock, then stamps the builds and the heartbeat at the store's own clock, which is what
     /// the reader's freshness tests compare with.</summary>
-    private static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
+    internal static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null)
     {
         var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
-        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC' WHERE NOT removed", ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC', clutter_built_at = CASE WHEN clutter_built_at = built_at THEN now() AT TIME ZONE 'UTC' END WHERE NOT removed", ct);
         await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = (now() AT TIME ZONE 'UTC') - interval '10 minutes'", ct);
         return result;
     }
@@ -227,16 +227,15 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         QueryStoreClosedDayRollup.ResolveServedDaysAsync(store.Connection, null, ServerId, start, end, 30, ct);
 
     /// <summary>
-    /// The rung is the newest on a dense ladder, makes its four tables empty, runs twice, and the store probe maps a store that holds
-    /// them to this version and a store without one of them to the version below.
+    /// The rung sits on a dense ladder, makes its four tables empty, runs twice, and the store probe still reads the migrated store as the
+    /// newest version. It does not assert that the rung is the newest: later rungs land on top of it, and a newer rung's sentinel can
+    /// answer for a store that lacks this rung's tables, so the probe's own V283 arm is proved by the ladder's pure probe tests.
     /// </summary>
     [Fact]
-    public async Task TheRungIsTheNewestOnADenseLadder_MakesItsTablesEmpty_RunsTwice_AndTheStoreProbeSeesThem()
+    public async Task TheRungIsOnADenseLadder_MakesItsTablesEmpty_RunsTwice_AndTheStoreProbeSeesThem()
     {
-        var rung = PgMigrations.Scripts[^1];
-        Assert.Equal(QueryStoreClosedDayRollup.Version, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, rung.Version);
-        Assert.Equal(rung.Version - 1, PgMigrations.Scripts[^2].Version);
+        var rung = PgMigrations.Scripts.Single(s => s.Version == QueryStoreClosedDayRollup.Version);
+        Assert.Contains(PgMigrations.Scripts, s => s.Version == rung.Version - 1);
 
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9111 closed-day rollup live test.");
         var ct = TestContext.Current.CancellationToken;
@@ -259,9 +258,6 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
-
-        await ExecuteAsync(connection, "DROP TABLE collect.query_store_closed_day_built", ct);
-        Assert.Equal(StorageVersion.SchemaVersion - 1, await viewer.GetStoreSchemaVersionAsync(ct));
     }
 
     [Fact]
@@ -333,7 +329,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
             "the late rows changed nothing in the 30-day window, so the rebuild would prove nothing");
 
         /* Marked days are left to the interval table until they are rebuilt. */
-        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC' WHERE NOT removed", ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET built_at = now() AT TIME ZONE 'UTC', clutter_built_at = CASE WHEN clutter_built_at = built_at THEN now() AT TIME ZONE 'UTC' END WHERE NOT removed", ct);
         Assert.NotNull(await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
         AssertSame(expectedAfterLate, await ReadAllAsync(store.Viewer, ct), "with the late rows' days marked");
 
