@@ -424,20 +424,63 @@ public static class DurationTrendRouting
         var maxGap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
         var elapsedSum = !includeElapsed ? ""
             : withDatabaseFilter
-                ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n                "
-                : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n                ";
+                ? $"COALESCE(SUM(elapsed) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n                "
+                : "SUM(elapsed) / 1000.0 AS total_elapsed_ms,\n                ";
         var executionSum = withDatabaseFilter
-            ? $"COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
-              + $"                COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
-            : "SUM(delta_execution_count) AS total_executions,";
+            ? $"COALESCE(SUM(executions) FILTER (WHERE {match}), 0) AS total_executions,\n"
+              + $"                COALESCE(SUM(row_count) FILTER (WHERE {match}), 0)::bigint AS matched_rows,"
+            : "SUM(executions) AS total_executions,";
         var elapsedOut = includeElapsed ? "total_elapsed_ms, " : "";
         var matchedOut = withDatabaseFilter ? ", matched_rows" : "";
+
+        /* #9147: query_stats has a per-collection summary (QueryStatsCollectionSummary, V286). The collections are read from it, in place of the
+           rows, when the summary covers the whole window for this server: its oldest row is at or before $2, so every collection after $2 has a
+           summary row, and so does the one before it that the LAG needs (the first collection after $2 finds its previous collection at or after
+           the oldest summary row). The cover also needs the other end: no raw collection of the server lies after the newest summary row and
+           at or before $3. A build older than V286 that ran after a rollback writes raw rows with no summary row, and until the next batch
+           moves the floor up (FloorMoveSql) the summary would drop them from a window that ends after them. The probe is one look at the
+           (server_id, collection_time) index past the newest summary row and normally finds nothing. A server with no summary row (a store fresh from V286, or a server first collected after it) has no floor and
+           reads the rows, as does a window that starts before the oldest summary row. Both arms carry the same one-time test, so only one of
+           them runs. A summary row stands for the rows of one (collection, database): its sums add, its n adds to the filtered row count and
+           its max_interval maxes, which is what the aggregates below take over the rows. */
+        var fromSummary = rawTable == "query_stats";
+        var coverCte = fromSummary ? $"""
+        summary_cover AS
+        (
+            SELECT COALESCE(s.oldest <= $2, false)
+                   AND NOT EXISTS
+                       (
+                           SELECT 1
+                           FROM {rawTable} AS q
+                           WHERE q.server_id = $1
+                           AND   q.collection_time > s.newest
+                           AND   q.collection_time <= $3
+                       ) AS covered
+            FROM
+            (
+                SELECT MIN(collection_time) AS oldest, MAX(collection_time) AS newest
+                FROM {QueryStatsCollectionSummary.Table}
+                WHERE server_id = $1
+            ) AS s
+        ),
+        """ : "";
+        var coverFilter = fromSummary ? "AND   NOT (SELECT covered FROM summary_cover)" : "";
+        var summaryArm = fromSummary ? $"""
+                    UNION ALL
+                    SELECT collection_time, database_name, sum_elapsed, sum_exec, n, max_interval
+                    FROM {QueryStatsCollectionSummary.Table}
+                    WHERE server_id = $1
+                    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+                    AND   collection_time <= $3
+                    AND   (SELECT covered FROM summary_cover)
+        """ : "";
 
         // #7161: the collection's seconds are its gap to the previous collection (the shape ProcedureCollectionsCte settled on in
         // #5449), not MAX(sample_interval_seconds): that is the longest interval of ANY query in the collection, and a query that
         // returns every 15 or 30 minutes stretched a 60 s collection to 900 s, cutting the rate about 15-fold. The table is read from
         // maxGap before $2 so the first in-window collection has its previous one; the rows before $2 are dropped after the LAG.
         return $"""
+        {coverCte}
         raw AS
         (
             SELECT
@@ -453,12 +496,18 @@ public static class DurationTrendRouting
                 SELECT
                     collection_time,
                     {elapsedSum}{executionSum}
-                    MAX(sample_interval_seconds) AS stored_interval,
+                    MAX(seconds) AS stored_interval,
                     extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds
-                FROM {rawTable}
-                WHERE server_id = $1
-                AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-                AND   collection_time <= $3
+                FROM
+                (
+                    SELECT collection_time, database_name, delta_elapsed_time AS elapsed, delta_execution_count AS executions, 1 AS row_count, sample_interval_seconds AS seconds
+                    FROM {rawTable}
+                    WHERE server_id = $1
+                    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+                    AND   collection_time <= $3
+                    {coverFilter}
+        {summaryArm}
+                ) AS src
                 GROUP BY collection_time
             ) AS g
             WHERE collection_time > $2

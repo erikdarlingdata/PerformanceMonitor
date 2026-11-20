@@ -897,10 +897,13 @@ DROP TABLE IF EXISTS collect.query_store_closed_day_tick;"),
         new(284, "hasFleetSummaryCoveringIndexes",
             @"DO $$ DECLARE v regclass; BEGIN FOR v IN SELECT c.oid::regclass FROM pg_class c WHERE c.relkind = 'i' AND c.relname IN ('ix_query_stats_interval_hourly_hash_cov', 'ix_query_stats_hourly_hash_cov') LOOP EXECUTE format('DROP INDEX %s', v); END LOOP; END $$;"),
         // V285 (#9148): the Query Store clutter rollups' two tables and the built table's clutter_built_at. The two tables are the probe's newest
-        // sentinel. The rewind drops them and the column, so a re-run of V285 creates them empty and the service builds the days again.
+        // sentinel until V286 (#9147) went on top. The rewind drops them and the column, so a re-run of V285 creates them empty and the service builds the days again.
         new(285, "hasQueryStoreClutterDaily", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_daily;
 DROP TABLE IF EXISTS collect.query_store_clutter_collections_daily;
 DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_built') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_built DROP COLUMN IF EXISTS clutter_built_at; END IF; END $$;"),
+        // V286 (#9147): the query_stats per-collection summary table, the probe's newest sentinel. The rewind drops it, so a re-run of V286 creates it
+        // empty and the duration trend reads raw until it covers a window. Safe on a store that never had it.
+        new(286, "hasQueryStatsCollectionSummary", @"DROP TABLE IF EXISTS collect.query_stats_collection;"),
     ];
 
     /// <summary>

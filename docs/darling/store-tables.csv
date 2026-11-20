@@ -115,6 +115,7 @@ query_plan_dim,collected,yes,query plan text shared by the Query Store rows
 query_snapshots,collected,yes,
 query_stats,collected,yes,
 query_stats_baseline,derived,derived,rollup view
+query_stats_collection,derived,derived,per-collection sums of query_stats for the duration trend
 query_stats_daily,derived,derived,rollup view
 query_stats_db_daily,derived,derived,rollup view
 query_stats_db_hourly,derived,derived,rollup view
