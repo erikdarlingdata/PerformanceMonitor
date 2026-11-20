@@ -58,7 +58,7 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
     /// days ago (and yesterday, once the builder's watermark passed today's midnight) lie inside it.</summary>
     private static DateTime RecentStart(DateTime today) => today.AddDays(-4).AddHours(6);
 
-    private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime day0, DateTime start, CancellationToken ct, bool extra = false, bool recent = false)
+    private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime day0, DateTime start, CancellationToken ct, bool extra = false, bool recent = false, bool planCounts = false)
     {
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var context = new CollectorContext { ServerId = ServerId, ServerName = "qsdaily-host", CollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
@@ -144,6 +144,44 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
                range. Its first execution is below D-1's midnight, so only a high range start below the next midnight reaches it
                (#5506): the latest form's raised bound, the next midnight minus the edge margin. The shared seed has no such row. */
             await IntervalAsync(day0.AddDays(7).AddHours(-0.33), 10, 101, 4, 6_000);
+        }
+
+        if (planCounts)
+        {
+            /* #9148 review: hand-worked plan counts. Each baseline arm is built days (D-6, D-5, D-4: daily rows) plus live edge rows
+               (the last 50 minutes before the window start), and the recent arm is live parts only. */
+            /* Query 60, two plans each seen in several parts. Baseline plan 601 holds 10 + 6 + 4 executions in 3 parts, plan 602
+               holds 5 + 3 in 2 parts: 28 executions, 2 plans, 5 part rows. Recent plan 601 holds 5 + 7, plan 602 holds 2 + 3: 17, 2, 4. */
+            await IntervalAsync(day0.AddDays(2).AddHours(10), 60, 601, 10, 1_000);
+            await IntervalAsync(day0.AddDays(3).AddHours(10), 60, 601, 6, 1_000);
+            await IntervalAsync(start.AddMinutes(-50), 60, 601, 4, 1_000);
+            await IntervalAsync(day0.AddDays(4).AddHours(10), 60, 602, 5, 1_000);
+            await IntervalAsync(start.AddMinutes(-50), 60, 602, 3, 1_000);
+            await IntervalAsync(start.AddHours(2), 60, 601, 5, 3_000);
+            await IntervalAsync(start.AddHours(3), 60, 601, 7, 3_000);
+            await IntervalAsync(start.AddHours(4), 60, 602, 2, 3_000);
+            await IntervalAsync(start.AddHours(5), 60, 602, 3, 3_000);
+
+            /* Query 61, one real plan and one plan stored with a NULL plan_id (plan 619, nulled by the caller before the daily
+               totals are built). Baseline: plan 611 holds 10 + 6, the NULL group 4 + 3: 23 executions, ONE plan. Recent: plan 611
+               holds 8, the NULL group 3: 11 executions, ONE plan. COUNT(*) would say 2 in both arms. */
+            await IntervalAsync(day0.AddDays(2).AddHours(11), 61, 611, 10, 1_000);
+            await IntervalAsync(start.AddMinutes(-50), 61, 611, 6, 1_000);
+            await IntervalAsync(day0.AddDays(3).AddHours(11), 61, 619, 4, 1_000);
+            await IntervalAsync(start.AddMinutes(-50), 61, 619, 3, 1_000);
+            await IntervalAsync(start.AddHours(3), 61, 611, 8, 3_000);
+            await IntervalAsync(start.AddHours(2), 61, 619, 3, 3_000);
+
+            /* Query 62, one plan: baseline 9 + 1 = 10 executions, recent 4, one plan each. */
+            await IntervalAsync(day0.AddDays(2).AddHours(12), 62, 621, 9, 1_000);
+            await IntervalAsync(start.AddMinutes(-50), 62, 621, 1, 1_000);
+            await IntervalAsync(start.AddHours(2), 62, 621, 4, 3_000);
+
+            foreach (var table in new[] { "query_store_stats", "query_store_interval_wide", "query_store_interval_latest" })
+            {
+                await using var command = postgres.CreateCommand($"UPDATE collect.{table} SET plan_id = NULL WHERE server_id = {ServerId} AND query_id = 61 AND plan_id = 619");
+                await command.ExecuteNonQueryAsync(ct);
+            }
         }
 
         if (recent)
@@ -506,7 +544,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         }
     }
 
-    private static async Task<Fixture> BuildFixtureAsync(bool extra, bool timescale, CancellationToken ct, bool recent = false)
+    private static async Task<Fixture> BuildFixtureAsync(bool extra, bool timescale, CancellationToken ct, bool recent = false, bool planCounts = false)
     {
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -526,7 +564,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var today = LiveClock.Now().Date;
         var start = today.AddDays(-1).AddHours(6);
         var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
-        await SeedAsync(postgres, today.AddDays(-8), start, ct, extra, recent);
+        await SeedAsync(postgres, today.AddDays(-8), start, ct, extra, recent, planCounts);
         var end = LiveClock.Now();
         end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
         await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, baselineStart.AddDays(-5), end, null, null, ct);
@@ -637,6 +675,42 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var q41 = Row(served, 41);
         Assert.Equal(25L, long.Parse(q41[7], CultureInfo.InvariantCulture));
         Assert.Equal(10L, long.Parse(q41[8], CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// #9148 review: the plan counts, hand-worked. Both arms are summed per plan first and the plans are then counted, across
+    /// the daily-plus-edge seam, so a count that follows the part rows, or counts the NULL plan group, is wrong here. Query 60
+    /// has two plans in several parts (baseline 28 executions, recent 17), query 61 a real plan and a NULL one (23 and 11, ONE
+    /// plan each), query 62 one plan (10 and 4). The all-live read, which has no daily rows, gives the same counts.
+    /// </summary>
+    [Fact]
+    public async Task ThePlanCounts_AreHandWorked_InBothArms_AcrossTheDailyAndEdgeParts_AndNullPlansAreNotCounted()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: false, timescale: false, ct, planCounts: true);
+
+        string[] Row(List<string> rows, long queryId) => rows.Single(r => r.StartsWith(Db + "|" + queryId.ToString(CultureInfo.InvariantCulture) + "|", StringComparison.Ordinal)).Split('|');
+
+        void AssertCounts(List<string> rows, long queryId, long baselineExecs, long recentExecs, int baselinePlans, int recentPlans)
+        {
+            var row = Row(rows, queryId);
+            Assert.Equal(baselineExecs, long.Parse(row[7], CultureInfo.InvariantCulture));
+            Assert.Equal(recentExecs, long.Parse(row[8], CultureInfo.InvariantCulture));
+            Assert.Equal(baselinePlans, int.Parse(row[9], CultureInfo.InvariantCulture));
+            Assert.Equal(recentPlans, int.Parse(row[10], CultureInfo.InvariantCulture));
+        }
+
+        var served = await ServedRowsAsync(f, ct);
+        var allLive = await AllLiveAsync(f, ct);
+        foreach (var rows in new[] { served, allLive })
+        {
+            AssertCounts(rows, 60, 28, 17, 2, 2);
+            AssertCounts(rows, 61, 23, 11, 1, 1);
+            AssertCounts(rows, 62, 10, 4, 1, 1);
+        }
+
+        Assert.Equal(allLive, served);
     }
 
     /// <summary>
