@@ -887,7 +887,11 @@ public sealed class DarlingFleetReaderLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
+            /* The tool takes no as_of: it windows hours_back from the product's own clock, so the seeds are placed by that clock, cut to
+               the second. A seed placed by DARLING_TEST_CLOCK_UTC sits hours off the window the tool reads, and the report 23.5 hours before
+               that clock then reads as a late start. */
+            var realNow = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(new DateTime(realNow.Ticks - (realNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Utc);
             /* Registered just now, so each server's coverage starts at its first collection and a report older than that moves it earlier. */
             await InsertServerAsync(connection, XeServerId, XeName, 5, ct, now);
             await InsertServerAsync(connection, DmvServerId, DmvName, 3, ct, now);

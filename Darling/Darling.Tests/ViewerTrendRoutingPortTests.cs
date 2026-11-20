@@ -602,14 +602,15 @@ CROSS JOIN (VALUES (1, 'DbA'), (3, 'DbB')) AS d(n, name)", connection))
         /* A recent window stays raw and says raw. #7161: the raw statement reads the collections from the collector's 3600 s gap
            policy before the window start, so the first in-window collection is rated over its gap to the one before the
            window (here exactly 3600 s, inside the policy) instead of being dropped as unrated: seven collections in the
-           window, seven points. The rollup tiers above are unchanged. */
-        var recent = await viewer.GetQueryDurationTrendAsync(ServerId, nowHour.AddHours(-6), end, nowUtc: now, cancellationToken: ct);
+           window, seven points. The window starts half an hour before its first collection, so none is stamped on the start, which
+           belongs to the window before. The rollup tiers above are unchanged. */
+        var recent = await viewer.GetQueryDurationTrendAsync(ServerId, nowHour.AddHours(-6).AddMinutes(-30), end, nowUtc: now, cancellationToken: ct);
         Assert.Equal(RetentionTier.Raw, recent.Tier);
         Assert.Equal("raw", recent.Source);
         Assert.Equal(7, recent.Points.Count);
         Assert.Equal(nowHour.AddHours(-6), recent.Points[0].CollectionTime);
         Assert.Equal(nowHour.AddHours(-6), recent.EffectiveStartUtc);
-        Assert.False(recent.Truncated); /* one cadence late is inside the 90-minute slack */
+        Assert.False(recent.Truncated); /* half a cadence late is inside the 90-minute slack */
         Assert.All(recent.Points, p => Assert.Equal(8000.0 / 3600.0, p.Value, 6));
 
         /* Truncation is disclosed when the tier's floor sits inside the window: a window reaching a day past the
