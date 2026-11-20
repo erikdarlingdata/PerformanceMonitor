@@ -33,7 +33,7 @@ public sealed class FindQueriesByTextAllServersLiveTests
             DarlingMcpFindQueriesByTextTools.SourceBudget.Default, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, ct, tracker);
 
 
-    /// <summary>The all-servers statement keeps the bare column, so with sequential scans off the planner reaches the text through the trigram index.
+    /// <summary>The all-servers span statement (#9150) keeps the bare column, so with sequential scans off the planner reaches the text through the trigram index.
     /// Without this the narrow-scope check above would pass for any statement, including one the index could never serve.</summary>
     [Fact]
     public async Task AllServersSql_UsesTheTrigramIndex_WhenItExists()
@@ -43,7 +43,7 @@ public sealed class FindQueriesByTextAllServersLiveTests
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
         await FindQueriesByTextIndexScopeLiveTests.BuildIndexAsync(data, ct);
 
-        var plan = await FindQueriesByTextIndexScopeLiveTests.ExplainAsync(data, DarlingMcpFindQueriesByTextTools.PlanCacheAllServersSql, null, "orders_77 where", withServer: false, ct);
+        var plan = await FindQueriesByTextIndexScopeLiveTests.ExplainAsync(data, DarlingMcpFindQueriesByTextTools.PlanCacheAllServersSpanSql, null, "orders_77 where", withServer: false, ct, span: true);
 
         Assert.Contains(FindQueriesByTextIndexScopeLiveTests.IndexShortName, plan, StringComparison.Ordinal);
     }
