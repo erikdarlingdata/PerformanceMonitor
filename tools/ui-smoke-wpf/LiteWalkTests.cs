@@ -106,7 +106,7 @@ public sealed class LiteWalkTests : WalkBase
         Safely("lite finops high impact", () =>
         {
             Step("FinOps tab", () => SelectMainTab(main, "FinOpsTab", "FinOps"));
-            Step("High Impact sub-tab", () => SelectTab(main, "High Impact"));
+            Step("High Impact sub-tab", () => SelectTabInWindow(main, "High Impact"));
             Step("high impact rows", () => WaitForRows(main, "HighImpactDataGrid", ControlType.DataItem));
             Shot("13-finops-high-impact");
         });
