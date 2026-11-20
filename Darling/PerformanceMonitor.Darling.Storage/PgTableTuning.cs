@@ -899,8 +899,10 @@ public static class PgTableTuning
            collection_time index it was an Index Scan with a heap fetch per row (or a Seq Scan of the day's whole chunk when
            random_page_cost is the stock 4), so a cold first call paid a disk wait for each of about 650 pages. This index is
            covering for exactly that read, so each of the window's chunks is an Index Only Scan over its own time range.
-           Time leads, so a new row lands at the right edge of the index, the same place as the table's own collection_time
-           index, and the index does not scatter page images through the WAL as the #4247 random-key indexes did. Measured
+           Time leads, so a new row lands at the right edge of the index, and the index does not scatter page images through
+           the WAL as the #4247 random-key indexes did. On a hypertable store that is the same place as the default
+           collection_time index TimescaleDB creates; on a plain store this is the first time-leading index the table has
+           (the table's own idx_cpu_utilization_stats_time leads with server_id). Measured
            on a rig with the store's random_page_cost of 1.1, 39 servers sampled once a minute for 30 days (1.68 M rows,
            chunks older than a day compressed), the window is 55,700 rows: EXPLAIN (ANALYZE, BUFFERS) after a PostgreSQL
            restart reads 654 execution pages and 104 planning pages before, 221 and 111 after, with identical rows. The
