@@ -894,7 +894,7 @@ CROSS JOIN (VALUES (TIMESTAMP '2026-02-20 06:00:00', true), (TIMESTAMP '2026-02-
             var normalized = sql.ReplaceLineEndings("\n");
             var fallback = normalized[normalized.IndexOf("FROM query_store_stats AS s", StringComparison.Ordinal)..];
             fallback = fallback[..fallback.IndexOf("LIMIT 1", StringComparison.Ordinal)];
-            Assert.Contains("s.collection_time >= $2", fallback, StringComparison.Ordinal);
+            Assert.Contains("s.collection_time > $2", fallback, StringComparison.Ordinal);
             Assert.Contains("s.collection_time <= $3", fallback, StringComparison.Ordinal);
         }
     }
