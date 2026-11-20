@@ -452,7 +452,7 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Blocked Process Reports");
             var read = dataReadTask.Result;
             var rows = read.Rows;
@@ -470,7 +470,7 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            var dataReadTask = _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc);
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Deadlocks");
             var rows = dataReadTask.Result;
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(rows));

@@ -1155,7 +1155,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// #8549: the slicer's hourly-route statement over <paramref name="fromClause"/> (the io hourly rollup, spliced through
     /// <see cref="RollupCoverage.StitchedRelationSql"/>). Three parts, each row in exactly one: raw rows in the partial hour at the
-    /// window's start ([$2, $6)), rollup buckets in the whole hours ([$6, $7)), and raw rows from the last whole hour to the window's end
+    /// window's start (($2, $6)), rollup buckets in the whole hours ([$6, $7)), and raw rows from the last whole hour to the window's end
     /// ([$7, $3], which also holds the hours past the rollup's ceiling). The raw parts keep the rollup's own row rule
     /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>) so a bucket reads the same whichever part it comes from. The columns are the
     /// ones <see cref="QueryStatsSlicerSql"/> answers, in the same order. $1 server_id, $4 database names, $5 bucket minutes.
@@ -1168,7 +1168,7 @@ public sealed partial class ViewerDataService
                 delta_logical_reads AS reads, delta_logical_writes AS writes, delta_physical_reads AS physical
             FROM query_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time < $6
             AND   sample_interval_seconds IS DISTINCT FROM 0
             AND   ($4::text[] IS NULL OR database_name = ANY($4))

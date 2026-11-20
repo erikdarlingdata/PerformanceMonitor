@@ -455,14 +455,14 @@ public sealed partial class ViewerDataService
     /// The caller takes the earlier of the two,
     /// through <see cref="BlockingThresholdCoverage.Combine"/>, which also folds in the threshold's history.
     /// $1 server, $2 window start, $3 window end, $4 database filter, $5 the event-window floor on collection time. Both run
-    /// reads are bounded, the first run in <c>[$2, $3]</c> and the newest run before $2, and ride
+    /// reads are bounded, the first run in <c>($2, $3]</c> and the newest run at or before $2, and ride
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
     /// </summary>
     public const string BlockingChartXeStartSql = """
         SELECT
             CASE WHEN EXISTS (SELECT 1
                               FROM collect.collection_log AS p
-                              WHERE p.server_id = $1 AND p.collector_name = 'blocked_process_report' AND p.collection_time < $2
+                              WHERE p.server_id = $1 AND p.collector_name = 'blocked_process_report' AND p.collection_time <= $2
                               ORDER BY p.collection_time DESC
                               LIMIT 1)
                  THEN $2::timestamp

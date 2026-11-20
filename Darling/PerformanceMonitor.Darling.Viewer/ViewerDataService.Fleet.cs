@@ -204,7 +204,7 @@ SELECT
                     server_id,
                     database_name
                 FROM pg_database_stats
-                WHERE collection_time > $1
+                WHERE collection_time >= $1
                 AND   collection_time <= $2
                 GROUP BY server_id, database_name
                 HAVING min(deadlocks) <> max(deadlocks)
@@ -219,7 +219,7 @@ SELECT
                 SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
                 FROM pg_database_stats
                 WHERE server_id = s.server_id
-                AND   collection_time > $1
+                AND   collection_time >= $1
                 AND   collection_time <= $2
                 AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
             ) AS sampled
