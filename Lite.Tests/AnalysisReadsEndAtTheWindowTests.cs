@@ -25,8 +25,9 @@ namespace PerformanceMonitorLite.Tests;
 /// that instant had. A capture stored after the window's end changes neither the database configuration fact, which
 /// reads the newest capture at or before the end, nor the data span the history gate measures. The same holds for the
 /// plan regression fact and its drill-down, which read the Query Store rows collected by the end, and for the
-/// configuration drill-down and the plan analysis server metadata, which read the newest capture at or before it. The
-/// anomaly detector's window leaves its end out, so its Azure edition read takes the newest row before the end.
+/// configuration drill-down, the plan analysis server metadata and the max degree of parallelism the high-DOP count is
+/// held to, which read the newest capture at or before it. The anomaly detector's window leaves its end out, so its
+/// Azure edition read takes the newest row before the end.
 /// </summary>
 public sealed class AnalysisReadsEndAtTheWindowTests : IClassFixture<SharedDuckDbFixture>
 {
@@ -303,6 +304,35 @@ VALUES ($1, $2, $3, 'window-end', 'max degree of parallelism', $4, $4, true, tru
         Assert.Equal((8, 4, 3), (before!.CpuCount, before.MaxDop, before.EngineEdition));
         Assert.Equal((before.CpuCount, before.MaxDop, before.EngineEdition), (after!.CpuCount, after.MaxDop, after.EngineEdition));
         Assert.Equal((64, 16, 5), (later!.CpuCount, later.MaxDop, later.EngineEdition));
+    }
+
+    /// <summary>One query ran at DOP 16 half an hour before the end, while the server's max degree of parallelism was 16. The
+    /// capture an hour after the end has the setting at 4, which a plan at DOP 16 cannot have run under.</summary>
+    [Fact]
+    public async Task TheHighDopCount_IsTheSame_WithAMaxDopCaptureStoredAfterTheWindowEnd()
+    {
+        await SeedAsync(async c =>
+        {
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
+     max_dop, min_dop, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_spills, query_text)
+VALUES ($1, $2, $3, 'window-end', 'SalesDb', '0xDOPHASH', '0xDOPPLAN', 16, 1, 10, 100000, 200000, 0, 'SELECT 1')";
+            foreach (var value in new object[] { _id--, End.AddMinutes(-30), ServerId })
+                cmd.Parameters.Add(new DuckDBParameter { Value = value });
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        });
+        await SeedServerCaptureAsync(End.AddHours(-1), engineEdition: 3, cpuCount: 8, maxDop: 16);
+        var before = (await FactsAsync(End))["QUERY_HIGH_DOP"];
+
+        await SeedServerCaptureAsync(End.AddHours(1), engineEdition: 3, cpuCount: 8, maxDop: 4);
+        var after = await FactsAsync(End);
+
+        Assert.Equal(1, before.Metadata["high_dop_query_count"]);
+        Assert.Contains("QUERY_HIGH_DOP", after.Keys);
+        Assert.Equal(Figures(before), Figures(after["QUERY_HIGH_DOP"]));
+        Assert.DoesNotContain("QUERY_HIGH_DOP", (await FactsAsync(End.AddHours(1))).Keys);
     }
 
     private async Task<bool> IsAzureSqlDatabaseAsync(DateTime end)

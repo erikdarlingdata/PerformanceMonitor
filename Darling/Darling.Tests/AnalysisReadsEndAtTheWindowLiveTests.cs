@@ -23,10 +23,10 @@ namespace Darling.Tests;
 /* #1776 own-store: reads only the scratch database each test mints. */
 /// <summary>
 /// An analysis pass replayed for an earlier window reads the server as it was at that window's end. Its latest-capture reads (the
-/// server settings, the server's version and properties, and the two newest object snapshots the growth and contention anomalies
-/// compare) take the newest capture the window holds, and the plan regression fact reads no Query Store snapshot stored after the
-/// end, so a row stored after the end does not change what the pass says. Each read is run twice over the same rows, once ending
-/// at the window's end and once ending after the later row.
+/// server settings, the max degree of parallelism the high-DOP count is held to, the server's version and properties, and the two
+/// newest object snapshots the growth and contention anomalies compare) take the newest capture the window holds, and the plan
+/// regression fact reads no Query Store snapshot stored after the end, so a row stored after the end does not change what the pass
+/// says. Each read is run twice over the same rows, once ending at the window's end and once ending after the later row.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class AnalysisReadsEndAtTheWindowLiveTests
@@ -65,6 +65,39 @@ VALUES ($1, $2, $3, $4, 'max degree of parallelism', $5, $5, TRUE, TRUE)";
 
         Assert.Equal(4L, await MaxDopAsync(connection, s_windowEnd, ct));
         Assert.Equal(8L, await MaxDopAsync(connection, s_after, ct));
+    }
+
+    [Fact]
+    public async Task TheHighDopCount_IsHeldToTheMaxDopCapturedByTheWindowEnd_NotOneStoredAfterIt()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* One query ran at DOP 16 inside the window, while the server's max degree of parallelism was 16. The setting captured
+           four hours after the window's end is 4, which a plan at DOP 16 cannot have run under. */
+        const string config = @"
+INSERT INTO collect.server_config
+    (config_id, capture_time, server_id, server_name, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced)
+VALUES ($1, $2, $3, $4, 'max degree of parallelism', $5, $5, TRUE, TRUE)";
+        await ExecAsync(connection, ct, config, 1L, s_before, ServerId, ServerName, 16L);
+        await ExecAsync(connection, ct, config, 2L, s_after, ServerId, ServerName, 4L);
+        await ExecAsync(connection, ct, @"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
+     sql_handle, plan_handle, query_text, delta_execution_count, delta_worker_time, delta_elapsed_time,
+     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills,
+     min_dop, max_dop, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time)
+VALUES
+    ($1, $2, $3, $4, 'db1', '0xHASH', '0xPLANHASH', '0xSQLH', '0xPLANH', 'SELECT 1', 10, 10000, 20000, 500, 0, 5, 100, 0, 1, 16, 800, 1500, 1600, 3000)",
+            1L, s_inside, ServerId, ServerName);
+
+        Assert.Equal(1L, await HighDopQueriesAsync(connection, s_windowEnd, ct));
+        Assert.Equal(0L, await HighDopQueriesAsync(connection, s_laterEnd, ct));
     }
 
     [Fact]
@@ -262,6 +295,18 @@ VALUES ($1, 'windowenddb', $2, $3, NULL, $3, $4, $5, $6, $7, 100, $8, $9, $10, f
         }
 
         return null;
+    }
+
+    /// <summary>The high-DOP query count of the query statistics read, for a window from <see cref="s_before"/> to <paramref name="windowEnd"/>.</summary>
+    private static async Task<long> HighDopQueriesAsync(NpgsqlConnection connection, DateTime windowEnd, CancellationToken ct)
+    {
+        using var cmd = new NpgsqlCommand(PgFactCollector.QueryStatsSql, connection);
+        cmd.Parameters.AddWithValue(ServerId);
+        cmd.Parameters.AddWithValue(s_before);
+        cmd.Parameters.AddWithValue(windowEnd);
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return Convert.ToInt64(reader.GetValue(reader.GetOrdinal("high_dop_queries")), CultureInfo.InvariantCulture);
     }
 
     /// <summary>The named column of the one row a latest-capture read answers for a window ending at <paramref name="windowEnd"/>.</summary>
