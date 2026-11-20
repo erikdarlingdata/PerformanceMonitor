@@ -13,7 +13,7 @@ set -euo pipefail
 
 image="${1:?usage: darling-nonroot-legs.sh <image> <previous-image>}"
 previous="${2:?usage: darling-nonroot-legs.sh <image> <previous-image>}"
-store_image="${STORE_IMAGE:-timescale/timescaledb:2.32.0-pg17}"
+store_image="${STORE_IMAGE:-timescale/timescaledb:2.32.1-pg17}"
 prefix="nonroot-$$"
 work="$(mktemp -d)"
 leg="setup"
