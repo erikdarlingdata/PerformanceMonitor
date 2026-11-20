@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// and an interval that starts exactly at the window's start stays in. Three intervals start at <c>as_of</c> minus an hour, at
 /// <c>as_of</c> and at <c>as_of</c> plus an hour; each read returns only the first. The top read goes through the tool with
 /// <c>as_of</c>, and the raw and interval-table statements of the top read and of the aborts read run against the same rows.
+/// The Viewer's grid, interval-table grid and slicer, and the duration trend, read the same rows over the same window.
 /// </summary>
 /* #1776 own-store: reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and then
    works entirely inside it, the same shape as QueryStoreTopWindowPlacementLiveTests. */
@@ -151,6 +152,74 @@ public sealed class QueryStoreWindowEndIsExclusiveLiveTests
         }
 
         Assert.Equal(new long[] { AtWindowStart }, ids.OrderBy(i => i).ToArray());
+    }
+
+    [Fact]
+    public async Task TheViewerGridAndSlicer_StopBeforeTheEnd_AndKeepTheWindowStart()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9100 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedRawAsync(connection, "Regular", ct);
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var grid = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, AsOf, cancellationToken: ct);
+        Assert.Equal(new long[] { AtWindowStart }, grid.Select(r => r.QueryId).OrderBy(i => i).ToArray());
+
+        var slicer = await viewer.GetQueryStoreSlicerDataAsync(ServerId, WindowStart, AsOf, null, ct);
+        Assert.Equal(1, slicer.Sum(b => b.SessionCount));
+    }
+
+    [Fact]
+    public async Task TheViewerGridIntervalTableRead_StopsBeforeAnEnd_ClosedOrOpen()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9100 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedWideAsync(connection, "Regular", ct);
+
+        await using var command = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableSql, connection);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = WindowStart, NpgsqlDbType = NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = AsOf, NpgsqlDbType = NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 20 });
+        command.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TopFill.FirstCandidates(20) });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var (rows, _) = await TopFill.ReadPageAsync(reader, reader.GetOrdinal("page_ord"), r => r.GetInt64(r.GetOrdinal("query_id")), ct);
+
+        Assert.Equal(new long[] { AtWindowStart }, rows.OrderBy(i => i).ToArray());
+    }
+
+    [Fact]
+    public async Task TheDurationTrend_PlacesOnlyTheIntervalStartedBeforeTheEnd_AndKeepsTheWindowStart()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9100 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedRawAsync(connection, "Regular", ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
+            postgres, ServerId, WindowStart, AsOf, QueryStoreTrendRouting.QueryStoreTrendRoute.RawOnly, DatabaseFilter.All, ct);
+
+        var point = Assert.Single(points);
+        Assert.Equal(WindowStart, point.CollectionTime);
     }
 
     /// <summary>One interval at the window's start, one at <c>as_of</c> and one an hour after it, each collected half an hour
