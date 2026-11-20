@@ -570,6 +570,19 @@ function renderStoreHostPayload(box, p) {
       ], settings)
     : emptyStrip("No sizing-relevant settings reported.");
 
+  /* #9179: the planner cost settings and, when random_page_cost is not the managed value, the one sentence that says so. */
+  const plannerCosts = Array.isArray(p.planner_costs) ? p.planner_costs : [];
+  const plannerCostsBody = plannerCosts.length
+    ? sweepGrid("store-host-planner-costs", [
+        { key: "name", label: "Setting", mono: true },
+        { key: "current", label: "Current" },
+        { key: "source", label: "Source" },
+        { key: "source_file", label: "File" },
+        { key: "managed_value", label: "Managed" },
+        { key: "matches_managed", label: "Matches managed", display: (r) => (r.matches_managed == null ? "—" : r.matches_managed ? "Yes" : "No"), cellClass: (r) => (r.matches_managed === false ? "sev-Warning" : "") },
+      ], plannerCosts)
+    : emptyStrip("No planner cost settings reported.");
+
   mount(box, [
     el("div", { class: "meta", text: p.any_stale
       ? "One or more settings are stale after a hardware change."
@@ -577,6 +590,9 @@ function renderStoreHostPayload(box, p) {
     facts,
     el("h4", { class: "section-title", text: "Settings" }),
     settingsBody,
+    el("h4", { class: "section-title", text: "Planner costs" }),
+    p.planner_cost_warning ? el("div", { class: "meta", text: p.planner_cost_warning }) : null,
+    plannerCostsBody,
   ]);
 }
 
