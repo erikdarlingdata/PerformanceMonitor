@@ -717,7 +717,9 @@ public partial class MainWindow : Window
             AppLogger.Error("MainWindow", "Failed to initialize the application", ex);
             AppLogger.Flush();
             StatusText.Text = $"Error: {ex.Message}";
-            if (HeadlessUi.Skips("the initialization-error dialog (the log holds the exception)"))
+            /* #9142: a headless start has no one to read the dialog and no listener, so it ends with a nonzero exit code (see
+               LiteStartupPlan.EndsStartAfterInitFailure). A start with a window falls through to the dialog. */
+            if ((Application.Current as App)?.EndStartAfterInitFailure() == true)
             {
                 return;
             }

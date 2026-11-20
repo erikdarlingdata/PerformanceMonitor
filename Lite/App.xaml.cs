@@ -628,7 +628,15 @@ public partial class App : Application
                 () => StopCommand.OtherInstanceRunning("PerformanceMonitorLite"),
                 TimeSpan.FromSeconds(60),
                 System.Threading.Thread.Sleep,
-                msg => System.Diagnostics.Debug.WriteLine(msg));
+                msg =>
+                {
+                    System.Diagnostics.Debug.WriteLine(msg);
+                    AppLogger.Info("Stop", msg);
+                });
+            /* #9142: a Release build has no debugger to read Debug.WriteLine, so the outcome goes to the Lite log too, when the log
+               folder exists. --stop starts nothing, so it never creates the data folder. */
+            StopCommand.FlushLog(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Services.DataRootMigration.DataRootName, "logs"));
             Shutdown(stopCode);
             return;
         }
@@ -973,11 +981,37 @@ public partial class App : Application
     /// </summary>
     private async void RequestShutdown()
     {
+        if (_startupPlan.Headless)
+            AppLogger.Info("App", "Headless instance asked to shut down.");
+
+        await ShutDownAsync(exitCode: 0);
+    }
+
+    /// <summary>
+    /// #9142: ends a headless start whose initialization failed, with a nonzero exit code, so Task Scheduler sees a failure
+    /// and its restart-on-failure setting works. Returns true when it did (a start with a window returns false and keeps its
+    /// error dialog). The exception is already in the log.
+    /// </summary>
+    internal bool EndStartAfterInitFailure() =>
+        _startupPlan.EndsStartAfterInitFailure(code =>
+        {
+            AppLogger.Error("App", $"The headless start failed to initialize, so Lite is exiting with code {code}.");
+            _ = ShutDownAsync(code);
+        });
+
+    /// <summary>
+    /// With a window, <see cref="Application.Shutdown(int)"/> closes the window and runs its closing cleanup. A headless
+    /// instance has no window to close, so it runs that same cleanup itself first. Cleanup that throws is logged and the
+    /// shutdown goes on: <see cref="Application.Shutdown(int)"/> closes the never-shown window with its Closing cancel ignored
+    /// (WPF's <c>Window.InternalClose(shutdown: true, ignoreCancel: true)</c>), so a cleanup that never finished cannot hold
+    /// the process open (#9142).
+    /// </summary>
+    private async Task ShutDownAsync(int exitCode)
+    {
         if (_startupPlan.Headless && _mainWindow is { } host)
         {
             try
             {
-                AppLogger.Info("App", "Headless instance asked to shut down.");
                 await host.RunShutdownCleanupAsync();
             }
             catch (Exception ex)
@@ -986,7 +1020,7 @@ public partial class App : Application
             }
         }
 
-        Shutdown();
+        Shutdown(exitCode);
     }
 
     /// <summary>

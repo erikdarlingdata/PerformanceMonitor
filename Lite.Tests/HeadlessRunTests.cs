@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -283,5 +285,101 @@ public sealed class HeadlessRunTests
             () => false, TimeSpan.FromSeconds(1), _ => { }, _ => { });
 
         Assert.Equal(StopCommand.ExitNotRunning, code);
+    }
+
+    [Fact]
+    public void Stop_DoesNotWaitOnALiteInAnotherSession_ThatCannotHearTheSignal()
+    {
+        var processes = new[]
+        {
+            new StopCommand.RunningProcess(Id: 100, SessionId: 0),
+            new StopCommand.RunningProcess(Id: 200, SessionId: 2),
+        };
+
+        Assert.False(StopCommand.OtherInstanceInSession(processes, selfId: 300, selfSession: 1));
+    }
+
+    [Fact]
+    public void Stop_WaitsOnALiteInItsOwnSession_ButNotOnItself()
+    {
+        var processes = new[]
+        {
+            new StopCommand.RunningProcess(Id: 300, SessionId: 0),
+            new StopCommand.RunningProcess(Id: 200, SessionId: 2),
+        };
+
+        Assert.False(StopCommand.OtherInstanceInSession(processes, selfId: 300, selfSession: 0));
+        Assert.True(StopCommand.OtherInstanceInSession(processes.Append(new StopCommand.RunningProcess(Id: 400, SessionId: 0)), selfId: 300, selfSession: 0));
+    }
+
+    // ---- a headless start whose initialization fails
+
+    [Fact]
+    public void AHeadlessStartThatFailsToInitialize_EndsWithANonzeroExitCode_AndSkipsTheDialog()
+    {
+        int? exitCode = null;
+
+        var ended = new LiteStartupPlan(Headless: true, Stop: false).EndsStartAfterInitFailure(code => exitCode = code);
+
+        Assert.True(ended);
+        Assert.NotNull(exitCode);
+        Assert.NotEqual(0, exitCode);
+    }
+
+    [Fact]
+    public void AStartWithAWindowThatFailsToInitialize_KeepsItsDialog_AndDoesNotShutDown()
+    {
+        var shutdowns = 0;
+
+        var ended = new LiteStartupPlan(Headless: false, Stop: false).EndsStartAfterInitFailure(_ => shutdowns++);
+
+        Assert.False(ended);
+        Assert.Equal(0, shutdowns);
+    }
+}
+
+/// <summary>
+/// #9142: what <c>--stop</c> writes to the Lite log. It shares the process-wide log buffer with every other test.
+/// </summary>
+[Collection("app-logger-statics")]
+public sealed class HeadlessStopLogTests : IDisposable
+{
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "HeadlessStopLog_" + Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
+    {
+        try
+        {
+            if (Directory.Exists(_root))
+                Directory.Delete(_root, recursive: true);
+        }
+        catch
+        {
+            /* Best-effort test cleanup. */
+        }
+    }
+
+    [Fact]
+    public void TheStopOutcome_ReachesTheLogFile_WhenTheLogFolderExists()
+    {
+        var logs = Path.Combine(_root, "logs");
+        Directory.CreateDirectory(logs);
+        var tag = Guid.NewGuid().ToString("N");
+        AppLogger.DrainBufferedLines();
+
+        StopCommand.Run(() => false, () => false, TimeSpan.Zero, _ => { }, msg => AppLogger.Info("Stop", $"{msg} {tag}"));
+        Assert.True(StopCommand.FlushLog(logs));
+
+        var text = string.Concat(Directory.GetFiles(logs, "lite_*.log").Select(File.ReadAllText));
+        Assert.Contains(tag, text);
+    }
+
+    [Fact]
+    public void TheStopOutcome_NeverCreatesTheLogFolder()
+    {
+        var logs = Path.Combine(_root, "never");
+
+        Assert.False(StopCommand.FlushLog(logs));
+        Assert.False(Directory.Exists(logs));
     }
 }

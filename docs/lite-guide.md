@@ -83,6 +83,8 @@ A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each
 
 Only one Lite runs in a Windows session. If you start Lite a second time in that session, the second start exits. A headless Lite does not show a window when the second start asks it to.
 
+If a headless Lite fails to start, it writes the error to the log and exits with code 3. Task Scheduler then sees a failed run, and its restart setting starts Lite again.
+
 #### Set up a dedicated Windows user
 
 1. Make a Windows user for Lite. A standard user is enough.
@@ -125,11 +127,13 @@ PerformanceMonitorLite.exe --stop
 | 1 | No Lite was listening. Lite is not running, or it is still starting. A Lite that is still starting does not listen yet. Try again in a minute. |
 | 2 | Lite had not exited after 60 seconds |
 
-The request goes to the Lite in the same Windows session as `--stop`. Run `--stop` in session 0, as the same user. Make a second scheduled task for it. Give it the same user, the same "Run whether the user is logged on or not" setting, and the action `PerformanceMonitorLite.exe` with the argument `--stop`. Run that task to stop Lite. For example:
+The request goes to the Lite in the same Windows session as `--stop`, and `--stop` waits only for a Lite in that session. Run `--stop` in session 0, as the same user. Make a second scheduled task for it. Give it the same user, the same "Run whether the user is logged on or not" setting, and the action `PerformanceMonitorLite.exe` with the argument `--stop`. Run that task to stop Lite. For example:
 
 ```
 schtasks /run /tn "Lite stop"
 ```
+
+`--stop` writes what it did to the Lite log, in the same user's logs folder. Each line has `[Stop]` in it. The lines say whether `--stop` asked a running Lite to stop, found none, or timed out.
 
 A hard end does not break the store. DuckDB replays its write-ahead log at the next start. The next start can take a little longer than usual.
 

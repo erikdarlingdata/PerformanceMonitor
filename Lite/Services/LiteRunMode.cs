@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
@@ -53,6 +54,26 @@ public sealed record LiteStartupPlan(bool Headless, bool Stop)
     /// relaunch of the upgrade handoff already does the same, through its own flag.
     /// </summary>
     public bool ConfirmsHandoffWithoutAsking => Headless;
+
+    /// <summary>The exit code of a headless start whose initialization failed. Any nonzero code is a failure to Task Scheduler.</summary>
+    public const int ExitInitFailed = 3;
+
+    /// <summary>
+    /// What a failed initialization does. A start with a window shows the error dialog and stays open, so the person at the
+    /// screen can read it. A headless start has no one to read a dialog, and a process that stays up with no listener would hold
+    /// the single-instance mutex for good: <c>--stop</c> would find nobody, a second <c>--headless</c> start would exit, and a
+    /// task's restart-on-failure would never fire. So it shuts down with <see cref="ExitInitFailed"/> (#9142).
+    /// </summary>
+    /// <param name="shutdown">Ends the process with the given exit code.</param>
+    /// <returns>True when the start was ended, so the caller skips the dialog.</returns>
+    public bool EndsStartAfterInitFailure(Action<int> shutdown)
+    {
+        if (!Headless)
+            return false;
+
+        shutdown(ExitInitFailed);
+        return true;
+    }
 }
 
 /// <summary>
@@ -246,20 +267,62 @@ public static class StopCommand
         return ExitStillRunning;
     }
 
-    /// <summary>True when a process of this name other than this one is running.</summary>
+    /// <summary>One running process, as far as <see cref="OtherInstanceInSession"/> needs to know it.</summary>
+    public readonly record struct RunningProcess(int Id, int SessionId);
+
+    /// <summary>
+    /// True when a process of this name other than this one is running in this process's Windows session. The stop signal is a
+    /// named event that reaches only the current session, so a Lite in another session can neither hear it nor be waited on.
+    /// </summary>
     public static bool OtherInstanceRunning(string processName)
     {
         var self = Environment.ProcessId;
+        int selfSession;
+        using (var current = Process.GetCurrentProcess())
+            selfSession = current.SessionId;
+        var processes = new List<RunningProcess>();
         foreach (var process in Process.GetProcessesByName(processName))
         {
             using (process)
             {
-                if (process.Id != self)
-                    return true;
+                try
+                {
+                    processes.Add(new RunningProcess(process.Id, process.SessionId));
+                }
+                catch (InvalidOperationException)
+                {
+                    /* The process exited between the listing and the read: it is not running. */
+                }
             }
         }
 
+        return OtherInstanceInSession(processes, self, selfSession);
+    }
+
+    /// <summary>The decision behind <see cref="OtherInstanceRunning"/>, over a given process list.</summary>
+    public static bool OtherInstanceInSession(IEnumerable<RunningProcess> processes, int selfId, int selfSession)
+    {
+        foreach (var process in processes)
+        {
+            if (process.Id != selfId && process.SessionId == selfSession)
+                return true;
+        }
+
         return false;
+    }
+
+    /// <summary>
+    /// Writes the lines <c>--stop</c> logged to the Lite log, only when the log folder already exists. <c>--stop</c> starts
+    /// nothing, so it never creates the data folder, and a machine that never ran Lite has no log to write to.
+    /// </summary>
+    /// <returns>True when the folder existed and the lines were written.</returns>
+    public static bool FlushLog(string logDirectory)
+    {
+        if (!Directory.Exists(logDirectory))
+            return false;
+
+        AppLogger.FlushTo(logDirectory);
+        return true;
     }
 }
 
