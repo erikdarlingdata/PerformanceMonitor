@@ -57,7 +57,7 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
     [Fact]
     public void BothChartSubTabs_ShowTheGapNote()
     {
-        Assert.Contains("ShowSystemHealthChartsNote();", MethodBody(SystemHealthChartsFile, "Task LoadSystemHealthChartsAsync("), StringComparison.Ordinal);
+        Assert.Contains("ShowSystemHealthChartsNote();", MethodBody(SystemHealthChartsFile, "void DrawSystemHealthCharts("), StringComparison.Ordinal);
 
         var body = MethodBody(SystemHealthChartsFile, "void ShowSystemHealthChartsNote(");
         Assert.Contains($"SystemHealthGapNote{GapNoteArguments}", body, StringComparison.Ordinal);

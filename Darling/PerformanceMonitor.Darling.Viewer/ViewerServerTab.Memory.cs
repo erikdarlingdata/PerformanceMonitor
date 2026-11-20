@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -90,23 +91,25 @@ public partial class ViewerServerTab
     /// picker is populated + drawn. The reads are genuinely async (no <c>Task.Run</c>), so a single
     /// <see cref="Task.WhenAll"/> pools a connection per read.
     /// </summary>
-    private async Task LoadMemoryAsync()
+    private async Task LoadMemoryAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
+        var reads = MemoryReads;
 
         /* Seven reads in flight: the six feeds below and the pressure chart's data-start probe (#4966). */
         using var readFanOut = ViewerReadFanOut.Of(7);
 
-        var latestTask = _dataService.GetLatestMemoryStatsAsync(_server.ServerId);
-        var trendTask = _dataService.GetMemoryTrendAsync(_server.ServerId, startUtc, endUtc);
-        var grantTrendTask = _dataService.GetMemoryGrantTrendAsync(_server.ServerId, startUtc, endUtc);
-        var clerkTypesTask = _dataService.GetDistinctMemoryClerkTypesAsync(_server.ServerId, startUtc, endUtc);
-        var grantChartTask = _dataService.GetMemoryGrantChartDataAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: each read is named on the load's clock, the nested Plan Cache and Resource Semaphore loads too, and the draws are named client steps. */
+        var latestTask = Timed(timer, "Memory summary read", reads.Latest());
+        var trendTask = Timed(timer, "Memory trend read", reads.Trend(startUtc, endUtc));
+        var grantTrendTask = Timed(timer, "Memory grant trend read", reads.GrantTrend(startUtc, endUtc));
+        var clerkTypesTask = Timed(timer, "Memory clerk list read", reads.ClerkTypes(startUtc, endUtc));
+        var grantChartTask = Timed(timer, "Memory grant chart read", reads.GrantChart(startUtc, endUtc));
         /* #4966: the chart's data-start probe starts beside its read and takes the same window, worked out once above. It stays OUT of
            the join below, so a probe that throws costs the chart's note (DataStartAnswerAsync catches it at the banner step) and not
            the chart's rows. */
-        var pressureDataStartTask = _dataService.GetMemoryPressureEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var pressureTask = _dataService.GetMemoryPressureEventsAsync(_server.ServerId, startUtc, endUtc);
+        var pressureDataStartTask = Timed(timer, "Memory pressure data start read", reads.PressureDataStart(startUtc, endUtc));
+        var pressureTask = Timed(timer, "Memory pressure events read", reads.Pressure(startUtc, endUtc));
 
         /* #5022: a join that throws skips the banner step below, so the probe would go unawaited. The helper watches it then, and a probe
            that fails later is a warning and not an unobserved-exception Error. */
@@ -118,22 +121,57 @@ public partial class ViewerServerTab
            width and the nested one multiplies against a contention count that no longer exists. */
         readFanOut.Release();
 
-        RenderMemorySummary(latestTask.Result);
-        RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);
-        RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc);
-        RenderMemoryPressureEventsChart(pressureTask.Result, startUtc, endUtc);
+        ClientStep(timer, "Memory summary build", () => RenderMemorySummary(latestTask.Result));
+        ClientStep(timer, "Memory chart draw", () => RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc));
+        ClientStep(timer, "Memory grant charts draw", () => RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc));
+        ClientStep(timer, "Memory pressure events chart draw", () => RenderMemoryPressureEventsChart(pressureTask.Result, startUtc, endUtc));
         await ShowMemoryPressureEventsDataStartAsync(MemoryPressureEventsTruncationBanner, pressureDataStartTask, startUtc, pressureTask.Result);
-        await ShowEngineGapAsync(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count);
-        PopulateMemoryClerkPicker(clerkTypesTask.Result);
-        await UpdateMemoryClerksChartFromPickerAsync();
+        await Timed(timer, "Memory pressure events engine gap read", ShowEngineGapAsync(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count));
+        ClientStep(timer, "Memory clerk picker build", () => PopulateMemoryClerkPicker(clerkTypesTask.Result));
+        await UpdateMemoryClerksChartFromPickerAsync(timer);
 
         /* Plan Cache sub-tab (under Memory, matching the Dashboard's Memory > Plan Cache): loaded in the
            same pass as the other Memory sub-tabs (the Memory tab's full-refresh branch). */
-        await LoadPlanCacheAsync();
+        await LoadPlanCacheAsync(timer);
 
         /* #6388: the Resource Semaphore sub-tab loads in the same pass. */
-        await LoadResourceSemaphoreAsync();
+        await LoadResourceSemaphoreAsync(timer);
     }
+
+    /// <summary>#9112: the Memory tab's store reads, its nested Plan Cache and Resource Semaphore sub-tabs' included, so a test can hand the tab
+    /// reads that take a known time. The product uses the data service's.</summary>
+    internal sealed record MemoryTabReads(
+        Func<Task<MemoryStatsRow?>> Latest,
+        Func<DateTime, DateTime, Task<List<MemoryTrendPoint>>> Trend,
+        Func<DateTime, DateTime, Task<List<MemoryGrantTrendPoint>>> GrantTrend,
+        Func<DateTime, DateTime, Task<List<string>>> ClerkTypes,
+        Func<DateTime, DateTime, Task<List<MemoryGrantChartPoint>>> GrantChart,
+        Func<DateTime, DateTime, Task<DateTime?>> PressureDataStart,
+        Func<DateTime, DateTime, Task<List<MemoryPressureEventRow>>> Pressure,
+        Func<List<string>, DateTime, DateTime, Task<Dictionary<string, List<MemoryClerkTrendPoint>>>> ClerkTrends,
+        Func<DateTime, DateTime, Task<List<PlanCacheTrendPoint>>> PlanCacheTrend,
+        Func<DateTime, DateTime, Task<List<PlanCacheGroupRow>>> PlanCacheByType,
+        Func<DateTime, DateTime, Task<PlanCacheSummary>> PlanCacheSummary,
+        Func<DateTime, DateTime, Task<List<MemoryGrantWindowRow>>> SemaphoreWindow,
+        Func<DateTime, DateTime, Task<List<ResourceSemaphoreRow>>> SemaphoreLatest);
+
+    /// <summary>A test's stand-in for the Memory tab's reads; null in the product.</summary>
+    internal MemoryTabReads? MemoryReadsOverride { get; set; }
+
+    private MemoryTabReads MemoryReads => MemoryReadsOverride ?? new MemoryTabReads(
+        () => _dataService.GetLatestMemoryStatsAsync(_server.ServerId),
+        (startUtc, endUtc) => _dataService.GetMemoryTrendAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetMemoryGrantTrendAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetDistinctMemoryClerkTypesAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetMemoryGrantChartDataAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetMemoryPressureEventsDataStartAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetMemoryPressureEventsAsync(_server.ServerId, startUtc, endUtc),
+        (types, startUtc, endUtc) => _dataService.GetMemoryClerkTrendsByTypesAsync(_server.ServerId, types, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetPlanCacheTrendAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetPlanCacheByTypeAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetPlanCacheSummaryAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetResourceSemaphoreWindowAsync(_server.ServerId, startUtc, endUtc),
+        (startUtc, endUtc) => _dataService.GetResourceSemaphoreLatestAsync(_server.ServerId, startUtc, endUtc));
 
     /// <summary>The Overview summary strip — Lite's <c>UpdateMemorySummary</c> verbatim.</summary>
     private void RenderMemorySummary(MemoryStatsRow? stats)
@@ -658,7 +696,7 @@ public partial class ViewerServerTab
     /// summary. The generation guard discards a stale run when the selection changes mid-query; the
     /// toolbar's settable window matches the tab load (Lite's custom-range branch is dropped).
     /// </summary>
-    private async Task UpdateMemoryClerksChartFromPickerAsync()
+    private async Task UpdateMemoryClerksChartFromPickerAsync(ViewerLoadTimer? timer = null)
     {
         var gen = ++_memoryClerksPickerGen;
         try
@@ -690,59 +728,62 @@ public partial class ViewerServerTab
             double topNonBpMb = 0;
 
             // Batched fetch: one query for all selected clerk types (was an N+1 query-per-clerk loop).
-            var trendsByType = await _dataService.GetMemoryClerkTrendsByTypesAsync(
-                _server.ServerId, selected.Select(s => s.DisplayName).ToList(), startUtc, endUtc);
+            var trendsByType = await Timed(timer, "Memory clerk trend read",
+                MemoryReads.ClerkTrends(selected.Select(s => s.DisplayName).ToList(), startUtc, endUtc));
             if (gen != _memoryClerksPickerGen) return;
 
-            for (int i = 0; i < selected.Count; i++)
+            ClientStep(timer, "Memory clerks chart draw", () =>
             {
-                if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
-
-                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
-                var values = trend.Select(t => t.MemoryMb).ToArray();
-
-                var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
-                plot.LegendText = selected[i].DisplayName;
-                plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
-                ChartStyle.StyleScatter(plot);
-                _memoryClerksHover?.Add(plot, selected[i].DisplayName);
-
-                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
-
-                /* Summary: use latest value, exclude buffer pool */
-                var latestMb = values.Last();
-                if (!selected[i].DisplayName.Contains("BUFFERPOOL", StringComparison.OrdinalIgnoreCase))
+                for (int i = 0; i < selected.Count; i++)
                 {
-                    nonBpTotal += latestMb;
-                    if (latestMb > topNonBpMb)
+                    if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
+
+                    var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
+                    var values = trend.Select(t => t.MemoryMb).ToArray();
+
+                    var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
+                    plot.LegendText = selected[i].DisplayName;
+                    plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                    ChartStyle.StyleScatter(plot);
+                    _memoryClerksHover?.Add(plot, selected[i].DisplayName);
+
+                    if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+
+                    /* Summary: use latest value, exclude buffer pool */
+                    var latestMb = values.Last();
+                    if (!selected[i].DisplayName.Contains("BUFFERPOOL", StringComparison.OrdinalIgnoreCase))
                     {
-                        topNonBpMb = latestMb;
-                        topNonBpClerk = selected[i].DisplayName;
+                        nonBpTotal += latestMb;
+                        if (latestMb > topNonBpMb)
+                        {
+                            topNonBpMb = latestMb;
+                            topNonBpClerk = selected[i].DisplayName;
+                        }
                     }
                 }
-            }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(MemoryClerksChart);
-            MemoryClerksChart.Plot.YLabel("MB");
-            SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
-            ShowChartLegend(MemoryClerksChart);
-            MemoryClerksChart.Refresh();
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+                MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
+                ReapplyAxisColors(MemoryClerksChart);
+                MemoryClerksChart.Plot.YLabel("MB");
+                SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
+                ShowChartLegend(MemoryClerksChart);
+                MemoryClerksChart.Refresh();
 
-            /* Update summary panel */
-            MemoryClerksTotalText.Text = nonBpTotal >= 1024 ? $"{nonBpTotal / 1024:F1} GB" : $"{nonBpTotal:N0} MB";
-            if (!string.IsNullOrEmpty(topNonBpClerk))
-            {
-                var name = topNonBpClerk;
-                if (name.StartsWith("MEMORYCLERK_", StringComparison.OrdinalIgnoreCase))
-                    name = name.Substring(12);
-                MemoryClerksTopText.Text = topNonBpMb >= 1024 ? $"{name} ({topNonBpMb / 1024:F1} GB)" : $"{name} ({topNonBpMb:N0} MB)";
-            }
-            else
-            {
-                MemoryClerksTopText.Text = "--";
-            }
+                /* Update summary panel */
+                MemoryClerksTotalText.Text = nonBpTotal >= 1024 ? $"{nonBpTotal / 1024:F1} GB" : $"{nonBpTotal:N0} MB";
+                if (!string.IsNullOrEmpty(topNonBpClerk))
+                {
+                    var name = topNonBpClerk;
+                    if (name.StartsWith("MEMORYCLERK_", StringComparison.OrdinalIgnoreCase))
+                        name = name.Substring(12);
+                    MemoryClerksTopText.Text = topNonBpMb >= 1024 ? $"{name} ({topNonBpMb / 1024:F1} GB)" : $"{name} ({topNonBpMb:N0} MB)";
+                }
+                else
+                {
+                    MemoryClerksTopText.Text = "--";
+                }
+            });
         }
         catch (Exception ex)
         {
