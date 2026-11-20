@@ -265,7 +265,9 @@ mcp:
 metrics:
   # Serve the Prometheus /metrics port (token-protected). Off by default. Needs a Darling image newer than 3.13.0.
   enabled: false
-  # Port of the metrics endpoint inside the pod. It must differ from the health port (5154) and, while they are on, from web.port and mcp.port.
+  # Port of the metrics endpoint inside the pod. With metrics.enabled it must differ from the health port (5154),
+  # web.port and mcp.port, whether or not web and MCP are on (Darling compares the ports either way, and the
+  # control plane can turn those surfaces on later without a restart).
   port: 5155
   # Addresses allowed to scrape the port (CIDRs). Empty adds no allowFrom to darling.json; network.allowFrom never applies to metrics.
   allowFrom: []

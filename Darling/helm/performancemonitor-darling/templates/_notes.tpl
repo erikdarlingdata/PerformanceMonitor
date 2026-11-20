@@ -9,7 +9,7 @@ tools (the chart README lists which keys are seeds).
 
 WARNING: generated values are in use:
 {{- if not .Values.secrets.existingSecret }}
-- the web and MCP tokens in the Secret {{ include "performancemonitor-darling.secretName" . }}
+- the web, MCP and metrics tokens in the Secret {{ include "performancemonitor-darling.secretName" . }}
 {{- end }}
 {{- if include "performancemonitor-darling.storePasswordGenerated" . }}
 - the bundled store's password in the Secret {{ include "performancemonitor-darling.storeSecretName" . }}

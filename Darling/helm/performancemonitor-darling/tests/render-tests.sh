@@ -840,8 +840,11 @@ t metrics_port_clash
 assert_fails "metrics.port" --set metrics.enabled=true --set metrics.port=5154
 assert_fails "5154" --set metrics.enabled=true --set metrics.port=5154
 assert_fails "web.port" --set metrics.enabled=true --set metrics.port=5153
-render --set metrics.enabled=true --set metrics.port=5152
+assert_fails "mcp.port" --set metrics.enabled=true --set metrics.port=5152
 assert_fails "mcp.port" --set metrics.enabled=true --set metrics.port=5152 --set mcp.enabled=true
+assert_fails "web.port" --set metrics.enabled=true --set web.enabled=false --set metrics.port=5153
+assert_fails "mcp.port" --set metrics.enabled=true --set mcp.port=9100 --set metrics.port=9100
+render --set metrics.port=5152
 
 t metrics_image_guard
 assert_fails "metrics" --set metrics.enabled=true --set image.tag=3.13.0

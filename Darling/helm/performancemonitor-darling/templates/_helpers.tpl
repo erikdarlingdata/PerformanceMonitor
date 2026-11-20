@@ -227,8 +227,8 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- toJson $block -}}
 {{- end -}}
 
-{{/* The owned metrics block of darling.json. Darling's own check refuses a metrics port that clashes with the health, web or
-MCP port while metrics is on, so the chart refuses it first. network.allowFrom never applies here: metrics has its own allowFrom. */}}
+{{/* The owned metrics block of darling.json. Darling's own check, while metrics is on, refuses a metrics port that clashes with the health, web or
+MCP port whether or not web and MCP are enabled (the chart always writes both ports), so the chart refuses it first. network.allowFrom never applies here: metrics has its own allowFrom. */}}
 {{- define "performancemonitor-darling.metricsJson" -}}
 {{- $m := .Values.metrics -}}
 {{- $block := dict "enabled" $m.enabled "port" (int $m.port) -}}
@@ -239,10 +239,10 @@ MCP port while metrics is on, so the chart refuses it first. network.allowFrom n
 {{- if eq (int $m.port) 5154 -}}
 {{- fail "metrics.port (5154) is the health port: give the metrics listener its own port" -}}
 {{- end -}}
-{{- if and .Values.web.enabled (eq (int $m.port) (int .Values.web.port)) -}}
+{{- if eq (int $m.port) (int .Values.web.port) -}}
 {{- fail (printf "metrics.port (%d) is the same as web.port: give the metrics listener its own port" (int $m.port)) -}}
 {{- end -}}
-{{- if and .Values.mcp.enabled (eq (int $m.port) (int .Values.mcp.port)) -}}
+{{- if eq (int $m.port) (int .Values.mcp.port) -}}
 {{- fail (printf "metrics.port (%d) is the same as mcp.port: give the metrics listener its own port" (int $m.port)) -}}
 {{- end -}}
 {{- $_ := set $block "listen" "0.0.0.0" -}}
