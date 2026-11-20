@@ -126,6 +126,17 @@ public sealed class LiteWalkTests : WalkBase
                     .FirstOrDefault(c => c.Name == LiteSeed.DisabledServerName), "an OverviewServerCardName reading " + LiteSeed.DisabledServerName));
             System.Threading.Thread.Sleep(2000);
             Shot("14-overview-disabled-server");
+
+            // The rail shows only dots. Open the pane the way a person would, then give the connection check time to finish,
+            // so the Offline server's dot has its colour and the Disabled one's row is named beside its dot.
+            Step("open the sidebar", () =>
+            {
+                var toggle = Find(main, "SidebarToggleButton");
+                toggle.AsButton().Invoke();
+                return true;
+            });
+            System.Threading.Thread.Sleep(60000);
+            Shot("15-sidebar-open-disabled-server");
         });
     }
 
