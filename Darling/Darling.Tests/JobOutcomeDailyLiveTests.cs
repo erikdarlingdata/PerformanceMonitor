@@ -34,10 +34,6 @@ public sealed class JobOutcomeDailyLiveTests
 {
     private const string Skip = "Set DARLING_TEST_PG to a Postgres connection string to run the live #9110 job outcome daily tests.";
     private const int ServerA = 9201;
-    private const int ServerOffset = 9202;
-    private const int ServerDisabled = 9203;
-
-    private static readonly DateTime Now1 = new(2026, 11, 20, 12, 0, 0);
 
     // ── The rung ──────────────────────────────────────────────────────────────
 
@@ -73,103 +69,30 @@ public sealed class JobOutcomeDailyLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, null, ct);
 
-        await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.job_outcome_daily; DROP TABLE IF EXISTS collect.job_outcome_daily_built", ct);
+        await ExecuteAsync(connection, "DROP TABLE IF EXISTS collect.job_outcome_daily; DROP TABLE IF EXISTS collect.job_outcome_daily_days; DROP TABLE IF EXISTS collect.job_outcome_daily_watermark", ct);
         await ExecuteAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
         await ExecuteAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily", ct));
-        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_built", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_days", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark", ct));
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
 
-        await ExecuteAsync(connection, "DROP TABLE collect.job_outcome_daily_built", ct);
+        await ExecuteAsync(connection, "DROP TABLE collect.job_outcome_daily_watermark", ct);
         Assert.Equal(StorageVersion.SchemaVersion - 1, await viewer.GetStoreSchemaVersionAsync(ct));
-    }
-
-    // ── One built day ─────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// A built day equals a GROUP BY over the raw successful job-outcome rows of that day: the count and sum of the non-NULL durations, the
-    /// newest run (a NULL-duration success still counts for it), and the average the two make. Rows of another status, another step, no job id,
-    /// the day before's last second and the next day's first second are not in it. The built row says how far its source reached.
-    /// </summary>
-    [Fact]
-    public async Task ABuiltDay_EqualsAGroupByOverTheRawRows()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
-        var ct = TestContext.Current.CancellationToken;
-
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-
-        var day = new DateOnly(2026, 11, 15);
-        var rows = new StringBuilder();
-        long id = 1;
-        void Add(string? job, int step, int status, string run, int? duration, string collected) =>
-            rows.Append(JobRow(id++, ServerA, job, step, status, run, duration, collected));
-
-        Add("A", 0, 1, "2026-11-15 00:00:00", 10, "2026-11-15 00:30:00");
-        Add("A", 0, 1, "2026-11-15 08:00:00", 20, "2026-11-15 08:30:00");
-        Add("A", 0, 1, "2026-11-15 23:59:59", 31, "2026-11-16 00:30:00");
-        Add("A", 0, 1, "2026-11-15 12:00:00", null, "2026-11-15 12:30:00");
-        Add("A", 0, 0, "2026-11-15 13:00:00", 999, "2026-11-15 13:30:00");
-        Add("A", 1, 1, "2026-11-15 14:00:00", 888, "2026-11-15 14:30:00");
-        Add("A", 0, 1, "2026-11-14 23:59:59", 777, "2026-11-15 00:30:00");
-        Add("A", 0, 1, "2026-11-16 00:00:00", 666, "2026-11-16 00:30:00");
-        Add("B", 0, 1, "2026-11-15 05:00:00", 7, "2026-11-15 05:30:00");
-        Add("C", 0, 1, "2026-11-15 06:00:00", null, "2026-11-15 06:30:00");
-        Add(null, 0, 1, "2026-11-15 07:00:00", 5, "2026-11-15 07:30:00");
-        await SeedAsync(connection, rows.ToString(), ct);
-
-        await JobOutcomeDaily.BuildDayAsync(connection, ServerA, day, Now1, ct);
-
-        var expected = await ReadAsync(connection, @"
-SELECT job_id, count(run_duration_seconds), COALESCE(sum(run_duration_seconds), 0), max(run_datetime)::text
-FROM collect.job_history
-WHERE server_id = 9201 AND step_id = 0 AND run_status = 1 AND job_id IS NOT NULL AND run_datetime::date = DATE '2026-11-15'
-GROUP BY job_id ORDER BY job_id", ct);
-        var actual = await ReadAsync(connection, @"
-SELECT job_id, success_count, success_duration_sum, last_success_run_local::text
-FROM collect.job_outcome_daily WHERE server_id = 9201 AND run_day = DATE '2026-11-15' ORDER BY job_id", ct);
-        Assert.Equal(3, expected.Count);
-        Assert.Equal(expected, actual);
-        Assert.Contains("A|3|61|2026-11-15 23:59:59", actual);
-        Assert.Contains("C|0|0|2026-11-15 06:00:00", actual);
-
-        /* sum / count is AVG(run_duration_seconds), NULL durations left out, for the job with some and the one with none. */
-        var avgRollup = await ReadAsync(connection, "SELECT job_id, (success_duration_sum::numeric / NULLIF(success_count, 0))::text FROM collect.job_outcome_daily ORDER BY job_id", ct);
-        var avgRaw = await ReadAsync(connection, @"
-SELECT job_id, AVG(run_duration_seconds)::text FROM collect.job_history
-WHERE step_id = 0 AND run_status = 1 AND job_id IS NOT NULL AND run_datetime::date = DATE '2026-11-15' GROUP BY job_id ORDER BY job_id", ct);
-        Assert.Equal(avgRaw, avgRollup);
-
-        /* The built row: source_through is the newest collection_time the build read, at UTC. */
-        var built = await ReadAsync(connection, "SELECT server_id, run_day::text, (source_through AT TIME ZONE 'UTC')::text, (built_at AT TIME ZONE 'UTC')::text FROM collect.job_outcome_daily_built", ct);
-        Assert.Equal(["9201|2026-11-15|2026-11-16 00:30:00|2026-11-20 12:00:00"], built);
-
-        /* A day with no success row is built and empty, and has no source. */
-        await JobOutcomeDaily.BuildDayAsync(connection, ServerA, new DateOnly(2026, 11, 3), Now1, ct);
-        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily WHERE run_day = DATE '2026-11-03'", ct));
-        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_built WHERE run_day = DATE '2026-11-03' AND source_through IS NULL", ct));
-
-        /* A rebuild replaces the day's rows: it does not add to them. */
-        await JobOutcomeDaily.BuildDayAsync(connection, ServerA, day, Now1.AddHours(1), ct);
-        Assert.Equal(expected, await ReadAsync(connection, @"
-SELECT job_id, success_count, success_duration_sum, last_success_run_local::text
-FROM collect.job_outcome_daily WHERE server_id = 9201 AND run_day = DATE '2026-11-15' ORDER BY job_id", ct));
     }
 
     // ── The ticks ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The first ticks after the upgrade fill the days the store holds, newest first, and only days that have ended on the server's own clock
-    /// and settled for <see cref="JobOutcomeDaily.BuildAfter"/>. A server on a clock ahead of UTC has its day built when its own midnight has
-    /// passed. A server that is not enabled, and a server with no job_history, are never planned. A tick with nothing left to do does nothing.
+    /// The first ticks work forward from the oldest collection_time a day at a time, and the invariant holds after each step: the rollup equals a
+    /// GROUP BY over the qualifying rows collected at or before the watermark, the days table holds each day's newest collection_time, and no row
+    /// above the watermark is counted. Rows of another status, another step, no job id and no run time are not in it, and the average the rollup
+    /// makes equals AVG over the same rows, NULL durations left out.
     /// </summary>
     [Fact]
-    public async Task TheFirstTicksBackfillTheExistingDays_NewestFirst_OnEachServersOwnClock()
+    public async Task TheStepsBackfillOldestFirst_AndTheInvariantHoldsAfterEachOne()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
@@ -179,57 +102,70 @@ FROM collect.job_outcome_daily WHERE server_id = 9201 AND run_day = DATE '2026-1
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await SeedServersAsync(connection, ct);
-        await SetRetentionAsync(connection, 10, ct);
 
         var rows = new StringBuilder();
         long id = 1;
-        foreach (var server in new[] { ServerA, ServerOffset, ServerDisabled })
-        {
-            for (var d = 12; d <= 20; d++)
-            {
-                var run = $"2026-11-{d:00} 09:00:00";
-                rows.Append(JobRow(id++, server, "A", 0, 1, run, 10 + d, $"2026-11-{d:00} 09:30:00"));
-            }
-        }
+        void Add(string? job, int step, int status, string run, int? duration, string collected) =>
+            rows.Append(JobRow(id++, ServerA, job, step, status, run, duration, collected));
 
+        Add("A", 0, 1, "2026-11-10 08:00:00", 10, "2026-11-10 08:30:00");
+        Add("A", 0, 1, "2026-11-10 12:00:00", null, "2026-11-10 12:30:00");
+        Add("A", 0, 1, "2026-11-10 23:59:59", 31, "2026-11-11 00:30:00");
+        Add("A", 0, 0, "2026-11-10 13:00:00", 999, "2026-11-10 13:30:00");
+        Add("A", 1, 1, "2026-11-10 14:00:00", 888, "2026-11-10 14:30:00");
+        Add(null, 0, 1, "2026-11-10 07:00:00", 5, "2026-11-10 07:30:00");
+        Add("B", 0, 1, "2026-11-11 05:00:00", 7, "2026-11-11 05:30:00");
+        Add("C", 0, 1, "2026-11-11 06:00:00", null, "2026-11-11 06:30:00");
+        /* A late row: an old run day that reached the store days later. */
+        Add("A", 0, 1, "2026-11-10 09:00:00", 20, "2026-11-14 10:00:00");
+        Add("A", 0, 1, "2026-11-14 09:00:00", 40, "2026-11-14 09:30:00");
+        /* A row with no run time. */
+        Add("A", 0, 1, "2026-11-12 09:00:00", 99, "2026-11-12 09:30:00");
         await SeedAsync(connection, rows.ToString(), ct);
+        await ExecuteAsync(connection, "UPDATE collect.job_history SET run_datetime = NULL WHERE job_history_id = 900000011", ct);
 
-        /* 21:00 UTC on the 20th is 02:30 on the 21st for the server at +05:30, so the 20th is closed and settled there and not on the other. */
-        var now = new DateTime(2026, 11, 20, 21, 0, 0);
+        /* The first step starts at the oldest row and covers one day of collection_time. */
+        var now = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+        var plan = await JobOutcomeDaily.PlanStepsAsync(connection, now, 10, ct);
+        var first = plan.Single(p => p.ServerId == ServerA);
+        Assert.Equal(new DateTime(2026, 11, 10, 7, 30, 0, DateTimeKind.Utc).AddTicks(-10), first.WOld);
+        Assert.Equal(first.WOld.AddDays(1), first.WNew);
+        await JobOutcomeDaily.StepAsync(connection, first.ServerId, first.WOld, first.WNew, ct);
+        await AssertInvariantAsync(connection, ct);
+        Assert.Equal(["A|2026-11-10|2|41"], await ReadAsync(connection, "SELECT job_id, run_day::text, success_count, success_duration_sum FROM collect.job_outcome_daily WHERE job_id = 'A'", ct));
+        Assert.Equal(["9201|2026-11-10|2026-11-11 00:30:00"], await ReadAsync(connection, "SELECT server_id, run_day::text, (max_collection_time AT TIME ZONE 'UTC')::text FROM collect.job_outcome_daily_days WHERE run_day = DATE '2026-11-10'", ct));
+
+        /* Further steps go forward only, up to the margin behind now. */
+        var before = await ScalarAsync<DateTime>(connection, "SELECT collected_through FROM collect.job_outcome_daily_watermark WHERE server_id = 9201", ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var plan = await PlanAsync(connection, now, ct);
-        Assert.Equal((ServerOffset, new DateOnly(2026, 11, 20)), plan[0]);
-        Assert.Equal((ServerA, new DateOnly(2026, 11, 19)), plan[1]);
-        Assert.DoesNotContain(plan, p => p.ServerId == ServerDisabled);
-        Assert.DoesNotContain(plan, p => p.ServerId == ServerA && p.Day == new DateOnly(2026, 11, 20));
-        Assert.Equal(plan.OrderByDescending(p => p.Day).ThenBy(p => p.ServerId).ToList(), plan);
+        var tick = await JobOutcomeDaily.RunTickAsync(dataSource, now, NullLogger.Instance, ct);
+        Assert.Equal(0, tick.Failed);
+        var after = await ScalarAsync<DateTime>(connection, "SELECT collected_through FROM collect.job_outcome_daily_watermark WHERE server_id = 9201", ct);
+        Assert.True(after > before);
+        Assert.Equal(now.AddHours(-1), DateTime.SpecifyKind(after, DateTimeKind.Utc));
+        await AssertInvariantAsync(connection, ct);
 
-        var first = await JobOutcomeDaily.RunTickAsync(dataSource, now, NullLogger.Instance, ct);
-        Assert.Equal(0, first.Failed);
-        Assert.Equal(plan.Count, first.Built);
+        /* Every qualifying row is counted once, the late one on its own old day. */
+        Assert.Equal(["A|2026-11-10|3|61|2026-11-10 23:59:59", "A|2026-11-14|1|40|2026-11-14 09:00:00", "B|2026-11-11|1|7|2026-11-11 05:00:00", "C|2026-11-11|0|0|2026-11-11 06:00:00"],
+            await ReadAsync(connection, "SELECT job_id, run_day::text, success_count, success_duration_sum, last_success_run_local::text FROM collect.job_outcome_daily ORDER BY job_id, run_day", ct));
+        Assert.Equal("2026-11-14 10:00:00", await ScalarAsync<string>(connection, "SELECT (max_collection_time AT TIME ZONE 'UTC')::text FROM collect.job_outcome_daily_days WHERE run_day = DATE '2026-11-10'", ct));
 
-        var built = await ReadAsync(connection, "SELECT server_id, run_day::text FROM collect.job_outcome_daily_built ORDER BY server_id, run_day", ct);
-        var expectedA = Enumerable.Range(10, 10).Select(d => $"{ServerA}|2026-11-{d:00}");
-        var expectedOffset = Enumerable.Range(10, 11).Select(d => $"{ServerOffset}|2026-11-{d:00}");
-        Assert.Equal(expectedA.Concat(expectedOffset).ToList(), built);
+        /* sum / count is AVG(run_duration_seconds) for a job with some NULL durations. */
+        Assert.Equal(
+            await ReadAsync(connection, "SELECT job_id, AVG(run_duration_seconds)::text FROM collect.job_history WHERE step_id = 0 AND run_status = 1 AND job_id = 'A' AND run_datetime::date = DATE '2026-11-10' GROUP BY job_id", ct),
+            await ReadAsync(connection, "SELECT job_id, (sum(success_duration_sum)::numeric / NULLIF(sum(success_count), 0))::text FROM collect.job_outcome_daily WHERE job_id = 'A' AND run_day = DATE '2026-11-10' GROUP BY job_id", ct));
 
-        /* Each built day with a run holds it, and the day the offset server's clock had just closed holds that day's run. */
-        Assert.Equal("9202|A|1|30", (await ReadAsync(connection, "SELECT server_id, job_id, success_count, success_duration_sum FROM collect.job_outcome_daily WHERE server_id = 9202 AND run_day = DATE '2026-11-20'", ct)).Single());
-        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily WHERE server_id = 9201 AND run_day = DATE '2026-11-20'", ct));
-
-        /* Everything due is built, and nothing is due again until a day closes. */
-        var second = await JobOutcomeDaily.RunTickAsync(dataSource, now, NullLogger.Instance, ct);
-        Assert.Equal(0, second.Built);
-        Assert.Equal(0, second.Failed);
-        Assert.Equal(0, second.Deferred);
+        /* A server with no job_history gets a watermark with nothing to add, and a disabled server gets nothing. */
+        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE server_id = 9204", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE server_id = 9203", ct));
     }
 
     /// <summary>
-    /// A rebuild a day later (the end of the day plus <see cref="JobOutcomeDaily.FinalBuildAfter"/>) picks up a row that reached the store after
-    /// the first build, once, and a day built after that instant is not built again.
+    /// A row collected inside the margin (the last hour) is counted only by a later tick, a late row (an old run day collected now) is added to its
+    /// own day and moves that day's newest collection time, and nothing is counted twice across ticks.
     /// </summary>
     [Fact]
-    public async Task ARebuildADayLater_PicksUpALateRow_Once()
+    public async Task ARowInsideTheMargin_IsCountedOnALaterTick_AndALateRowLandsOnItsOwnDay()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
@@ -239,38 +175,33 @@ FROM collect.job_outcome_daily WHERE server_id = 9201 AND run_day = DATE '2026-1
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await SeedServersAsync(connection, ct);
-        await SetRetentionAsync(connection, 3, ct);
-
         await SeedAsync(connection, JobRow(1, ServerA, "A", 0, 1, "2026-11-19 09:00:00", 10, "2026-11-19 09:30:00"), ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        await JobOutcomeDaily.RunTickAsync(dataSource, Now1, NullLogger.Instance, ct);
-        Assert.Equal("A|1|10", (await ReadAsync(connection, "SELECT job_id, success_count, success_duration_sum FROM collect.job_outcome_daily WHERE run_day = DATE '2026-11-19'", ct)).Single());
-        var firstThrough = await ScalarAsync<DateTime>(connection, "SELECT source_through AT TIME ZONE 'UTC' FROM collect.job_outcome_daily_built WHERE run_day = DATE '2026-11-19'", ct);
-        Assert.Equal(new DateTime(2026, 11, 19, 9, 30, 0), firstThrough);
+        var now1 = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+        await JobOutcomeDaily.RunTickAsync(dataSource, now1, NullLogger.Instance, ct);
+        Assert.Equal(["A|2026-11-19|1|10"], await ReadAsync(connection, "SELECT job_id, run_day::text, success_count, success_duration_sum FROM collect.job_outcome_daily", ct));
 
-        /* A row of the 19th that reached the store after the first build. Not due yet: the 19th ends at midnight and the second build is 26 hours later. */
-        await SeedAsync(connection, JobRow(2, ServerA, "A", 0, 1, "2026-11-19 22:00:00", 30, "2026-11-20 13:00:00"), ct);
-        var early = await JobOutcomeDaily.RunTickAsync(dataSource, Now1.AddHours(10), NullLogger.Instance, ct);
-        Assert.DoesNotContain(await PlanAsync(connection, Now1.AddHours(10), ct), p => p.Day == new DateOnly(2026, 11, 19));
-        Assert.Equal("A|1|10", (await ReadAsync(connection, "SELECT job_id, success_count, success_duration_sum FROM collect.job_outcome_daily WHERE run_day = DATE '2026-11-19'", ct)).Single());
-        Assert.Equal(0, early.Failed);
+        /* Collected at 11:30, inside the hour margin of the first tick, and a late row of the 2nd collected at 11:45. */
+        await SeedAsync(connection, JobRow(2, ServerA, "A", 0, 1, "2026-11-20 11:00:00", 30, "2026-11-20 11:30:00") + JobRow(3, ServerA, "A", 0, 1, "2026-11-02 11:00:00", 50, "2026-11-20 11:45:00"), ct);
+        await JobOutcomeDaily.RunTickAsync(dataSource, now1, NullLogger.Instance, ct);
+        Assert.Equal(["A|2026-11-19|1|10"], await ReadAsync(connection, "SELECT job_id, run_day::text, success_count, success_duration_sum FROM collect.job_outcome_daily", ct));
+        await AssertInvariantAsync(connection, ct);
 
-        /* 03:00 on the 21st is past the 19th's end plus 26 hours. */
-        var late = new DateTime(2026, 11, 21, 3, 0, 0);
-        Assert.Contains(await PlanAsync(connection, late, ct), p => p.Day == new DateOnly(2026, 11, 19));
-        await JobOutcomeDaily.RunTickAsync(dataSource, late, NullLogger.Instance, ct);
-        Assert.Equal("A|2|40", (await ReadAsync(connection, "SELECT job_id, success_count, success_duration_sum FROM collect.job_outcome_daily WHERE run_day = DATE '2026-11-19'", ct)).Single());
-        Assert.Equal(new DateTime(2026, 11, 20, 13, 0, 0), await ScalarAsync<DateTime>(connection, "SELECT source_through AT TIME ZONE 'UTC' FROM collect.job_outcome_daily_built WHERE run_day = DATE '2026-11-19'", ct));
-        Assert.DoesNotContain(await PlanAsync(connection, late, ct), p => p.Day == new DateOnly(2026, 11, 19));
+        var now2 = now1.AddHours(3);
+        await JobOutcomeDaily.RunTickAsync(dataSource, now2, NullLogger.Instance, ct);
+        await JobOutcomeDaily.RunTickAsync(dataSource, now2, NullLogger.Instance, ct);
+        Assert.Equal(["A|2026-11-02|1|50", "A|2026-11-19|1|10", "A|2026-11-20|1|30"], await ReadAsync(connection, "SELECT job_id, run_day::text, success_count, success_duration_sum FROM collect.job_outcome_daily ORDER BY run_day", ct));
+        Assert.Equal("2026-11-20 11:45:00", await ScalarAsync<string>(connection, "SELECT (max_collection_time AT TIME ZONE 'UTC')::text FROM collect.job_outcome_daily_days WHERE run_day = DATE '2026-11-02'", ct));
+        await AssertInvariantAsync(connection, ct);
     }
 
     /// <summary>
-    /// Retention deletes the days before job_history's own retention edge from both tables, with the rows of a server that is not enabled, and
-    /// keeps the rest. The edge follows the fleet retention override for job_history.
+    /// Retention deletes the days before job_history's own retention edge (the fleet override) from the rollup and the days table, and keeps the
+    /// rest and every watermark row.
     /// </summary>
     [Fact]
-    public async Task Retention_DeletesTheDaysPastJobHistorysHorizon_AndTheRowsOfADisabledServer()
+    public async Task Retention_DeletesTheDaysPastJobHistorysHorizon_AndKeepsTheWatermark()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
@@ -280,26 +211,23 @@ FROM collect.job_outcome_daily WHERE server_id = 9201 AND run_day = DATE '2026-1
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await SeedServersAsync(connection, ct);
-        await SetRetentionAsync(connection, 10, ct);
+        await ExecuteAsync(connection, "INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, 'job_history', 10)", ct);
 
         await ExecuteAsync(connection, @"
 INSERT INTO collect.job_outcome_daily (server_id, job_id, run_day, success_count, success_duration_sum, last_success_run_local) VALUES
     (9201, 'old', DATE '2026-11-09', 1, 1, '2026-11-09 01:00:00'),
     (9201, 'edge', DATE '2026-11-10', 1, 1, '2026-11-10 01:00:00'),
-    (9201, 'new', DATE '2026-11-18', 1, 1, '2026-11-18 01:00:00'),
-    (9203, 'off', DATE '2026-11-18', 1, 1, '2026-11-18 01:00:00');
-INSERT INTO collect.job_outcome_daily_built (server_id, run_day, built_at, source_through) VALUES
-    (9201, DATE '2026-11-09', now(), now()),
-    (9201, DATE '2026-11-10', now(), now()),
-    (9201, DATE '2026-11-18', now(), now()),
-    (9203, DATE '2026-11-18', now(), now())", ct);
+    (9201, 'new', DATE '2026-11-18', 1, 1, '2026-11-18 01:00:00');
+INSERT INTO collect.job_outcome_daily_days (server_id, run_day, max_collection_time) VALUES
+    (9201, DATE '2026-11-09', now()), (9201, DATE '2026-11-10', now()), (9201, DATE '2026-11-18', now());
+INSERT INTO collect.job_outcome_daily_watermark (server_id, collected_through) VALUES (9201, now())", ct);
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var result = await JobOutcomeDaily.RunTickAsync(dataSource, Now1, NullLogger.Instance, ct);
-        Assert.Equal(2, result.DaysRemoved);
-
-        Assert.Equal(["edge", "new"], (await ReadAsync(connection, "SELECT job_id FROM collect.job_outcome_daily ORDER BY job_id", ct)));
-        Assert.Equal(["9201|2026-11-10", "9201|2026-11-18"], (await ReadAsync(connection, "SELECT server_id, run_day::text FROM collect.job_outcome_daily_built ORDER BY run_day", ct)));
+        var result = await JobOutcomeDaily.RunTickAsync(dataSource, new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc), NullLogger.Instance, ct);
+        Assert.Equal(1, result.DaysRemoved);
+        Assert.Equal(["edge", "new"], await ReadAsync(connection, "SELECT job_id FROM collect.job_outcome_daily ORDER BY job_id", ct));
+        Assert.Equal(["2026-11-10", "2026-11-18"], await ReadAsync(connection, "SELECT run_day::text FROM collect.job_outcome_daily_days ORDER BY run_day", ct));
+        Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_outcome_daily_watermark WHERE server_id = 9201", ct));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -323,14 +251,24 @@ INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, s
 INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes) VALUES
     (1, now() AT TIME ZONE 'UTC', 9202, 'jod-9202', 330)", ct);
 
-    private static async Task SetRetentionAsync(NpgsqlConnection connection, int days, CancellationToken ct) =>
-        await ExecuteAsync(connection, $"INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, 'job_history', {days})", ct);
-
-    private static async Task<List<(int ServerId, DateOnly Day)>> PlanAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
+    /// <summary>The invariant: per server with a watermark, the rollup equals a GROUP BY over the qualifying rows collected at or before it.</summary>
+    private static async Task AssertInvariantAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var retention = await ScalarAsync<int>(connection, JobOutcomeDaily.RetentionDaysSql, ct);
-        var plan = await JobOutcomeDaily.PlanBuildsAsync(connection, now, retention, ct);
-        return plan.Select(b => (b.ServerId, b.Day)).ToList();
+        var expected = await ReadAsync(connection, @"
+SELECT jh.server_id, jh.job_id, jh.run_datetime::date::text, count(jh.run_duration_seconds), COALESCE(sum(jh.run_duration_seconds), 0), max(jh.run_datetime)::text
+FROM collect.job_history AS jh
+JOIN collect.job_outcome_daily_watermark AS w ON w.server_id = jh.server_id AND jh.collection_time <= (w.collected_through AT TIME ZONE 'UTC')
+WHERE jh.step_id = 0 AND jh.run_status = 1 AND jh.job_id IS NOT NULL AND jh.run_datetime IS NOT NULL
+GROUP BY jh.server_id, jh.job_id, jh.run_datetime::date ORDER BY 1, 2, 3", ct);
+        var actual = await ReadAsync(connection, "SELECT server_id, job_id, run_day::text, success_count, success_duration_sum, last_success_run_local::text FROM collect.job_outcome_daily ORDER BY 1, 2, 3", ct);
+        Assert.Equal(expected, actual);
+        var days = await ReadAsync(connection, @"
+SELECT jh.server_id, jh.run_datetime::date::text, (max(jh.collection_time))::text
+FROM collect.job_history AS jh
+JOIN collect.job_outcome_daily_watermark AS w ON w.server_id = jh.server_id AND jh.collection_time <= (w.collected_through AT TIME ZONE 'UTC')
+WHERE jh.step_id = 0 AND jh.run_status = 1 AND jh.job_id IS NOT NULL AND jh.run_datetime IS NOT NULL
+GROUP BY jh.server_id, jh.run_datetime::date ORDER BY 1, 2", ct);
+        Assert.Equal(days, await ReadAsync(connection, "SELECT server_id, run_day::text, (max_collection_time AT TIME ZONE 'UTC')::text FROM collect.job_outcome_daily_days ORDER BY 1, 2", ct));
     }
 
     private static async Task<List<string>> ReadAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
