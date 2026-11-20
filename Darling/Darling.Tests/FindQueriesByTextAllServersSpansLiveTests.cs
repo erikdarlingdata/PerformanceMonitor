@@ -142,6 +142,15 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.Contains($"after the newest {searched} of the {days}-day raw tier had been searched, newest first", message, StringComparison.Ordinal);
         Assert.Contains("the matches in the part searched and not a complete answer", message, StringComparison.Ordinal);
         Assert.Equal(1, statements);
+
+        /* #9150: the reply names the servers and the part of the window it read: the newest span, ending now. */
+        var searchedWindow = planCache.GetProperty("searched");
+        Assert.Equal("every enabled server", searchedWindow.GetProperty("servers").GetString());
+        Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
+        var from = DateTime.Parse(searchedWindow.GetProperty("searched_from").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var to = DateTime.Parse(searchedWindow.GetProperty("searched_to").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        Assert.InRange((to - from).TotalSeconds, (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds - 1, (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds + 1);
+        Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
     }
 
     [Fact]
@@ -221,36 +230,169 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.InRange(statements, 2, DarlingMcpFindQueriesByTextTools.RawTierSpanCount - 1);
     }
 
-    /// <summary>A pattern more texts contain than the probe takes joins the window in one statement; a budget gone before it runs is stopped with
-    /// the message that names no span, because the join is not searched in spans.</summary>
+    /// <summary>#9150: a page that fills in the newest span stops the search there (one statement), and the reply says the page is the whole-window
+    /// answer: <c>complete</c> is true and <c>searched_from</c> is the window's start, because spans run newest first and the older ones could not
+    /// change a full page. <c>truncated</c> says more matches exist. A count statement on span-b half an hour ago makes the newest span hold two rows.</summary>
     [Fact]
-    public async Task TheWindowJoin_IsOneStatement_AndItsStoppedMessageNamesNoSpan()
+    public async Task APageThatFillsInTheNewestSpan_IsTheWholeWindowAnswer_AndIsTruncated()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
+        var (scratch, _) = await OpenScratchAsync(ct);
+        await using var _s = scratch;
         await using (var c = new NpgsqlConnection(scratch.ConnectionString))
         {
             await c.OpenAsync(ct);
-            await DarlingMcpTestData.ExecAsync(c, ct, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
             await DarlingMcpTestData.ExecAsync(c, ct,
-                "CREATE INDEX IF NOT EXISTS " + FindQueriesByTextIndexScopeLiveTests.IndexShortName + " ON collect.query_text_dim USING gin (query_text gin_trgm_ops)");
+                @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
+                  VALUES ($1,$2,2,'span-b','Books',$3,sha256('count'::text::bytea))",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromMinutes(30), CountHash);
         }
 
         var statements = 0;
-        var ran = await PlanCacheAsync(scratch.ConnectionString, "dbo.Orders_", Counting(() => statements++), 20, ct);
-        Assert.Equal("join", ran.GetProperty("sample_read").GetString());
+        var planCache = await PlanCacheAsync(scratch.ConnectionString, "dbo.Ledger", Counting(() => statements++), 1, ct);
+
+        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.True(planCache.GetProperty("truncated").GetBoolean());
         Assert.Equal(1, statements);
+        var searchedWindow = planCache.GetProperty("searched");
+        Assert.True(searchedWindow.GetProperty("complete").GetBoolean());
+        Assert.Equal(searchedWindow.GetProperty("window_from").GetString(), searchedWindow.GetProperty("searched_from").GetString());
+        Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
+    }
+
+    private const string CommonHash = "0xC001";
+    private const string SecondCommonHash = "0xC002";
+    private const string NullDatabaseHash = "0xC003";
+
+    /// <summary>A pattern more texts contain than the probe takes (1,100 filler texts name dbo.Common), so the search joins the window in spans. Server
+    /// span-a ran the first statement an hour ago and two and a half days ago, and the third statement, with no database, an hour ago and three days
+    /// ago; span-b ran the first statement, with the same query_hash and database, two and a half days ago; span-a ran the second statement three and
+    /// a half days ago; a statement that does not name dbo.Common ran an hour ago. Only the first and third span-a statements sit in the newest span.</summary>
+    private static async Task<(ScratchPostgres Scratch, DateTime NewestSample)> OpenCommonScratchAsync(CancellationToken ct)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await DarlingMcpTestData.RegisterServerAsync(c, 1, "span-a", ct);
+        await DarlingMcpTestData.RegisterServerAsync(c, 2, "span-b", ct);
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+              SELECT sha256(('filler' || i)::text::bytea), 'SELECT ' || i || ' FROM dbo.Common', timezone('UTC', now())
+              FROM generate_series(1, 1100) AS i");
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+              VALUES (sha256('first'::text::bytea), 'SELECT * FROM dbo.Common WHERE Id = @p', timezone('UTC', now())),
+                     (sha256('second'::text::bytea), 'SELECT COUNT(*) FROM dbo.Common', timezone('UTC', now())),
+                     (sha256('third'::text::bytea), 'UPDATE dbo.Common SET X = 1', timezone('UTC', now())),
+                     (sha256('other'::text::bytea), 'SELECT 1 FROM dbo.Other', timezone('UTC', now()))");
+
+        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        async Task Stat(int server, string name, string? database, string hash, string text, TimeSpan age) =>
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
+                  VALUES ($1,$2,$3,$4,$5,$6,sha256($7::text::bytea))",
+                CollectionIdGenerator.Next(), now - age, server, name, (object?)database ?? DBNull.Value, hash, text);
+
+        await Stat(1, "span-a", "Books", CommonHash, "first", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", "Books", CommonHash, "first", TimeSpan.FromDays(2.5));
+        await Stat(2, "span-b", "Books", CommonHash, "first", TimeSpan.FromDays(2.5));
+        await Stat(1, "span-a", "Books", SecondCommonHash, "second", TimeSpan.FromDays(3.5));
+        await Stat(1, "span-a", null, NullDatabaseHash, "third", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", null, NullDatabaseHash, "third", TimeSpan.FromDays(3));
+        await Stat(1, "span-a", "Books", OtherHash, "other", TimeSpan.FromHours(1));
+
+        await DarlingMcpTestData.ExecAsync(c, ct, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            "CREATE INDEX IF NOT EXISTS " + FindQueriesByTextIndexScopeLiveTests.IndexShortName + " ON collect.query_text_dim USING gin (query_text gin_trgm_ops)");
+        return (scratch, now - TimeSpan.FromHours(1));
+    }
+
+    /// <summary>#9150: a pattern more texts contain than the probe takes is joined to the window in spans, newest first. An uncut search runs every
+    /// span and lists what the whole-window join lists, in its order: each server, query_hash and database once, at its newest sighting, a database
+    /// that is NULL included (a span does not list it again), and the same query_hash on the other server as its own row.</summary>
+    [Fact]
+    public async Task ACommonPattern_JoinsTheWindowInSpans_AndListsWhatTheWholeWindowJoinLists()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, newestSample) = await OpenCommonScratchAsync(ct);
+        await using var _ = scratch;
+
+        var statements = 0;
+        var planCache = await PlanCacheAsync(scratch.ConnectionString, "dbo.Common", Counting(() => statements++), 20, ct);
+
+        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
+        Assert.Equal(JsonValueKind.Null, planCache.GetProperty("matched_texts").ValueKind);
+        Assert.Equal(DarlingMcpFindQueriesByTextTools.RawTierSpanCount, statements);
+        string[] expected =
+        [
+            "span-a@" + CommonHash + "@Books", "span-a@" + NullDatabaseHash + "@",
+            "span-b@" + CommonHash + "@Books", "span-a@" + SecondCommonHash + "@Books",
+        ];
+        Assert.Equal(expected, Keys(planCache));
+        Assert.Equal(await JoinKeysAsync(scratch.ConnectionString, "dbo.Common", 20, ct), Keys(planCache));
+        Assert.Equal(Stamp(newestSample), planCache.GetProperty("rows")[0].GetProperty("last_collected_at").GetString());
+        Assert.True(planCache.GetProperty("searched").GetProperty("complete").GetBoolean());
+    }
+
+    /// <summary>#9150: a budget that runs out after the newest span of the join keeps that span's rows, and <c>searched</c> names that span. Before this
+    /// the join was one statement, and a cut in it returned no rows and said none of the window had been read.</summary>
+    [Fact]
+    public async Task ACommonPatternWhoseJoinIsCutAfterTheNewestSpan_KeepsThatSpansRows_AndSaysHowMuchWasSearched()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, newestSample) = await OpenCommonScratchAsync(ct);
+        await using var _ = scratch;
+
+        var statements = 0;
+        var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds)
+        {
+            ElapsedClock = () => statements >= 1 ? TimeSpan.FromMilliseconds(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds + 1) : TimeSpan.Zero,
+            BeforeStatement = (_, _, _) => { statements++; return Task.CompletedTask; },
+        };
+
+        var planCache = await PlanCacheAsync(scratch.ConnectionString, "dbo.Common", budget, 20, ct);
+
+        Assert.Equal("stopped", planCache.GetProperty("status").GetString());
+        Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
+        Assert.Equal(["span-a@" + CommonHash + "@Books", "span-a@" + NullDatabaseHash + "@"], Keys(planCache));
+        Assert.Equal(Stamp(newestSample), planCache.GetProperty("rows")[0].GetProperty("last_collected_at").GetString());
+        Assert.Equal(1, statements);
+
+        var searchedWindow = planCache.GetProperty("searched");
+        Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
+        var from = DateTime.Parse(searchedWindow.GetProperty("searched_from").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var to = DateTime.Parse(searchedWindow.GetProperty("searched_to").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var span = (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds;
+        Assert.InRange((to - from).TotalSeconds, span - 1, span + 1);
+        Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
+    }
+
+    /// <summary>A budget gone before the join's first span is stopped, and the reply names no part of the window as searched.</summary>
+    [Fact]
+    public async Task ACommonPatternWhoseBudgetIsGoneBeforeTheFirstSpan_IsStopped_AndSaysNothingWasSearched()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, _) = await OpenCommonScratchAsync(ct);
+        await using var _s = scratch;
 
         var spent = new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds)
         {
             ElapsedClock = () => TimeSpan.FromMilliseconds(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds + 1),
         };
-        var stopped = await PlanCacheAsync(scratch.ConnectionString, "dbo.Orders_", spent, 20, ct);
+        var stopped = await PlanCacheAsync(scratch.ConnectionString, "dbo.Common", spent, 20, ct);
+
         Assert.Equal("stopped", stopped.GetProperty("status").GetString());
         Assert.Equal("join", stopped.GetProperty("sample_read").GetString());
-        var message = stopped.GetProperty("message").GetString()!;
-        Assert.Contains("before the search finished", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("span", message, StringComparison.Ordinal);
+        Assert.Equal(0, stopped.GetProperty("returned").GetInt32());
+        var searchedWindow = stopped.GetProperty("searched");
+        Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, searchedWindow.GetProperty("searched_from").ValueKind);
+        Assert.Equal(JsonValueKind.Null, searchedWindow.GetProperty("searched_to").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, searchedWindow.GetProperty("window_from").ValueKind);
+        Assert.True(searchedWindow.GetProperty("server_count").GetInt32() > 0);
     }
 
     /// <summary>The window join run directly with the tool's own parameters, its rows in its order as <c>server@query_hash@database</c>, the row
@@ -282,7 +424,7 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         {
             while (await reader.ReadAsync(ct))
             {
-                rows.Add(names[reader.GetInt32(0)] + "@" + reader.GetString(1) + "@" + reader.GetString(2));
+                rows.Add(names[reader.GetInt32(0)] + "@" + reader.GetString(1) + "@" + (reader.IsDBNull(2) ? string.Empty : reader.GetString(2)));
             }
         }
 
