@@ -99,12 +99,15 @@ internal static class DarlingObjectUsageReader
     /// The names Query Store statements referenced over the window that can be objects of THIS database (#8784 part 2): names statements run
     /// in it wrote with no database part (or its own), and names statements run in any other database of the server wrote with its name as
     /// the database part, so a view read only from another database counts. The database part is compared ignoring case, as SQL Server
-    /// compares database names on a default collation. $1 server_id, $2 database_name, $3 the first day.
+    /// compares database names on a default collation: the summary stores it folded by <c>ObjectReferenceAggregator.FoldName</c>, and $4 is
+    /// the asked name folded the same way, so the read and the build fold in one place (#8784 review). The schema and name come back as
+    /// first seen where the build kept that spelling, and folded otherwise. $1 server_id, $2 database_name, $3 the first day, $4 the database
+    /// name folded.
     /// </summary>
     internal static readonly string ReferencesSql = $"""
         SELECT
-            r.referenced_schema,
-            r.referenced_name,
+            COALESCE(min(r.referenced_schema_as_seen), r.referenced_schema),
+            COALESCE(min(r.referenced_name_as_seen), r.referenced_name),
             r.is_function,
             sum(r.execution_count),
             max(r.last_execution_time),
@@ -113,8 +116,8 @@ internal static class DarlingObjectUsageReader
         WHERE r.server_id = $1
         AND   r.day >= $3
         AND   (
-                  (r.database_name = $2 AND (r.referenced_database = '' OR lower(r.referenced_database) = lower($2)))
-               OR (r.database_name <> $2 AND lower(r.referenced_database) = lower($2))
+                  (r.database_name = $2 AND (r.referenced_database = '' OR r.referenced_database = $4))
+               OR (r.database_name <> $2 AND r.referenced_database = $4)
               )
         GROUP BY
             r.referenced_schema,
@@ -171,8 +174,42 @@ internal static class DarlingObjectUsageReader
     /// (#8784 review): a reporting database's <c>A.dbo.vReport</c> reading <c>B.dbo.vCustomer</c> is read for B here, so <c>vCustomer</c> is
     /// not called unused when only <c>vReport</c> is ever queried. $1 server id, $2 database name. The database part is matched ignoring case,
     /// as SQL Server does on a case-insensitive server; a linked-server row is never the same server's database.
+    ///
+    /// <para><b>Only each database's newest capture is read</b> (#8784 review). A <c>max(collection_time) ... GROUP BY database_name</c>
+    /// reads every row the server has kept over the 30 days, since PostgreSQL has no skip scan: about 13.5 million rows a call for 150
+    /// databases of 3,000 rows each. Instead the database names are found by a recursive skip scan over
+    /// <c>idx_object_dependencies_database</c> <c>(server_id, database_name, collection_time)</c>, one index seek per name, then each
+    /// database's newest <c>collection_time</c> is one more seek (a <c>LATERAL</c> top-1 on the same index), and only those captures' rows
+    /// are read.</para>
     /// </summary>
     internal const string InboundDependenciesSql = """
+        WITH RECURSIVE
+            databases AS
+        (
+            (
+                SELECT
+                    l.database_name
+                FROM collect.object_dependencies AS l
+                WHERE l.server_id = $1
+                ORDER BY
+                    l.database_name
+                LIMIT 1
+            )
+            UNION ALL
+            SELECT
+                (
+                    SELECT
+                        l.database_name
+                    FROM collect.object_dependencies AS l
+                    WHERE l.server_id = $1
+                    AND   l.database_name > databases.database_name
+                    ORDER BY
+                        l.database_name
+                    LIMIT 1
+                )
+            FROM databases
+            WHERE databases.database_name IS NOT NULL
+        )
         SELECT
             d.database_name,
             d.referencing_schema,
@@ -185,23 +222,34 @@ internal static class DarlingObjectUsageReader
             COALESCE(d.is_bound, false),
             COALESCE(d.is_caller_dependent, false),
             COALESCE(d.is_ambiguous, false)
-        FROM collect.object_dependencies AS d
-        JOIN
+        FROM databases
+        CROSS JOIN LATERAL
         (
             SELECT
-                l.database_name,
-                max(l.collection_time) AS collection_time
+                l.collection_time
             FROM collect.object_dependencies AS l
             WHERE l.server_id = $1
-            AND   l.database_name <> $2
-            GROUP BY
-                l.database_name
+            AND   l.database_name = databases.database_name
+            ORDER BY
+                l.collection_time DESC
+            LIMIT 1
         ) AS newest
-          ON  newest.database_name = d.database_name
-          AND newest.collection_time = d.collection_time
-        WHERE d.server_id = $1
-        AND   lower(d.referenced_database) = lower($2)
-        AND   COALESCE(d.referenced_server, '') = ''
+        CROSS JOIN LATERAL
+        (
+            SELECT
+                c.*
+            FROM collect.object_dependencies AS c
+            WHERE c.server_id = $1
+            AND   c.database_name = databases.database_name
+            AND   c.collection_time = newest.collection_time
+            AND   lower(c.referenced_database) = lower($2)
+            AND   COALESCE(c.referenced_server, '') = ''
+            /* A fence: without it the planner pulls this subquery up and, the referenced_database filter looking selective, reads the
+               whole table in one sequential scan instead of each newest capture through the index. */
+            OFFSET 0
+        ) AS d
+        WHERE databases.database_name IS NOT NULL
+        AND   databases.database_name <> $2
         """;
 
     /// <summary>Reads the window and runs it through <see cref="ObjectUsageWindow"/>.</summary>
@@ -323,6 +371,7 @@ internal static class DarlingObjectUsageReader
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddText(command, databaseName);
             command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay });
+            DarlingMcpReadParameters.AddText(command, PerformanceMonitor.Analysis.ObjectReferences.ObjectReferenceAggregator.FoldName(databaseName));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

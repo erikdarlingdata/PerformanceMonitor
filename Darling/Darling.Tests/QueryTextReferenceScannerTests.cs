@@ -287,6 +287,30 @@ public sealed class QueryTextReferenceScannerTests
     }
 
     [Fact]
+    public void TheAggregator_MergesAndKeysNamesByOneFold_SoTwoRowsCanNeverShareAStoredKey()
+    {
+        /* #8784 review: merging by one case rule and keying the stored row by another (PostgreSQL's lower()) could land two rows on one key
+           and fail the upsert. The aggregator now merges on the fold it hands out as the key, and the build stores that key as it is, so
+           two rows always have two keys: "vİtem" (U+0130) and "vItem" fold apart and stay two rows with two keys, while "DBO.VITEM",
+           "dbo.vItem" and "SALES.dbo.vItem" run in Sales fold together into one. */
+        var aggregator = new ObjectReferenceAggregator();
+        aggregator.Add("Sales", "SELECT 1 FROM dbo.vİtem", 2, null);
+        aggregator.Add("Sales", "SELECT 1 FROM DBO.VITEM", 3, null);
+        aggregator.Add("Sales", "SELECT 1 FROM SALES.dbo.vItem", 4, null);
+
+        var rows = aggregator.References;
+        Assert.Equal(rows.Count, rows.Select(r => (r.DatabaseName, r.ReferencedDatabaseKey, r.SchemaKey, r.ObjectNameKey, r.IsFunction)).Distinct().Count());
+        Assert.All(rows, r => Assert.Equal(ObjectReferenceAggregator.FoldName(r.ObjectName), r.ObjectNameKey));
+
+        /* Whether U+0130 folds to "i" is the runtime's call (ICU keeps it); either way the merge follows the fold, never another rule. */
+        var dottedFoldsTogether = ObjectReferenceAggregator.FoldName("vİtem") == "vitem";
+        Assert.Equal(dottedFoldsTogether ? 1 : 2, rows.Count);
+        var plain = Assert.Single(rows, r => r.ObjectNameKey == "vitem");
+        Assert.Equal(dottedFoldsTogether ? 9 : 7, plain.Executions);
+        Assert.Equal(("", "dbo"), (plain.ReferencedDatabaseKey, plain.SchemaKey));
+    }
+
+    [Fact]
     public void TheScanCache_ParsesEachTextOnce_AndWhenFullDropsOnlyTheScansNotUsedForAGeneration()
     {
         var cache = new QueryTextScanCache(capacity: 2);

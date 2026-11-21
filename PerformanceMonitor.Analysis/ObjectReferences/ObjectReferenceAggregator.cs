@@ -33,7 +33,17 @@ public sealed record AggregatedReference(
     long Executions,
     DateTime? LastExecution,
     int Statements,
-    bool TextMatched);
+    bool TextMatched)
+{
+    /// <summary>The referenced database folded by <see cref="ObjectReferenceAggregator.FoldName"/>: the key the aggregator merged on.</summary>
+    public string ReferencedDatabaseKey => ObjectReferenceAggregator.FoldName(ReferencedDatabase);
+
+    /// <summary>The schema folded the same way.</summary>
+    public string SchemaKey => ObjectReferenceAggregator.FoldName(SchemaName);
+
+    /// <summary>The name folded the same way.</summary>
+    public string ObjectNameKey => ObjectReferenceAggregator.FoldName(ObjectName);
+}
 
 /// <summary>What was looked at in one statement database.</summary>
 /// <param name="DatabaseName">The database.</param>
@@ -138,14 +148,23 @@ public sealed class QueryTextScanCache
 /// schema, so it matches the name under any schema. With no names to search for (Lite has no object list), it is only counted.</para>
 ///
 /// <para>Names are compared ignoring case: within one statement database, <c>dbo.Orders</c> and <c>DBO.ORDERS</c> are added up as one name,
-/// spelled the first way seen.</para>
+/// spelled the first way seen. The comparison is <see cref="FoldName"/> on each part, the one fold Darling's summary also stores as its key
+/// (#8784 review), so two names the aggregator keeps apart can never fold to one stored key and make the upsert touch a row twice.</para>
 /// </summary>
 public sealed class ObjectReferenceAggregator
 {
     private readonly Func<string, IReadOnlyCollection<string>>? _fallbackNames;
     private readonly QueryTextScanCache? _cache;
-    private readonly Dictionary<(string, string, string, string, bool), Accumulator> _references = new(KeyComparer.Instance);
+    /* Keyed by the statement database exactly (Query Store's own name for it) and the parts as written folded by FoldName. */
+    private readonly Dictionary<(string Db, string RefDb, string Schema, string Name, bool IsFunction), Accumulator> _references = new();
     private readonly Dictionary<string, long[]> _databases = new(StringComparer.Ordinal);
+
+    /// <summary>The one case fold names are merged and keyed by: <see cref="string.ToLowerInvariant()"/>.</summary>
+    public static string FoldName(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        return name.ToLowerInvariant();
+    }
 
     /// <summary>Creates an aggregator.</summary>
     /// <param name="fallbackNames">For a statement database, the names to search an unparsed statement's text for, or null for none.</param>
@@ -251,7 +270,7 @@ public sealed class ObjectReferenceAggregator
         string databaseName, string referencedDatabase, string schema, string name, bool isFunction, long executions, DateTime? lastExecution,
         bool textMatched)
     {
-        var key = (databaseName, referencedDatabase, schema, name, isFunction);
+        var key = (databaseName, FoldName(referencedDatabase), FoldName(schema), FoldName(name), isFunction);
         if (!_references.TryGetValue(key, out var a))
         {
             a = new Accumulator(databaseName, referencedDatabase, schema, name, isFunction);
@@ -278,26 +297,5 @@ public sealed class ObjectReferenceAggregator
         public DateTime? LastExecution { get; set; }
         public int Statements { get; set; }
         public bool TextMatched { get; set; }
-    }
-
-    /// <summary>The statement database is compared exactly (it is Query Store's own name for it); the parts as written ignore case.</summary>
-    private sealed class KeyComparer : IEqualityComparer<(string Db, string RefDb, string Schema, string Name, bool IsFunction)>
-    {
-        public static KeyComparer Instance { get; } = new();
-
-        public bool Equals((string Db, string RefDb, string Schema, string Name, bool IsFunction) x, (string Db, string RefDb, string Schema, string Name, bool IsFunction) y) =>
-            x.IsFunction == y.IsFunction
-            && string.Equals(x.Db, y.Db, StringComparison.Ordinal)
-            && string.Equals(x.RefDb, y.RefDb, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(x.Schema, y.Schema, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(x.Name, y.Name, StringComparison.OrdinalIgnoreCase);
-
-        public int GetHashCode((string Db, string RefDb, string Schema, string Name, bool IsFunction) obj) =>
-            HashCode.Combine(
-                StringComparer.Ordinal.GetHashCode(obj.Db),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.RefDb),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Schema),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Name),
-                obj.IsFunction);
     }
 }

@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS collect.object_references_daily
     statement_count integer NOT NULL,
     last_execution_time timestamp,
     text_matched boolean NOT NULL,
+    referenced_schema_as_seen text,
+    referenced_name_as_seen text,
     CONSTRAINT pk_object_references_daily PRIMARY KEY (server_id, database_name, referenced_database, referenced_schema, referenced_name, is_function, day)
 );
 
@@ -181,29 +183,36 @@ GROUP BY
     q.query_sql_text;";
 
     /// <summary>
-    /// Upserts one (server, day)'s referenced names from parallel arrays. $1 server_id, $2 day, $3..$11 the columns. A name already stored
+    /// Upserts one (server, day)'s referenced names from parallel arrays. $1 server_id, $2 day, $3..$13 the columns. A name already stored
     /// keeps the larger count and the newer execution time (PostgreSQL's GREATEST skips a NULL), and text_matched stays true only while
     /// every build of the day found the name by the text search alone.
     ///
-    /// <para>The referenced names are stored lower-cased (#8784 review). One build merges <c>dbo.VSales</c> and <c>dbo.vSales</c> into one
-    /// row, but keeps whichever spelling it met first, and the key is case-sensitive: two builds of the same day meeting the spellings in a
-    /// different order would leave two rows, and the read would count that day twice. The read matches names ignoring case, so nothing is
-    /// lost.</para>
+    /// <para><b>The key is folded once, in the aggregator</b> (#8784 review). The referenced database, schema and name are stored as
+    /// <c>ObjectReferenceAggregator.FoldName</c> folded them, with no <c>lower()</c> here: one build merges <c>dbo.VSales</c> and
+    /// <c>dbo.vSales</c> into one row, and a case-sensitive key holding the spelling met first would let two builds of the same day leave two
+    /// rows and the read count that day twice. Folding in one place also means two names the aggregator keeps apart cannot fold to one key
+    /// here (PostgreSQL's <c>lower()</c> and .NET's case rules differ on a few letters, such as U+0130), which would make the upsert affect a
+    /// row twice and fail the build. The spelling as seen is kept beside the key ($12, $13) for display, the first build's spelling
+    /// winning, so a view guessed from the summary where no object list is kept is not reported under a lower-cased name that a
+    /// case-sensitive collation does not resolve.</para>
     /// </summary>
     internal const string UpsertReferencesSql = @"
 INSERT INTO collect.object_references_daily
     (server_id, database_name, referenced_database, referenced_schema, referenced_name, is_function, day, execution_count, statement_count,
-     last_execution_time, text_matched)
-SELECT $1, u.database_name, lower(u.referenced_database), lower(u.referenced_schema), lower(u.referenced_name), u.is_function, $2,
-       u.execution_count, u.statement_count, u.last_execution_time, u.text_matched
-FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::boolean[], $8::numeric[], $9::integer[], $10::timestamp[], $11::boolean[])
+     last_execution_time, text_matched, referenced_schema_as_seen, referenced_name_as_seen)
+SELECT $1, u.database_name, u.referenced_database, u.referenced_schema, u.referenced_name, u.is_function, $2,
+       u.execution_count, u.statement_count, u.last_execution_time, u.text_matched, u.schema_as_seen, u.name_as_seen
+FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::boolean[], $8::numeric[], $9::integer[], $10::timestamp[], $11::boolean[],
+            $12::text[], $13::text[])
      AS u (database_name, referenced_database, referenced_schema, referenced_name, is_function, execution_count, statement_count,
-           last_execution_time, text_matched)
+           last_execution_time, text_matched, schema_as_seen, name_as_seen)
 ON CONFLICT (server_id, database_name, referenced_database, referenced_schema, referenced_name, is_function, day) DO UPDATE
 SET execution_count = GREATEST(collect.object_references_daily.execution_count, EXCLUDED.execution_count),
     statement_count = GREATEST(collect.object_references_daily.statement_count, EXCLUDED.statement_count),
     last_execution_time = GREATEST(collect.object_references_daily.last_execution_time, EXCLUDED.last_execution_time),
-    text_matched = collect.object_references_daily.text_matched AND EXCLUDED.text_matched;";
+    text_matched = collect.object_references_daily.text_matched AND EXCLUDED.text_matched,
+    referenced_schema_as_seen = COALESCE(collect.object_references_daily.referenced_schema_as_seen, EXCLUDED.referenced_schema_as_seen),
+    referenced_name_as_seen = COALESCE(collect.object_references_daily.referenced_name_as_seen, EXCLUDED.referenced_name_as_seen);";
 
     /// <summary>Upserts one (server, day)'s database counts from parallel arrays. $1 server_id, $2 day, $3..$7 the columns. The larger
     /// statement count stays, with the counts that came with it.</summary>
@@ -384,14 +393,16 @@ SET source_built_at = EXCLUDED.source_built_at,
             upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = item.ServerId });
             upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = item.Day });
             AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.DatabaseName).ToArray());
-            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.ReferencedDatabase).ToArray());
-            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.SchemaName).ToArray());
-            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.ObjectName).ToArray());
+            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.ReferencedDatabaseKey).ToArray());
+            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.SchemaKey).ToArray());
+            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.ObjectNameKey).ToArray());
             AddArray(upsert, NpgsqlDbType.Boolean, references.Select(r => r.IsFunction).ToArray());
             AddArray(upsert, NpgsqlDbType.Numeric, references.Select(r => (decimal)r.Executions).ToArray());
             AddArray(upsert, NpgsqlDbType.Integer, references.Select(r => r.Statements).ToArray());
             AddArray(upsert, NpgsqlDbType.Timestamp, references.Select(r => r.LastExecution is { } t ? Unspecified(t) : (DateTime?)null).ToArray());
             AddArray(upsert, NpgsqlDbType.Boolean, references.Select(r => r.TextMatched).ToArray());
+            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.SchemaName).ToArray());
+            AddArray(upsert, NpgsqlDbType.Text, references.Select(r => r.ObjectName).ToArray());
             await upsert.ExecuteNonQueryAsync(cancellationToken);
         }
 

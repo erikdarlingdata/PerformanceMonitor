@@ -128,9 +128,12 @@ public sealed class ObjectReferencesLiveTests
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE lower(referenced_name) = 'vcte'", ct));
         Assert.Equal(5L, await ScalarAsync<long>(connection, RefCount("vLegacy"), ct));
         Assert.True(await ScalarAsync<bool>(connection, $"SELECT text_matched FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vlegacy'", ct));
-        /* The referenced names are stored lower-cased (#8784 review), so two builds that meet two spellings key one row. */
+        /* The key is folded once, by the aggregator (#8784 review), so two builds that meet two spellings key one row; the spelling as seen
+           is kept beside it for display. */
         Assert.Equal("sales", await ScalarAsync<string>(connection,
             $"SELECT referenced_database FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vcrossdb'", ct));
+        Assert.Equal("vOrders", await ScalarAsync<string>(connection,
+            $"SELECT referenced_name_as_seen FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vorders'", ct));
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE lower(referenced_name) = 'vgone'", ct));
 
         Assert.Equal(4L, await ScalarAsync<long>(connection,
@@ -152,6 +155,15 @@ public sealed class ObjectReferencesLiveTests
         Assert.Equal(42L, await ScalarAsync<long>(connection, RefCount("vOrders"), ct));
         Assert.Equal(1L, await ScalarAsync<long>(connection,
             $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE server_id = {ServerId} AND lower(referenced_name) = 'vorders'", ct));
+
+        /* The rebuild's spelling does not replace the first one, and the read hands back the spelling as seen, not the folded key: a view
+           guessed from the summary where no object list is kept keeps a name a case-sensitive collation resolves. */
+        Assert.Equal("vOrders", await ScalarAsync<string>(connection,
+            $"SELECT referenced_name_as_seen FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vorders'", ct));
+        var read = await DarlingObjectUsageReader.ReadReferencesAsync(
+            dataSource, ServerId, Db, now.AddDays(-90), ct);
+        Assert.Contains(read.References, r => r.ObjectName == "vOrders");
+        Assert.DoesNotContain(read.References, r => r.ObjectName == "vorders");
     }
 
     // ── The reads and the tool ──────────────────────────────────────────────────────────────
@@ -190,7 +202,7 @@ public sealed class ObjectReferencesLiveTests
         await ExecuteAsync(connection,
             $"INSERT INTO {ObjectReferencesDaily.Table} VALUES ({ServerId}, '{Db}', '', 'dbo', 'vOuter', false, DATE '{now.AddDays(-3):yyyy-MM-dd}', 12, 1, NULL, false)", ct);
         await ExecuteAsync(connection,
-            $"INSERT INTO {ObjectReferencesDaily.Table} VALUES ({ServerId}, 'Reports', 'SALES', 'dbo', 'vCrossDb', false, DATE '{now.AddDays(-3):yyyy-MM-dd}', 4, 1, NULL, false)", ct);
+            $"INSERT INTO {ObjectReferencesDaily.Table} VALUES ({ServerId}, 'Reports', 'sales', 'dbo', 'vCrossDb', false, DATE '{now.AddDays(-3):yyyy-MM-dd}', 4, 1, NULL, false)", ct);
         /* A name another database reads with no database part is that database's object, not this one's. */
         await ExecuteAsync(connection,
             $"INSERT INTO {ObjectReferencesDaily.Table} VALUES ({ServerId}, 'Reports', '', 'dbo', 'vOld', false, DATE '{now.AddDays(-3):yyyy-MM-dd}', 4, 1, NULL, false)", ct);
@@ -234,6 +246,77 @@ public sealed class ObjectReferencesLiveTests
         var views = root.GetProperty("coverage")[0].GetProperty("views");
         Assert.Equal(85, views.GetProperty("days_with_data").GetInt32());
         Assert.Equal(850, views.GetProperty("statements").GetInt64());
+    }
+
+    [Fact]
+    public async Task TheCrossDatabaseRead_ReadsOnlyEachDatabasesNewestCapture()
+    {
+        /* #8784 review: a max(collection_time) GROUP BY database_name read every kept row for the server on every call. 40 databases with 10
+           daily captures of 30 rows each is 12,000 rows kept and 1,200 in the newest captures; the read touches the newest captures, one seek
+           per database name and one per database's newest time, and nothing older. */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var newest = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-1));
+        await using (var plant = new NpgsqlCommand(
+            """
+            INSERT INTO collect.object_dependencies (collection_id, collection_time, server_id, server_name, database_name, referencing_schema,
+                referencing_name, referencing_type, referenced_server, referenced_database, referenced_schema, referenced_name, is_bound,
+                is_caller_dependent, is_ambiguous)
+            SELECT 9000000000000 + (db * 1000 + cap) * 100 + r, $1 - make_interval(days => cap), $2, $3, 'Db' || lpad(db::text, 2, '0'), 'dbo',
+                   'v' || r, 'V', NULL, CASE WHEN r = 1 THEN 'Sales' END, 'dbo', CASE WHEN r = 1 THEN 'vShared' || cap ELSE 't' || r END, true,
+                   false, false
+            FROM generate_series(1, 40) AS db, generate_series(0, 9) AS cap, generate_series(1, 30) AS r
+            """, connection))
+        {
+            plant.Parameters.AddWithValue(newest);
+            plant.Parameters.AddWithValue(ServerId);
+            plant.Parameters.AddWithValue(Server);
+            await plant.ExecuteNonQueryAsync(ct);
+        }
+
+        await ExecuteAsync(connection, "ANALYZE collect.object_dependencies", ct);
+
+        /* Only the newest capture's row of each database (vShared0) comes back, not the nine older ones. */
+        var inbound = await DarlingObjectUsageReader.ReadInboundDependenciesAsync(dataSource, ServerId, "Sales", ct);
+        Assert.Equal(40, inbound.Count);
+        Assert.All(inbound, e => Assert.Equal("vShared0", e.ReferencedName));
+
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingObjectUsageReader.InboundDependenciesSql, connection);
+        explain.Parameters.AddWithValue(ServerId);
+        explain.Parameters.AddWithValue("Sales");
+        using var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
+        var read = RowsReadFrom(plan.RootElement[0].GetProperty("Plan"), "object_dependencies");
+        Assert.True(read <= 1_200 + 40 * 4, $"the cross-database read touched {read:N0} rows of 12,000 kept; the newest captures hold 1,200");
+    }
+
+    /// <summary>The rows the plan's scans of <paramref name="relation"/> produced or filtered out, over all their loops.</summary>
+    private static double RowsReadFrom(JsonElement node, string relation)
+    {
+        double rows = 0;
+        if (node.TryGetProperty("Relation Name", out var name) && name.GetString() == relation)
+        {
+            var loops = node.TryGetProperty("Actual Loops", out var l) ? l.GetDouble() : 1;
+            var produced = node.TryGetProperty("Actual Rows", out var a) ? a.GetDouble() : 0;
+            var removed = node.TryGetProperty("Rows Removed by Filter", out var f) ? f.GetDouble() : 0;
+            rows += (produced + removed) * loops;
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                rows += RowsReadFrom(child, relation);
+            }
+        }
+
+        return rows;
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
