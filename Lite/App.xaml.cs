@@ -49,6 +49,9 @@ public partial class App : Application
     private const string ExitForUpgradeEventName = "PerformanceMonitorLite_ExitForUpgrade";
     private SingleInstanceCoordinator? _instanceCoordinator;
 
+    /// <summary>#9184: cancelled when the exit channel (<c>--stop</c> or an upgrade handoff) asks this instance to shut down.</summary>
+    private readonly CancellationTokenSource _stopRequested = new();
+
     /* Single-instance "surface the window" channel (#769, #1050). A second launch signals this named
        event and exits; the owning instance restores its window through WPF's own Show() path
        (MainWindow.RestoreFromTray). The old approach poked the HWND with raw Win32 ShowWindow, which
@@ -984,6 +987,9 @@ public partial class App : Application
         if (_startupPlan.Headless)
             AppLogger.Info("App", "Headless instance asked to shut down.");
 
+        /* #9184: a headless start that is waiting to retry its store open ends here, without another attempt. */
+        _stopRequested.Cancel();
+
         await ShutDownAsync(exitCode: 0);
     }
 
@@ -1023,10 +1029,14 @@ public partial class App : Application
         Shutdown(exitCode);
     }
 
+    /// <summary>#9184: ends a headless start's retry wait when the instance is asked to shut down.</summary>
+    internal CancellationToken StopRequested => _stopRequested.Token;
+
     /// <summary>
     /// Opens the upgrade-handoff "exit" channel once startup is past its risky init (DuckDB ready).
     /// Called by <see cref="MainWindow"/> after initialization so a newer build won't signal/kill us
     /// mid-init (#single-instance-upgrade-handoff). Safe to call more than once.
+    /// <para>#9184: a headless start also calls it before each wait to retry the store open, so <c>--stop</c> reaches it.</para>
     /// </summary>
     public void EnableUpgradeHandoff() => _instanceCoordinator?.EnableUpgradeHandoff();
 
