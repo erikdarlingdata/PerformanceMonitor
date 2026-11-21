@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -391,6 +392,77 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
         var mixedGroups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id' AND stats_min_value <> stats_max_value");
         Assert.True(groups >= 4 * servers, $"{groups} row groups: too few to tell sorted from unsorted");
         Assert.True(mixedGroups <= servers - 1, $"{mixedGroups} of {groups} row groups hold more than one server");
+    }
+
+    /* A day of the field shape, wide enough that a sort of it cannot fit in a few MB: 5 servers over 60,000 rows
+       with a 64-character payload, one file. Returns the file's path. */
+    private string MakeWideDay()
+    {
+        var source = P("wide_source_query_store_stats.parquet");
+        Exec("COPY (SELECT i::BIGINT AS id, TIMESTAMP '2026-09-28 00:00:00' + to_seconds((i % 86400)::BIGINT) AS collection_time, " +
+             "(1 + i % 5)::INTEGER AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range(60000) t(i)) " +
+             $"TO '{source}' ({ParquetCompaction.ArchiveCopyOptions})");
+        return source;
+    }
+
+    /// <summary>
+    /// #9255. The sorted merge cannot spill the parquet writer's own allocations, so a batch that outgrows its limit
+    /// fails with an out-of-memory error. The merge then reruns the batch unsorted at the default limit: no throw, a
+    /// warning, and every row in the output.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeThatRunsOutOfMemory_FallsBackToTheUnsortedMerge_WithEveryRow()
+    {
+        var source = MakeWideDay();
+        var output = P("fallback_out.parquet");
+        var log = new List<(LogLevel Level, string Message)>();
+
+        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], output, P("spill"),
+            memoryLimit: "2MB", logger: new CapturingLogger(log));
+
+        Assert.Equal(60_000, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
+        Assert.Equal(RowsPerServer(source), RowsPerServer(output));
+        var warning = Assert.Single(log, l => l.Level == LogLevel.Warning);
+        Assert.Contains("query_store_stats", warning.Message, StringComparison.Ordinal);
+        Assert.Contains("unsorted", warning.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #9255. Only memory and temp space send a sorted merge to the unsorted fallback. A COPY that fails for another
+    /// reason (here an output folder that does not exist) reaches the caller unchanged.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeThatFailsForAnotherReason_StillThrows_WithoutAFallbackWarning()
+    {
+        var source = MakeWideDay();
+        var log = new List<(LogLevel Level, string Message)>();
+
+        Assert.Throws<DuckDBException>(() => ParquetCompaction.MergeBatchToFile("query_store_stats", [source],
+            P("no_such_folder/out.parquet"), P("spill"), logger: new CapturingLogger(log)));
+
+        Assert.DoesNotContain(log, l => l.Level == LogLevel.Warning);
+    }
+
+    /// <summary>
+    /// #9255. A sorted merge runs at the lower limit unless the caller passes one, and the tables that keep no order
+    /// stay at the default.
+    /// </summary>
+    [Fact]
+    public void TheSortedMergeRunsAtTheLowerLimit_UnlessTheCallerPassesOne()
+    {
+        Assert.Equal(ParquetCompaction.SortedMergeMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_store_stats", null));
+        Assert.Equal("1GB", ParquetCompaction.EffectiveMemoryLimit("query_store_stats", "1GB"));
+        Assert.Equal(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_stats", null));
+    }
+
+    private sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
     }
 
     private static async Task<long> ViewScalarAsync(string dbPath, string sql)

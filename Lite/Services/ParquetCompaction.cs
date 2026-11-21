@@ -13,6 +13,8 @@
 
 using System.IO;
 using DuckDB.NET.Data;
+using DuckDB.NET.Native;
+using Microsoft.Extensions.Logging;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -23,6 +25,9 @@ public static class ParquetCompaction
        so tools/CompactionRepro can sweep them; production callers use the
        defaults below. */
     public const string DefaultMemoryLimit = "4GB";
+
+    /* Memory limit of a sorted merge's connection (ServerOrderedTables, #9255) when the caller passes none. */
+    public const string SortedMergeMemoryLimit = "512MB";
     public const int DefaultThreads = 2;
     public const int DefaultRowGroupSize = ArchiveRowGroupSize;
 
@@ -155,11 +160,26 @@ public static class ParquetCompaction
        Measured with a seeded store of the field shape (5 servers sharing the rows 33/22.5/17/17/10.5%, hourly files as
        the archiver writes them, one day merged by compaction's own settings: 1 thread, 4 GB; DuckDB 1.5.6): 4 of 141
        groups mixed servers, against all 121 groups without the sort, and a one-server read of 8 such days took 2.5 s
-       CPU against 5.3 s on the biggest server (1.2 s against 4.3 s on the smallest), with the same rows read. Costs:
-       the merge's peak working set was 480 MB against 144 MB for a 45 MB day, merge time about the same, and a group
-       now spans more time (90 against 12 minutes on average), so a narrow time window over ALL servers decodes a few
-       more groups (a 24 h window over all servers read 1.39 s CPU against 1.09 s; one hour, no change). The sort spills
-       under the memory limit: the same merge at a 250 MB limit finished, peak 330 MB.
+       CPU against 5.3 s on the biggest server (1.2 s against 4.3 s on the smallest), with the same rows read.
+
+       Memory cost, measured on a copy of a field store (query_store_stats day files at the 64 MiB batch budget, each
+       its own batch): at a 4 GB limit the sorted merge's peak process memory was over three times the unsorted
+       merge's. A 1 GB limit did not lower it. A 512MB limit (SortedMergeMemoryLimit) brings it to about twice the
+       unsorted peak, for about half a second more per merge. 512MB, not 250MB: 512MB was measured three times and 250MB
+       once, and the hard-ceiling risk below grows as the limit drops. Rows and reads came out the same. At 512MB the
+       sort spills a few hundred MB of temp files per merge, and the field day files all finished without the
+       fallback below.
+
+       Time spans: on field day files, which hold rows from many collection days, a sorted group spans LESS time than
+       an unsorted one (the average fell from about a day or more to a few hours), so a narrow time window decodes no
+       more groups. Only on a seeded single-day store did a group span more time (90 against 12 minutes on average, a
+       24 h window over all servers read 1.39 s CPU against 1.09 s, one hour no change).
+
+       The cap is a hard ceiling for the parquet writer (see MergeBatchToFile), and a sorted merge has no row-group byte
+       bound, so a day of very long statement texts can fill a 2,048-row group past 512MB. MergeBatchToFile then reruns
+       that batch unsorted at DefaultMemoryLimit with the byte bound, as the merge ran before #9255, and logs a warning.
+       DuckDB's out-of-memory error fires quickly, before anything is spilled. Field compressibility does not reach
+       this case, so the fallback guards against unusually long, repetitive statement texts or a DuckDB change.
 
        Only query_store_stats. Its merge reads no plan text (CompactionExcludeColumns drops query_plan_text), so the
        #5410 peak does not apply. query_snapshots and query_stats carry plan XML and stay unsorted. The monthly tables
@@ -236,20 +256,72 @@ public static class ParquetCompaction
          - memory_limit = 4GB: parquet COPY makes allocations that bypass the
            buffer manager and can't spill; the cap is a hard ceiling, not a
            spill trigger. Paired with the batch budget (DefaultBatchInputBytes)
-           so the working set stays under it.
+           so the working set stays under it. A sorted merge (ServerOrderedTables,
+           #9255) runs at SortedMergeMemoryLimit (512MB) instead: the sort holds
+           more of the batch than the streaming copy, and the lower limit makes
+           it spill, which cut its peak from over three times the unsorted
+           merge's to about twice (see ServerOrderedTables). If that merge hits
+           the ceiling anyway, the batch is rerun unsorted at 4GB.
          - threads = 2: fewer per-thread row-group buffers in flight.
          - preserve_insertion_order = false: lets DuckDB stream.
        The memoryLimit/threads/rowGroupSize parameters let tools/CompactionRepro
-       sweep them; production passes the defaults. */
+       sweep them (null memoryLimit means the table's default); production passes
+       the defaults. */
     public static void MergeBatchToFile(
         string table,
         List<string> sourcePaths,
         string outputPath,
         string spillDirSql,
-        string memoryLimit = DefaultMemoryLimit,
+        string? memoryLimit = null,
         int threads = DefaultThreads,
         int rowGroupSize = DefaultRowGroupSize,
-        long? rowGroupBytes = null)
+        long? rowGroupBytes = null,
+        ILogger? logger = null)
+    {
+        var orderBy = ServerOrderByFor(table);
+        try
+        {
+            RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
+                threads, rowGroupSize, rowGroupBytes, orderBy);
+        }
+        catch (DuckDBException ex) when (orderBy is not null && IsOutOfMemoryOrTempSpace(ex))
+        {
+            /* The cap is a hard ceiling for the parquet writer and a sorted merge has no row-group byte bound, so a
+               batch of very long rows can pass it (#9255). Without this the day's compaction would fail on every
+               pass and its hourly files would pile up. Rerun the batch as dev ran it before the sort: unsorted, at
+               the default limit, with the byte bound, on a fresh connection (a failed instance may hold memory). */
+            if (File.Exists(outputPath))
+            {
+                File.Delete(outputPath);
+            }
+
+            logger?.LogWarning(
+                "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
+                table, sourcePaths.Count, ex.Message);
+            RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
+                threads, rowGroupSize, rowGroupBytes, orderBy: null);
+        }
+    }
+
+    /* The memory limit a merge of the table runs at: the caller's when it passes one, else the sorted merge's lower
+       limit for a ServerOrderedTables table, else the default. */
+    internal static string EffectiveMemoryLimit(string table, string? memoryLimit) =>
+        memoryLimit ?? (ServerOrderByFor(table) is null ? DefaultMemoryLimit : SortedMergeMemoryLimit);
+
+    /* DuckDB's out-of-memory error type, or the temp folder filling up (the sorted merge spills under its limit). */
+    private static bool IsOutOfMemoryOrTempSpace(DuckDBException ex) =>
+        ex.ErrorType == DuckDBErrorType.OutOfMemory || QueryStoreSliceRepairService.IsOutOfTempSpace(ex);
+
+    private static void RunMerge(
+        string table,
+        List<string> sourcePaths,
+        string outputPath,
+        string spillDirSql,
+        string memoryLimit,
+        int threads,
+        int rowGroupSize,
+        long? rowGroupBytes,
+        string? orderBy)
     {
         using var con = new DuckDBConnection("DataSource=:memory:");
         con.Open();
@@ -267,7 +339,6 @@ public static class ParquetCompaction
            without it, #9255), so a sorted merge drops the byte bound whatever the caller passed rather than lean on
            a DuckDB version. */
         var selectClause = BuildSelectClause(table, sourcePaths);
-        var orderBy = ServerOrderByFor(table);
         var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
         using var cmd = con.CreateCommand();
         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)" +

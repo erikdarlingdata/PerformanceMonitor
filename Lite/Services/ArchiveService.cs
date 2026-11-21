@@ -1658,7 +1658,7 @@ COPY (
                     cancellationToken.ThrowIfCancellationRequested();
 
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
-                        threads: ParquetCompaction.ThreadsFor(table));
+                        threads: ParquetCompaction.ThreadsFor(table), logger: _logger);
                     AfterCompactionBatchMergedForTests?.Invoke(i);
                 }
 
