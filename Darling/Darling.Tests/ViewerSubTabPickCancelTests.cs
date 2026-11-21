@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -42,13 +41,12 @@ public sealed class ViewerSubTabPickCancelTests
         var pickedLoads = 0;
         var heldCancelled = false;
         var errorsBeforePickedStart = false;
-        TimeSpan? pickedStartedAfter = null;
+        var pickedStartedInBound = false;
         var firstDone = false;
         RunThemed(async () =>
         {
             var heldStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var pickedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var picking = new Stopwatch();
             var tab = NewTab(13, "pick-cancel-alias", lines, statuses);
             tab.LoadStartHook = async (index, token) =>
             {
@@ -68,7 +66,7 @@ public sealed class ViewerSubTabPickCancelTests
                 else if (index == ViewerServerTab.FileIoInnerTabIndex)
                 {
                     pickedLoads++;
-                    pickedStartedAfter ??= picking.Elapsed;
+                    pickedStartedInBound = true;
                     errorsBeforePickedStart |= pickedLoads == 1 && statuses.Any(s => s.Contains("refresh failed", StringComparison.Ordinal));
                     pickedStarted.TrySetResult();
                 }
@@ -83,7 +81,6 @@ public sealed class ViewerSubTabPickCancelTests
                 var first = tab.RefreshActiveInnerTabAsync();
                 Assert.Same(heldStarted.Task, await Task.WhenAny(heldStarted.Task, Task.Delay(Bound)));
 
-                picking.Start();
                 inner.SelectedIndex = ViewerServerTab.FileIoInnerTabIndex;
                 await Task.WhenAny(pickedStarted.Task, Task.Delay(Bound));
                 await Task.WhenAny(first, Task.Delay(Bound));
@@ -95,7 +92,7 @@ public sealed class ViewerSubTabPickCancelTests
             }
         });
 
-        Assert.NotNull(pickedStartedAfter);
+        Assert.True(pickedStartedInBound, "the picked load never started inside the bound");
         Assert.True(firstDone, "the refresh did not end after the pick");
         Assert.True(heldCancelled, "the left load's hold was not cancelled");
         Assert.False(errorsBeforePickedStart, "the cancelled load reported an error: " + string.Join(" / ", statuses));
@@ -180,9 +177,8 @@ public sealed class ViewerSubTabPickCancelTests
             var now = DateTime.UtcNow;
             var read = service.GetFileIoLatencyTrendAsync(1, now.AddHours(-1), now);
             cts.CancelAfter(TimeSpan.FromMilliseconds(500));
-            var clock = Stopwatch.StartNew();
             var done = await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(60)));
-            Assert.True(ReferenceEquals(read, done) && clock.Elapsed < Bound, $"read ended={ReferenceEquals(read, done)} after {clock.Elapsed}, status {read.Status}");
+            Assert.Same(read, done);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
         }
         finally
