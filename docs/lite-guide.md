@@ -101,7 +101,11 @@ A normal headless start can therefore write no `Headless: skipped` line. After a
 
 Only one Lite runs in a Windows session. If you start Lite a second time in that session, the second start exits. A headless Lite does not show a window when the second start asks it to.
 
-If a headless Lite fails to start, it writes the error to the log and exits with code 3. Task Scheduler then sees a failed run, and its restart setting starts Lite again. A start also fails this way when the account is not allowed to create the lock that keeps Lite to one copy and no other Lite is running.
+If a headless Lite cannot open its database when it starts, for example because another process holds the file, it does not exit at once. It writes one line to the log for each failed attempt, with the error and the delay before the next attempt. The first delay is 10 seconds. Each delay is twice the one before, up to 5 minutes. Lite keeps trying for 30 minutes. During the wait, `--stop` still ends Lite, and a second start is refused as usual. While Lite is trying to open its database, `--stop` returns 1, so run it again. If the 30 minutes pass, Lite writes a line that says it is giving up after a number of attempts, and it exits with code 3.
+
+Task Scheduler's **If the task fails, restart every** setting did not restart a run that exited with code 3. In a test, the task went to Ready with Last Result 3 and no second run started. So a Lite that gives up stays down until someone starts it again. To see that this happened, look for a **Last Result** of `3` on the task, and for the giving up line in the Lite log.
+
+A start also fails with code 3 when the account is not allowed to create the lock that keeps Lite to one copy and no other Lite is running in the same Windows session. Lite writes the reason to the log.
 
 #### Set up a dedicated Windows user
 
@@ -122,7 +126,7 @@ Make a task in Task Scheduler with these settings:
 | Run whether the user is logged on or not | On |
 | Trigger | At startup |
 | Action | `PerformanceMonitorLite.exe` with the argument `--headless` |
-| If the task fails, restart every | 1 minute, up to 3 times |
+| If the task fails, restart every | 1 minute, up to 3 times. This does not restart a Lite that gave up and exited with code 3. |
 | Long-running limit | Turn off "Stop the task if it runs longer than" |
 
 Task Scheduler runs this task in session 0. Session 0 has no taskbar. Without `--headless`, the first tray balloon that fails for that reason writes one Warning to the log. Lite then skips tray balloons for the rest of the run. It does not write an error for each alert, and the other alert channels still send.
@@ -194,6 +198,8 @@ All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a differ
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
 - Typical size: ~50–200 MB per server per week
+
+Compaction merges the per-run Parquet files into one file for each month. `--stop` does not wait for it to finish. Lite checks for the stop before it starts each group of files, and it waits up to 5 seconds for a merge that is already running. If that merge is still running at the end of the 5 seconds, Lite exits and the merge ends with it. In both cases a group of files is either fully merged or left as it was, so a read returns each row once. A merge writes to a `.tmp` file first, and a read never opens that file. The first archive pass after the next start runs about an hour after the start. It deletes a leftover `.tmp` file and runs the compaction again. Lite logs one line when compaction ends: complete, cancelled by shutdown, or failed.
 
 For the full list of folders, see [Where Lite keeps its files](#where-lite-keeps-its-files). To remove a server or uninstall, see [Remove a server, uninstall, and delete the data](#remove-a-server-uninstall-and-delete-the-data). To back up Lite or move it to another PC, see [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc).
 
