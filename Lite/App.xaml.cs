@@ -1085,7 +1085,7 @@ public partial class App : Application
     /// shared servers.json exists yet; the old file is left in place as a backup.
     /// Credentials remain per-user in Windows Credential Manager.
     /// </summary>
-    private static string ResolveSharedConfigDirectory(string perUserConfigDirectory)
+    internal static string ResolveSharedConfigDirectory(string perUserConfigDirectory)
     {
         string sharedDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),

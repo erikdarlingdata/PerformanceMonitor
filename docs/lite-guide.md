@@ -193,6 +193,8 @@ A headless Lite writes the same files as a Lite with a window. The logs are in `
 
 A headless Lite has no Settings window. You turn MCP on in `settings.json`, and you read the token with a command.
 
+For a full setup of a headless Lite that an AI client on another machine uses, see [Set up a headless Lite for an AI client on another machine](#set-up-a-headless-lite-for-an-ai-client-on-another-machine).
+
 To turn MCP on, add these keys to the `settings.json` of the dedicated user. The file is in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config`. Restart Lite after you change it.
 
 | Key | Value | What it does |
@@ -230,6 +232,68 @@ The exit code says what happened:
 | 3 | The command has nowhere to write: no console and no redirect. Lite did not read the token. | Nothing | Nothing |
 
 For code 1, turn MCP on and start Lite as that user once. Lite then makes the token.
+
+Add a server with `--add-server`. The Add Server window is the only other way to add one, and a dedicated user never signs in to open it. Run `--add-server` as the Windows user that runs Lite, because Lite keeps the password in the Credential Manager of that user. The command pipes a JSON array of servers to Lite on standard input:
+
+```
+type servers-to-add.json | PerformanceMonitorLite.exe --add-server
+```
+
+Each entry has `host` and can have `display_name`, `auth`, `username`, `password` and `database`. The value of `auth` is `windows`, `sql`, `serviceprincipal`, `managedidentity` or `entradefault`. For one server, you can give the fields as flags instead: `--host`, `--name`, `--auth`, `--username` and `--database`.
+
+A SQL login then needs its password as one line on standard input. There is no password flag, because a flag shows in the process list. There is no password prompt either, because a command prompt does not wait for Lite. Always pipe the input, so that the shell waits for Lite and you can read the exit code.
+
+The command runs the same checks and the same connection test as the Add Server window. It writes `servers.json`, saves the password for the user that runs it, and records the host confirmation for that user. If a server is already in the list, the command replaces its saved password and adds no second entry.
+
+If any entry fails, the command exits with code 1, gives the reason on standard error and changes nothing. When it succeeds, it exits with code 0 and prints the Windows account and the folders it wrote to.
+
+Lite keeps the server list in memory and writes it back. If a Lite is running, `--add-server` exits with code 1 and changes nothing. Run `--stop`, run `--add-server`, and start Lite again. Lite collects from the new server from that start. A Microsoft Entra MFA or device code server needs a person to sign in, so add it in the window.
+
+#### Set up a headless Lite for an AI client on another machine
+
+This procedure sets up a headless Lite that an AI client on another machine reaches over MCP. It uses the parts above, in this order. Do the steps on the Lite machine, except step 7.
+
+1. Download Lite. Use the install text at the top of this guide, [Quick Start](#quick-start--lite). Step 2 installs it for the dedicated user.
+2. Make the dedicated user, install Lite as that user, and make the scheduled task. Follow steps 1 and 2 of [Set up a dedicated Windows user](#set-up-a-dedicated-windows-user) and then [Start it with a scheduled task](#start-it-with-a-scheduled-task). In step 3 of the user setup, `--add-server` replaces only adding the servers and entering their passwords, as step 4 of this procedure does. It does not set up email, Slack, Teams or webhook alerts, or their passwords and URLs. If you want alerts, do that part of step 3 as that user in **Settings**, or with `runas`. Then do step 4 of the user setup. If you do not want alerts, skip steps 3 and 4 of the user setup. Do not start the task yet. If the task already ran, stop Lite first. See [Stop it](#stop-it).
+3. Turn MCP on for the dedicated user. Open a `cmd` window as that user: `runas /user:<user> cmd`. In that window, run these commands:
+   ```
+   mkdir "%LOCALAPPDATA%\PerformanceMonitorLite-Data\config"
+   notepad "%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\settings.json"
+   ```
+   If `settings.json` is new, give it this content and save it:
+   ```
+   { "mcp_enabled": true }
+   ```
+   If the file exists, add the `mcp_enabled` key to it. The MCP port is `5151`. To use another port, add `mcp_port` with a number from 1024 to 65535. Leave `mcp_allow_tokenless_loopback` out. See [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite) for the keys. Ignore the error that `mkdir` prints when the folder exists.
+4. Add the servers with `--add-server`, in the same window, as the same user. Lite keeps the password in the Credential Manager of the user that runs the command. The dedicated user must run it. The command has no password prompt and no password flag. It reads the servers from standard input.
+   1. Make a file of servers in the profile folder of that user. Only that user and administrators can read that folder. Run `notepad "%USERPROFILE%\servers-to-add.json"` and enter one object for each server. In a password, write `"` as `\"` and `\` as `\\`:
+      ```
+      [
+        { "host": "<sql-host>", "display_name": "<name>", "auth": "sql", "username": "<sql-login>", "password": "<password>" }
+      ]
+      ```
+      For a server that uses Windows authentication, leave out `auth`, `username` and `password`. The connection then uses the dedicated user. For all the fields, see [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite).
+   2. Make sure that no Lite runs, in any session and for any user. That includes a Lite window of your own. If a Lite runs, the command exits with code 1 and changes nothing.
+   3. Run the command. The pipe makes the window wait for Lite, so the output shows in the window:
+      ```
+      type "%USERPROFILE%\servers-to-add.json" | "<path>\PerformanceMonitorLite.exe" --add-server
+      ```
+      For one server, you can give flags instead of the JSON file: `--host`, `--name`, `--auth`, `--username` and `--database`. Then put only the password, on one line, in a file in the same profile folder, and pipe that file: `type "%USERPROFILE%\password.txt" | "<path>\PerformanceMonitorLite.exe" --add-server --host <sql-host> --auth sql --username <sql-login>`. Do not type the password into the command with `echo`. In a `cmd` window, each side of a pipe runs as a command of its own. So the password shows in the process list and in the command history of the window. Delete the file when the command is done.
+   4. Read the output. It ends with the line `Credentials were stored for the Windows account <account>.` Check that the account is the dedicated user. If it is another account, the password is stored for the wrong user. Run the command again as the dedicated user. If the window shows no output, add `> "%USERPROFILE%\add-server-result.txt" 2>&1` at the end of the command line and read that file. Lite never writes the password to the output.
+   5. Delete the file of servers: `del "%USERPROFILE%\servers-to-add.json"`.
+5. Start the scheduled task, for example with `schtasks /run /tn "<task name>"`. Lite collects from the added servers from this start, and it makes the MCP token. See [Start it with a scheduled task](#start-it-with-a-scheduled-task).
+6. Read the token with `--print-mcp-token`, in a `cmd` window that you open as the dedicated user. Follow [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite). Treat the token like a password. Do not leave it in a shared window, a chat or a log.
+7. On the client machine, forward a local port to Lite with SSH. Use an account that can sign in to the Lite machine over SSH. The Lite machine must run an SSH server, and this guide does not cover how to set one up.
+   ```
+   ssh -L <local port>:127.0.0.1:<Lite MCP port> <user>@<host>
+   ```
+   Keep that SSH session open while the client works. Then point the client at the local port, and put the token in the client config. For Claude Code, the command is:
+   ```
+   claude mcp add --transport http --scope user sql-monitor http://localhost:<local port>/ --header "Authorization: Bearer <token>"
+   ```
+   The command puts the token on the command line. It stays in your shell history, and it shows in the process list while the command runs. PowerShell keeps its history in a file, at the path `(Get-PSReadLineOption).HistorySavePath`, so delete the line there if you ran it. To keep the token off the command line, use a `.mcp.json` file. Claude Code's documentation says a `headers` value there can hold `${NAME}`, which it replaces with the environment variable `NAME`, for example `"Authorization": "Bearer ${SQL_MONITOR_TOKEN}"`. Set that variable in the Windows environment variable settings, not with a typed command.
+   The client needs the header `Authorization: Bearer <token>` on every request. [Lite with Copilot](mcp-server.md#lite-with-copilot) shows the VS Code entry. In it, use the URL `http://localhost:<local port>/`.
+8. Keep the token, even with the SSH forward. The forward protects only the network hop between the two machines. A loopback port on the Lite machine is open to every program and every account on that machine. The token is the only control on that port, so leave `mcp_allow_tokenless_loopback` off.
 
 ### Lite Data Storage
 
