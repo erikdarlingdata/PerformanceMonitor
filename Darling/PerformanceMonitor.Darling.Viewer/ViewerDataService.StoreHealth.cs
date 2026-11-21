@@ -39,20 +39,30 @@ public sealed record StoreIndexHealth(
 /// </summary>
 public sealed partial class ViewerDataService
 {
+    /// <summary>#9224: the store's held reads, with a refresh that fails behind a held part written to the Viewer log (the held part stays on
+    /// screen with its own read time). The Viewer never warms: most sessions never open Store Health.</summary>
+    private DarlingStoreTableHealthCache HeldStoreHealth()
+    {
+        var held = DarlingStoreTableHealthCache.For(_dataSource);
+        held.OnReadFailed ??= static (part, ex) =>
+            ViewerLogger.Warn("StoreHealth", $"The store table health read of {part} failed ({ex.GetType().Name}); the next refresh after the lifetime tries again.");
+        return held;
+    }
+
     /// <summary>One row per store table, behind on autovacuum first (the reader's own order), with the time the store answered.</summary>
     public Task<StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>>> GetStoreTableHealthAsync(
         bool fresh = false, CancellationToken cancellationToken = default) =>
-        DarlingStoreTableHealthCache.For(_dataSource).GetTablesAsync(_dataSource, fresh, cancellationToken);
+        HeldStoreHealth().GetTablesAsync(_dataSource, fresh, cancellationToken);
 
     /// <summary>The store's autovacuum settings, the workers running and the cancels the store log holds in the last day, held like the
     /// tables read. A read past its limit throws <see cref="StoreTableHealthTimeoutException"/>.</summary>
     public Task<StoreHealthRead<DarlingStoreTableHealthReader.StoreAutovacuumSettings>> GetStoreAutovacuumSettingsAsync(
         bool fresh = false, CancellationToken cancellationToken = default) =>
-        DarlingStoreTableHealthCache.For(_dataSource).GetAutovacuumSettingsAsync(_dataSource, fresh, cancellationToken);
+        HeldStoreHealth().GetAutovacuumSettingsAsync(_dataSource, fresh, cancellationToken);
 
     /// <summary>One row per store index, and the leaf index coverage of each partitioned parent.</summary>
     public Task<StoreIndexHealth> GetStoreIndexHealthAsync(bool fresh = false, CancellationToken cancellationToken = default) =>
-        ReadStoreIndexHealthAsync(DarlingStoreTableHealthCache.For(_dataSource), _dataSource, fresh, cancellationToken);
+        ReadStoreIndexHealthAsync(HeldStoreHealth(), _dataSource, fresh, cancellationToken);
 
     /// <summary>The index half of the tab from <paramref name="held"/>, the cache of <paramref name="store"/>: the index rows, then the
     /// coverage rows. A test hands in a cache over reads that count their calls.</summary>

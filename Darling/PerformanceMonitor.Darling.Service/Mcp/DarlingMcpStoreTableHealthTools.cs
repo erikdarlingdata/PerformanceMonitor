@@ -48,8 +48,8 @@ public sealed class DarlingMcpStoreTableHealthTools
     /// <summary>The sentence every answer carries about the as-of fields: a part is read from the store at most once in
     /// <see cref="DarlingStoreTableHealthCache.Lifetime"/>, so the answer says when each part it returns was read.</summary>
     internal static readonly string AsOfNote = string.Create(CultureInfo.InvariantCulture,
-        $"Each part (tables, indexes, partition index coverage, autovacuum settings) is read from the store's catalogs at most once every {DarlingStoreTableHealthCache.Lifetime.TotalMinutes:0} minutes and held in memory between reads. ")
-        + "tables_as_of, indexes_as_of, partition_index_coverage_as_of and autovacuum_settings.as_of are when the store answered that read (UTC), and the matching age_seconds is how old it is as of this response. held_for_seconds is how long a read is held.";
+        $"Each part (tables, indexes, partition index coverage, autovacuum settings) is read from the store's catalogs once when the service starts and then at most once every {DarlingStoreTableHealthCache.Lifetime.TotalMinutes:0} minutes, and held in memory between reads. A call after that time gets the held part at once, with its own as_of and age_seconds, and a new read of it runs behind the call. ")
+        + "tables_as_of, indexes_as_of, partition_index_coverage_as_of and autovacuum_settings.as_of are when the store answered that read (UTC), and the matching age_seconds is how old it is as of this response. held_for_seconds is how long a read is held before a call starts a new read behind it.";
 
     /// <summary>The sentence a tables answer carries about the autovacuum fields.</summary>
     internal static readonly string AutovacuumNote = string.Create(CultureInfo.InvariantCulture,
@@ -69,7 +69,7 @@ public sealed class DarlingMcpStoreTableHealthTools
         + "whether plain VACUUM can give the space back, and rewrite_candidate. Also the store's autovacuum settings and write budget. "
         + "Per index: size, scans, bloat estimate, validity; plus index coverage for partitioned parents. "
         + "<<GUIDE>> Also per table: plain, partitioned, hypertable and continuous aggregate kinds, the size split (heap, index, toast), visibility map coverage, insert, update, delete and HOT rates since the statistics were reset, last vacuum and analyze, autovacuum off, 7-day growth where store_metrics records it. Per index: scans, index-to-heap ratio, larger_than_heap and rarely_used. Reads the catalogs of the "
-        + "monitoring store at most once every 5 minutes: each part (tables, indexes, partition index coverage, autovacuum settings) is held in memory between reads, "
+        + "monitoring store once when the service starts and then at most once every 5 minutes: each part (tables, indexes, partition index coverage, autovacuum settings) is held in memory between reads, and a call after the 5 minutes gets the held part at once while a new read runs behind it, "
         + "and tables_as_of, indexes_as_of, partition_index_coverage_as_of and autovacuum_settings.as_of say when the store answered it (UTC), with the matching age_seconds as of this response. "
         + "top, offset, candidates_only and section cut the held rows, so they never cause a store read. Hypertable chunks and the relations holding compressed data roll up to the hypertable "
         + "(chunk_count), a continuous aggregate to its view name, and a partitioned table's leaves to the parent (leaf_count); a "

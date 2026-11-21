@@ -116,7 +116,7 @@ public sealed class StoreHealthPageBehaviourTests
         Assert.EndsWith(" (4 min ago)", line, StringComparison.Ordinal);
         Assert.Contains("2026", line, StringComparison.Ordinal);
         Assert.Equal(
-            "The store's tables and indexes are read at most once every 5 min. A refresh inside that time shows the same read.",
+            "The store's tables and indexes are read at most once every 5 min. A refresh inside that time shows the same read; after it, a refresh shows the last read at once and a new read runs behind it.",
             first.GetProperty("readLineTitle")[0].GetString());
 
         var indexLines = Result.Value.GetProperty("afterIndexes").GetProperty("indexSummary").EnumerateArray().Select(t => t.GetString()!).ToArray();
