@@ -160,8 +160,11 @@ public partial class FinOpsTab : UserControl
         _openTabClock = openTabClock;
         _credentialResolver = serverManager.CredentialResolver;
 
+        /* #9233: the per-server load (fifteen store reads, High Impact the heaviest) runs only while the tab is shown. Window start used to run
+           it twice for a tab nobody had opened (the selector's first selection, then RefreshData), against a store the first collection
+           has not written to yet, and the first show re-runs it whole anyway (FinOpsShowReloadPolicy). Start-up keeps the fleet inventory. */
         PopulateServerSelector();
-        RefreshData();
+        _ = LoadServerInventoryAsync();
     }
 
     /// <summary>
@@ -1439,6 +1442,14 @@ public partial class FinOpsTab : UserControl
            server A's rows under server B's selection, and a "Get Actual Plan" click in that window would pair the
            selected server B with A's row. */
         ClearPerServerGrids();
+
+        /* #9233: a selection that moves while the tab is hidden (the first one at start-up, a server list that changed) loads nothing. The
+           next show runs the whole load, as the first show always does. */
+        if (!FinOpsShowReloadPolicy.ShouldLoadOnSelectionChange(IsVisible))
+        {
+            _firstShowPending = true;
+            return;
+        }
 
         await LoadPerServerDataAsync();
     }

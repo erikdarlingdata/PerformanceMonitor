@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -102,12 +103,60 @@ public sealed class StoreLockTimeoutLogTests : IClassFixture<SharedDuckDbFixture
 
     private async Task<string> SkipMaintenanceAndReadTheLineAsync(string? displayName)
     {
-        var service = new LocalDataService(_duckDb, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
-        if (displayName is not null)
+        var names = displayName is null ? null : new Dictionary<int, string> { [ServerId] = displayName };
+        return Assert.Single(await SkipMaintenanceForAsync(names, ServerId));
+    }
+
+    /// <summary>#9233: three servers' sweeps meet the same held write lock, one after another as the alert engine runs them. Their one line names all three.</summary>
+    [Fact]
+    public async Task ASkippedCycle_WritesOneLine_NamingEveryServerItSkipped()
+    {
+        var names = new Dictionary<int, string> { [ServerId] = "Display One", [ServerId - 1] = "Display Two", [ServerId - 2] = "Display Three" };
+
+        var lines = await SkipMaintenanceForAsync(names, ServerId, ServerId - 1, ServerId - 2);
+
+        var line = Assert.Single(lines);
+        Assert.Contains("'Display One'", line, StringComparison.Ordinal);
+        Assert.Contains("'Display Two'", line, StringComparison.Ordinal);
+        Assert.Contains("'Display Three'", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>The skips of a cycle that has been written do not leak into the next cycle's line.</summary>
+    [Fact]
+    public async Task TheNextCycleOfSkips_WritesItsOwnLine_WithoutTheEarlierServers()
+    {
+        var service = new LocalDataService(_duckDb, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100))
         {
-            service.DisplayNames = () => new Dictionary<int, string> { [ServerId] = displayName };
+            MaintenanceSkipLogQuietPeriodOverride = TimeSpan.FromHours(1),
+            DisplayNames = () => new Dictionary<int, string> { [ServerId] = "Display One", [ServerId - 1] = "Display Two" },
+        };
+
+        var first = await SkipUnderAHeldLockAsync(service, ServerId);
+        var second = await SkipUnderAHeldLockAsync(service, ServerId - 1);
+
+        Assert.Contains("'Display One'", Assert.Single(first), StringComparison.Ordinal);
+        var later = Assert.Single(second);
+        Assert.Contains("'Display Two'", later, StringComparison.Ordinal);
+        Assert.DoesNotContain("'Display One'", later, StringComparison.Ordinal);
+    }
+
+    private async Task<List<string>> SkipMaintenanceForAsync(Dictionary<int, string>? displayNames, params int[] serverIds)
+    {
+        var service = new LocalDataService(_duckDb, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100))
+        {
+            MaintenanceSkipLogQuietPeriodOverride = TimeSpan.FromHours(1),
+        };
+        if (displayNames is not null)
+        {
+            service.DisplayNames = () => displayNames;
         }
 
+        return await SkipUnderAHeldLockAsync(service, serverIds);
+    }
+
+    /// <summary>Sweeps each server under a read held on another thread, then writes the burst's line, and returns the maintenance-skip lines the log buffered.</summary>
+    private async Task<List<string>> SkipUnderAHeldLockAsync(LocalDataService service, params int[] serverIds)
+    {
         /* A read held on another thread: the maintenance wants the write lock, waits its 100 ms and skips the cycle. */
         var held = new ManualResetEventSlim(false);
         var release = new ManualResetEventSlim(false);
@@ -126,7 +175,12 @@ public sealed class StoreLockTimeoutLogTests : IClassFixture<SharedDuckDbFixture
         {
             Assert.True(held.Wait(TimeSpan.FromSeconds(10)), "the read never took the lock");
             AppLogger.DrainBufferedLines();
-            await service.GetDatabaseStateDeviationsAsync(ServerId);
+            foreach (var serverId in serverIds)
+            {
+                await service.GetDatabaseStateDeviationsAsync(serverId);
+            }
+
+            service.FlushMaintenanceSkipLog();
         }
         finally
         {
@@ -134,7 +188,7 @@ public sealed class StoreLockTimeoutLogTests : IClassFixture<SharedDuckDbFixture
             holder.Join(TimeSpan.FromSeconds(10));
         }
 
-        return Assert.Single(AppLogger.DrainBufferedLines(), l => l.Contains("skipped this cycle's database-state maintenance", StringComparison.Ordinal));
+        return AppLogger.DrainBufferedLines().Where(l => l.Contains("skipped this cycle's database-state maintenance", StringComparison.Ordinal)).ToList();
     }
 
     private sealed class CapturingLogger : ILogger

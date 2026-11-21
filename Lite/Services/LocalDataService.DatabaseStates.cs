@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
@@ -34,6 +35,56 @@ public partial class LocalDataService
     /// says nothing about another's. Never pruned — one bool per server ever swept.</para>
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, bool> _lastMaintenanceSkipped = new();
+
+    /// <summary>
+    /// #9233: the servers whose maintenance skipped in the current burst, with the holder each named, waiting for ONE line. The alert
+    /// engine sweeps the servers one at a time and a held lock skips every one of them, so a line per server read as six identical
+    /// lines about one event. A skip joins this list and (re)starts <see cref="_skipLogTimer"/>. The line is written once the burst
+    /// has been quiet for <see cref="MaintenanceSkipLogQuietPeriod"/>, naming every server in it.
+    /// </summary>
+    private readonly List<(string Server, string Holder)> _skipsThisCycle = new();
+    private readonly object _skipLogGate = new();
+    private System.Threading.Timer? _skipLogTimer;
+
+    /// <summary>
+    /// How long no further server may skip before the burst's line is written. One sweep waits up to the write-lock budget before it
+    /// skips, so the default is that budget plus five seconds. A test sets a long time and calls <see cref="FlushMaintenanceSkipLog"/>.
+    /// </summary>
+    internal TimeSpan? MaintenanceSkipLogQuietPeriodOverride { get; set; }
+
+    private TimeSpan MaintenanceSkipLogQuietPeriod =>
+        MaintenanceSkipLogQuietPeriodOverride ?? _backgroundWriteLockBudget + TimeSpan.FromSeconds(5);
+
+    private void NoteMaintenanceSkipped(string server, string holder)
+    {
+        lock (_skipLogGate)
+        {
+            _skipsThisCycle.Add((server, holder));
+            _skipLogTimer?.Dispose();
+            _skipLogTimer = new System.Threading.Timer(_ => FlushMaintenanceSkipLog(), null, MaintenanceSkipLogQuietPeriod, System.Threading.Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    /// <summary>Writes the one line for the servers waiting in <see cref="_skipsThisCycle"/>, if any, and empties the list.</summary>
+    internal void FlushMaintenanceSkipLog()
+    {
+        (string Server, string Holder)[] skipped;
+        lock (_skipLogGate)
+        {
+            _skipLogTimer?.Dispose();
+            _skipLogTimer = null;
+            skipped = _skipsThisCycle.ToArray();
+            _skipsThisCycle.Clear();
+        }
+
+        if (skipped.Length == 0)
+        {
+            return;
+        }
+
+        AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
+            MaintenanceSkippedWarning(skipped.Select(x => x.Server).ToList(), skipped.Select(x => x.Holder).Distinct(StringComparer.Ordinal).ToList(), _backgroundWriteLockBudget));
+    }
     /* Effective state = STANDBY for a read-only log-shipping secondary (is_in_standby), else the raw
        state_desc. A standby secondary reports state_desc = ONLINE with is_in_standby = 1 and flips through
        RESTORING on every log restore; collapsing it to a single stable STANDBY token means it baselines as
@@ -144,8 +195,16 @@ SELECT
     /// had (5 s in the shipped app, two minutes in Lite.Tests), not a number written into the text.
     /// </summary>
     internal static string MaintenanceSkippedWarning(string server, string holder, TimeSpan budget) =>
-        $"server {server}: skipped this cycle's database-state maintenance: could not acquire the " +
-            $"store write lock within {budget.TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture)}s ({holder}). Baselines are not being " +
+        MaintenanceSkippedWarning(new[] { server }, new[] { holder }, budget);
+
+    /// <summary>
+    /// #9233: the one line for a skipped cycle, naming every server it skipped. The holders are the distinct ones the skipped servers
+    /// saw (usually one), joined with a bar.
+    /// </summary>
+    internal static string MaintenanceSkippedWarning(IReadOnlyList<string> servers, IReadOnlyList<string> holders, TimeSpan budget) =>
+        (servers.Count == 1 ? $"server {servers[0]}" : $"servers {string.Join(", ", servers)}") +
+            ": skipped this cycle's database-state maintenance: could not acquire the " +
+            $"store write lock within {budget.TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture)}s ({string.Join(" | ", holders)}). Baselines are not being " +
             "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
             "occasionally. If it repeats, the write lock is contended.";
 
@@ -233,8 +292,7 @@ SELECT
             if (!_lastMaintenanceSkipped.TryGetValue(serverId, out var wasSkipped) || !wasSkipped)
             {
                 _lastMaintenanceSkipped[serverId] = true;
-                AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
-                    MaintenanceSkippedWarning(ServerLabelForLog(serverId), skipHolder, _backgroundWriteLockBudget));
+                NoteMaintenanceSkipped(ServerLabelForLog(serverId), skipHolder);
             }
         }
         else if (_lastMaintenanceSkipped.TryGetValue(serverId, out var hadSkipped) && hadSkipped)
