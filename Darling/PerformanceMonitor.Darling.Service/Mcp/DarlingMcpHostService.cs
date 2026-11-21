@@ -1114,6 +1114,13 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* StartAsync, not RunAsync (#1560): the supervisor loop owns the wait — the app keeps
                serving until StopServerAsync (toggle-off, port change, or shutdown). */
             await StartListenerAsync(_app, tokenSet.Personal is not null, stoppingToken);
+            /* #9224: the store table health read for this host's data source, taken once the worker has migrated the store, so the first call
+               finds it held. A front door holds no store. */
+            if (frontDoor is null)
+            {
+                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken);
+            }
+
             _runningPort = effectivePort;
             _servesPersonalTokens = tokenSet.Personal is not null;
             return true;
