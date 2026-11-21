@@ -89,9 +89,10 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     }
 
     /* Rows [from, to) over the hour starting at `hour`, one a second, with a payload wide enough that file
-       sizes follow row counts. */
+       sizes follow row counts. server_id is a column every archive file carries, and query_store_stats' merge
+       sorts by it (#9255): one server here, so the sort keeps the time order the tests below read. */
     private void MakeParquet(string fileName, long from, long to, string hour = "2026-09-28 14:00:00") =>
-        Exec($"COPY (SELECT i AS id, TIMESTAMP '{hour}' + INTERVAL (i - {from}) SECOND AS collection_time, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' ({ParquetCompaction.BuildArchiveCopyOptions()})");
+        Exec($"COPY (SELECT i AS id, TIMESTAMP '{hour}' + INTERVAL (i - {from}) SECOND AS collection_time, 1 AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' ({ParquetCompaction.BuildArchiveCopyOptions()})");
 
     private long SizeOf(string fileName) => new FileInfo(P(fileName).Replace("/", "\\")).Length;
 
@@ -337,6 +338,121 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
 
         Assert.Equal([$"20260928_{table}.parquet"], ArchiveFileNames());
         Assert.Equal((800L, 800L), Visible(table));
+    }
+
+    private static string Text(string sql)
+    {
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToString(cmd.ExecuteScalar())!;
+    }
+
+    /* One entry per server: its row count and a hash of every row's content, so two sources match only when each
+       server's rows are the same. */
+    private static string RowsPerServer(string source) =>
+        Text("SELECT string_agg(server_id::VARCHAR || ':' || n::VARCHAR || ':' || h::VARCHAR, ',' ORDER BY server_id) " +
+             "FROM (SELECT server_id, count(*) AS n, sum((hash(id, collection_time, payload) % 1000003)::HUGEINT) AS h " +
+             $"FROM read_parquet('{source}') GROUP BY server_id)");
+
+    /// <summary>
+    /// #9255. The archiver writes the hot table's rows in time order, which interleaves the servers, so every row
+    /// group of an archive file spanned every server and a read filtered to one server decoded them all. The day
+    /// merge of query_store_stats sorts by server, then time: each output group holds one server, except the few
+    /// that straddle a boundary between two, and the rows themselves are the same.
+    /// </summary>
+    [Fact]
+    public void ADaysQueryStoreFiles_AreMergedIntoRowGroupsOfOneServer_WithEveryServersRowsUnchanged()
+    {
+        const string table = "query_store_stats";
+        const int servers = 5;
+        const int hours = 10;
+        const int rowsPerHour = 5_000;
+
+        for (var h = 0; h < hours; h++)
+        {
+            Exec($"COPY (SELECT ({h * rowsPerHour} + i)::BIGINT AS id, TIMESTAMP '2026-09-28 {h:D2}:00:00' + to_seconds((i * 3600 / {rowsPerHour})::BIGINT) AS collection_time, " +
+                 $"(1 + i % {servers})::INTEGER AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({rowsPerHour}) t(i)) " +
+                 $"TO '{P($"20260928_{h:D2}00_{table}.parquet")}' ({ParquetCompaction.ArchiveCopyOptions})");
+        }
+
+        var before = RowsPerServer(P($"*_{table}.parquet"));
+        Assert.Equal(servers, before.Split(',').Length);
+
+        NewService().CompactParquetFiles();
+
+        Assert.Equal([$"20260928_{table}.parquet"], ArchiveFileNames());
+        var merged = P($"20260928_{table}.parquet");
+        Assert.Equal(before, RowsPerServer(merged));
+        Assert.Equal(hours * rowsPerHour, Scalar($"SELECT count(*) FROM read_parquet('{merged}')"));
+
+        var groups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id'");
+        var mixedGroups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id' AND stats_min_value <> stats_max_value");
+        Assert.True(groups >= 4 * servers, $"{groups} row groups: too few to tell sorted from unsorted");
+        Assert.True(mixedGroups <= servers - 1, $"{mixedGroups} of {groups} row groups hold more than one server");
+    }
+
+    /* A day of the field shape, wide enough that a sort of it cannot fit in a few MB: 5 servers over 60,000 rows
+       with a 64-character payload, one file. Returns the file's path. */
+    private string MakeWideDay()
+    {
+        var source = P("wide_source_query_store_stats.parquet");
+        Exec("COPY (SELECT i::BIGINT AS id, TIMESTAMP '2026-09-28 00:00:00' + to_seconds((i % 86400)::BIGINT) AS collection_time, " +
+             "(1 + i % 5)::INTEGER AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range(60000) t(i)) " +
+             $"TO '{source}' ({ParquetCompaction.ArchiveCopyOptions})");
+        return source;
+    }
+
+    /// <summary>
+    /// #9255. The sorted merge cannot spill the parquet writer's own allocations, so a batch that outgrows its limit
+    /// fails with an out-of-memory error. The merge then reruns the batch unsorted at the default limit: no throw, a
+    /// warning, and every row in the output.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeThatRunsOutOfMemory_FallsBackToTheUnsortedMerge_WithEveryRow()
+    {
+        var source = MakeWideDay();
+        var output = P("fallback_out.parquet");
+        var fallbacks = new List<(string Table, int Files, string Error)>();
+
+        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], output, P("spill"),
+            memoryLimit: "2MB", onSortFallback: (t, f, e) => fallbacks.Add((t, f, e)));
+
+        Assert.Equal(60_000, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
+        Assert.Equal(RowsPerServer(source), RowsPerServer(output));
+        var fallback = Assert.Single(fallbacks);
+        Assert.Equal("query_store_stats", fallback.Table);
+        Assert.Equal(1, fallback.Files);
+        Assert.NotEmpty(fallback.Error);
+    }
+
+    /// <summary>
+    /// #9255. Only memory and temp space send a sorted merge to the unsorted fallback. A COPY that fails for another
+    /// reason (here an output folder that does not exist) reaches the caller unchanged.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeThatFailsForAnotherReason_StillThrows_WithoutAFallbackWarning()
+    {
+        var source = MakeWideDay();
+        var fallbacks = new List<string>();
+
+        Assert.Throws<DuckDBException>(() => ParquetCompaction.MergeBatchToFile("query_store_stats", [source],
+            P("no_such_folder/out.parquet"), P("spill"), onSortFallback: (t, _, _) => fallbacks.Add(t)));
+
+        Assert.Empty(fallbacks);
+    }
+
+    /// <summary>
+    /// #9255. A sorted merge runs at the lower limit unless the caller passes one, and the tables that keep no order
+    /// stay at the default.
+    /// </summary>
+    [Fact]
+    public void TheSortedMergeRunsAtTheLowerLimit_UnlessTheCallerPassesOne()
+    {
+        Assert.Equal(ParquetCompaction.SortedMergeMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_store_stats", null));
+        Assert.Equal("1GB", ParquetCompaction.EffectiveMemoryLimit("query_store_stats", "1GB"));
+        Assert.Equal(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_stats", null));
     }
 
     private static async Task<long> ViewScalarAsync(string dbPath, string sql)
