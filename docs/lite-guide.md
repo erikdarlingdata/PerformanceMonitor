@@ -210,9 +210,11 @@ The command prints the token and a new line to standard output, and then it exit
 Lite has no console of its own. A command prompt or PowerShell can give the prompt back before Lite writes. To read the token as the dedicated user:
 
 1. Open a command prompt as that user: `runas /user:<name> cmd`
-2. In the new window, run `cmd /c "<path>\PerformanceMonitorLite.exe" --print-mcp-token`. The `cmd /c` makes the window wait for Lite. To keep the token in a file, add `> token.txt` at the end of the line.
+2. In the new window, run `cmd /c "<path>\PerformanceMonitorLite.exe" --print-mcp-token`. The `cmd /c` makes the window wait for Lite. To keep the token in a file, add `> "%USERPROFILE%\mcp-token.txt"` at the end of the line. A file in the profile folder of the user can be read only by that user and by administrators. Do not write the token to a folder that other users can read, for example the folder that the window opens in. Delete the file after you copy the token.
 
 In PowerShell, pipe the output to get it: `& "<path>\PerformanceMonitorLite.exe" --print-mcp-token | Out-String`.
+
+If a policy turns on PowerShell module logging or transcription, PowerShell records the token in the event log or in the transcript folder. In that case, use the command prompt steps above.
 
 The exit code says what happened:
 
