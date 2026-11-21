@@ -2466,6 +2466,7 @@ internal static partial class DarlingDataReader
     /// (<see cref="MidObjectTypeMatch"/>).</summary>
     private const string MidObjectTypeMatch = "AND object_type IS NOT DISTINCT FROM w.win_object_type";
     private const string MidObjectTypeMatchFirstArm = "AND p.object_type IS NOT DISTINCT FROM w.win_object_type";
+    private const string MidObjectTypeMatchOuter = "AND wide.object_type IS NOT DISTINCT FROM w.win_object_type";
     private const string TopProceduresWideSql = $"""
         /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters, matched on the
            full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). This ORDER BY
@@ -2533,9 +2534,7 @@ internal static partial class DarlingDataReader
                 MIN(min_logical_writes) AS min_logical_writes,
                 MAX(max_logical_writes) AS max_logical_writes,
                 MIN(min_spills) AS min_spills,
-                MAX(max_spills) AS max_spills,
-                MAX(w.rank_metric) AS sort_metric,
-                MAX(w.rank_cpu) AS sort_cpu
+                MAX(max_spills) AS max_spills
             FROM procedure_stats AS p
             JOIN winners AS w
                 ON  p.database_name = w.win_database_name
@@ -2578,9 +2577,7 @@ internal static partial class DarlingDataReader
                 MIN(min_logical_writes) AS min_logical_writes,
                 MAX(max_logical_writes) AS max_logical_writes,
                 MIN(min_spills) AS min_spills,
-                MAX(max_spills) AS max_spills,
-                MAX(w.rank_metric) AS sort_metric,
-                MAX(w.rank_cpu) AS sort_cpu
+                MAX(max_spills) AS max_spills
             FROM procedure_stats
             JOIN winners AS w
                 ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
@@ -2597,7 +2594,12 @@ internal static partial class DarlingDataReader
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, schema_name, object_name, object_type
         ) AS wide
-        ORDER BY sort_metric DESC NULLS LAST, sort_cpu DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        JOIN winners AS w
+            ON  wide.database_name IS NOT DISTINCT FROM w.win_database_name
+            AND wide.schema_name IS NOT DISTINCT FROM w.win_schema_name
+            AND wide.object_name IS NOT DISTINCT FROM w.win_object_name
+            AND wide.object_type IS NOT DISTINCT FROM w.win_object_type
+        ORDER BY w.rank_metric DESC NULLS LAST, w.rank_cpu DESC NULLS LAST, wide.database_name, wide.schema_name, wide.object_name, wide.object_type
         """;
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
@@ -2789,7 +2791,10 @@ internal static partial class DarlingDataReader
     /// wide pass matched on (database, schema, object), the key the rollup ranks. The query tag token is still in it.</summary>
     internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid) =>
         TopRankings.Apply(TopProceduresMidWinnersSql, ranking, hourly: true).Replace(HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
-        + "\n" + TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal);
+        + "\n" + TopProceduresWideSql
+            .Replace(MidObjectTypeMatch, "", StringComparison.Ordinal)
+            .Replace(MidObjectTypeMatchFirstArm, "", StringComparison.Ordinal)
+            .Replace(MidObjectTypeMatchOuter, "", StringComparison.Ordinal);
 
     /// <summary>#9147: the whole hours <c>[MidStart, MidEnd)</c> a raw top-procedures read takes from <c>Relation</c>.</summary>
     internal sealed record HourlyMid(string Relation, string View, DateTime MidStart, DateTime MidEnd);
