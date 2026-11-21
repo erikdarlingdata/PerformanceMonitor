@@ -44,6 +44,17 @@ internal static class ServerEntryRules
     }
 
     /// <summary>
+    /// The Encrypt box position (0 Optional, 1 Mandatory, 2 Strict) the Edit window shows for a stored mode. It follows
+    /// <see cref="EncryptOptionFor"/>: a blank or unknown mode is Mandatory, so the window shows, and tests, what Lite connects with.
+    /// </summary>
+    internal static int EncryptBoxIndexFor(string? encryptMode) => EncryptOptionFor(encryptMode) switch
+    {
+        var option when option == SqlConnectionEncryptOption.Optional => 0,
+        var option when option == SqlConnectionEncryptOption.Strict => 2,
+        _ => 1
+    };
+
+    /// <summary>
     /// The Test Connection builder before authentication is applied. The Data Source goes through
     /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
     /// to a named pipe over SMB with this process's Windows credentials (#6352).

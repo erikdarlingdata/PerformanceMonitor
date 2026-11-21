@@ -105,12 +105,8 @@ public partial class AddServerDialog : Window
         EnabledCheckBox.IsChecked = existing.IsEnabled;
         TrustCertCheckBox.IsChecked = existing.TrustServerCertificate;
 
-        EncryptModeComboBox.SelectedIndex = existing.EncryptMode switch
-        {
-            "Mandatory" => 1,
-            "Strict" => 2,
-            _ => 0
-        };
+        /* A blank or unknown stored mode connects as Mandatory (#9237), so the box shows Mandatory, not Optional. */
+        EncryptModeComboBox.SelectedIndex = ServerEntryRules.EncryptBoxIndexFor(existing.EncryptMode);
 
         FavoriteCheckBox.IsChecked = existing.IsFavorite;
         DescriptionTextBox.Text = existing.Description ?? "";
@@ -317,16 +313,6 @@ public partial class AddServerDialog : Window
         };
     }
 
-    private static SqlConnectionEncryptOption ParseEncryptOption(string mode)
-    {
-        return mode switch
-        {
-            "Mandatory" => SqlConnectionEncryptOption.Mandatory,
-            "Strict" => SqlConnectionEncryptOption.Strict,
-            _ => SqlConnectionEncryptOption.Optional
-        };
-    }
-
     /// <summary>The Test Connection builder before authentication is applied. The rule lives in <see cref="ServerEntryRules"/> (#9237) so
     /// <c>--add-server</c> builds the same one.</summary>
     internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
@@ -344,7 +330,7 @@ public partial class AddServerDialog : Window
             ServerNameBox.Text,
             DatabaseNameBox.Text,
             TrustCertCheckBox.IsChecked == true,
-            ParseEncryptOption(GetSelectedEncryptMode()),
+            ServerEntryRules.EncryptOptionFor(GetSelectedEncryptMode()),
             ReadOnlyIntentCheckBox.IsChecked == true,
             MultiSubnetFailoverCheckBox.IsChecked == true);
 

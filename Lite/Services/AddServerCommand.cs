@@ -117,7 +117,8 @@ internal static class AddServerCommand
                 || name.Equals("--auth", StringComparison.OrdinalIgnoreCase) || name.Equals("--username", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--login", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase)))
             {
-                errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login) and --database.";
+                /* The position, never the text: a password typed as an option (-PSecret, -Password:Secret) would be echoed back. */
+                errorMessage = $"Unknown option at argument {i + 1}. --add-server takes --host, --name, --auth, --username (--login) and --database.";
                 break;
             }
 
@@ -329,7 +330,8 @@ internal static class AddServerCommand
         var planned = new List<(Entry Entry, ServerConnection Server, bool Exists)>();
         foreach (var (entry, label, candidate) in pending)
         {
-            var existing = manager.GetAllServers().FirstOrDefault(s => ServerManager.IsSameServer(s, candidate));
+            var listed = manager.GetAllServers();
+            var existing = listed.FirstOrDefault(s => ServerManager.IsSameServer(s, candidate));
             if (existing is null && manager.FindServerIdHolder(candidate) is { } holder)
             {
                 error.WriteLine($"{label}: {ServerManager.DescribeIdHolder(candidate, holder)}");
@@ -338,6 +340,25 @@ internal static class AddServerCommand
 
             if (existing is not null)
             {
+                /* The storage name joins the host and the database, so a host such as "tcp:sql01" matches an entry for host "tcp" and
+                   database "sql01". It is the same server only when the host and the database each match. */
+                if (!string.Equals(existing.ServerName, entry.Host, StringComparison.Ordinal)
+                    || !string.Equals(BlankToEmpty(existing.DatabaseName), BlankToEmpty(entry.Database), StringComparison.Ordinal))
+                {
+                    error.WriteLine($"{label}: the listed entry '{ServerHostChange.Shown(ServerManager.NameForMessage(existing))}' (host '{ServerHostChange.Shown(existing.ServerName)}', "
+                        + $"database '{ServerHostChange.Shown(existing.DatabaseName)}') has the same storage name as this server but a different host or database, so nothing was changed. "
+                        + "Remove that entry, or add this server with the host and database spelled as the entry has them.");
+                    return ExitRefused;
+                }
+
+                /* Two entries with one Id: an update replaces the first of them, which may not be the one matched here. */
+                if (listed.FirstOrDefault(s => !ReferenceEquals(s, existing) && s.Id == existing.Id) is { } sameId)
+                {
+                    error.WriteLine($"{label}: the listed entries '{ServerHostChange.Shown(ServerManager.NameForMessage(existing))}' and '{ServerHostChange.Shown(ServerManager.NameForMessage(sameId))}' "
+                        + "have the same Id, so an update could replace the wrong one and nothing was changed. Remove one of them in the Add Server window or Manage Servers and run this again.");
+                    return ExitRefused;
+                }
+
                 /* A saved password is written only for a server whose Id is a GUID, so the entry would be "updated" with no password stored. */
                 if (entry.AuthenticationType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal && !ServerCredentialIds.IsUsable(existing.Id))
                 {
@@ -348,7 +369,7 @@ internal static class AddServerCommand
 
                 /* The entry's own settings are in a file any local account can change. The connection test below and the stored password
                    would use them, so one this Windows account has not confirmed is refused here, before anything connects. */
-                var unconfirmed = UnconfirmedSettings(existing, manager.HostChangeIfSaved(existing));
+                var unconfirmed = UnconfirmedSettings(existing, manager.HostChangeIfSaved(existing), keepsManagedIdentityClientId: entry.AuthenticationType == AuthenticationTypes.ManagedIdentity);
                 if (unconfirmed.Count > 0)
                 {
                     error.WriteLine($"{label}: the listed entry for this server holds {string.Join(", ", unconfirmed)} that this Windows account has not confirmed, so nothing was changed. "
@@ -416,6 +437,15 @@ internal static class AddServerCommand
             results.Add($"{(exists ? "Updated" : "Added")} {server.DisplayName} ({server.ServerName}).");
         }
 
+        /* The manager reports a failed write of the host record instead of throwing, and the run would then say Added. */
+        if (manager.HostRecordSaveProblem is { } recordProblem)
+        {
+            error.WriteLine(recordProblem);
+            foreach (var line in undo.Restore(reached))
+                error.WriteLine(line);
+            return ExitRefused;
+        }
+
         foreach (var line in results)
             output.WriteLine(line);
 
@@ -429,15 +459,18 @@ internal static class AddServerCommand
     /// <summary>
     /// The settings a listed entry holds that this Windows account's host record does not confirm, which the Add Server window would ask
     /// about: a Query Store replica, a utility database, a certificate trusted without a check, and encryption that is Optional (or
-    /// weaker than the confirmed one). Empty when <paramref name="change"/> is null (the record confirms the entry).
+    /// weaker than the confirmed one), and a managed identity client id the run keeps (<paramref name="keepsManagedIdentityClientId"/>).
+    /// Every setting counts as unconfirmed when the record is not for this host. Empty when <paramref name="change"/> is null (the
+    /// record confirms the entry).
     /// </summary>
-    internal static List<string> UnconfirmedSettings(ServerConnection server, ServerHostChange? change)
+    internal static List<string> UnconfirmedSettings(ServerConnection server, ServerHostChange? change, bool keepsManagedIdentityClientId)
     {
         var names = new List<string>();
         if (change is null)
             return names;
 
-        var neverConfirmed = change.ConfirmedHost is null;
+        /* A record for another host (the entry was renamed, or its Id is shared) confirms nothing about this one. */
+        var neverConfirmed = change.HostChanged;
         bool Asked(string setting) => change.Settings.Any(s => s.Name == setting);
 
         if (change.ReplicaChanged || (neverConfirmed && !string.IsNullOrWhiteSpace(server.QueryStoreReplica)))
@@ -448,6 +481,9 @@ internal static class AddServerCommand
             names.Add("TrustServerCertificate");
         if (neverConfirmed ? ServerHostBindings.EncryptRank(server.EncryptMode) == 0 : Asked(ServerHostBindings.EncryptionSetting))
             names.Add("encryption that is Optional or weaker than the confirmed one");
+        if (keepsManagedIdentityClientId && !string.IsNullOrWhiteSpace(server.ManagedIdentityClientId)
+            && (neverConfirmed || Asked(ServerHostBindings.ManagedIdentityClientIdSetting)))
+            names.Add("a managed identity client id");
         return names;
     }
 
@@ -536,6 +572,9 @@ internal static class AddServerCommand
             ];
         }
     }
+
+    /// <summary>The storage name reads a blank database as none, so the same-server check does too.</summary>
+    private static string BlankToEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? "" : value;
 
     private static string ManagerLabel(ServerConnection server) => ServerManager.NameForMessage(server);
 

@@ -549,6 +549,144 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Empty(StoredKeys());
     }
 
+    private const string ReAddSql01 = """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""";
+
+    [Fact]
+    public async Task AReAdd_OfAnEntryWhoseRecordIsForAnotherHost_TreatsEverySettingAsUnconfirmed()
+    {
+        /* This user confirmed sql01 (with Optional encryption) under one Id. servers.json now names sql02 under that Id. */
+        var id = await AddSql01Async();
+        var manager = Reload();
+        var listed = manager.GetAllServers().Single();
+        listed.EncryptMode = "Optional";
+        manager.UpdateServerSettings(listed);
+        manager.ConfirmHost(listed);
+        EditListedEntry(entry => entry["ServerName"] = "sql02");
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+
+        var run = await RunVerbAsync(["--add-server"], ReAddSql01.Replace("sql01", "sql02"));
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("encryption", run.Err);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(id));
+    }
+
+    [Fact]
+    public async Task AHostWithAProtocolPrefix_IsNotTheListedEntryWhoseHostAndDatabaseJoinToTheSameName()
+    {
+        await RunVerbAsync(["--add-server"], """[{"host":"tcp","database":"sql01","auth":"sql","username":"monitor","password":"first-value"}]""");
+        var id = Reload().GetAllServers().Single().Id;
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"tcp:sql01","auth":"sql","username":"monitor2","password":"second-value"}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("different host or database", run.Err);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(id));
+    }
+
+    [Fact]
+    public async Task AReAdd_WhenAnotherListedEntryHasTheSameId_IsRefused_AndChangesNothing()
+    {
+        var id = await AddSql01Async();
+        var root = JsonNode.Parse(File.ReadAllText(ServersFile))!.AsObject();
+        var servers = root["Servers"]!.AsArray();
+        var other = JsonNode.Parse(servers[0]!.ToJsonString())!.AsObject();
+        other["ServerName"] = "sql02";
+        other["DisplayName"] = "second-entry";
+        servers.Insert(0, other);
+        File.WriteAllText(ServersFile, root.ToJsonString());
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+
+        var run = await RunVerbAsync(["--add-server"], ReAddSql01);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("second-entry", run.Err);
+        Assert.Contains("same Id", run.Err);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(id));
+    }
+
+    private const string ManagedIdentityClientId = "00000000-0000-0000-0000-000000000001";
+
+    private async Task AddManagedIdentityAsync()
+    {
+        var added = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"managedidentity"}]""");
+        Assert.Equal(0, added.Exit);
+    }
+
+    [Fact]
+    public async Task AReAdd_OfAManagedIdentityEntryWithAnUnconfirmedClientId_IsRefused_AndChangesNothing()
+    {
+        await AddManagedIdentityAsync();
+        EditListedEntry(entry => entry["ManagedIdentityClientId"] = ManagedIdentityClientId);
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"managedidentity"}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("a managed identity client id", run.Err);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+    }
+
+    [Fact]
+    public async Task AReAdd_OfAManagedIdentityEntryWhoseClientIdThisUserConfirmed_GoesThrough()
+    {
+        await AddManagedIdentityAsync();
+        EditListedEntry(entry => entry["ManagedIdentityClientId"] = ManagedIdentityClientId);
+        var manager = Reload();
+        manager.ConfirmHost(manager.GetAllServers().Single());
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"managedidentity"}]""");
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(["sql01"], run.Tested);
+    }
+
+    [Fact]
+    public async Task AHostRecordThatCannotBeWritten_FailsTheRun_AndPutsEverythingBack()
+    {
+        /* A folder where the record's temporary file goes: the write fails, and the manager reports that instead of throwing. */
+        Directory.CreateDirectory(HostsFile + ".tmp");
+
+        var run = await RunVerbAsync(["--add-server"], ReAddSql01);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("could not save", run.Err);
+        Assert.Contains("put back", run.Err);
+        Assert.DoesNotContain("Added", run.Out);
+        Assert.Empty(ServerNames());
+        Assert.False(File.Exists(HostsFile));
+        Assert.Empty(StoredKeys());
+    }
+
+    [Theory]
+    [InlineData("-PSecret1")]
+    [InlineData("-Password:Secret1")]
+    public async Task AnUnknownOptionThatCarriesAPassword_IsNamedByItsPosition_NotItsText(string option)
+    {
+        var run = await RunVerbAsync(["--add-server", "--username", "sa", option], "");
+
+        Assert.Equal(1, run.Exit);
+        Assert.DoesNotContain("Secret1", run.Err);
+        Assert.DoesNotContain("Secret1", run.Out);
+        Assert.Contains("argument 3", run.Err);
+    }
+
     [Fact]
     public void TheCredentialRule_IsTheOneTheWindowApplies()
     {

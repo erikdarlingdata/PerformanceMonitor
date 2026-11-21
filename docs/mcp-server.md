@@ -26,6 +26,8 @@ Lite and Darling set up MCP in different ways. Follow the part for your edition,
 claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ --header "Authorization: Bearer <token>"
 ```
 
+   The command puts the token on the command line. It stays in your shell history, and it shows in the process list while the command runs. PowerShell keeps its history in a file, at the path `(Get-PSReadLineOption).HistorySavePath`, so delete the line there if you ran it. To keep the token off the command line, use a `.mcp.json` file. Claude Code's documentation says a `headers` value there can hold `${NAME}`, which it replaces with the environment variable `NAME`, for example `"Authorization": "Bearer ${SQL_MONITOR_TOKEN}"`. Set that variable in the Windows environment variable settings, not with a typed command.
+
    If you type the command yourself, replace `<token>` with the token. A request with no token, or a wrong one, is answered `401`.
 
    If MCP was already on when you updated, Lite makes the token at its first start and logs a line saying so. Copy the new config then, because the old registration has no token.
@@ -60,7 +62,7 @@ The MCP token gates the entire read surface. It also gates `analyze_server`, whi
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
-   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how.
+   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how. The command above puts the token on the command line in the same way, so the note under the Lite step applies to it too.
 
 **Proof**, in the service log:
 
@@ -308,6 +310,8 @@ Then set up the client. Point it at the LAN IP of the box and never at `localhos
 claude mcp add --transport http --scope user sql-monitor-darling http://192.168.1.205:5152/ `
   --header "Authorization: Bearer <token>"
 ```
+
+The command above puts the token on the command line in the same way, so the note under the Lite step applies to it too.
 
 Two gates apply, in this order:
 

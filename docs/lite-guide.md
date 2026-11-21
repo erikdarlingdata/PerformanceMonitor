@@ -291,6 +291,7 @@ This procedure sets up a headless Lite that an AI client on another machine reac
    ```
    claude mcp add --transport http --scope user sql-monitor http://localhost:<local port>/ --header "Authorization: Bearer <token>"
    ```
+   The command puts the token on the command line. It stays in your shell history, and it shows in the process list while the command runs. PowerShell keeps its history in a file, at the path `(Get-PSReadLineOption).HistorySavePath`, so delete the line there if you ran it. To keep the token off the command line, use a `.mcp.json` file. Claude Code's documentation says a `headers` value there can hold `${NAME}`, which it replaces with the environment variable `NAME`, for example `"Authorization": "Bearer ${SQL_MONITOR_TOKEN}"`. Set that variable in the Windows environment variable settings, not with a typed command.
    The client needs the header `Authorization: Bearer <token>` on every request. [Lite with Copilot](mcp-server.md#lite-with-copilot) shows the VS Code entry. In it, use the URL `http://localhost:<local port>/`.
 8. Keep the token, even with the SSH forward. The forward protects only the network hop between the two machines. A loopback port on the Lite machine is open to every program and every account on that machine. The token is the only control on that port, so leave `mcp_allow_tokenless_loopback` off.
 
