@@ -150,6 +150,33 @@ public static class ParquetCompaction
 
     public static long RowGroupBytesFor(string table) => IsDailyTable(table) ? DailyRowGroupBytes : 0;
 
+    /* On-disk parquet bytes per merge batch for a monthly table whose merge sorts by server (#9258). A batch's sort
+       holds more of it than the streaming copy, so the sorted monthly merge gets its own smaller budget instead of
+       DefaultBatchInputBytes: more _ptNNN parts, each sorted on its own and each holding one server per row group.
+       Measured with tools/CompactionRepro (measure-sorted-monthly.sh) on 22 seeded hourly files, sorted merge at the
+       512MB limit, peak working set (baseline about 60 MB included) and row groups that still mix servers:
+         - 60-column index_object_stats shape (655 MB on disk): 32 MiB 474 MB, 88 of 1628 mixed;
+           64 MiB 653 MB, 44 mixed; 100 MiB 647 MB, 32 mixed. Unsorted at 200 MB: 343 MB, every group mixed.
+         - 37-column procedure_stats shape with seven 200-byte texts (241 MB): 32 MiB 605 MB, 44 of 649 mixed;
+           64 MiB 623 MB, 20 mixed; 100 MiB 640 MB, 12 mixed. Unsorted at 200 MB: 304 MB, every group mixed.
+       32 MiB is the one budget that stays near 600 MB on both shapes, so no table is taken out of the sorted set.
+       The mixed groups left are the seams where a server's rows continue across two parts. */
+    public const long SortedBatchInputBytes = 32L * 1024 * 1024; /* 32 MiB */
+
+    /* The per-batch input budget of a table's compaction merge. The one rule, so the production merge and
+       tools/CompactionRepro cannot drift apart: the daily budget for a table merged per day (query_snapshots,
+       query_stats and query_store_stats, the last of which is also sorted and keeps its day budget as measured in
+       #9255), the sorted monthly budget for any other server-ordered table, else the default. The three budgets
+       are parameters so a caller with its own settings (ArchiveService's test-settable properties) passes them in. */
+    public static long BatchInputBytesFor(
+        string table,
+        long defaultBytes = DefaultBatchInputBytes,
+        long dailyBytes = DailyBatchInputBytes,
+        long sortedBytes = SortedBatchInputBytes) =>
+        IsDailyTable(table) ? dailyBytes
+        : ServerOrderByFor(table) is null ? defaultBytes
+        : sortedBytes;
+
     /* Tables whose compaction merge sorts by server, then by the table's time column (#9255): table -> time column.
 
        Every archive file mixed every server's rows in each row group (the archiver's COPY and a merge without a sort
@@ -180,16 +207,55 @@ public static class ParquetCompaction
        DuckDB's out-of-memory error fires quickly, before anything is spilled. Field compressibility does not reach
        this case, so the fallback guards against unusually long, repetitive statement texts or a DuckDB change.
 
-       Only query_store_stats. Its merge reads no plan text (CompactionExcludeColumns drops query_plan_text), so the
-       #5410 peak does not apply. query_snapshots and query_stats carry plan XML and stay unsorted. The monthly tables
-       are not sorted either: a numeric month batch of 100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a
-       200 MB batch would reach about 2.4 GB and would need its own budget first. The archiver's hourly COPY is not
-       sorted: at the field's cadence an hourly file is one row group, so the sort clusters nothing, and compaction
-       rewrites the day's files in the same pass. */
-    private static readonly Dictionary<string, string> ServerOrderedTables = new(StringComparer.OrdinalIgnoreCase)
+       Which tables are sorted. At the daily level only query_store_stats: its merge reads no plan text
+       (CompactionExcludeColumns drops query_plan_text), so the #5410 peak does not apply, and its day budget
+       stays DailyBatchInputBytes. query_snapshots and query_stats carry plan XML, are merged per day and stay
+       unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
+       (32 MiB) per batch, not the 200 MB default the unsorted monthly tables keep: a numeric month batch of
+       100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a sorted batch needs its own smaller budget
+       (see there for the measurements). A table not listed keeps its merge unsorted at the default budget. The
+       archiver's hourly COPY is not sorted: at the field's cadence an hourly file is one row group, so the sort
+       clusters nothing, and compaction rewrites the day's files in the same pass. */
+    private static readonly Dictionary<string, string> ServerOrderedTables = BuildServerOrderedTables();
+
+    private static Dictionary<string, string> BuildServerOrderedTables()
     {
-        ["query_store_stats"] = "collection_time"
-    };
+        var tables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["query_store_stats"] = "collection_time"
+        };
+
+        /* The monthly-merged tables (#9258): every table Lite stores and archives except the three merged per day
+           above (query_snapshots and query_stats stay unsorted, see below). Each carries server_id and its own
+           time column: capture_time for the config snapshots, alert_time for the alert log, collection_time for
+           the rest. A table that is not named here keeps its merge unsorted, whatever it is called (the
+           ArchiveService tests merge tables of other names with files that have no server_id). */
+        foreach (var table in new[]
+        {
+            "ag_database_replica_states", "ag_replica_states", "agent_status", "attention_events",
+            "blocked_process_reports", "collection_log", "cpu_scheduler_stats", "cpu_utilization_stats",
+            "database_size_stats", "database_states", "deadlocks", "default_trace_events",
+            "dmv_blocking_snapshots", "file_io_stats", "index_object_stats", "job_history", "latch_stats",
+            "long_query_completions", "memory_clerks", "memory_grant_stats", "memory_pressure_events",
+            "memory_stats", "perfmon_stats", "plan_cache_stats", "plan_correction", "procedure_stats",
+            "pvs_stats", "running_jobs", "server_properties", "session_stats", "session_summary_stats",
+            "spinlock_stats", "system_health_events", "tempdb_stats", "wait_stats", "waiting_tasks"
+        })
+        {
+            tables[table] = "collection_time";
+        }
+
+        foreach (var table in new[]
+        {
+            "database_config", "database_scoped_config", "query_store_health", "server_config", "trace_flags"
+        })
+        {
+            tables[table] = "capture_time";
+        }
+
+        tables["config_alert_log"] = "alert_time";
+        return tables;
+    }
 
     /* The ORDER BY list of the table's compaction merge, or null when the merge keeps no order. */
     public static string? ServerOrderByFor(string table) =>
@@ -249,7 +315,8 @@ public static class ParquetCompaction
        numeric tables this runs on. (query_snapshots, with its query-plan XML,
        is merged one day at a time on a much smaller batch budget, and
        query_stats and query_store_stats are merged one day at a time so a
-       one-hour read prunes — see DailyCompactionTables.)
+       one-hour read prunes, see DailyCompactionTables. The monthly tables
+       that sort by server take the sorted budget, see BatchInputBytesFor.)
 
        Pragma tuning:
          - memory_limit = 4GB: parquet COPY makes allocations that bypass the

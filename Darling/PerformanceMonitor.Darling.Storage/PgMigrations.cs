@@ -3369,6 +3369,26 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// </summary>
     private static readonly string V292Sql = TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql;
 
+    /// <summary>The name of the partial index the Client Timeouts counter rows are read through (#9277, V293).</summary>
+    internal const string AttentionCountIndexName = "idx_attention_events_count_time";
+
+    /// <summary>
+    /// V293 (#9277): <c>idx_attention_events_count_time</c>, <c>(server_id, collection_time) INCLUDE (attention_count) WHERE event_kind = 'count'</c> on
+    /// <c>collect.attention_events</c>. The counter rows are one per collector run, a few thousand over seven days, and sit among a million or more
+    /// sampled events. <c>get_client_timeouts</c> sums them per run, and on an uncompressed chunk it read the whole (server_id, collection_time) range of
+    /// the table and dropped the sampled events after the heap fetch.
+    /// This index holds only the counter rows and carries the count, so the same read is an index-only scan that touches no sampled row.
+    ///
+    /// <para><b>Cost.</b> One build under a SHARE lock that blocks the collector's writes and not reads, with the lock timeout of V246
+    /// (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). It has two shapes, and the rung runs under <see cref="V293CommandTimeoutSeconds"/>
+    /// for the second. On a hypertable the build is one per chunk: it reads each uncompressed chunk's heap once and writes only its counter rows, and a
+    /// compressed chunk's index is an empty shell. On a store without TimescaleDB, or one whose start-path swap to a hypertable has not yet taken its
+    /// lock, the table is one plain heap and the build reads all of it in one statement, and on such a store the service start can wait up to the
+    /// declared bound (1800 s) for this rung before collectors start. A chunk created afterwards gets the index with the chunk.
+    /// Additive for an older build: it ignores the index, and no GRANT is needed for an index. The statement is a catalog read when the index exists.</para>
+    /// </summary>
+    private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + TimescaleSupport.CreateAttentionCountIndexSql;
+
     /// <summary>
     /// V294 (#9284): <c>collect.query_store_stats_corrected_daily</c> compresses ordered by <c>query_hash, bucket DESC</c> instead of
     /// <c>bucket DESC</c>, the order <see cref="TimescaleSupport.EnableAggregateCompressionSql(string)"/> gives a fresh store, and the same order V279 gave
@@ -3900,9 +3920,11 @@ END $$;";
            get_query_fleet_summary's Query Store statement reads the newest uncompressed daily chunks through it instead of scanning them whole.
            Catalog-only for the data: no row moves. An older build ignores the index. */
         new Migration(292, "query-store-corrected-daily-hash-index", V292Sql),
+        /* V293 (#9277): a partial covering index on the Client Timeouts counter rows, so get_client_timeouts' per-run counts read the newest uncompressed chunks
+           through an index-only scan instead of fetching every sampled event of the range and dropping it. No row moves. An older build ignores the index. */
+        new Migration(293, "attention-events-count-index", V293Sql),
         /* V294 (#9284): the corrected daily Query Store rollup's compression order becomes query_hash then bucket, as V279 did for the hourly rollup, so one
-           query's days sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. V293 is
-           #9281's. */
+           query's days sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
         new Migration(294, "qs-corrected-daily-compress-orderby", V294Sql),
     };
 
@@ -11301,6 +11323,19 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     internal const int V281CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
 
     /// <summary>
+    /// V293's command timeout (seconds), #9277: six times the default bound, equal to <see cref="V281CommandTimeoutSeconds"/>, so
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> stays as it is.
+    ///
+    /// <para><b>Why this rung needs its own.</b> On a hypertable the build reads only the uncompressed chunks and is short. Without TimescaleDB, or
+    /// while the start-path swap to a hypertable keeps losing its lock, <c>collect.attention_events</c> is one plain table, and the partial index
+    /// build reads the whole heap in one statement. The repo's own sizing puts that table at about 0.7 GB a day for 30 days (see
+    /// <c>V277Sql</c>), about 21 GB, which a cold read at 100 to 250 MB/s takes 85 to 210 s to cover. The statement's lock wait comes out of the same
+    /// bound, up to 280 s of it (the rung's own <c>lock_timeout</c>, <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, is kept). The default
+    /// 300 s leaves no room for both, and a rung that runs out of time rolls back and fails the start on every start.</para>
+    /// </summary>
+    internal const int V293CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
     /// The rungs that run under a longer command timeout than <see cref="MigrationCommandTimeoutSeconds"/>, by
     /// version, with the bound each one runs under (seconds). The applier reads this for every rung it applies
     /// (<see cref="RungCommandTimeoutSeconds"/>).
@@ -11314,6 +11349,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     internal static IReadOnlyDictionary<int, int> DeclaredRungCommandTimeoutSeconds { get; } = new Dictionary<int, int>
     {
         [281] = V281CommandTimeoutSeconds,
+        [293] = V293CommandTimeoutSeconds,
     };
 
     /// <summary>
@@ -11368,8 +11404,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// PostgreSQL 18.6, see <see cref="V281Sql"/>), and it runs under its own longer bound,
     /// <see cref="V281CommandTimeoutSeconds"/>. The budget is the larger of two sums, each with one default
     /// rung bound of margin, sized at one rung bound because that is the granularity this ladder grows by — one
-    /// new data-moving rung. The first is every floor-setting rung at the default bound: five rungs and the
-    /// margin, six default bounds. The second is the longest bound in
+    /// new data-moving rung. The first is every floor-setting rung at the default bound: six rungs (V293, #9277, is the sixth) and the
+    /// margin, seven default bounds. The second is the longest bound in
     /// <see cref="DeclaredRungCommandTimeoutSeconds"/> and the margin, which is the larger and is this constant.
     /// The two are not added together, because V281 and the three oldest floor-setting rungs are never expensive
     /// in one upgrade: V281 reads rows only on a store that already had the text table (V74), and V22, V23 and
@@ -11818,7 +11854,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                 /* A declared rung can run for minutes with nothing else logged, and collection waits behind it, so the
                    log says which rung is running and how long it may take. */
                 logger?.LogInformation(
-                    "Applying migration V{Version} ({Name}). It copies data the store already holds, so on a large " +
+                    "Applying migration V{Version} ({Name}). It reads or copies data the store already holds, so on a large " +
                     "store it can run for several minutes, and for at most {Timeout}s. Collection starts when the " +
                     "migrations finish.",
                     migration.Version, migration.Name, rungTimeoutSeconds);
