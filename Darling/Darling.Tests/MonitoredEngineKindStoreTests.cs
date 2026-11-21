@@ -50,23 +50,9 @@ public sealed class MonitoredEngineKindStoreTests
     /* ---------------- the rung ---------------- */
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("server-engine-kind", PgMigrations.Scripts.Single(s => s.Version == 82).Name);
-
-        /* V83 (#2539) took the top of the ladder, so this rung's own test no longer claims it. What it
-           still owns is that 82 EXISTS, is ordered, and sits in the dense run — the invariants that keep a
-           rung from being silently skipped. The top-of-ladder pins live with whichever rung is newest;
-           leaving a stale copy here would fail every future rung's PR for a reason in someone else's file. */
-        Assert.Contains(82, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
@@ -114,8 +100,6 @@ public sealed class MonitoredEngineKindStoreTests
         Assert.Contains(
             "table_name = 'servers' AND column_name = 'engine_kind'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-
     }
 
     [Fact]

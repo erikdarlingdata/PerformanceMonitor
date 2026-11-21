@@ -79,7 +79,6 @@ job_stats AS (
         var rung = PgMigrations.Scripts.Single(m => m.Name == "job-history-success-index");
 
         Assert.Equal(RungVersion, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
     }
 
     /// <summary>

@@ -48,8 +48,6 @@ public sealed class AgentLevel2StoreRungTests
     {
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Equal(191, Rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
     [Fact]

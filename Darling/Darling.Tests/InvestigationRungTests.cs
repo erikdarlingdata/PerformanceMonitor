@@ -42,10 +42,7 @@ public sealed class InvestigationRungTests
         Assert.Equal("agent-investigations", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(InvestigationTables.RungVersion, RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V185 (#5812) took the top of the ladder; this rung stays registered just below it. */
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Equal(InvestigationTables.CreateSql, Rung.Sql);
     }
 

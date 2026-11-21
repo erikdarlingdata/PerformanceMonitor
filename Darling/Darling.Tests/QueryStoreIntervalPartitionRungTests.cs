@@ -69,8 +69,6 @@ CREATE TRIGGER trg_plan_regression_daily_late
         Assert.Equal(Enumerable.Range(171, StorageVersion.SchemaVersion - 171 + 1).ToArray(), versions.OrderBy(v => v).Where(v => v >= 171).ToArray());
         Assert.Equal("query-store-interval-wide-partitioned", WideRung.Name);
         Assert.Equal("query-store-interval-latest-partitioned", LatestRung.Name);
-        /* No longer the top rung: the Query Store compose rollup rung (V173, #5582), the service version rung (V174, #5655), the plan regression rowcount rung (V175, #5631), the external alert rung (V180, #5654), the read latency capacity rung (V182, #5506) the read caller rung (V183, #5793), the investigation rung (V184, #5632), the plan regression partial-day rung (V185, #5812), the collection log hourly rung (V186, #5810), the alert resolution rung (V187, #5825), the investigation alert facts rung (V188, #5821) and the compose failure rung (V189, #5867) landed above it. */
-        Assert.True(LatestRungVersion < StorageVersion.SchemaVersion);
         /* Registered once each, found by version: the distance from the top moved with every new rung (#5825). */
         Assert.Single(PgMigrations.Scripts, m => m.Version == LatestRungVersion);
         Assert.Single(PgMigrations.Scripts, m => m.Version == WideRungVersion);

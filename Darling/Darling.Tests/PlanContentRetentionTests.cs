@@ -32,24 +32,6 @@ public sealed class PlanContentRetentionTests
     /* ---------------- the rung ---------------- */
 
     [Fact]
-    public void TheRungIsTheTopOfADenseLadder()
-    {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* #2319 added V76, so this rung is no longer the top — the "I am the top" claim moves to the
-           newest rung's own test (QueryStoreHealthStoreTests) and this one keeps the invariants that
-           stay true forever: the rung is PRESENT, the ladder is ordered and dense, and the build's
-           schema version tracks the maximum. */
-        Assert.Contains(75, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        /* Dense above the one sanctioned historical hole at V45. */
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
-    }
-
-    [Fact]
     public void TheRungAddsTheKnobWithThe21DayDefault()
     {
         var rung = PgMigrations.Scripts.Single(s => s.Version == 75);

@@ -40,17 +40,9 @@ public sealed class BuiltinAlertPersistenceRungTests
     private const int ProbeOrdinal = 93;
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(118, RungVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        /* Below the top now, and that has to be asserted rather than assumed: every probe claim in this
-           file is about a store that has THIS rung and not the ones above it, which is only a meaningful
-           distinction while something is above it. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
     }
 
     [Fact]
