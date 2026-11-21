@@ -558,8 +558,10 @@ chunk_rels AS (
                    WHERE cs.relid::oid = pc.oid AND cs.compress_relid IS NOT NULL) AS is_compressed
     /* Chunk membership from core inheritance, not timescaledb_information.chunks: that view joins every chunk to its dimension
        slices and to all of pg_class, and its row count is estimated far too low, which let the planner pick the wrong join order
-       (#9224). No _timescaledb_catalog column is named: TimescaleDB 2.29 rebuilt the chunk catalog, so a column of it exists on
-       one side of that version only. A chunk dropped by retention has no relation and no pg_inherits row, as in the view. The
+       (#9224). No column of _timescaledb_catalog.chunk is named: TimescaleDB 2.29 rebuilt that catalog, so a column of it exists on
+       one side of that version only. The compression_settings reads (relid, compress_relid), here and in TimescaleMemberArms, are
+       the catalog columns still named, and both exist on 2.28.1 and on 2.29 and later. A chunk dropped by retention has no relation
+       and no pg_inherits row, as in the view. The
        tiered-storage (OSM) chunk is a foreign table, which the view skipped.*/
     FROM root_rels AS t
     JOIN pg_catalog.pg_inherits AS inh ON inh.inhparent = t.rel_oid
