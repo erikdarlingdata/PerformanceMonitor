@@ -21,14 +21,15 @@ namespace Darling.Tests;
 /// fleet card answers (#8554), and the card of a server with no recent collection (is_online false) used to make it restart them,
 /// so the reads in flight were aborted and sent again. These run the shipped <c>app.js</c> and Server page under Node
 /// (<c>web-first-visit-front-door-harness.mjs</c>) with three stores whose fleet reads answer at their own virtual times, and count the
-/// reads the page aborted or sent twice. Node is skipped when it is not installed.
+/// reads the page aborted or sent twice. The same holds for a first visit by a partial server name, which the card's arrival moved to the
+/// server's own name by a new render that aborted the batch in flight and read everything again. Node is skipped when it is not installed.
 /// </summary>
 [Trait("Cost", "Slow")]
 public sealed class FirstVisitFrontDoorBehaviourTests
 {
     private const string OfflineCard = "{\"is_online\":false}";
 
-    private static JsonElement Run(string scenario, string tab, string card, int ownStoreFleetMs, int panelReadMs)
+    private static JsonElement Run(string scenario, string tab, string card, int ownStoreFleetMs, int panelReadMs, params (string Key, string Value)[] env)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-first-visit-front-door-harness.mjs"));
@@ -38,6 +39,7 @@ public sealed class FirstVisitFrontDoorBehaviourTests
         psi.Environment["CARD"] = card;
         psi.Environment["OWN_MS"] = ownStoreFleetMs.ToString();
         psi.Environment["PANEL_MS"] = panelReadMs.ToString();
+        foreach (var (key, value) in env) psi.Environment[key] = value;
 
         Process proc;
         try
@@ -105,6 +107,91 @@ public sealed class FirstVisitFrontDoorBehaviourTests
     {
         var r = Run("firstVisit", "activity", OfflineCard, 1500, 400);
         Assert.True(r.GetProperty("sentMoreThanOnce").GetArrayLength() > 0);
+    }
+
+    // A first visit by a route name that is only PART of the server's own name (it equals neither the card's display name nor its server
+    // name): the panel reads go out under that name, and the card's arrival moves the link to the server's own name. The reads in flight
+    // stay, so none is aborted and none is sent a second time under the new name.
+    private const string PartialCards = "[{\"server_name\":\"alpha.corp.test\",\"display_name\":\"alpha-prod\"},{\"server_name\":\"beta\",\"display_name\":\"beta\"}]";
+    private const string TwoMatchingCards = "[{\"server_name\":\"alpha.corp.test\",\"display_name\":\"alpha-prod\"},{\"server_name\":\"alpha2.corp.test\",\"display_name\":\"alpha-two\"}]";
+
+    private static JsonElement RunPartial(string scenario, string tab, string card, int ownStoreFleetMs, int panelReadMs, string cards) =>
+        Run(scenario, tab, card, ownStoreFleetMs, panelReadMs, ("CARDS", cards), ("ROUTE", "alpha"), ("FULL", "alpha.corp.test"), ("NEXT_TAB", tab == "queries" ? "overview" : "queries"));
+
+    private static void AssertReadsUnder(JsonElement byServer, params string[] allowedNames)
+    {
+        var total = 0;
+        foreach (var p in byServer.EnumerateObject())
+        {
+            Assert.Contains(p.Name, allowedNames);
+            total += p.Value.GetInt32();
+        }
+
+        Assert.True(total > 0, "no panel read was sent");
+    }
+
+    [Theory]
+    [InlineData("overview", 700, 1500)]
+    [InlineData("overview", 1500, 400)]
+    [InlineData("queries", 700, 1500)]
+    [InlineData("queries", 1500, 400)]
+    public void FirstVisit_ByPartialServerName_KeepsThePanelBatch_AndMovesTheLinkToTheOwnName(string tab, int ownStoreFleetMs, int panelReadMs)
+    {
+        var r = RunPartial("partialFirstVisit", tab, "", ownStoreFleetMs, panelReadMs, PartialCards);
+        AssertNothingRestarted(r);
+        // Every read went out under the route's name, once: none was sent again under the card's name.
+        AssertReadsUnder(r.GetProperty("byServer"), "alpha", "null");
+        Assert.Equal("#/s/use1/server/alpha.corp.test/" + tab, r.GetProperty("finalHash").GetString());
+    }
+
+    [Fact]
+    public void FirstVisit_ByPartialServerName_OfStaleServer_KeepsThePanelBatch()
+    {
+        var r = RunPartial("partialFirstVisit", "overview", OfflineCard, 700, 1500, PartialCards);
+        AssertNothingRestarted(r);
+        Assert.Equal("#/s/use1/server/alpha.corp.test/overview", r.GetProperty("finalHash").GetString());
+    }
+
+    // Running Jobs words its empty state by is_online, so a stale server's card still draws this tab's panels afresh, under the own name.
+    [Fact]
+    public void FirstVisit_ByPartialServerName_OfStaleServer_OnTheActivityTab_StillDrawsWithTheCard()
+    {
+        var r = RunPartial("partialFirstVisit", "activity", OfflineCard, 700, 1500, PartialCards);
+        Assert.True(r.GetProperty("aborted").GetArrayLength() > 0);
+        Assert.Equal("#/s/use1/server/alpha.corp.test/activity", r.GetProperty("finalHash").GetString());
+    }
+
+    // After the move, the page's own poll and a tab click read by the server's own name.
+    [Fact]
+    public void AfterThePartialNameMoves_ThePollAndATabClick_ReadByTheOwnName()
+    {
+        var r = RunPartial("partialThenPollAndTab", "overview", "", 700, 400, PartialCards);
+        Assert.Equal(0, r.GetProperty("aborted").GetArrayLength());
+        AssertReadsUnder(r.GetProperty("afterPoll"), "alpha.corp.test", "null");
+        AssertReadsUnder(r.GetProperty("afterTabClick"), "alpha.corp.test", "null");
+        Assert.Equal("#/s/use1/server/alpha.corp.test/queries", r.GetProperty("finalHash").GetString());
+    }
+
+    // A partial name that fits two servers shows its message and reads nothing once the card answers; the link stays as it was.
+    [Fact]
+    public void FirstVisit_ByAmbiguousPartialName_ReadsNothingAfterTheCard()
+    {
+        var r = RunPartial("partialAmbiguous", "overview", "", 700, 1500, TwoMatchingCards);
+        Assert.Equal(0, r.GetProperty("startedAfterTheCard").GetInt32());
+        Assert.Equal(0, r.GetProperty("rewrites").GetArrayLength());
+        Assert.Equal("#/s/use1/server/alpha/overview", r.GetProperty("finalHash").GetString());
+    }
+
+    // The reads a partial-name visit kept are still the page's reads: opening another server ends them.
+    [Fact]
+    public void LeavingForAnotherServer_AfterAPartialNameMoved_AbortsTheReadsKept()
+    {
+        var r = RunPartial("leaveForAnotherServer", "queries", "", 700, 1500, PartialCards);
+        Assert.Equal(0, r.GetProperty("abortedBeforeLeaving").GetInt32());
+        var started = r.GetProperty("startedForAlpha").GetInt32();
+        Assert.True(started > 0);
+        Assert.Equal(0, r.GetProperty("answeredForAlpha").GetInt32());
+        Assert.Equal(started, r.GetProperty("abortedForAlpha").GetInt32());
     }
 
     // A real navigation still ends the page's reads: the first server's reads are aborted when the person opens another server.

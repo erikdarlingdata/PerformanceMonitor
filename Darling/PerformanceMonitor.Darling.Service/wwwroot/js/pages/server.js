@@ -340,7 +340,7 @@ export function renderServer(main, server, tabId, opts) {
   const custom = customRanges.get(server);
   /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same
      tab) instead of reading the same hours again. The Refresh button passes `manual: true`: a click asks for a re-read, so it rebuilds even then. A live range, a preset and a tab or server click rebuild as before. */
-  const keep = isPoll && !(opts && opts.manual === true) && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
+  const keep = takeRenamedBatch(server, tabId) || (isPoll && !(opts && opts.manual === true) && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || ""));
   /* #6933: every other poll, and the Refresh button, keep the same server and tab's panels on screen and read them again in place. */
   const inPlace = isPoll && !keep && gridPageIsShown(main, server, tabId);
   if (!isPoll && cancelRefresh) { cancelRefresh(); cancelRefresh = null; }
@@ -439,7 +439,20 @@ export function renderServer(main, server, tabId, opts) {
           rememberServerId(exactName, card.server_id);
           const next = storeHash("#/server/" + encodeURIComponent(exactName)) + (tabId ? "/" + encodeURIComponent(tabId) : "");
           if (typeof history !== "undefined" && history.replaceState) history.replaceState(null, "", next);
-          window.dispatchEvent(new Event("hashchange"));
+          /* #9220: the panels started on the route's partial name read the same one server the exact name does (the read API resolves a name by
+             the rule resolveFleetCard mirrors), so when they agree with the card they are the right reads and the render under the exact name
+             adopts them: app.js's route() does not end the page's reads for it, and renderServer keeps the grid. Without this the new render
+             aborted the batch in flight and sent every panel read again. A card that changes the tab set or the offline wording, or a range
+             waiting on the catalog, still draws afresh as before. The hold lives for the synchronous dispatch only. */
+          const tabKey = tabId || "";
+          const agrees = beforeCard && !!painted && serverTabsFor(card) === painted && !(serverIsOffline(exactName) && current.tab && current.tab.readsOffline === true)
+            && !!gridNode && gridKey === server + "|" + tabKey && !catalogWaits.has(server);
+          if (agrees) renameHold = { from: server, to: exactName, tabKey };
+          try {
+            window.dispatchEvent(new Event("hashchange"));
+          } finally {
+            renameHold = null;
+          }
           return;
         }
       }
@@ -473,6 +486,27 @@ export function renderServer(main, server, tabId, opts) {
       beforeCard = false;
     });
   }
+}
+
+/* #9220: set for the one synchronous hashchange that moves a partial route name to the card's own name while the panels started on the
+   partial name are still in flight. `from` and `to` are the two route names and `tabKey` the tab. */
+let renameHold = null;
+
+/** True while the page is moving a first visit from a partial route name to the server's own name and keeps the panel reads it has out,
+ *  so the router must not end the page's reads for that one route change (#9220). */
+export function holdsRenamedServerRoute() {
+  return renameHold !== null;
+}
+
+/** True once, for the render the rename above asked for: it is the same server and tab, and the grid on screen is the one the partial
+ *  name started, so its reads are kept and its grid is adopted (#9220). */
+function takeRenamedBatch(server, tabId) {
+  const hold = renameHold;
+  if (!hold || hold.to !== server || hold.tabKey !== (tabId || "") || !gridNode || gridKey !== hold.from + "|" + hold.tabKey) return false;
+  renameHold = null;
+  const started = dataStarts.get(hold.from);
+  if (started && !dataStarts.has(server)) dataStarts.set(server, started);
+  return true;
 }
 
 /** Whether the page may start a server's panel reads before its fleet card arrives (#8554). Not for a server this browser has seen as

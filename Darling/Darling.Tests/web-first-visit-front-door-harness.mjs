@@ -101,9 +101,11 @@ const card = (id, name, extra = {}) => ({
   server_id: id, display_name: name, server_name: name, band: "Healthy", band_label: "Healthy", is_online: true,
   status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0, ...extra,
 });
+/* CARDS (JSON, optional): the fleet's cards as [{server_name, display_name}], for a server whose route name is only part of its own name. */
+const cardsEnv = process.env.CARDS ? JSON.parse(process.env.CARDS) : null;
 const fleetOf = (names, extra) => ({
   total_servers: names.length, critical_count: 0, warning_count: 0, offline_count: 0, offline_servers: 0, tags: [],
-  cards: names.map((n, i) => card(i + 1, n, i === 0 ? extra : {})), generated_at: "2026-11-21T12:00:00Z", worst_servers: [], additional_problem_count: 0,
+  cards: cardsEnv ? cardsEnv.map((c, i) => card(i + 1, c.display_name, { server_name: c.server_name, ...(i === 0 ? extra : {}) })) : names.map((n, i) => card(i + 1, n, i === 0 ? extra : {})), generated_at: "2026-11-21T12:00:00Z", worst_servers: [], additional_problem_count: 0,
 });
 const json = (body, status = 200) => ({ status, body });
 const storeOf = (opts) => (opts.headers || {})["X-Darling-Store"] || "";
@@ -173,6 +175,11 @@ const summary = () => {
   };
 };
 
+const serverOf = (r) => new URLSearchParams(r.url.split("?")[1] || "").get("server");
+const tally = (reads) => { const t = {}; for (const r of reads) { const n = serverOf(r); t[n] = (t[n] || 0) + 1; } return t; };
+const ROUTE = process.env.ROUTE || "alpha";
+const FULL = process.env.FULL || "alpha";
+
 /* argv: <js dir> <scenario> <tab or "">. The own store (use1) answers its fleet at OWN_MS, the others at 300 and 600. */
 const tabArg = process.argv[4] || "";
 const hashFor = (store, server) => "#/" + (store ? "s/" + store + "/" : "") + "server/" + server + (tabArg ? "/" + tabArg : "");
@@ -193,6 +200,36 @@ const scenarios = {
     await boot(hashFor("", "alpha"));
     await advance(4000);
     return summary();
+  },
+  /* #9220: a first visit by a PARTIAL route name (ROUTE is part of the card's server_name FULL and equals neither it nor the display name).
+     The fleet card of the own store answers at OWN_MS. Reports the server name each panel read went out under, and where the link ended. */
+  async partialFirstVisit() {
+    startScenario(Number(process.env.OWN_MS || 700));
+    await boot(hashFor("use1", ROUTE));
+    await advance(4000);
+    return { ...summary(), byServer: tally(panelReads()), finalHash: location.hash };
+  },
+  /* The partial-name first visit, then the page's own 60 s poll, then a tab click by the link the page ended on. Reads sent after each
+     step are tallied by the name they carry. */
+  async partialThenPollAndTab() {
+    startScenario(Number(process.env.OWN_MS || 700));
+    await boot(hashFor("use1", ROUTE));
+    await advance(4000);
+    const first = panelReads().length;
+    await advance(65000);
+    const afterPoll = panelReads().slice(first);
+    const second = panelReads().length;
+    await go("#/s/use1/server/" + encodeURIComponent(FULL) + "/" + (process.env.NEXT_TAB || "queries"));
+    await advance(2500);
+    return { ...summary(), afterPoll: tally(afterPoll), afterTabClick: tally(panelReads().slice(second)), finalHash: location.hash };
+  },
+  /* A first visit by a partial name that fits two servers: the page says so and sends no panel read after the card answers. */
+  async partialAmbiguous() {
+    startScenario(Number(process.env.OWN_MS || 700));
+    await boot(hashFor("use1", ROUTE));
+    await advance(4000);
+    const late = panelReads().filter((r) => serverOf(r) !== null && r.at - 1_000_000 > Number(process.env.OWN_MS || 700));
+    return { ...summary(), startedAfterTheCard: late.length, finalHash: location.hash };
   },
   /* A first visit, then a real navigation to another server while its reads are still out. */
   async leaveForAnotherServer() {
