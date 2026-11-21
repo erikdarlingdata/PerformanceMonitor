@@ -89,6 +89,7 @@ CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '30 minutes') 
                 await refresh.ExecuteNonQueryAsync(ct);
             }
 
+            await Exec(connection, TimescaleSupport.EnableCompressionSql("collect.procedure_stats"), ct);
             /* The store's policy compresses a chunk once it is a day old. */
             await Exec(connection, "SELECT count(compress_chunk(c)) FROM show_chunks('collect.procedure_stats', older_than => (now() AT TIME ZONE 'UTC') - interval '1 day') AS c", ct);
             Console.WriteLine($"Total: S9280 proc cagg+compress {sw.Elapsed.TotalSeconds:F0}s");
