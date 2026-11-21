@@ -201,7 +201,7 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(reader.GetString(0));
@@ -263,7 +263,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate, double Signal, double Avg)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */

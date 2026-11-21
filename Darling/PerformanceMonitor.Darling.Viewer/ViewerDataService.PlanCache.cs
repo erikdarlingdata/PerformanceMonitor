@@ -165,7 +165,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double SingleUse, double MultiUse)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -201,7 +201,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(PlanCacheSnapshotSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             result.Add(new PlanCacheSnapshotRow(
@@ -229,7 +229,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(PlanCacheSummarySql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return new PlanCacheSummary(0, 0, null);

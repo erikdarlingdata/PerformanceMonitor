@@ -352,7 +352,7 @@ public sealed partial class ViewerDataService
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        return await command.ExecuteScalarAsync(cancellationToken) is true;
+        return await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is true;
     }
 
     /// <summary>
@@ -392,7 +392,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         DateTime? collectorCoverage;
         DateTime? earliestReport;
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             await reader.ReadAsync(cancellationToken);
             collectorCoverage = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
@@ -442,7 +442,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(BlockedProcessThresholdOnSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         await reader.ReadAsync(cancellationToken);
         return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
     }
@@ -491,7 +491,7 @@ public sealed partial class ViewerDataService
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerBlockedProcessRow
@@ -554,7 +554,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(MapDmvRow(reader));
@@ -615,14 +615,14 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<BlockingPairRow>();
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using (var command = connection.CreateCommand())
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.CommandText = BlockingPairRowsSql;
             AddBlockingParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
                 rows.Add(PgBlockingPairRowQuery.Read(reader));
         }

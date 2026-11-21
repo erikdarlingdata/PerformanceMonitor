@@ -112,7 +112,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = collectorNames.ToArray() });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             facts.Add(new PostgresCollectorLogFacts(
@@ -348,7 +348,7 @@ LIMIT 1";
         await using var command = _dataSource.CreateCommand(PgServerClockSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        if (await command.ExecuteScalarAsync(cancellationToken) is not string setting || string.IsNullOrWhiteSpace(setting))
+        if (await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is not string setting || string.IsNullOrWhiteSpace(setting))
         {
             return (null, null);
         }
@@ -525,7 +525,7 @@ LIMIT 1";
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.AddWithValue(serverId);
             entryDatabase = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(
-                await command.ExecuteScalarAsync(cancellationToken) as string);
+                await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) as string);
         }
 
         var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(

@@ -245,7 +245,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;
@@ -291,7 +291,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double TotalGrantedMb)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(3) != 1)
@@ -345,7 +345,7 @@ public sealed partial class ViewerDataService
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(reader.GetString(0));
@@ -394,7 +394,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string ClerkType, DateTime BucketStart, DateTime FirstCollectionTime, double MemoryMb)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -452,7 +452,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(int PoolId, DateTime BucketStart, DateTime FirstCollectionTime, double Available, double Granted, double Used, int Grantee, int Waiter, long TimeoutDelta, long ForcedDelta, double Target, double MaxTarget)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(12) != 1)
@@ -526,7 +526,7 @@ public sealed partial class ViewerDataService
         });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new MemoryPressureEventRow(

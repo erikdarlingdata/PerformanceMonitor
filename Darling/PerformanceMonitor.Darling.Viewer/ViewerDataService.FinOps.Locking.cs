@@ -153,7 +153,7 @@ LIMIT $3";
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<IndexLockingRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new IndexLockingRow
@@ -218,7 +218,7 @@ AND   ($2::text[] IS NULL OR database_name = ANY($2))";
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var flags = new List<bool?>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
             flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
         return OptimizedLockingNote.For(flags);
@@ -232,7 +232,7 @@ AND   ($2::text[] IS NULL OR database_name = ANY($2))";
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<string>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!reader.IsDBNull(0)) items.Add(reader.GetString(0));

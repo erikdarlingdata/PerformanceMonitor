@@ -121,11 +121,30 @@ SELECT
     }
 
     /// <summary>
+    /// #9196: how this service's lines name a server: its display name in quotes, as the other per-server lines in Lite do, from the
+    /// display-name map the main window supplies, else the MCP host's lookup. A server neither knows (a hand-built service, or one
+    /// removed since) keeps its storage id, the only name the line has.
+    /// </summary>
+    internal string ServerLabelForLog(int serverId)
+    {
+        string? name = null;
+        if (DisplayNames?.Invoke() is { } map && map.TryGetValue(serverId, out var mapped))
+        {
+            name = mapped;
+        }
+
+        name ??= ServerDisplayNameLookup?.Invoke(serverId);
+        return string.IsNullOrWhiteSpace(name)
+            ? serverId.ToString(CultureInfo.InvariantCulture)
+            : $"'{name}'";
+    }
+
+    /// <summary>
     /// The Warning for a skipped maintenance cycle (#2266). <paramref name="budget"/> is the write-lock wait the call really
     /// had (5 s in the shipped app, two minutes in Lite.Tests), not a number written into the text.
     /// </summary>
-    internal static string MaintenanceSkippedWarning(int serverId, string holder, TimeSpan budget) =>
-        $"server {serverId}: skipped this cycle's database-state maintenance: could not acquire the " +
+    internal static string MaintenanceSkippedWarning(string server, string holder, TimeSpan budget) =>
+        $"server {server}: skipped this cycle's database-state maintenance: could not acquire the " +
             $"store write lock within {budget.TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture)}s ({holder}). Baselines are not being " +
             "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
             "occasionally. If it repeats, the write lock is contended.";
@@ -215,14 +234,14 @@ SELECT
             {
                 _lastMaintenanceSkipped[serverId] = true;
                 AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
-                    MaintenanceSkippedWarning(serverId, skipHolder, _backgroundWriteLockBudget));
+                    MaintenanceSkippedWarning(ServerLabelForLog(serverId), skipHolder, _backgroundWriteLockBudget));
             }
         }
         else if (_lastMaintenanceSkipped.TryGetValue(serverId, out var hadSkipped) && hadSkipped)
         {
             _lastMaintenanceSkipped[serverId] = false;
             AppLogger.Info(nameof(GetDatabaseStateDeviationsAsync),
-                $"server {serverId}: database-state maintenance is running again after one or more skipped " +
+                $"server {ServerLabelForLog(serverId)}: database-state maintenance is running again after one or more skipped " +
                 "cycles (#2266).");
         }
 

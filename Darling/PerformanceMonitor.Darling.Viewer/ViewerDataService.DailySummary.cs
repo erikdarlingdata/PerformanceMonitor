@@ -193,7 +193,7 @@ public sealed partial class ViewerDataService
                 command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = scope.ToArray() });
             }
 
-            await using (var reader = await command.ExecuteReaderAsync(ct))
+            await using (var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(ct)))
             {
                 while (await reader.ReadAsync(ct))
                 {

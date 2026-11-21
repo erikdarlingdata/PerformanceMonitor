@@ -36,12 +36,22 @@ internal sealed class ViewerScheduleOverridesCache
         _onFailure = onFailure;
     }
 
+    /* #9194: the read is shared by every panel of the tab, so it must not take the ambient read scope of the load that happened to
+       start it. A sub-tab pick cancels that scope, and a cancelled shared read would hand every other panel null (the shipped
+       cadence) and log a false failure for the cancellation. The clear sits in this async method, so it ends with the read's own
+       flow and never reaches the caller, whose scope stays for the rest of its load. */
+    private async Task<IReadOnlyList<CollectorScheduleRow>> ReadOutsideTheCallersScopeAsync()
+    {
+        ViewerReadScope.Clear();
+        return await _read();
+    }
+
     /// <summary>The schedule rows, or null when they could not be read (the caller then keeps the shipped cadence).</summary>
     internal async Task<IReadOnlyList<CollectorScheduleRow>?> GetAsync()
     {
         if (_pending is null || _utcNow() - _readUtc > MaxAge)
         {
-            _pending = _read();
+            _pending = ReadOutsideTheCallersScopeAsync();
             _readUtc = _utcNow();
         }
 
