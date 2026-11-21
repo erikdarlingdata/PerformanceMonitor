@@ -2465,54 +2465,139 @@ internal static partial class DarlingDataReader
     /// winners, from raw. On the mid route <c>win_object_type</c> does not exist, so the caller drops that one match line
     /// (<see cref="MidObjectTypeMatch"/>).</summary>
     private const string MidObjectTypeMatch = "AND object_type IS NOT DISTINCT FROM w.win_object_type";
+    private const string MidObjectTypeMatchFirstArm = "AND p.object_type IS NOT DISTINCT FROM w.win_object_type";
     private const string TopProceduresWideSql = $"""
         /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters, matched on the
-           full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). The
-           COALESCE equality is only the hashable pre-filter (see TopQueriesSql); IS NOT DISTINCT FROM makes the
-           match exact. This ORDER BY is the page's final order: the same keys as pass 1, group key last. */
+           full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). This ORDER BY
+           is the page's final order: the same keys as pass 1, group key last.
+           #9280: two arms, each a join of the winners to the raw rows. The first takes the winners whose database
+           and object are both set, joined on plain equalities on those columns plus the procedure's full name, the
+           expression idx_procedure_stats_server_db_name_time keys on (#8570): the planner can then seek each
+           winner's rows through that index on an uncompressed chunk, and read only the batches of that name on a
+           chunk compressed on the name. Schema and type stay NULL-safe matches. The second arm is the old join,
+           for a winner with a NULL database or object, which no equality matches; it joins nothing when no winner
+           has one. A winner belongs to exactly one arm, so the arms never repeat a group. */
         SELECT
             database_name,
             schema_name,
             object_name,
             object_type,
-            MAX(sql_handle) AS sql_handle,
-            MAX(plan_handle) AS plan_handle,
-            CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-            CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-            CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-            CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-            CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-            CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-            CAST(SUM(delta_spills) AS bigint) AS total_spills,
-            MIN(min_worker_time) AS min_worker_time,
-            MAX(max_worker_time) AS max_worker_time,
-            MIN(min_elapsed_time) AS min_elapsed_time,
-            MAX(max_elapsed_time) AS max_elapsed_time,
-            MAX(last_execution_time) AS last_execution_time,
-            MAX(cached_time) AS cached_time,
-            MIN(min_logical_reads) AS min_logical_reads,
-            MAX(max_logical_reads) AS max_logical_reads,
-            MIN(min_physical_reads) AS min_physical_reads,
-            MAX(max_physical_reads) AS max_physical_reads,
-            MIN(min_logical_writes) AS min_logical_writes,
-            MAX(max_logical_writes) AS max_logical_writes,
-            MIN(min_spills) AS min_spills,
-            MAX(max_spills) AS max_spills
-        FROM procedure_stats
-        JOIN winners AS w
-            ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
-            AND database_name IS NOT DISTINCT FROM w.win_database_name
-            AND schema_name IS NOT DISTINCT FROM w.win_schema_name
-            AND object_name IS NOT DISTINCT FROM w.win_object_name
-            AND object_type IS NOT DISTINCT FROM w.win_object_type
-        WHERE server_id = $1
-        AND   collection_time > $2
-        AND   collection_time <= $3
-        AND   ($5::text[] IS NULL OR database_name = ANY($5))
-        AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
-        AND   {TimescaleSupport.IntervalHonestSourceFilter}
-        GROUP BY database_name, schema_name, object_name, object_type
-        ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
+            sql_handle,
+            plan_handle,
+            total_executions,
+            total_cpu_us,
+            total_elapsed_us,
+            total_reads,
+            total_writes,
+            total_physical_reads,
+            total_spills,
+            min_worker_time,
+            max_worker_time,
+            min_elapsed_time,
+            max_elapsed_time,
+            last_execution_time,
+            cached_time,
+            min_logical_reads,
+            max_logical_reads,
+            min_physical_reads,
+            max_physical_reads,
+            min_logical_writes,
+            max_logical_writes,
+            min_spills,
+            max_spills
+        FROM (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                MAX(sql_handle) AS sql_handle,
+                MAX(plan_handle) AS plan_handle,
+                CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+                CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+                CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+                CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+                CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+                CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+                CAST(SUM(delta_spills) AS bigint) AS total_spills,
+                MIN(min_worker_time) AS min_worker_time,
+                MAX(max_worker_time) AS max_worker_time,
+                MIN(min_elapsed_time) AS min_elapsed_time,
+                MAX(max_elapsed_time) AS max_elapsed_time,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(cached_time) AS cached_time,
+                MIN(min_logical_reads) AS min_logical_reads,
+                MAX(max_logical_reads) AS max_logical_reads,
+                MIN(min_physical_reads) AS min_physical_reads,
+                MAX(max_physical_reads) AS max_physical_reads,
+                MIN(min_logical_writes) AS min_logical_writes,
+                MAX(max_logical_writes) AS max_logical_writes,
+                MIN(min_spills) AS min_spills,
+                MAX(max_spills) AS max_spills,
+                MAX(w.rank_metric) AS sort_metric,
+                MAX(w.rank_cpu) AS sort_cpu
+            FROM procedure_stats AS p
+            JOIN winners AS w
+                ON  p.database_name = w.win_database_name
+                AND p.object_name = w.win_object_name
+                AND COALESCE(NULLIF(p.schema_name, '') || '.', '') || p.object_name = COALESCE(NULLIF(w.win_schema_name, '') || '.', '') || w.win_object_name
+                AND p.schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND p.object_type IS NOT DISTINCT FROM w.win_object_type
+            WHERE p.server_id = $1
+            AND   p.collection_time > $2
+            AND   p.collection_time <= $3
+            AND   ($5::text[] IS NULL OR p.database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR p.database_name IS NULL OR p.database_name <> ALL($6))
+            AND   p.sample_interval_seconds IS DISTINCT FROM 0
+            GROUP BY p.database_name, p.schema_name, p.object_name, p.object_type
+            UNION ALL
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                MAX(sql_handle) AS sql_handle,
+                MAX(plan_handle) AS plan_handle,
+                CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+                CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+                CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+                CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+                CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+                CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+                CAST(SUM(delta_spills) AS bigint) AS total_spills,
+                MIN(min_worker_time) AS min_worker_time,
+                MAX(max_worker_time) AS max_worker_time,
+                MIN(min_elapsed_time) AS min_elapsed_time,
+                MAX(max_elapsed_time) AS max_elapsed_time,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(cached_time) AS cached_time,
+                MIN(min_logical_reads) AS min_logical_reads,
+                MAX(max_logical_reads) AS max_logical_reads,
+                MIN(min_physical_reads) AS min_physical_reads,
+                MAX(max_physical_reads) AS max_physical_reads,
+                MIN(min_logical_writes) AS min_logical_writes,
+                MAX(max_logical_writes) AS max_logical_writes,
+                MIN(min_spills) AS min_spills,
+                MAX(max_spills) AS max_spills,
+                MAX(w.rank_metric) AS sort_metric,
+                MAX(w.rank_cpu) AS sort_cpu
+            FROM procedure_stats
+            JOIN winners AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+                AND object_type IS NOT DISTINCT FROM w.win_object_type
+            WHERE server_id = $1
+            AND   (w.win_database_name IS NULL OR w.win_object_name IS NULL)
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+        ) AS wide
+        ORDER BY sort_metric DESC NULLS LAST, sort_cpu DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with

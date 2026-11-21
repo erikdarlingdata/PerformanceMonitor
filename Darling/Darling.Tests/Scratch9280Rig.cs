@@ -162,6 +162,29 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
     }
 
     [Fact]
+    public async Task Recompress()
+    {
+        Assert.SkipUnless(Phase == "recompress", "S9280 != recompress");
+        var ct = TestContext.Current.CancellationToken;
+        var cs = new NpgsqlConnectionStringBuilder(BaseCs) { Database = Db, Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Exec(connection, "SELECT count(decompress_chunk(c, true)) FROM show_chunks('collect.procedure_stats') AS c", ct);
+        var seg = Scale("S9280_SEG", "server_id");
+        var ord = Scale("S9280_ORD", "collection_time DESC");
+        await Exec(connection, $"ALTER TABLE collect.procedure_stats SET (timescaledb.compress_segmentby = '{seg}', timescaledb.compress_orderby = '{ord}')", ct);
+        await Exec(connection, "SELECT count(compress_chunk(c)) FROM show_chunks('collect.procedure_stats', older_than => (now() AT TIME ZONE 'UTC') - interval '1 day') AS c", ct);
+        await Exec(connection, "ANALYZE collect.procedure_stats", ct);
+        Console.WriteLine($"S9280 recompressed seg=[{seg}] ord=[{ord}] {sw.Elapsed.TotalSeconds:F0}s");
+        await using var size = new NpgsqlCommand("SELECT pg_size_pretty(sum(after_compression_total_bytes)), count(*) FROM chunk_compression_stats('collect.procedure_stats')", connection);
+        await using var r = await size.ExecuteReaderAsync(ct);
+        await r.ReadAsync(ct);
+        Console.WriteLine($"S9280 compressed size {r.GetString(0)} chunks {r.GetInt64(1)}");
+    }
+
+    [Fact]
     public Task ExplainCold() => ExplainAsync("cold", 1);
 
     [Fact]
@@ -183,15 +206,16 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
             procEnd = r.GetDateTime(1);
         }
 
-        var variant = Scale("S9280_VARIANT", "dev");
+        var variantQs = Scale("S9280_VARIANT", "dev");
         /* QS daily */
+        if (Scale("S9280_QS", "1") == "1")
         {
             var readStart = qsEnd.AddHours(-168);
             var s = readStart.Date.AddDays(1);
             var e = qsEnd.Date;
             for (var i = 0; i < runs; i++)
             {
-                await using var cmd = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS) " + QsSql(variant), connection);
+                await using var cmd = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS) " + QsSql(variantQs), connection);
                 cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Busy });
                 cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = readStart });
                 cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = qsEnd });
@@ -202,7 +226,7 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
                 cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = DateOnly.FromDateTime(s) });
                 cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = DateOnly.FromDateTime(e) });
                 cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = TopFill.FirstCandidates(3) });
-                await Record($"{label} {variant} QS_DAILY run{i}", cmd, ct);
+                await Record($"{label} {variantQs} QS_DAILY run{i}", cmd, ct);
             }
         }
 
@@ -211,6 +235,7 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
             await using var availability = NpgsqlDataSource.Create(cs);
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(availability, ct);
             foreach (var hours in new[] { 24, 168 })
+            foreach (var variant in new[] { "dev", "new" })
             {
                 var start = procEnd.AddHours(-hours);
                 var mid = DarlingDataReader.PlanProceduresHourlyMid(rollups, coverage, TopRanking.Cpu, start, procEnd);
@@ -226,15 +251,69 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
                     cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
                     cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid!.MidStart });
                     cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidEnd });
-                    await Record($"{label} {variant} PROC_MID_{hours}h run{i}", cmd, ct);
+                    await Record($"{label} {Scale("S9280_TAG", "base")} {variant} PROC_MID_{hours}h run{i}", cmd, ct);
                 }
             }
         }
     }
 
+    private const string OldWide = """
+        /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters, matched on the
+           full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). The
+           COALESCE equality is only the hashable pre-filter (see TopQueriesSql); IS NOT DISTINCT FROM makes the
+           match exact. This ORDER BY is the page's final order: the same keys as pass 1, group key last. */
+        SELECT
+            database_name,
+            schema_name,
+            object_name,
+            object_type,
+            MAX(sql_handle) AS sql_handle,
+            MAX(plan_handle) AS plan_handle,
+            CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+            CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+            CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+            CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+            CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+            CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+            CAST(SUM(delta_spills) AS bigint) AS total_spills,
+            MIN(min_worker_time) AS min_worker_time,
+            MAX(max_worker_time) AS max_worker_time,
+            MIN(min_elapsed_time) AS min_elapsed_time,
+            MAX(max_elapsed_time) AS max_elapsed_time,
+            MAX(last_execution_time) AS last_execution_time,
+            MAX(cached_time) AS cached_time,
+            MIN(min_logical_reads) AS min_logical_reads,
+            MAX(max_logical_reads) AS max_logical_reads,
+            MIN(min_physical_reads) AS min_physical_reads,
+            MAX(max_physical_reads) AS max_physical_reads,
+            MIN(min_logical_writes) AS min_logical_writes,
+            MAX(max_logical_writes) AS max_logical_writes,
+            MIN(min_spills) AS min_spills,
+            MAX(max_spills) AS max_spills
+        FROM procedure_stats
+        JOIN winners AS w
+            ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+            AND database_name IS NOT DISTINCT FROM w.win_database_name
+            AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+            AND object_name IS NOT DISTINCT FROM w.win_object_name
+            AND object_type IS NOT DISTINCT FROM w.win_object_type
+        WHERE server_id = $1
+        AND   collection_time > $2
+        AND   collection_time <= $3
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+        AND   sample_interval_seconds IS DISTINCT FROM 0
+        GROUP BY database_name, schema_name, object_name, object_type
+        ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        """;
+
     private static string QsSql(string variant) => DarlingDataReader.QueryStoreTopDailyTableSql;
 
-    private static string ProcSql(string variant, DarlingDataReader.HourlyMid mid) => DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid);
+    private static string ProcSql(string variant, DarlingDataReader.HourlyMid mid) => variant == "new"
+        ? DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid)
+        : TopRankings.Apply(DarlingDataReader.TopProceduresMidWinnersSql, TopRanking.Cpu, hourly: true).Replace(DarlingDataReader.HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
+          + "
+" + OldWide.Replace("AND object_type IS NOT DISTINCT FROM w.win_object_type", "", StringComparison.Ordinal);
 
     private static async Task Record(string label, NpgsqlCommand cmd, CancellationToken ct)
     {
