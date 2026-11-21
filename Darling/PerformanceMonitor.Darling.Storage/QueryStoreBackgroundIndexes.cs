@@ -194,9 +194,13 @@ public static class QueryStoreBackgroundIndexes
     /// index predicate counts as indexed; an equal value, and NULL to NULL, counts as unchanged), not by whether the upsert's SET
     /// list names the column. The upsert writes <c>interval_start_time_utc = EXCLUDED.interval_start_time_utc</c>, but an
     /// interval's start does not change between fetches of the same interval: it changes only when a NULL left by a catalog join
-    /// miss is filled, which is rare. So every ordinary update stays HOT; the rare fill is one non-HOT update. The one place the
-    /// HOT census in <c>QueryStoreIntervalWideBrinIndexLiveTests</c> exempts a predicate-only column is this pair, and
-    /// <c>QueryStoreBackgroundIndexesLiveTests</c> proves the counters change and the start does not.</para>
+    /// miss is filled, which is rare. So every ordinary update stays HOT; the rare fill is one non-HOT update. The write is
+    /// unconditional, so a later fetch that carries a NULL start would also clear a start that was filled: that update is non-HOT too,
+    /// and the row moves back to the other arm, so reads stay correct. The one place the
+    /// HOT census in <c>QueryStoreIntervalWideBrinIndexLiveTests</c> exempts a predicate-only column is this pair.
+    /// <c>QueryStoreTopSplitLiveTests.TheUpsertsSetList_StaysHot_WhenTheIntervalStartIsUnchanged_AndNotWhenANullStartIsFilled</c>
+    /// proves an unchanged start is HOT and a filled NULL start is not; <c>QueryStoreBackgroundIndexesLiveTests</c> proves the
+    /// whole set list stays HOT with the start unchanged.</para>
     ///
     /// <para><b>Until it is built</b> the read keeps its single 26 hour floor and the statement it had before.</para>
     /// </summary>

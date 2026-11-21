@@ -15,6 +15,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -42,9 +44,6 @@ public sealed class QueryStoreTopSplitLiveTests
     private const int WindowRows = 300;
     private const int NullStartRows = 20;
 
-    /// <summary>The window is the 24 hours before this instant, on the pinned live clock (#5608).</summary>
-    private static DateTime End => LiveClock.AnchoredEnd();
-
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private static Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
@@ -58,28 +57,28 @@ public sealed class QueryStoreTopSplitLiveTests
                           window starts, so only the 26 hour floor keeps them (the one-hour floor of an interval-start row would drop them);
          older rows       query_id 20001..23000: an interval start BEFORE the window and a first execution two to twenty hours before it.
                           The window drops all of them, and the one-floor read fetches every one of them first. */
-    private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct, int nullStartFirstExecHoursBefore = 5, string database = "db")
     {
-        var start = End.AddHours(-24);
+        var start = end.AddHours(-24);
         await ExecAsync(connection, string.Create(CultureInfo.InvariantCulture, $@"
 INSERT INTO {Wide}
     (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
      last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
-SELECT s + interval '1 hour', {ServerId}, 'db', g, g, 'Regular', s + interval '10 minutes', s + interval '50 minutes',
+SELECT s + interval '1 hour', {ServerId}, '{database}', g, g, 'Regular', s + interval '10 minutes', s + interval '50 minutes',
        'select 1', 10 + g, 1000 + g, g, s
 FROM (SELECT g, timestamp '{Ts(start)}' + make_interval(mins => (g % 1380)) AS s FROM generate_series(1, {WindowRows}) g) AS w;
 
 INSERT INTO {Wide}
     (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
      last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
-SELECT timestamp '{Ts(start)}' + make_interval(mins => 30 + (g - 10000)), {ServerId}, 'db', g, g, 'Regular', timestamp '{Ts(start)}' - interval '5 hours',
-       timestamp '{Ts(start)}' - interval '4 hours', 'select 1', 10 + g, 1000 + g, -1, NULL
+SELECT timestamp '{Ts(start)}' + make_interval(mins => 30 + (g - 10000)), {ServerId}, '{database}', g, g, 'Regular', timestamp '{Ts(start)}' - interval '{nullStartFirstExecHoursBefore} hours',
+       timestamp '{Ts(start)}' - interval '{nullStartFirstExecHoursBefore - 1} hours', 'select 1', 10 + g, 1000 + g, -1, NULL
 FROM generate_series(10001, {10000 + NullStartRows}) g;
 
 INSERT INTO {Wide}
     (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
      last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
-SELECT f + interval '1 hour', {ServerId}, 'db', g, g, 'Regular', f, f + interval '20 minutes',
+SELECT f + interval '1 hour', {ServerId}, '{database}', g, g, 'Regular', f, f + interval '20 minutes',
        'select 1', 10 + g, 1000 + g, g, f - interval '5 minutes'
 FROM (SELECT g, timestamp '{Ts(start)}' - interval '2 hours' - make_interval(mins => (g % 1080)) AS f FROM generate_series(20001, 23000) g) AS o;
 
@@ -100,12 +99,12 @@ ANALYZE {Wide};"), ct);
     private static NpgsqlParameter NullText() => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value };
 
     /// <summary>The statement's rows exactly as the product binds it, stringified and sorted so two runs compare exactly.</summary>
-    private static async Task<List<string>> RunAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    private static async Task<List<string>> RunAsync(NpgsqlConnection connection, string sql, DateTime end, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
-        command.Parameters.Add(Timestamp(End.AddHours(-24)));
-        command.Parameters.Add(Timestamp(End));
+        command.Parameters.Add(Timestamp(end.AddHours(-24)));
+        command.Parameters.Add(Timestamp(end));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
         command.Parameters.Add(DatabaseFilter.All.Parameter());
         command.Parameters.Add(NullText());
@@ -134,7 +133,7 @@ ANALYZE {Wide};"), ct);
     /// from <c>EXPLAIN ANALYZE</c> with sequential scans off (a store far larger than this one is read through its btrees, and the
     /// small seed would otherwise read a leaf whole).
     /// </summary>
-    private static async Task<long> RowsRemovedByFilterAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    private static async Task<long> RowsRemovedByFilterAsync(NpgsqlConnection connection, string sql, DateTime end, CancellationToken ct)
     {
         await ExecAsync(connection, "SET plan_cache_mode = force_custom_plan", ct);
         await ExecAsync(connection, "SET enable_seqscan = off", ct);
@@ -143,7 +142,7 @@ ANALYZE {Wide};"), ct);
         {
             var arguments = string.Create(
                 CultureInfo.InvariantCulture,
-                $"{ServerId}, '{Ts(End.AddHours(-24))}', '{Ts(End)}', 500, NULL, NULL, NULL, {TopFill.FirstCandidates(500)}");
+                $"{ServerId}, '{Ts(end.AddHours(-24))}', '{Ts(end)}', 500, NULL, NULL, NULL, {TopFill.FirstCandidates(500)}");
             await using var command = new NpgsqlCommand($"EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE split_probe({arguments})", connection) { CommandTimeout = 120 };
             var json = (string)(await command.ExecuteScalarAsync(ct))!;
             using var document = JsonDocument.Parse(json);
@@ -189,10 +188,11 @@ ANALYZE {Wide};"), ct);
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9276 live test.");
         var ct = TestContext.Current.CancellationToken;
+        var end = LiveClock.AnchoredEnd();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenAsync(scratch, ct);
-        await SeedAsync(connection, ct);
+        await SeedAsync(connection, end, ct);
 
         Assert.False(await QueryStoreBackgroundIndexes.IsBuiltAsync(
             connection, null, QueryStoreBackgroundIndexes.WideNullStartFirstExec, 30, ct));
@@ -201,8 +201,8 @@ ANALYZE {Wide};"), ct);
         Assert.True(await QueryStoreBackgroundIndexes.IsBuiltAsync(
             connection, null, QueryStoreBackgroundIndexes.WideNullStartFirstExec, 30, ct));
 
-        var oneFloor = await RunAsync(connection, DarlingDataReader.QueryStoreTopTableSql, ct);
-        var split = await RunAsync(connection, DarlingDataReader.QueryStoreTopTableSplitSql, ct);
+        var oneFloor = await RunAsync(connection, DarlingDataReader.QueryStoreTopTableSql, end, ct);
+        var split = await RunAsync(connection, DarlingDataReader.QueryStoreTopTableSplitSql, end, ct);
 
         /* Non-vacuous: the window rows and all 20 NULL-start rows, whose first execution is five hours before the window, come back
            in both shapes, and not one of the 3,000 older rows does. */
@@ -210,8 +210,8 @@ ANALYZE {Wide};"), ct);
         Assert.Equal(oneFloor, split);
         Assert.Equal(NullStartRows, split.Count(row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture) > 10000));
 
-        var oneFloorRemoved = await RowsRemovedByFilterAsync(connection, DarlingDataReader.QueryStoreTopTableSql, ct);
-        var splitRemoved = await RowsRemovedByFilterAsync(connection, DarlingDataReader.QueryStoreTopTableSplitSql, ct);
+        var oneFloorRemoved = await RowsRemovedByFilterAsync(connection, DarlingDataReader.QueryStoreTopTableSql, end, ct);
+        var splitRemoved = await RowsRemovedByFilterAsync(connection, DarlingDataReader.QueryStoreTopTableSplitSql, end, ct);
         Assert.True(oneFloorRemoved >= 2500, $"the one-floor read must fetch the older rows to drop them; it dropped {oneFloorRemoved}");
         Assert.True(splitRemoved * 10 <= oneFloorRemoved, $"the split read dropped {splitRemoved} fetched rows against {oneFloorRemoved} for the one-floor read");
     }
@@ -222,10 +222,11 @@ ANALYZE {Wide};"), ct);
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9276 live test.");
         var ct = TestContext.Current.CancellationToken;
+        var end = LiveClock.AnchoredEnd();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenAsync(scratch, ct);
-        await SeedAsync(connection, ct);
+        await SeedAsync(connection, end, ct);
         await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
         Assert.True(await QueryStoreBackgroundIndexes.IsBuiltAsync(
             connection, null, QueryStoreBackgroundIndexes.WideNullStartFirstExec, 30, ct), "the claim is about the index being present");
@@ -258,25 +259,107 @@ ANALYZE {Wide};"), ct);
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9276 live test.");
         var ct = TestContext.Current.CancellationToken;
+        var end = LiveClock.AnchoredEnd();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenAsync(scratch, ct);
-        await SeedAsync(connection, ct);
+        await SeedAsync(connection, end, ct);
         await ExecAsync(connection, $"UPDATE {Wide} SET execution_type_desc = 'Aborted' WHERE server_id = {ServerId} AND (query_id % 3 = 0)", ct);
         await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
         await ExecAsync(connection, $"ANALYZE {Wide}", ct);
 
-        var oneFloor = await RunAbortsAsync(connection, DarlingQueryStoreAbortsReader.TableSql, ct);
-        var split = await RunAbortsAsync(connection, DarlingQueryStoreAbortsReader.TableSplitSql, ct);
+        var oneFloor = await RunAbortsAsync(connection, DarlingQueryStoreAbortsReader.TableSql, end, ct);
+        var split = await RunAbortsAsync(connection, DarlingQueryStoreAbortsReader.TableSplitSql, end, ct);
         Assert.True(oneFloor.Count >= 100, $"the aborted rows must come back; {oneFloor.Count} did");
         Assert.Contains(oneFloor, row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture) > 10000);
         Assert.Equal(oneFloor, split);
     }
 
-    private static async Task<List<string>> RunAbortsAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    /// <summary>
+    /// The shipped path. <c>GetQueryStoreTopWithReachAsync</c> and <c>DarlingQueryStoreAbortsReader.ReadAsync</c> pick the split statement once
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built, then narrow its floor to the server's own interval length and
+    /// add the tag join and the self-key test. This runs both readers on a store the gate accepts, with 60-minute health rows (a three hour
+    /// floor), once before the index exists and once after <c>EnsureAllAsync</c> built it, and requires the replies to be the same and to
+    /// hold the NULL-start rows. The one-floor statement at the full 26 hour floor is the oracle for the reply itself.
+    /// </summary>
+    [Fact]
+    public async Task TheShippedTopAndAbortsReaders_ReplyTheSame_BeforeAndAfterTheIndexIsBuilt_AtANarrowedEdgeMargin()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9276 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* A fixed window that starts at 06:00, so it holds no whole UTC day: the top read keeps its interval statement instead of the daily one. */
+        var start = new DateTime(2026, 9, 15, 6, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddHours(24);
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        /* The grid seed gives the gate its coverage; the rows of SeedAsync go in beside it in the same database. The NULL-start rows' first
+           execution is two hours before the window, inside the three hour floor the health rows resolve to. */
+        await QueryStoreIntervalWideGridLiveTests.SeedGridAsync(runner, ServerId, start, ct);
+        await SeedAsync(connection, end, ct, nullStartFirstExecHoursBefore: 2, database: "qsA");
+        await ExecAsync(connection, $"UPDATE {Wide} SET execution_type_desc = 'Aborted' WHERE server_id = {ServerId} AND query_id < 20001 AND (query_id % 3 = 0)", ct);
+        await ExecAsync(connection, $"""
+            UPDATE collect.query_store_interval_wide_coverage SET filled_since = timestamp '{Ts(start.AddDays(-1))}' WHERE server_id = {ServerId}
+            """, ct);
+        await ExecAsync(connection, $"""
+            INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+            VALUES ({ServerId}, 'qs-top-split', 'qs-top-split', TRUE, 16, now(), now())
+            ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE
+            """, ct);
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
+            SELECT row_number() OVER (), c.c, {ServerId}, 'qs-top-split', d.d, 60
+            FROM generate_series(timestamp '{Ts(start.AddDays(-2))}', timestamp '{Ts(end)}', interval '6 hours') AS c(c)
+            CROSS JOIN (VALUES ('qsA'), ('qsB')) AS d(d)
+            """, ct);
+        await ExecAsync(connection, $"ANALYZE {Wide}", ct);
+
+        Assert.Equal(TimeSpan.FromHours(3), await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, ServerId, start, end, 60, ct));
+
+        async Task<(List<(string Database, long Query, long Plan, string Outcome)> Top, List<DarlingQueryStoreAbortsReader.AbortRow> Aborts)> ReadBothAsync()
+        {
+            using var scope = ReadScope.Open(new CapturingTestLogger());
+            var top = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, ServerId, start, end, 500, DatabaseFilter.All, null, null, ct);
+            Assert.NotNull(top.Table);
+            var aborts = await DarlingQueryStoreAbortsReader.ReadAsync(postgres, ServerId, start, end, 500, DatabaseFilter.All, ct);
+            Assert.NotNull(aborts.Table);
+            Assert.Null(scope.Fallback);
+            return (top.Rows.Select(r => (r.DatabaseName, r.QueryId, r.PlanId, r.ExecutionTypeDesc)).OrderBy(k => k).ToList(), aborts.Rows);
+        }
+
+        Assert.False(await QueryStoreBackgroundIndexes.IsBuiltAsync(
+            connection, null, QueryStoreBackgroundIndexes.WideNullStartFirstExec, 30, ct));
+        var before = await ReadBothAsync();
+        await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
+        await ExecAsync(connection, $"ANALYZE {Wide}", ct);
+        Assert.True(await QueryStoreBackgroundIndexes.IsBuiltAsync(
+            connection, null, QueryStoreBackgroundIndexes.WideNullStartFirstExec, 30, ct));
+        var after = await ReadBothAsync();
+
+        /* Non-vacuous: the window's rows and all the NULL-start rows come back from the top read, and aborted rows from the aborts read,
+           NULL-start ones among them. */
+        Assert.True(before.Top.Count(k => k.Query is > 10000 and < 20000) == NullStartRows, "every NULL-start row must be in the top reply");
+        Assert.True(before.Top.Count(k => k.Query <= WindowRows) >= WindowRows, "the window rows must be in the top reply");
+        Assert.DoesNotContain(before.Top, k => k.Query >= 20001);
+        Assert.Contains(before.Aborts, row => row.QueryId > 10000);
+        Assert.Equal(before.Top, after.Top);
+        Assert.Equal(before.Aborts, after.Aborts);
+
+        /* The oracle: the one-floor statement at the full 26 hour floor names the same statements. */
+        var oracle = (await RunAsync(connection, DarlingDataReader.QueryStoreTopTableSql, end, ct))
+            .Select(row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture)).Distinct().OrderBy(q => q).ToList();
+        Assert.Equal(oracle, after.Top.Select(k => k.Query).Distinct().OrderBy(q => q).ToList());
+    }
+
+    private static async Task<List<string>> RunAbortsAsync(NpgsqlConnection connection, string sql, DateTime end, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
-        DarlingMcpReadParameters.AddWindow(command, ServerId, End.AddHours(-24), End);
+        DarlingMcpReadParameters.AddWindow(command, ServerId, end.AddHours(-24), end);
         DarlingMcpReadParameters.AddInt(command, 500);
         command.Parameters.Add(DatabaseFilter.All.Parameter());
         await using var reader = await command.ExecuteReaderAsync(ct);

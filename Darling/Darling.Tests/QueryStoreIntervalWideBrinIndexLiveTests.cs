@@ -195,8 +195,8 @@ ORDER BY g;"), ct);
        interval_start_time_utc in its predicate only. PostgreSQL decides HOT by whether an indexed column's VALUE changes (equal values
        and NULL to NULL count as unchanged), and an interval's start does not change between fetches of the same interval except when a
        NULL left by a catalog join miss is filled, which is rare. The upsert names the column in its SET list, so the name-based rule
-       below would reject it; QueryStoreBackgroundIndexesLiveTests proves the update stays HOT when the value is unchanged and counts the
-       fill as the one non-HOT case. Every other index and every other column keeps the rule, and a key column of this index is not exempt. */
+       below would reject it; QueryStoreTopSplitLiveTests.TheUpsertsSetList_StaysHot_WhenTheIntervalStartIsUnchanged_AndNotWhenANullStartIsFilled proves the update stays HOT when the value is
+       unchanged and counts the fill as a non-HOT case. Every other index and every other column keeps the rule, and a key column of this index is not exempt. */
     private const string PredicateOnlyExemptIndex = "ix_query_store_interval_wide_nullstart_first_exec";
     private const string PredicateOnlyExemptColumn = "interval_start_time_utc";
 
