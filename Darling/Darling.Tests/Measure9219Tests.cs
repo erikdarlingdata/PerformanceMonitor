@@ -144,6 +144,15 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
             report.AppendLine($"AFTER first span covers {(now - capFloor).TotalSeconds:0} s of the hour");
             report.AppendLine(await Run("AFTER common, first span, page of 4", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql, "dbo.Common", 4, capFloor, true));
             report.AppendLine(await Run("AFTER rare, first span, page of 4", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql, "dbo.Rare", 4, capFloor, true));
+            foreach (var mult in new[] { 2, 4 })
+            {
+                await using var rf2 = new NpgsqlCommand(DarlingMcpFindQueriesByTextTools.RowFloorSql, c);
+                rf2.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+                rf2.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = ceiling });
+                rf2.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingMcpFindQueriesByTextTools.AllServersSpanRows * mult - 1 });
+                var f2 = (DateTime)(await rf2.ExecuteScalarAsync(ct))!;
+                report.AppendLine(await Run($"AFTER rare, span of {mult}x rows ({(now - f2).TotalSeconds:0} s)", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql, "dbo.Rare", 4, f2, true));
+            }
         }
 
         Assert.Fail("MEASURE9219\n" + report);

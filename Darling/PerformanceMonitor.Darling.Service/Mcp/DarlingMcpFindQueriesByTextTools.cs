@@ -401,12 +401,13 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
     /// <summary>#9219: how many of the newest spans the all-servers window join reads with <see cref="PlanCacheAllServersLookupSpanSql"/>: the first two, an hour
     /// each of a four-day tier. The spans after them are wider and carry too large a share of the texts for a lookup per text to beat the join.</summary>
-    internal const int AllServersLookupSpans = 2;
+    internal const int AllServersLookupSpans = 4;
 
     /// <summary>#9219: the most sample rows one of the newest all-servers spans (<see cref="AllServersLookupSpans"/>) reads. A span's width in time says
     /// nothing about its work: on a large store the newest hour held about 972,000 rows and 30,000 digests, each digest one cold random read of a text
     /// table of 1.5 million pages, more than the whole budget. The span ends at the sample this many rows back from its newest edge (or at its time
-    /// width, when that is nearer), so the work of the first statement is bounded by a count and the search widens while time remains.</summary>
+    /// width, when that is nearer), so the work of the first statement is bounded by a count and the search widens while time remains. A later
+    /// lookup span reads this many rows for each part of its width (the spans are 1, 1, 2 and 4 parts wide), so a span costs at most as much as it is wide.</summary>
     internal const int AllServersSpanRows = 20000;
 
     /// <summary>#9219: the number of matching sightings the lookup statement finds before it stops probing, as a multiple of the rows still wanted. A
@@ -1018,7 +1019,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     var spanFloor = joinReached - floor < part * (width + 1) ? floor : joinReached - part * width;
                     if (lookup && spanFloor < joinReached)
                     {
-                        spanFloor = await ReadRowFloorAsync(joinConnection, joinTransaction, spanFloor, joinCeiling, planCacheBudget.SpanRows, joinToken);
+                        spanFloor = await ReadRowFloorAsync(joinConnection, joinTransaction, spanFloor, joinCeiling, planCacheBudget.SpanRows * width, joinToken);
                     }
 
                     joinPending = (spanFloor, joinCeiling);
