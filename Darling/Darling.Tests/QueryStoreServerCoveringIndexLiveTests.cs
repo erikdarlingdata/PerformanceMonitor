@@ -190,7 +190,7 @@ public sealed class QueryStoreServerCoveringIndexLiveTests
         var bodySucceeded = false;
         try
         {
-            var v291 = PgMigrations.Scripts[^1];
+            var v291 = PgMigrations.Scripts.Single(m => m.Version == 291);
             Assert.Equal(291, v291.Version);
 
             await DowngradeToPlainAsync(c, ct);

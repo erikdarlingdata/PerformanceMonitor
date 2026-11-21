@@ -4215,6 +4215,21 @@ END $$;";
         "SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + "s';"
         + FleetSummaryCoveringIndexBlock(QueryStoreStatsCorrectedHourlyView, QueryStoreCorrectedHourlyHashIndexName, QueryStoreFleetSummaryIncludeColumns);
 
+    /// <summary>The name of the covering (query_hash, bucket DESC) index on <see cref="QueryStoreStatsCorrectedDailyView"/>'s materialization (#9223, V292).</summary>
+    public const string QueryStoreCorrectedDailyHashIndexName = "ix_qs_corrected_daily_hash_bucket";
+
+    /// <summary>
+    /// #9223 (V292): the hourly rollup's covering hash index (<see cref="CreateQueryStoreCorrectedHourlyHashCoveringIndexSql"/>), on the corrected DAILY
+    /// rollup's materialization. The <c>mid</c> arm of <c>get_query_fleet_summary</c>'s Query Store statement filters the daily rollup on the hash
+    /// alone, and the newest daily chunks are still uncompressed (inside the rollup's compress-after window) with a bucket index only, so the plan
+    /// read every row of each of them. The index carries the columns the arm sums, so the planner answers from the index. Same block as the hourly
+    /// one: a catalog read when the index is there, no lock request then, the build under the V246 lock timeout, and a store without TimescaleDB or
+    /// without the view returns before touching anything. No narrow index of this name ever existed, so nothing is dropped.
+    /// </summary>
+    public static readonly string CreateQueryStoreCorrectedDailyHashCoveringIndexSql =
+        "SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + "s';"
+        + FleetSummaryCoveringIndexBlock(QueryStoreStatsCorrectedDailyView, QueryStoreCorrectedDailyHashIndexName, QueryStoreFleetSummaryIncludeColumns);
+
     /// <summary>
     /// #9149 (V284): the covering hash indexes under the plan cache arms of <c>get_query_fleet_summary</c>, one per hourly rollup the read can
     /// name (the interval-honest one, and the legacy one while the stitched read still reaches it). The planner reads the pair keys and the three sums
@@ -14603,7 +14618,7 @@ END $$;";
         [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
         [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashCoveringIndexSql + "\n" + CreateQueryStoreCorrectedHourlyServerCoveringIndexSql,
         [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
-        [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
+        [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedDailyHashCoveringIndexSql,
         [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
         [QueryStoreStatsDayGrainDailyView] = CreateQueryStoreStatsDayGrainDailyKeptIndexesSql,
     };
