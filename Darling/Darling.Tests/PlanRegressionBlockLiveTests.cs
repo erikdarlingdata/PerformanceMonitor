@@ -221,9 +221,11 @@ public sealed class PlanRegressionBlockLiveTests
 
             /* A day of the second block loses its built row: the block no longer has four whole days. */
             await ExecAsync(connection, $"DELETE FROM collect.plan_regression_daily_built WHERE server_id = 1 AND day = DATE '{DateText(missing.AddDays(2))}'", ct);
-            /* A day of the first block is built again over one more interval: it carries a new built_seq, so the block's stamp no longer matches. */
+            /* A late row lands on a day of the first block (the late-row trigger moves late_seq, which the test disabled) and the day is built again: it is whole
+               again, but with a new built_seq, so the block's stamp no longer matches. */
             var day = rebuilt.AddDays(1);
             await SeedAsync(connection, 1, "db1", 1, day.ToDateTime(TimeOnly.MinValue).AddHours(5), 7, 100, 1000, false, ct);
+            await ExecAsync(connection, $"UPDATE collect.plan_regression_daily_built SET late_seq = late_seq + 1 WHERE server_id = 1 AND day = DATE '{DateText(day)}'", ct);
             Assert.NotNull(await PlanRegressionDaily.BuildDayAsync(connection, 1, day, Now, ct));
 
             Assert.Equal(untouched, await ValidAsync(connection, ct));
