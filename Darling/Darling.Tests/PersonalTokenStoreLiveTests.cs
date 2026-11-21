@@ -52,7 +52,9 @@ public sealed class PersonalTokenStoreLiveTests
     private static async Task WithStoreAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct, emptyStore: true);
+        /* #9266: a clone of the migrated template (the default store), not an empty database the test migrates itself. No test here
+           applies part of the ladder or stages a store shape, so the clone is the same schema at a fraction of the cost. */
+        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct);
         var bodySucceeded = false;
         try
         {
