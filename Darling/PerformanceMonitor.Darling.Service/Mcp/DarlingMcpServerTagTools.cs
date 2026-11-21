@@ -690,9 +690,13 @@ public sealed class DarlingMcpServerTagTools
         {
             root = JsonNode.Parse(changesJson);
         }
-        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        catch (JsonException ex)
         {
-            return (null, "changes_json is not valid JSON: " + ex.Message, null);
+            return (null, DarlingJsonParseError.Describe("changes_json", ex), null);
+        }
+        catch (ArgumentException)
+        {
+            return (null, "changes_json is not valid JSON.", null);
         }
 
         if (root is not JsonObject body)
