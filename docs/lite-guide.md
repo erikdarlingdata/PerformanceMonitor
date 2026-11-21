@@ -10,6 +10,8 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 4. Click **+ Add Server**, enter connection details, test, save.
 5. Double-click the server in the sidebar to connect.
 
+On a Windows on ARM machine, download `PerformanceMonitorLite-lite-arm64-Setup.exe` in place of `PerformanceMonitorLite-lite-Setup.exe`, or `PerformanceMonitorLite-<version>-win-arm64.zip` in place of the portable ZIP. The other files also run on an ARM machine, but through emulation. An installed copy updates itself from its own build, so an ARM64 install stays ARM64.
+
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
 For the first server, check three things in the **Add Server** dialog:

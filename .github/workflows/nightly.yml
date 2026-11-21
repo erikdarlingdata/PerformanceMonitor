@@ -272,6 +272,18 @@ jobs:
       - name: Publish Lite
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite -p:Version=${{ steps.version.outputs.VERSION }}
 
+      # #9256: the win-arm64 portable ZIP, so a Windows on ARM machine can test the nightly natively. Unsigned, like
+      # every nightly artifact, and with no Setup.exe, like the x64 ZIP. The assert step is the one build.yml runs on
+      # a release: one x64-only native file in the tree would fail only when the app loads it on ARM64.
+      - name: Publish Lite (win-arm64)
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-arm64 --self-contained -o publish/Lite-arm64 -p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Assert every native file in the Lite win-arm64 publish is ARM64
+        shell: pwsh
+        run: |
+          python3 .github/scripts/assert_pe_machine.py --machine arm64 publish/Lite-arm64
+          if ($LASTEXITCODE -ne 0) { throw "publish/Lite-arm64 holds a native file that is not ARM64." }
+
       # #6471: the Windows service and the zip's viewer\ folder are self-contained, like Lite above.
       - name: Publish Darling Service
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r win-x64 --self-contained -o publish/DarlingService -p:Version=${{ steps.version.outputs.VERSION }}
@@ -309,6 +321,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path releases
 
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
+          Compress-Archive -Path 'publish/Lite-arm64/*' -DestinationPath "releases/PerformanceMonitorLite-$version-win-arm64.zip" -Force
 
 
           # Same layout as the release zip (build.yml "Package Darling (signed)"): service at the

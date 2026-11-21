@@ -437,6 +437,28 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
 
+      # #9256: the same two Lite publishes for win-arm64, release events only (a pull request or a push does not
+      # pay for them). Both need `win-arm64` in the project's RuntimeIdentifiers, which is what keeps the committed
+      # lock file and the locked-mode restore above in step. The assert step checks the machine type of every native
+      # file in each tree: a self-contained publish bundles the .NET runtime and every package's native libraries,
+      # and one x64-only library in the tree would only fail when the app loads it on a native ARM64 machine.
+      - name: Publish Lite (win-arm64)
+        if: github.event_name == 'release'
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-arm64 --self-contained -o publish/Lite-arm64
+
+      - name: Publish Lite (win-arm64, self-contained for Velopack)
+        if: github.event_name == 'release'
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-arm64 --self-contained -o publish/Lite-arm64-velopack
+
+      - name: Assert every native file in the Lite win-arm64 publishes is ARM64
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          python3 .github/scripts/assert_pe_machine.py --machine arm64 publish/Lite-arm64 --list
+          if ($LASTEXITCODE -ne 0) { throw "publish/Lite-arm64 holds a native file that is not ARM64." }
+          python3 .github/scripts/assert_pe_machine.py --machine arm64 publish/Lite-arm64-velopack
+          if ($LASTEXITCODE -ne 0) { throw "publish/Lite-arm64-velopack holds a native file that is not ARM64." }
+
       # #6471: the Windows service and the viewer\ folder inside the Darling zip are self-contained, as Lite and
       # the viewer Setup.exe already are, so a stock Windows Server needs no .NET Runtime, ASP.NET Core Runtime or
       # Desktop Runtime before install-darling.ps1 runs. Runtime patches now arrive with Darling releases. The Linux
@@ -491,6 +513,10 @@ jobs:
           # users at Setup.exe (Velopack); this ZIP is the explicit fallback.
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
+          # #9256: the win-arm64 portable ZIP, for Windows on ARM (Snapdragon laptops, Windows VMs on Apple Silicon).
+          # The x64 ZIP above keeps its name; this one adds the CPU.
+          Compress-Archive -Path 'publish/Lite-arm64/*' -DestinationPath "releases/PerformanceMonitorLite-$version-win-arm64.zip" -Force
+
       # upload-artifact is deliberately HELD at v6 (#1653): every signing step below consumes
       # `steps.upload-*.outputs.artifact-id`, and v7 changes artifact archiving semantics (the
       # `archive` parameter). The signing path only executes on `release: [published]`, so a broken
@@ -503,6 +529,14 @@ jobs:
         with:
           name: Lite-unsigned
           path: publish/Lite/
+
+      - name: Upload Lite win-arm64 for signing
+        if: github.event_name == 'release'
+        id: upload-lite-arm64
+        uses: actions/upload-artifact@v6
+        with:
+          name: Lite-arm64-unsigned
+          path: publish/Lite-arm64/
 
       - name: Stage Darling for signing
         if: github.event_name == 'release'
@@ -556,6 +590,22 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite'
 
+      # #9256: the win-arm64 tree has the same layout as the x64 one (files at the root), and the 'Lite' artifact
+      # configuration matches that layout and not the CPU type, so it signs this upload too (the x64 Velopack
+      # upload below already reuses it the same way). No new configuration on signpath.io.
+      - name: Sign Lite win-arm64
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'Lite'
+          github-artifact-id: '${{ steps.upload-lite-arm64.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Lite-arm64'
+
       - name: Sign Darling
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
@@ -592,6 +642,8 @@ jobs:
           # Re-zip signed files into release archives
           Remove-Item "releases/PerformanceMonitorLite-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
+          Remove-Item "releases/PerformanceMonitorLite-$version-win-arm64.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Lite-arm64/*' -DestinationPath "releases/PerformanceMonitorLite-$version-win-arm64.zip" -Force
 
       - name: Package Darling (signed)
         if: github.event_name == 'release'
@@ -683,6 +735,14 @@ jobs:
           name: Lite-Velopack-unsigned
           path: publish/Lite-velopack/
 
+      - name: Upload Lite win-arm64 (Velopack) for signing
+        if: github.event_name == 'release'
+        id: upload-lite-arm64-velopack
+        uses: actions/upload-artifact@v6
+        with:
+          name: Lite-arm64-Velopack-unsigned
+          path: publish/Lite-arm64-velopack/
+
       - name: Upload Darling Viewer (Velopack) for signing
         if: github.event_name == 'release'
         id: upload-darlingviewer-velopack
@@ -703,6 +763,19 @@ jobs:
           github-artifact-id: '${{ steps.upload-lite-velopack.outputs.artifact-id }}'
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite-Velopack'
+
+      - name: Sign Lite win-arm64 (Velopack)
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'Lite'
+          github-artifact-id: '${{ steps.upload-lite-arm64-velopack.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Lite-arm64-Velopack'
 
       # The remote-seat viewer (#1555) has its OWN 'DarlingViewer' artifact configuration — the
       # co-located-zip 'Darling' slug signs a service+viewer\ tree layout, which does not match
@@ -734,6 +807,7 @@ jobs:
           # "Velopack library version is greater than vpk version").
           dotnet tool install -g vpk --version 1.2.161
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
+          New-Item -ItemType Directory -Force -Path releases/velopack-lite-arm64
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
 
           # #6506: `vpk download github` logs "No releases found" and EXITS 0 when the GitHub
@@ -766,6 +840,16 @@ jobs:
           Invoke-VpkChannelDownload 'lite' 'releases/velopack-lite'
           vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite --packTitle "Performance Monitor Lite" --packAuthors "Darling Data, LLC"
           if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'lite' failed (exit $LASTEXITCODE)." }
+
+          # #9256: Lite for Windows on ARM, its own channel ('lite-arm64') so an ARM64 install updates from ARM64
+          # packages and an x64 install keeps updating from 'lite'. The same pack id, so both land in the same
+          # install folder and one Start Menu entry. `--runtime win-arm64` is what makes vpk bundle its ARM64
+          # Setup and Update binaries; without it vpk takes this x64 runner's own RID. The channel's first release
+          # has no earlier package: Invoke-VpkChannelDownload's last line covers that case, because it fails only
+          # when an earlier release already carries releases.lite-arm64.json.
+          Invoke-VpkChannelDownload 'lite-arm64' 'releases/velopack-lite-arm64'
+          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-arm64-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite-arm64 --channel lite-arm64 --runtime win-arm64 --packTitle "Performance Monitor Lite" --packAuthors "Darling Data, LLC"
+          if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'lite-arm64' failed (exit $LASTEXITCODE)." }
 
           # Darling Viewer remote-seat installer (#1555): download previous + pack (from the SIGNED
           # velopack output). Its own 'darlingviewer' channel/delta feed, separate from the co-located
@@ -800,7 +884,7 @@ jobs:
         if: github.event_name == 'release'
         shell: pwsh
         run: |
-          python3 .github/scripts/postpack_signing.py collect --stage postpack/unsigned --manifest postpack/manifest.json --product lite=releases/velopack-lite --product darlingviewer=releases/velopack-darlingviewer
+          python3 .github/scripts/postpack_signing.py collect --stage postpack/unsigned --manifest postpack/manifest.json --product lite=releases/velopack-lite --product lite-arm64=releases/velopack-lite-arm64 --product darlingviewer=releases/velopack-darlingviewer
 
       - name: Upload the Velopack-generated executables for signing
         if: github.event_name == 'release'
@@ -977,6 +1061,17 @@ jobs:
           # assets.lite.json / RELEASES-lite, which the Velopack client never fetches.
           $dir = "releases/velopack-lite"
           $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.nupkg$' -or $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.zip' -or $_.Name -eq 'releases.lite.json' }).FullName
+          gh release upload "${{ github.event.release.tag_name }}" $files --clobber
+
+      - name: Upload Lite win-arm64 Velopack artifacts
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # See the Lite step above for why this uses gh instead of `vpk upload github --merge` (#9256).
+          $dir = "releases/velopack-lite-arm64"
+          $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.nupkg$' -or $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.zip' -or $_.Name -eq 'releases.lite-arm64.json' }).FullName
           gh release upload "${{ github.event.release.tag_name }}" $files --clobber
 
       - name: Upload Darling Viewer Velopack artifacts
