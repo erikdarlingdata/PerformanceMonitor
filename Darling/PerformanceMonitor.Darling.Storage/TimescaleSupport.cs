@@ -8072,6 +8072,104 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
         return converged;
     }
 
+    /// <summary>The most chunks one pass of <see cref="EnsureRollupChunkVisibilityAsync"/> vacuums (#9274). A lagging chunk the cap leaves
+    /// is found again by the next hourly pass.</summary>
+    public const int RollupVacuumMaxChunksPerPass = 8;
+
+    /// <summary>A chunk is vacuumed when fewer than this share of its pages are all-visible (#9274), as a percentage.</summary>
+    public const int RollupVacuumAllVisibleFloorPercent = 90;
+
+    /// <summary>Chunks smaller than this many pages are left to autovacuum (#9274): at 1 MB a heap fetch per row costs nothing worth a vacuum.</summary>
+    public const int RollupVacuumMinPages = 128;
+
+    /// <summary>A chunk whose last vacuum (manual or automatic) is younger than this is left alone (#9274), so a vacuum that could set no
+    /// page because an old snapshot was open is retried at most once an hour.</summary>
+    public const string RollupVacuumMinAge = "1 hour";
+
+    /// <summary>
+    /// The uncompressed chunks of the <c>collect</c> rollups that lag on the visibility map (#9274): under
+    /// <see cref="RollupVacuumAllVisibleFloorPercent"/> percent of their pages all-visible, at least <see cref="RollupVacuumMinPages"/> pages,
+    /// no insert since the last vacuum (so autovacuum's insert trigger will not come back for them) and a last vacuum at least
+    /// <see cref="RollupVacuumMinAge"/> old. A chunk whose stats were reset (no vacuum on record) counts as old. Compressed chunks are
+    /// never listed: their heap is empty and the compression policy has rewritten them. One catalog read, no row on a settled store.
+    /// Worst lag first, at most <see cref="RollupVacuumMaxChunksPerPass"/>.
+    /// </summary>
+    public static string RollupChunkVisibilityLagSql =>
+        $@"SELECT format('%I.%I', ch.chunk_schema, ch.chunk_name) AS chunk, c.relpages, c.relallvisible
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.chunks AS ch
+  ON ch.hypertable_schema = ca.materialization_hypertable_schema AND ch.hypertable_name = ca.materialization_hypertable_name
+JOIN pg_class AS c ON c.relname = ch.chunk_name AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ch.chunk_schema)
+JOIN pg_stat_all_tables AS st ON st.relid = c.oid
+WHERE ca.view_schema = 'collect'
+AND   NOT ch.is_compressed
+AND   c.relpages >= {RollupVacuumMinPages}
+AND   c.relallvisible::bigint * 100 < c.relpages::bigint * {RollupVacuumAllVisibleFloorPercent}
+AND   st.n_ins_since_vacuum = 0
+AND   coalesce(greatest(st.last_vacuum, st.last_autovacuum), '-infinity'::timestamptz) < now() - INTERVAL '{RollupVacuumMinAge}'
+ORDER BY (c.relpages - c.relallvisible) DESC
+LIMIT {RollupVacuumMaxChunksPerPass}";
+
+    /// <summary>
+    /// Vacuums the rollup chunks <see cref="RollupChunkVisibilityLagSql"/> lists (#9274), on the start path and on the hourly store-maintenance
+    /// tick. A chunk of a rollup that is written once, by the refresh, gets one autovacuum. If that vacuum runs while a transaction that began
+    /// before the refresh committed is still open, it can mark no page all-visible, and with no update or delete on the chunk autovacuum never
+    /// returns, so every index-only scan of it (the fleet summary's read of <c>query_store_stats_corrected_daily</c>) fetches each row from the
+    /// heap until compression rewrites the chunk. A plain <c>VACUUM (SKIP_LOCKED)</c>, never FULL: it reads the chunk once, takes no lock that
+    /// blocks a reader or the refresh, and leaves a chunk it cannot lock for the next pass. Failure-isolated per chunk (a chunk compression
+    /// dropped or compressed meanwhile, a login that does not own it): logged, and the rest still run. A settled store pays one catalog read.
+    /// Returns how many chunks it vacuumed.
+    /// </summary>
+    public static async Task<int> EnsureRollupChunkVisibilityAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var lagging = new List<(string Chunk, int Pages, int AllVisible)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(RollupChunkVisibilityLagSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                lagging.Add((reader.GetString(0), Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture), Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Rollup chunk visibility: could not read the chunks: {Message}", ex.Message);
+            return 0;
+        }
+
+        var vacuumed = 0;
+        foreach (var (chunk, pages, allVisible) in lagging)
+        {
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                using var vacuum = new NpgsqlCommand($"VACUUM (SKIP_LOCKED) {chunk}", connection) { CommandTimeout = SetupTimeoutSeconds };
+                await vacuum.ExecuteNonQueryAsync(cancellationToken);
+                vacuumed++;
+                logger?.LogInformation(
+                    "TimescaleDB: vacuumed rollup chunk {Chunk} in {Seconds:F1}s because {AllVisible} of its {Pages} pages were all-visible and autovacuum had no reason to come back; index-only scans of it read the heap until its pages are marked.",
+                    chunk, clock.Elapsed.TotalSeconds, allVisible, pages);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogInformation("Rollup chunk visibility: vacuuming {Chunk} failed ({Message}); the next hourly pass looks again.", chunk, ex.Message);
+                if (connection.State != System.Data.ConnectionState.Open)
+                {
+                    break;
+                }
+            }
+        }
+
+        return vacuumed;
+    }
+
     /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — comfortably past the hourly CAGG's own
     /// <see cref="HourlyRefreshStartOffset"/> refresh window, so the raw drop never outruns the aggregate that
     /// preserves it. The margin is three days since #3012 narrowed that window; it was one day before, and the

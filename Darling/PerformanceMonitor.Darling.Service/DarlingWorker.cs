@@ -446,6 +446,12 @@ public sealed partial class DarlingWorker : BackgroundService
         new("policy job retry period converge", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergePolicyJobRetryPeriodAsync(connection, logger, ct)),
 
+        /* #9274: AFTER the aggregates exist. A chunk of a rollup written once by its refresh can keep zero all-visible pages for days when
+           its one autovacuum ran beside an old open snapshot, and autovacuum never returns to it. One catalog read; a plain VACUUM only for
+           a chunk that lags, so a settled store issues none. */
+        new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, ct)),
+
         /* #2007/#3653: BEFORE the fallback ensure (hygiene — the retired names left the ensure list, so it
            could not recreate them anyway). Judges each superseded pair against the tier horizon, which is a
            TIME-dependent verdict: today it flips only on a restart, and this is the step that makes "drops
