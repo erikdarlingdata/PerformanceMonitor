@@ -299,6 +299,7 @@ try {
       document: { querySelectorAll: (selector) => (selector === ".nav a" ? shell.links : []) },
       isSessionExpired: () => false,
       beginPageScope: () => {},
+      holdsRenamedServerRoute: () => false,
       frontDoor: () => false,
       gateStore: () => false,
       currentRoute: () => ({ name: shell.routeName, id: null, param: null }),
