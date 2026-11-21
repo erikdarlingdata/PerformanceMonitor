@@ -103,7 +103,7 @@ public sealed class LiteTextDimensionTests : IDisposable
     private Task AddToDimensionAsync(DuckDBConnection connection, string text) =>
         ExecAsync(connection, $"INSERT INTO query_text_dim VALUES ({LiteTextDimensions.DigestSql("$1")}, $1)", text);
 
-    /// <summary>One query_stats row. <paramref name="inlineText"/> null leaves the column NULL; <paramref name="digestOf"/> null leaves the digest NULL.</summary>
+    /// <summary>One query_stats row. <paramref name="inlineText"/> null leaves the column NULL, and <paramref name="digestOf"/> null leaves the digest NULL.</summary>
     private Task InsertQueryStatsAsync(DuckDBConnection connection, long id, string? inlineText, string? digestOf) =>
         ExecAsync(connection,
             $"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, query_text, query_text_digest) "
