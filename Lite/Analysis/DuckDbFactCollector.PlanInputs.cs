@@ -31,7 +31,7 @@ public partial class DuckDbFactCollector
     internal static readonly TimeSpan PlanInputTotalTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>One row of the detector's read: a query whose latest plan costs 2x or more of its best plan.</summary>
-    private sealed record PlanRegressionCandidate(
+    internal sealed record PlanRegressionCandidate(
         long QueryId,
         double LatestCpu,
         int LatestIsForced,
