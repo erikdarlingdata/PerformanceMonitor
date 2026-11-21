@@ -3369,6 +3369,24 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// </summary>
     private static readonly string V292Sql = TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql;
 
+    /// <summary>The name of the partial index the Client Timeouts counter rows are read through (#9277, V293).</summary>
+    internal const string AttentionCountIndexName = "idx_attention_events_count_time";
+
+    /// <summary>
+    /// V293 (#9277): <c>idx_attention_events_count_time</c>, <c>(server_id, collection_time) INCLUDE (attention_count) WHERE event_kind = 'count'</c> on
+    /// <c>collect.attention_events</c>. The counter rows are one per collector run, a few thousand over seven days, and sit among a million or more
+    /// sampled events. <c>get_client_timeouts</c> sums them per run, and on an uncompressed chunk it read the whole (server_id, collection_time) range of
+    /// the table and dropped the sampled events after the heap fetch.
+    /// This index holds only the counter rows and carries the count, so the same read is an index-only scan that touches no sampled row.
+    ///
+    /// <para><b>Cost.</b> One build per chunk, under a SHARE lock that blocks the collector's writes and not reads, with the lock timeout of V246
+    /// (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). The build reads each uncompressed chunk's heap once and writes only its counter rows. A
+    /// compressed chunk's index is an empty shell, and a chunk created afterwards gets the index with the chunk. Additive for an older build: it ignores
+    /// the index, and no GRANT is needed for an index. The statement is a catalog read when the index exists.</para>
+    /// </summary>
+    private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+CREATE INDEX IF NOT EXISTS " + AttentionCountIndexName + @" ON collect.attention_events (server_id, collection_time) INCLUDE (attention_count) WHERE event_kind = 'count';";
+
     /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
     /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
@@ -3854,6 +3872,9 @@ END $$;";
            get_query_fleet_summary's Query Store statement reads the newest uncompressed daily chunks through it instead of scanning them whole.
            Catalog-only for the data: no row moves. An older build ignores the index. */
         new Migration(292, "query-store-corrected-daily-hash-index", V292Sql),
+        /* V293 (#9277): a partial covering index on the Client Timeouts counter rows, so get_client_timeouts' per-run counts read the newest uncompressed chunks
+           through an index-only scan instead of fetching every sampled event of the range and dropping it. No row moves. An older build ignores the index. */
+        new Migration(293, "attention-events-count-index", V293Sql),
     };
 
     /// <summary>
