@@ -246,7 +246,7 @@ SELECT
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
         FleetTotals totals;
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        await using (var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken)))
         {
             totals = await reader.ReadAsync(cancellationToken)
                 ? new FleetTotals

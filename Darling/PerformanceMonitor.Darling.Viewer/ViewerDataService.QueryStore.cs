@@ -821,7 +821,7 @@ public sealed partial class ViewerDataService
         List<ViewerQueryStoreRow> rows;
         /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
            the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
-        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken)))
         await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
             await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
@@ -836,7 +836,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = TopFill.FinalCandidates(top) });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
         }
 
@@ -937,7 +937,7 @@ public sealed partial class ViewerDataService
         var rollupsTried = false;
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
 
             await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
@@ -1006,7 +1006,7 @@ public sealed partial class ViewerDataService
                     AddServedDaysParameters(keysCommand, run);
                 }
 
-                await using var keyReader = await keysCommand.ExecuteReaderAsync(cancellationToken);
+                await using var keyReader = await keysCommand.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                 while (await keyReader.ReadAsync(cancellationToken))
                 {
                     keys.Add(keyReader);
@@ -1078,7 +1078,7 @@ public sealed partial class ViewerDataService
                     AddServedDaysParameters(command, run);
                 }
 
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
 
@@ -1402,7 +1402,7 @@ public sealed partial class ViewerDataService
     {
         var items = new List<QueryStatsComparisonItem>();
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         /* #7730: the key table's test ahead of each window's top-100 cut once its backfill has run; the tail's text test stays for the
            marker texts of a store the backfill has not reached. */
         var comparisonSql = await QueryStoreSelfKeys.ReadyAsync(connection, null, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
@@ -1412,7 +1412,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new QueryStatsComparisonItem
@@ -1744,7 +1744,7 @@ public sealed partial class ViewerDataService
         var rollupsTried = false;
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
@@ -1783,7 +1783,7 @@ public sealed partial class ViewerDataService
                 AddServedDaysParameters(command, run);
             }
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             return (await ReadSlicerBucketsAsync(reader, cancellationToken), plan);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

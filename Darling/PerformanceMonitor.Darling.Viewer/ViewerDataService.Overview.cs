@@ -298,7 +298,7 @@ LIMIT 1";
     /// </summary>
     public async Task<DatabaseStateRead> GetDatabaseStatesAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         return await DarlingDatabaseStateDeviations.ReadAsync(
             connection, serverId, nowUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
@@ -369,7 +369,7 @@ LIMIT 1";
                 TypedValue = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
             });
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = CpuReadingFreshnessSql.FloorMinutes });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 cpuPercent = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
@@ -387,7 +387,7 @@ LIMIT 1";
             {
                 TypedValue = DateTime.SpecifyKind(nowUtc - DarlingPgCpuUtilizationReader.Freshness, DateTimeKind.Unspecified),
             });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 instanceCpuPercent = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
@@ -405,7 +405,7 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 memoryMb = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
@@ -418,7 +418,7 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 memoryWaiterCount = reader.IsDBNull(0) ? 0 : Convert.ToInt64(reader.GetValue(0));
@@ -433,7 +433,7 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 totalThreads = reader.IsDBNull(0) ? null : Convert.ToInt32(reader.GetValue(0));
@@ -458,7 +458,7 @@ LIMIT 1";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = collectionFloor });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
@@ -519,7 +519,7 @@ LIMIT 1";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = collectionFloor });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
@@ -553,7 +553,7 @@ LIMIT 1";
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 var pgCount = reader.IsDBNull(0) ? 0L : Convert.ToInt64(reader.GetValue(0));
@@ -581,7 +581,7 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            var result = await command.ExecuteScalarAsync(cancellationToken);
+            var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             if (result is not null && result != DBNull.Value)
             {
                 lastCollection = Convert.ToDateTime(result);
@@ -680,7 +680,7 @@ WHERE id = 1";
     {
         await using var command = _dataSource.CreateCommand(DeadlockRateThresholdSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (await reader.ReadAsync(cancellationToken))
         {
             return new DeadlockRateThresholds(reader.GetDouble(0), reader.GetDouble(1));

@@ -212,7 +212,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(ServerConfigChangesSnapshotsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerIdAndWindowEnd(command, serverId, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ConfigChangeDiff.ServerConfigSnapshot(
@@ -235,7 +235,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerIdAndWindowEnd(command, serverId, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var values = new string?[ConfigChangeDiff.DatabaseConfigChangeSettingNames.Count];
@@ -263,7 +263,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             times.Add(reader.GetDateTime(0));
@@ -279,7 +279,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(TraceFlagChangesSnapshotsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerIdAndWindowEnd(command, serverId, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ConfigChangeDiff.TraceFlagSnapshot(

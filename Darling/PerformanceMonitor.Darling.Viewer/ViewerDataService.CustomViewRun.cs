@@ -113,7 +113,7 @@ public sealed partial class ViewerDataService
             var servers = new List<RegisteredServer>();
             await using var command = postgres.CreateCommand(ComposeRegistrySql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 servers.Add(new RegisteredServer(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
@@ -143,7 +143,7 @@ public sealed partial class ViewerDataService
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = names });
             var missing = new List<string>();
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 missing.Add(reader.GetString(0));
@@ -164,7 +164,7 @@ public sealed partial class ViewerDataService
         {
             await using var command = postgres.CreateCommand(ComposeDeadlineSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            var value = await command.ExecuteScalarAsync(cancellationToken);
+            var value = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             return ClampComposeSeconds(value is int seconds ? seconds : 0);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

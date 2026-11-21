@@ -274,7 +274,7 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(reader.GetString(0));
@@ -329,7 +329,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string CounterName, DateTime BucketStart, DateTime FirstCollectionTime, long? Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType, long ArtifactsSetAside)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(7) != 1)

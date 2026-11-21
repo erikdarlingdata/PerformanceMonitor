@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -94,6 +95,16 @@ public partial class ViewerServerTab : UserControl
 
     private bool _refreshInFlight;
     private bool _refreshRequested;
+
+    /* #9194: the cancellation of the sub-tab load now running, and that sub-tab's name. Null between loads. A pick of another sub-tab
+       cancels it, so the picked tab's read starts at once instead of waiting behind the one being left. */
+    private CancellationTokenSource? _loadPass;
+    private string? _loadPassName;
+    private string? _loadPassSurface;
+
+    /// <summary>Test hook (#9194): awaited at the start of each sub-tab load, inside the load's cancellation scope, with the inner tab index
+    /// and the token a pick of another sub-tab cancels. Holds a load without a store.</summary>
+    internal Func<int, CancellationToken, Task>? LoadStartHook { get; set; }
 
     /* #8549: when the refresh now queued (_refreshRequested) was first asked for, as a Stopwatch timestamp. The queued load's clock starts there. */
     private long _refreshQueuedAt;
@@ -367,7 +378,30 @@ public partial class ViewerServerTab : UserControl
             return;
         }
 
-        await RefreshActiveInnerTabAsync();
+        await RefreshAfterSubTabPickAsync();
+    }
+
+    /// <summary>
+    /// #9194: a sub-tab pick while another sub-tab's load runs. That load's reads are cancelled, so the picked tab's own read starts as
+    /// soon as they unwind and the click does not wait for the whole load it left. The load unwinds with no slow-load line and no
+    /// error, and the tab loads again when the reader returns to it, because the pick back is a refresh like this one. A read that
+    /// runs without a token (a shared fetch, or a reader outside the Viewer's data service) is not cut short: the status line names
+    /// the refresh the pick waits for.
+    /// </summary>
+    private string SubTabSurface() =>
+        $"{InnerTabs.SelectedIndex}/{QueriesSubTabControl.SelectedIndex}/{FileIoSubTabs.SelectedIndex}/{BlockingSubTabs.SelectedIndex}/{SystemEventsSubTabControl.SelectedIndex}";
+
+    private Task RefreshAfterSubTabPickAsync()
+    {
+        /* A selection event that leaves the surface as it was (a sub-tab's own first selection, raised when its content is first shown) is no
+           pick: it must not cancel the load of the tab it is on. */
+        if (_loadPass is { } pass && _loadPassName is { } leaving && _loadPassSurface != SubTabSurface())
+        {
+            pass.Cancel();
+            StatusChanged?.Invoke($"{_server.DisplayName}: waiting for the {leaving} refresh to finish");
+        }
+
+        return RefreshActiveInnerTabAsync();
     }
 
     /// <summary>
@@ -444,6 +478,9 @@ public partial class ViewerServerTab : UserControl
                 int loadedTab;
                 do
                 {
+                    /* #9194: a pass after a sub-tab switch reads what was asked for up to now, so the switch's own ask is served by it
+                       and does not load the picked tab a second time. */
+                    _refreshRequested = false;
                     loadedTab = InnerTabs.SelectedIndex;
                     ShowFirstPaintLoading(); // #8647: also the landing sub-tab of the first open, which has no selection event
                     /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
@@ -451,7 +488,23 @@ public partial class ViewerServerTab : UserControl
                     await Timed(timer, "collection interval read", UpdateSampleIntervalAsync());
                     /* The first pass hands this refresh's clock on, so the sub-tab's reads land in the same line; a second pass
                        (the reader switched tabs mid-load) is an ordinary load on its own clock. */
-                    await LoadInnerTabAsync(loadedTab, timer);
+                    using (var pass = new CancellationTokenSource())
+                    {
+                        _loadPass = pass;
+                        _loadPassSurface = SubTabSurface();
+                        _loadPassName = InnerTabLoadName(loadedTab, (InnerTabs.Items[loadedTab] as TabItem)?.Header);
+                        try
+                        {
+                            await LoadInnerTabAsync(loadedTab, timer, pass.Token);
+                        }
+                        finally
+                        {
+                            _loadPass = null;
+                            _loadPassName = null;
+                            _loadPassSurface = null;
+                        }
+                    }
+
                     timer = null;
                     /* #8647: whatever on the sub-tab still says "Loading..." after its read was never filled; it must not outlive the read. */
                     if (InnerTabs.SelectedIndex == loadedTab) FirstPaint.Resolve((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
@@ -571,11 +624,20 @@ public partial class ViewerServerTab : UserControl
 
     /// <param name="tabIndex">The inner tab to load.</param>
     /// <param name="loadTimer">The load's phase clock; null starts a new one. A test hands in its own to read the phases the load booked (#8549).</param>
-    internal async Task LoadInnerTabAsync(int tabIndex, ViewerLoadTimer? loadTimer = null)
+    /// <param name="cancel">#9194: cancelled when the reader picks another sub-tab. The store reads the load starts take it (<see cref="ViewerReadScope"/>),
+    /// and a load it cancels ends with no status, no slow-load line and no draw after the cancel.</param>
+    internal async Task LoadInnerTabAsync(int tabIndex, ViewerLoadTimer? loadTimer = null, CancellationToken cancel = default)
     {
         var timer = loadTimer ?? new ViewerLoadTimer();
+        var cancelled = false;
+        ViewerReadScope.Enter(cancel);
         try
         {
+            if (LoadStartHook is { } hook)
+            {
+                await hook(tabIndex, cancel);
+            }
+
             /* #6155: a PostgreSQL panel's healthy sentence needs to know whether the server is offline before it is written. */
             if (_server.IsPostgres)
             {
@@ -674,12 +736,20 @@ public partial class ViewerServerTab : UserControl
                     break;
             }
 
+            /* A loader that swallowed the cancel (a read it treats as best-effort) must not stamp or write a line either. */
+            cancel.ThrowIfCancellationRequested();
+
             /* #8549: a refresh queued behind this one reads the window the picker names now, and this load read the one before it,
                so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
             if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
             {
                 StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
             }
+        }
+        catch (Exception) when (cancel.IsCancellationRequested)
+        {
+            /* #9194: the reader picked another sub-tab. Not an error, and the half-read tab is read again when they come back. */
+            cancelled = true;
         }
         catch (Exception ex)
         {
@@ -693,7 +763,7 @@ public partial class ViewerServerTab : UserControl
                store read in Timed(timer, ...)), not a field. A read that starts outside this load (a Daily Summary drill into
                Top Queries, a slicer drag) passes null, so it cannot append its phases to this load's line, finished or live, or
                rename it. */
-            if (slow is not null)
+            if (slow is not null && !cancelled)
             {
                 SlowLoadSink($"[{_server.DisplayName}] {slow}");
             }
