@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -784,7 +785,12 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
-        var sizeDue = _duckDb != null && HotStoreReset.IsReached(_duckDb.GetDatabaseSizeMb());
+        /* #9238: the data in the store (used blocks) counts, not the file length, because the file keeps its freed blocks. The data
+           cannot exceed the file, so the used read (a connection under the read lock) is made only once the file has reached the
+           reset point. A null read (busy store) leaves the file length to decide. */
+        var fileMb = _duckDb?.GetDatabaseSizeMb() ?? 0;
+        var usedMb = _duckDb != null && fileMb >= HotStoreReset.Mb ? _duckDb.GetUsedDataSizeMb() : null;
+        var sizeDue = _duckDb != null && HotStoreReset.IsReached(usedMb, fileMb);
 
         if (!timeDue && !sizeDue)
         {
@@ -796,8 +802,8 @@ public class CollectionBackgroundService : BackgroundService
             var complete = true;
             if (sizeDue)
             {
-                _logger?.LogInformation("Database size ({SizeMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}) — archiving all data and resetting database",
-                    _duckDb!.GetDatabaseSizeMb(), HotStoreReset.Mb, HotStoreReset.Source);
+                _logger?.LogInformation("Store data ({UsedMb} MB) and file ({FileMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}), or the file reached twice it. Archiving all data and resetting the database",
+                    usedMb is { } used ? used.ToString("F0", CultureInfo.InvariantCulture) : "not read", fileMb, HotStoreReset.Mb, HotStoreReset.Source);
                 await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
             }
             else

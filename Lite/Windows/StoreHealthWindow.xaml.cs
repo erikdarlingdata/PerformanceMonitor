@@ -90,7 +90,7 @@ public partial class StoreHealthWindow : Window
         var store = snapshot.Store;
         StoreSentenceText.Text = StoreHealthText.StoreSentence(store);
         StoreFactsText.Text = string.Create(ci,
-            $"Store file on disk: {StoreHealthText.Megabytes(store.FileMb)} of {store.ResetAtMb:0} MB ({store.FilePercentOfReset:0}%).   Data inside the file: {(store.UsedMb is { } used ? StoreHealthText.Megabytes(used) : "not read")}.   Write-ahead log: {StoreHealthText.Megabytes(store.WalMb)}.");
+            $"Data inside the file: {(store.UsedMb is { } used ? StoreHealthText.Megabytes(used) : "not read")} of {store.ResetAtMb:0} MB ({store.DataPercentOfReset:0}%).   Store file on disk: {StoreHealthText.Megabytes(store.FileMb)} (resets at {store.FileResetAtMb:0} MB).   Write-ahead log: {StoreHealthText.Megabytes(store.WalMb)}.");
         StoreNoteText.Text = snapshot.StoreNote ?? "";
         StoreNoteText.Visibility = snapshot.StoreNote is null ? Visibility.Collapsed : Visibility.Visible;
 

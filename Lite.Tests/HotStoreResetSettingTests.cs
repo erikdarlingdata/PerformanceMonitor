@@ -53,6 +53,7 @@ public sealed class HotStoreResetSettingTests : IDisposable
     [Theory]
     [InlineData(128)]
     [InlineData(1024)]
+    [InlineData(2048)]
     public void TheBoundsThemselves_AreAccepted_WithoutANote(int mb)
     {
         var limit = Resolve($"{{\"hot_store_reset_mb\": {mb}}}", out var note);
@@ -66,8 +67,8 @@ public sealed class HotStoreResetSettingTests : IDisposable
     [InlineData(64, 128)]
     [InlineData(0, 128)]
     [InlineData(-5, 128)]
-    [InlineData(2048, 1024)]
-    [InlineData(99999999999, 1024)]
+    [InlineData(3000, 2048)]
+    [InlineData(99999999999, 2048)]
     public void AValueOutOfRange_IsClampedToTheNearestBound_AndSaysSo(long given, double expected)
     {
         var limit = Resolve($"{{\"hot_store_reset_mb\": {given}}}", out var note);
@@ -97,7 +98,7 @@ public sealed class HotStoreResetSettingTests : IDisposable
         var limit = HotStoreResetSetting.ResolveAndLog("{\"hot_store_reset_mb\": 4096}");
 
         var lines = AppLogger.DrainBufferedLines().Where(l => l.Contains("hot_store_reset_mb", StringComparison.Ordinal)).ToList();
-        Assert.Equal(1024, limit.Mb);
+        Assert.Equal(2048, limit.Mb);
         var line = Assert.Single(lines);
         Assert.Contains("WARN", line, StringComparison.OrdinalIgnoreCase);
     }
@@ -113,30 +114,45 @@ public sealed class HotStoreResetSettingTests : IDisposable
         Assert.DoesNotContain("outside", line);
     }
 
-    /// <summary>The size check. A store just over the 512 MB default is due a reset, and with a 1024 MB setting it is not until it
-    /// passes 1024 MB.</summary>
+    /// <summary>The size check (#9238). The data in the store counts, not the file: the file keeps its freed blocks and runs well
+    /// past its data. A store whose data is under the limit is left alone however large its file is, up to twice the limit.</summary>
     [Theory]
-    [InlineData(520, 512, true)]
-    [InlineData(511.9, 512, false)]
-    [InlineData(520, 1024, false)]
-    [InlineData(1023.9, 1024, false)]
-    [InlineData(1024, 1024, true)]
-    [InlineData(1100, 1024, true)]
-    public void TheSizeCheck_UsesTheEffectiveLimit(double fileMb, double limitMb, bool due)
+    [InlineData(300, 540, 512, false)]     // data under the limit, file over it: the old check reset here
+    [InlineData(511.9, 700, 512, false)]
+    [InlineData(512, 540, 512, true)]      // data at the limit
+    [InlineData(600, 700, 512, true)]      // data over the limit
+    [InlineData(300, 1023.9, 512, false)]  // file just under twice the limit
+    [InlineData(300, 1024, 512, true)]     // file at twice the limit resets whatever the data
+    [InlineData(300, 1500, 512, true)]
+    [InlineData(1500, 1900, 2048, false)]
+    public void TheSizeCheck_CountsTheDataInTheStore_AndBoundsTheFileAtTwiceTheLimit(double usedMb, double fileMb, double limitMb, bool due)
     {
         var limit = new HotStoreResetLimit(limitMb, "setting");
 
-        Assert.Equal(due, limit.IsReached(fileMb));
+        Assert.Equal(due, limit.IsReached(usedMb, fileMb));
+    }
+
+    /// <summary>A failed or skipped used read (a busy store) leaves the file length to decide, as the check did before.</summary>
+    [Theory]
+    [InlineData(520, 512, true)]
+    [InlineData(511.9, 512, false)]
+    [InlineData(1100, 1024, true)]
+    [InlineData(1023.9, 1024, false)]
+    public void TheSizeCheck_WhenTheUsedReadIsNull_FallsBackToTheFileLength(double fileMb, double limitMb, bool due)
+    {
+        var limit = new HotStoreResetLimit(limitMb, "setting");
+
+        Assert.Equal(due, limit.IsReached(null, fileMb));
     }
 
     [Fact]
-    public void TheSizeCheck_OfASettingOf1024_LeavesA520MbStoreAlone_WhereTheDefaultWouldReset()
+    public void TheSizeCheck_OfASettingOf1024_LeavesA520MbFileAlone_WhereTheDefaultWouldReset()
     {
         var fromSetting = Resolve("{\"hot_store_reset_mb\": 1024}", out _);
         var fromDefault = Resolve("{}", out _);
 
-        Assert.False(fromSetting.IsReached(520));
-        Assert.True(fromDefault.IsReached(520));
-        Assert.True(fromSetting.IsReached(1030));
+        Assert.False(fromSetting.IsReached(null, 520));
+        Assert.True(fromDefault.IsReached(null, 520));
+        Assert.True(fromSetting.IsReached(null, 1030));
     }
 }

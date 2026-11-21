@@ -92,7 +92,8 @@ public sealed class StoreHealthTests : IDisposable
         Assert.NotNull(snapshot.Store.UsedMb);
         Assert.True(snapshot.Store.UsedMb > 0);
         Assert.Equal(512, snapshot.Store.ResetAtMb);
-        Assert.Equal(snapshot.Store.FileMb / 512 * 100, snapshot.Store.FilePercentOfReset, 6);
+        Assert.Equal(snapshot.Store.UsedMb!.Value / 512 * 100, snapshot.Store.DataPercentOfReset, 6);
+        Assert.Equal(1024, snapshot.Store.FileResetAtMb);
         Assert.Null(snapshot.StoreNote);
 
         Assert.NotNull(snapshot.Tables);
@@ -117,7 +118,8 @@ public sealed class StoreHealthTests : IDisposable
         Assert.Equal("default", fromDefault.ResetSource);
         Assert.Equal(1024, fromSetting.Store.ResetAtMb);
         Assert.Equal("setting", fromSetting.Store.ResetSource);
-        Assert.Equal(fromSetting.Store.FileMb / 1024 * 100, fromSetting.Store.FilePercentOfReset, 6);
+        Assert.Equal(fromSetting.Store.UsedMb!.Value / 1024 * 100, fromSetting.Store.DataPercentOfReset, 6);
+        Assert.Equal(2048, fromSetting.Store.FileResetAtMb);
 
         /* The window and get_store_health print the same sentence, and it tells the two sources apart. */
         var settingText = StoreHealthText.Render(fromSetting);
@@ -128,8 +130,9 @@ public sealed class StoreHealthTests : IDisposable
         Assert.NotEqual(StoreHealthText.StoreSentence(fromDefault), StoreHealthText.StoreSentence(fromSetting.Store));
     }
 
-    /// <summary>#9238: the size check of the housekeeping loop uses the effective reset point, not a fixed one. The store file is
-    /// the same size in both passes. Only the limit differs, and only the lower one resets.</summary>
+    /// <summary>#9238: the size check of the housekeeping loop uses the effective reset point, not a fixed one. The store is the
+    /// same in every pass. Only the limit differs. A limit above the data leaves it alone even when the file is over the limit, and a
+    /// limit below the data resets.</summary>
     [Fact]
     public async Task TheLoopsSizeCheck_ResetsAtTheEffectiveLimit_AndNotBelowIt()
     {
@@ -148,14 +151,28 @@ public sealed class StoreHealthTests : IDisposable
 
         /* The timed archive is not due, so only the size check can start a reset. */
         stampField.SetValue(service, DateTime.UtcNow);
-        service.HotStoreReset = new HotStoreResetLimit(fileMb * 2, HotStoreResetSetting.SourceSetting);
-        await (Task)step.Invoke(service, args)!;
+        async Task RunAsync(double limitMb)
+        {
+            service.HotStoreReset = new HotStoreResetLimit(limitMb, HotStoreResetSetting.SourceSetting);
+            await (Task)step.Invoke(service, args)!;
+        }
+
+        await RunAsync(fileMb * 2);
 
         Assert.Empty(new StoreHousekeepingHistory(_historyPath).Read());
         Assert.Equal(3L, await CountDeadlocksAsync());
 
-        service.HotStoreReset = new HotStoreResetLimit(fileMb / 2, HotStoreResetSetting.SourceSetting);
-        await (Task)step.Invoke(service, args)!;
+        /* The file is over the limit but the data in it is under: the file keeps its freed blocks, so it is not a reason to reset. */
+        var usedMb = _duckDb.GetUsedDataSizeMb();
+        Assert.NotNull(usedMb);
+        Assert.True(usedMb < fileMb, "a store file holds more than its data");
+        await RunAsync((usedMb.Value + fileMb) / 2);
+
+        Assert.Empty(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(3L, await CountDeadlocksAsync());
+
+        /* The data reaches the limit: reset. */
+        await RunAsync(usedMb.Value / 2);
 
         var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read());
         Assert.Equal(StoreHousekeepingHistory.KindSizeReset, reset.Kind);
@@ -473,7 +490,7 @@ public sealed class StoreHealthTests : IDisposable
         var text = await McpStoreHealthTools.GetStoreHealth(NewReader());
 
         Assert.Contains("STORE", text);
-        Assert.Contains("starts a fresh store when the store file reaches 512 MB", text);
+        Assert.Contains("starts a fresh store when the data in the store reaches 512 MB", text);
         Assert.Contains("ARCHIVES", text);
         Assert.Contains("1 parquet files", text);
         Assert.Contains("Oldest month: 2026-01", text);

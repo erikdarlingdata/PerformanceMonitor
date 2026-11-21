@@ -13,8 +13,8 @@ using System.Text.Json;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// The size at which Lite archives every hot table to Parquet and recreates <c>monitor.duckdb</c> (#9238), and where that
-/// number came from. <see cref="Source"/> is <see cref="HotStoreResetSetting.SourceDefault"/> or
+/// The amount of data in the hot store at which Lite archives every hot table to Parquet and recreates <c>monitor.duckdb</c>
+/// (#9238), and where that number came from. <see cref="Source"/> is <see cref="HotStoreResetSetting.SourceDefault"/> or
 /// <see cref="HotStoreResetSetting.SourceSetting"/>.
 /// </summary>
 internal sealed record HotStoreResetLimit(double Mb, string Source)
@@ -23,8 +23,19 @@ internal sealed record HotStoreResetLimit(double Mb, string Source)
     /// background service and the store-health readers are built. Every reader goes through this one property.</summary>
     internal static HotStoreResetLimit Current { get; set; } = HotStoreResetSetting.DefaultLimit;
 
-    /// <summary>True when a store file of <paramref name="fileMb"/> has reached the limit and is due a reset.</summary>
-    internal bool IsReached(double fileMb) => fileMb >= Mb;
+    /// <summary>The file length at which the store resets whatever the data in it, so the disk the hot file uses stays bounded.</summary>
+    internal double FileCeilingMb => Mb * FileCeilingFactor;
+
+    /// <summary>The file may grow to this many times the reset point before it forces a reset.</summary>
+    internal const double FileCeilingFactor = 2;
+
+    /// <summary>
+    /// True when the store is due a reset (#9238). The reset point counts the DATA in the store (<paramref name="usedMb"/>, the used
+    /// blocks), not the file: DuckDB keeps freed blocks in the file, so the file runs well past its data, and a file-length check
+    /// reset the store long before the data warranted it. A null <paramref name="usedMb"/> (the read failed or the store was busy)
+    /// falls back to the file length. The file reaching <see cref="FileCeilingMb"/>, twice the reset point, resets either way.
+    /// </summary>
+    internal bool IsReached(double? usedMb, double fileMb) => fileMb >= FileCeilingMb || (usedMb ?? fileMb) >= Mb;
 }
 
 /// <summary>
@@ -45,7 +56,7 @@ internal static class HotStoreResetSetting
 
     internal const double MinMb = 128;
 
-    internal const double MaxMb = 1024;
+    internal const double MaxMb = 2048;
 
     internal const string SourceDefault = "default";
 
