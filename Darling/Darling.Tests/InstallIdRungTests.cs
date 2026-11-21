@@ -41,19 +41,6 @@ public sealed class InstallIdRungTests
     /// <summary>The rung's version, read off the migration registered under <see cref="RungName"/>.</summary>
     public static int RungVersion => Rung.Version;
 
-    [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
-    {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* No longer the top rung: V159 (the install id's table OID) landed above it. */
-        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(Rung.Version - 1, versions);
-    }
-
     /// <summary>
     /// ONE table in the config schema, shaped like its neighbours: a single row pinned to <c>id = 1</c>, the id
     /// under a CHECK for exactly eight lowercase hex digits, and the two binding columns: the database's OID NOT NULL

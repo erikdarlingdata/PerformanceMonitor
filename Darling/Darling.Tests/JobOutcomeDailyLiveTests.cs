@@ -42,10 +42,6 @@ public sealed class JobOutcomeDailyLiveTests
     {
         var rung = PgMigrations.Scripts.Single(s => s.Version == JobOutcomeDaily.Version);
 
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(rung.Version - 1, versions);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         var own = Array.FindIndex(parameters, p => p.Name == "hasJobOutcomeDaily");

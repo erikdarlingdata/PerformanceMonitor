@@ -83,8 +83,6 @@ public sealed class QueryStatsHourLedgerTests
         Assert.Equal(QueryStatsHourLedger.RungVersion, Rung.Version); // the runner's below-the-rung check reads this constant
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Contains(Rung.Version + 1, versions); // no longer the top rung: V165 landed above it
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Contains(Rung.Version - 1, versions);
     }
 
     [Fact]

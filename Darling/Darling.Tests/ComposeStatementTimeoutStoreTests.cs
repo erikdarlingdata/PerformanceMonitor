@@ -33,19 +33,7 @@ public class ComposeStatementTimeoutStoreTests
     [Fact]
     public void TheRungIsRegisteredAndIsTheTopOfADenseLadder()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* #2349 added V79, so this rung is no longer the top -- the "I am the top" claim moves to the newest
-           rung's own test (FileGrowthAlertStoreTests). What stays true: it is PRESENT, the ladder is ordered
-           and dense, and the build's schema version tracks the maximum. */
         Assert.Equal("compose-statement-timeout", PgMigrations.Scripts.Single(s => s.Version == 78).Name);
-        Assert.Contains(78, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* Ordered, and dense above the one sanctioned historical hole at V45. */
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

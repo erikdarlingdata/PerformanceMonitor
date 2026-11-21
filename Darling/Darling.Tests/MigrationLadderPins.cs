@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -25,6 +26,11 @@ namespace Darling.Tests;
 /// view with V54's <c>query_plan_gz</c>, and every 3.3.0→3.4.0 upgrade died with 42703 at service
 /// start. The dogfood box never sees this class — it walks each rung in the era it shipped — so
 /// only a pin can.
+///
+/// <para>This file also holds the ladder's own invariants, once for every rung: versions distinct, in order and
+/// dense, and the top rung equal to <c>StorageVersion.SchemaVersion</c>. A rung's test class asserts only what is
+/// true of that rung alone (its name at its version, its SQL, its probe ordinal) and nothing about its
+/// neighbours or the top, so adding a rung edits no other rung's tests.</para>
 /// </summary>
 public sealed class MigrationLadderPins
 {
@@ -123,16 +129,14 @@ public sealed class MigrationLadderPins
     {
         /* The replay math above only holds when versions are strictly increasing and unique — a
            duplicated or out-of-order version would let two rungs disagree about what "already ran"
-           means. The historical V45 hole stays sanctioned (a gap NOBODY fills is harmless — the
-           stamp comparison is >, not sequence arithmetic); new gaps are the next pin's job. Cheap
-           to pin, catastrophic to debug from a half-migrated field store. */
+           means. Cheap to pin, catastrophic to debug from a half-migrated field store. */
         var versions = PgMigrations.Scripts.Select(m => m.Version).ToList();
         Assert.Equal(versions.OrderBy(v => v).ToList(), versions);
         Assert.Equal(versions.Count, versions.Distinct().Count());
     }
 
     [Fact]
-    public void TheLadder_IsDenseAboveTheHistoricalGap()
+    public void TheLadder_IsDense_FromTheFirstRungToTheLast_ExceptTheHistoricalGap()
     {
         /* #2226: a NEW gap is a rung some other branch intends to fill later — and the applier
            ascends with `version <= currentVersion ? skip`, so a rung filled AFTER a store stamped
@@ -143,7 +147,25 @@ public sealed class MigrationLadderPins
            author's own test run: every branch must take max(dev)+1, and two branches that both do
            so collide loudly at rebase instead of coexisting into a field incident. V45 is the one
            sanctioned hole, vacant for many releases and filled by nobody. */
-        var above = PgMigrations.Scripts.Select(m => m.Version).Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count).ToList(), above);
+        var versions = PgMigrations.Scripts.Select(m => m.Version).ToList();
+        var expected = Enumerable.Range(versions[0], versions[^1] - versions[0] + 1).Where(v => v != HistoricalGap).ToList();
+
+        Assert.Equal(1, versions[0]);
+        Assert.Equal(expected, versions.OrderBy(v => v).ToList());
     }
+
+    [Fact]
+    public void TheLadderTop_IsTheStorageVersion_AndTheViewerGate()
+    {
+        /* The ONE place that says which rung is the newest. A rung class asserts its own name at its own
+           version and nothing about its neighbours or the top, so a new rung edits no other rung's tests.
+           A rung added without bumping StorageVersion.SchemaVersion fails here, once, with this message. */
+        var versions = PgMigrations.Scripts.Select(m => m.Version).ToList();
+
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
+    }
+
+    private const int HistoricalGap = 45;
 }

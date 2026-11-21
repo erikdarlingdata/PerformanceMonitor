@@ -42,10 +42,6 @@ public sealed class ReadLatencyCapacityRungTests
     {
         Assert.Equal("read-latency-capacity-fields", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V183 (#5793) and V184 (#5632) sit above it; this rung stays registered below them. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
     [Fact]

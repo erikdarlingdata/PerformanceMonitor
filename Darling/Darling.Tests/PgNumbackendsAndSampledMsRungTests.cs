@@ -60,17 +60,9 @@ public sealed class PgNumbackendsAndSampledMsRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("pg-numbackends-and-sampled-ms", V133.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* One below the top since V134 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
-           the top-arm claim moved to TimeHonestyRungTests with the top. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V133 is expected to sit below the ladder's top now that V134 has landed");
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>

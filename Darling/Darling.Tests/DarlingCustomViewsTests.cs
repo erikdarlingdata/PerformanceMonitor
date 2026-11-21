@@ -61,7 +61,6 @@ public sealed class DarlingCustomViewsTests
            future migration does not have to churn this test (ScaffoldTests pins the same rule, and
            DarlingObservabilityTests carries the full index->version ladder). */
         Assert.Equal(31, PgMigrations.Scripts[30].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
     }
 
     /* ── ValidateDefinition: the authority ── */

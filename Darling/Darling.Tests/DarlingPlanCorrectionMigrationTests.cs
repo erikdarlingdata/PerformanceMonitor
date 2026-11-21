@@ -43,10 +43,6 @@ public sealed class DarlingPlanCorrectionMigrationTests
     [Fact]
     public void MigrationVersions_AreUniqueAndAscending_EvenAcrossTheDeliberateV45Gap()
     {
-        /* 45 belongs to a sibling lane and is deliberately absent here. The runner applies whatever sits
-           above the store's current version, so a GAP is harmless; a COLLISION would mean two different
-           bodies claiming one version and a store that silently skips one of them. Pin the property that
-           actually matters rather than contiguity, which was never required. */
         var versions = PgMigrations.Scripts.Select(m => m.Version).ToArray();
 
         Assert.Equal(versions.Distinct().Count(), versions.Length);
@@ -55,7 +51,6 @@ public sealed class DarlingPlanCorrectionMigrationTests
 
         /* 45 is permanently unused: #1951 was renumbered to 47 once #1952 took 46, because the runner
            only applies versions ABOVE the store's MAX and a store stamped 46 would never have seen it. */
-        Assert.Contains(47, versions);
     }
 
     [Fact]

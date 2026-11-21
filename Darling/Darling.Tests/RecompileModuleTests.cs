@@ -151,7 +151,6 @@ public sealed class RecompileModuleTests
         try
         {
             var rung = PgMigrations.Scripts.Single(m => m.Name == "server-action-recompile-module");
-            Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
             await PgMigrations.MigrateAsync(store, ct);
             await ExecAsync(store, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5690, 'srv-a', 'host-a')", ct);
             await ExecAsync(store, "INSERT INTO config.config_server_actions (server_id, action, set_by) VALUES (5690, 'recompile_module', 'erik')", ct);
