@@ -176,16 +176,17 @@ FROM generate_series(0, 29999) AS g", connection);
         => Assert.True((long)(await ScalarAsync(connection,
             $"SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('{relation}'::regclass) AS c", ct))! > 0);
 
-    /* The compressed chunk relations in the store, found by the name TimescaleDB gives them. The catalog's own chunk to compressed-chunk link
-       changed shape in TimescaleDB 2.29, and the only chunks this scratch store compresses are the ones the test seeds. */
+    /* The compressed chunk relations in the store, found by the batch row count column every compressed chunk table carries. The catalog's own
+       chunk to compressed-chunk link changed shape in TimescaleDB 2.29, and the only chunks this scratch store compresses are the ones the test seeds. */
     private static async Task<List<string>> CompressedChunksAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var chunks = new List<string>();
         await using var command = new NpgsqlCommand(@"
 SELECT format('%I.%I', n.nspname, c.relname)
-FROM pg_class AS c
+FROM pg_attribute AS a
+JOIN pg_class AS c ON c.oid = a.attrelid
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
-WHERE c.relkind = 'r' AND c.relname LIKE 'compress\_hyper\_%\_chunk'
+WHERE a.attname = '_ts_meta_count' AND NOT a.attisdropped AND c.relkind = 'r'
 ORDER BY c.oid", connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
