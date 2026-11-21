@@ -91,7 +91,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest) "
             + "SELECT $2::bigint + i, $1::timestamp - ((i * 3600.0 / 972000) * interval '1 second'), 1 + (i % 42), 'x', 'Books', 'h' || ((i * 7919) % " + digests + "), "
-            + "sha256(('t' || (1 + ((i * 7919) % " + digests + ") * 19))::text::bytea) FROM generate_series(0, 971999) AS i", newest, CollectionIdGenerator.Next());
+            + "sha256(('t' || (1 + ((i * 7919) % " + digests + ") * 19))::text::bytea) FROM generate_series(0::bigint, 971999) AS i", newest, CollectionIdGenerator.Next());
         await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE collect.query_text_dim");
         await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE query_stats");
         report.AppendLine($"seeded in {sw.Elapsed.TotalSeconds:0.0}s: {texts} texts, 972000 samples in the newest hour");
