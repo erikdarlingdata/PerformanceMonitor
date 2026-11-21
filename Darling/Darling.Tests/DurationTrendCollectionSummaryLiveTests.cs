@@ -36,7 +36,7 @@ public sealed class DurationTrendCollectionSummaryLiveTests
     private const string B = "SummaryB";
 
     private const string Cleanup =
-        "DELETE FROM query_stats WHERE server_id = {0}; DELETE FROM collect.query_stats_collection WHERE server_id = {0}";
+        "DELETE FROM query_stats WHERE server_id = {0}; DELETE FROM collect.query_stats_collection WHERE server_id = {0}; DELETE FROM collect.query_stats_collection_floor WHERE server_id = {0}";
 
     private static Task PlantAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string? db, string hash, long weight) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
@@ -63,9 +63,9 @@ public sealed class DurationTrendCollectionSummaryLiveTests
 
     private static string Stamp(DateTime at) => DarlingMcpTestData.TruncateToSeconds(at).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-    private static async Task<string> ReadAsync(NpgsqlDataSource postgres, int serverId, DateTime now, DatabaseFilter filter, CancellationToken ct)
+    private static async Task<string> ReadAsync(NpgsqlDataSource postgres, int serverId, DateTime now, DatabaseFilter filter, CancellationToken ct, DateTime? windowStart = null)
     {
-        var start = now.AddHours(-24);
+        var start = windowStart ?? now.AddHours(-24);
         var end = now.AddMinutes(5);
         var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
         var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, rollups.Item1, rollups.Item2, windowEndUtc: end);
@@ -158,7 +158,7 @@ public sealed class DurationTrendCollectionSummaryLiveTests
         }, Cleanup);
 
     [Fact]
-    public Task ACollectionAnOlderBuildLeftWithoutASummaryRow_MovesTheSummaryFloorUpToTheNextBatch() =>
+    public Task ACollectionAnOlderBuildLeftWithoutASummaryRow_MovesTheServersFloorToTheNextBatch_AndDeletesNoSummaryRow() =>
         DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-hole", async (connection, postgres, serverId, serverName, now, ct) =>
         {
             var t1 = now.AddHours(-3);
@@ -170,8 +170,55 @@ public sealed class DurationTrendCollectionSummaryLiveTests
             await PlantAsync(connection, ct, serverId, serverName, t3, A, "0xQ1", 10);
             await WriteSummaryAsync(connection, ct, serverId, t3);
 
-            Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId}"));
+            /* #9193: the batch that finds the hole writes the server's floor at its own time and deletes nothing, so the older row stays. */
+            Assert.Equal(2, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId}"));
             Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection WHERE server_id = {serverId} AND collection_time = '{Stamp(t3)}'"));
+            Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection_floor WHERE server_id = {serverId} AND valid_from = '{Stamp(t3)}'"));
+        }, Cleanup);
+
+    [Fact]
+    public Task AfterAHole_TheTrendReadsRawForAWindowStartingBeforeTheFloor_AndTheSummaryForOneStartingAfterIt_AndBothEqualRaw() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("summary-route-floor-read", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            /* The summary is whole through the seed's last collection (about 1.8 hours before now). Then an older build wrote two raw collections
+               with no summary row, and the first batch of this build, at -60 min, found the hole and wrote the floor. */
+            await SeedAsync(connection, ct, serverId, serverName, now);
+            await PlantAsync(connection, ct, serverId, serverName, now.AddMinutes(-100), A, "0xQ1", 4_000);
+            await PlantAsync(connection, ct, serverId, serverName, now.AddMinutes(-80), A, "0xQ1", 5_000);
+            await PlantAsync(connection, ct, serverId, serverName, now.AddMinutes(-80), B, "0xQ4", 6_000);
+            var floor = now.AddMinutes(-60);
+            foreach (var at in new[] { floor, now.AddMinutes(-40), now.AddMinutes(-20) })
+            {
+                await PlantAsync(connection, ct, serverId, serverName, at, A, "0xQ1", 7_000);
+                await PlantAsync(connection, ct, serverId, serverName, at, B, "0xQ4", 8_000);
+                await WriteSummaryAsync(connection, ct, serverId, at);
+            }
+
+            Assert.Equal(1, await ScalarAsync(connection, ct, $"SELECT count(*) FROM collect.query_stats_collection_floor WHERE server_id = {serverId} AND valid_from = '{Stamp(floor)}'"));
+            var beforeFloor = now.AddHours(-24);
+            var afterFloor = now.AddMinutes(-50);
+            var filters = new[] { DatabaseFilter.All, DatabaseFilter.One(A), DatabaseFilter.One(B) };
+            var viaFloor = new List<(string Before, string After)>();
+            foreach (var filter in filters)
+            {
+                viaFloor.Add((await ReadAsync(postgres, serverId, now, filter, ct, beforeFloor), await ReadAsync(postgres, serverId, now, filter, ct, afterFloor)));
+            }
+
+            /* Which table each window read: a tampered summary changes only the window that starts after the floor. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.query_stats_collection SET sum_elapsed = sum_elapsed * 100 WHERE server_id = $1", serverId);
+            Assert.Equal(viaFloor[0].Before, await ReadAsync(postgres, serverId, now, DatabaseFilter.All, ct, beforeFloor));
+            Assert.NotEqual(viaFloor[0].After, await ReadAsync(postgres, serverId, now, DatabaseFilter.All, ct, afterFloor));
+
+            /* Both windows give a pure raw read's answer, with no summary and no floor. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection WHERE server_id = $1", serverId);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.query_stats_collection_floor WHERE server_id = $1", serverId);
+            for (var i = 0; i < filters.Length; i++)
+            {
+                Assert.Equal(await ReadAsync(postgres, serverId, now, filters[i], ct, beforeFloor), viaFloor[i].Before);
+                Assert.Equal(await ReadAsync(postgres, serverId, now, filters[i], ct, afterFloor), viaFloor[i].After);
+            }
+
+            Assert.True(viaFloor[0].Before.Length > 2 && viaFloor[0].After.Length > 2);
         }, Cleanup);
 
     [Fact]

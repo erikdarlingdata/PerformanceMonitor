@@ -918,6 +918,9 @@ CREATE INDEX idx_collection_log_watermark ON collect.collection_log (server_id, 
 DROP TABLE IF EXISTS collect.query_store_clutter_collections_hourly;
 DROP TABLE IF EXISTS collect.query_store_clutter_hour_built;
 DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_tick DROP COLUMN IF EXISTS hour_ticked_at; END IF; END $$;"),
+        // V290 (#9193): the query_stats summary's per-server floor table, the probe's newest sentinel. The rewind drops it, so a re-run of V290 creates it empty
+        // and a server has no floor until a batch finds a hole. Safe on a store that never had it.
+        new(290, "hasQueryStatsCollectionFloor", @"DROP TABLE IF EXISTS collect.query_stats_collection_floor;"),
     ];
 
     /// <summary>
