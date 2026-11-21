@@ -1251,18 +1251,7 @@ public sealed partial class DarlingWorker
 
         /* #9111: the closed-day rollups the Query Store grid and its slicer read whole UTC days from. It reads the interval table the
            daily summary above reads and writes its own three tables, so it has its own catch and a failure leaves the passes above standing. */
-        try
-        {
-            /* #9173: the hourly clutter step follows the retention query_store_stats' raw rows are purged on, resolved the way the purge resolves it. */
-            await QueryStoreClosedDayRollup.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
-                DarlingRetention.EffectivePurgeRetentionDays("query_store_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_store_stats", _scheduleOverrides)),
-                _logger, stoppingToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning("Query Store closed-day rollups could not run; the next hourly tick retries: {Message}", ex.Message);
-        }
+        await RunQueryStoreClosedDayTickAsync(stoppingToken);
 
         /* #9164: the hourly host rollup of query_stats the top-queries read ranks whole hours from. It reads query_stats and the count ledger,
            and writes its own two tables, so it has its own catch and a failure leaves the passes above standing. Its prune follows the retention
@@ -1279,6 +1268,26 @@ public sealed partial class DarlingWorker
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("Query stats host hourly rollup could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The closed-day rollup pass of the hourly store-maintenance tick (#9111), with its own catch so a failure leaves the passes before it
+    /// standing. The hourly clutter step follows the retention <c>query_store_stats</c>' raw rows are purged on (#9173), taken from
+    /// <see cref="DarlingRetention.QueryStoreStatsPurgeRetentionDays"/> so the clutter step and the purge agree (#9221).
+    /// </summary>
+    internal async Task RunQueryStoreClosedDayTickAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await QueryStoreClosedDayRollup.RunTickAsync(
+                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
+                DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
+                _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query Store closed-day rollups could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 

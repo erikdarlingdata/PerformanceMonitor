@@ -105,6 +105,19 @@ public static class DarlingRetention
     }
 
     /// <summary>
+    /// The days the purge keeps <c>query_store_stats</c>' raw rows for (#9221): the retention of the collector whose target table it is,
+    /// through <see cref="EffectivePurgeRetentionDays"/>, which is the argument <see cref="PurgeAsync"/> builds for that catalog entry. The
+    /// collector is named <c>query_store</c> and its table <c>query_store_stats</c>, and the schedule rows and defaults are keyed by the
+    /// collector, so a caller that passes the table name finds no default and throws. Taking the name from the catalog keeps the
+    /// hourly clutter step on the purge's own horizon.
+    /// </summary>
+    internal static int QueryStoreStatsPurgeRetentionDays(IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var collector = CollectorCatalog.All.Single(c => string.Equals(c.TargetTable, "query_store_stats", StringComparison.Ordinal)).Name;
+        return EffectivePurgeRetentionDays(collector, StoreConfigProvider.ResolveFleetRetentionDays(collector, overrides));
+    }
+
+    /// <summary>
     /// config_alert_log (the fired-alert history: what alerted + delivery status, read by the viewer Alert
     /// History tab and the get_alert_history MCP tool) is a plain <c>config</c>-schema registry table — NOT a
     /// collector (so it has no <see cref="CollectorScheduleDefaults"/> horizon) and NOT a hypertable (so it
