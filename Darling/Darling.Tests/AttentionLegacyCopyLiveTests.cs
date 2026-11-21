@@ -266,9 +266,9 @@ public sealed class AttentionLegacyCopyLiveTests
     }
 
     /* About 20 rows a page, spread over 20 days in an order unrelated to the page order, so every early batch puts rows in the old chunks. */
-    private static string ScatteredSeedSql(int rows) =>
+    private static string ScatteredSeedSql(int rows, DateTime anchor) =>
         "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, statement_text) "
-        + "SELECT g, now() AT TIME ZONE 'UTC' - make_interval(secs => ((g * 7919) % " + rows + ") * (1728000 / " + rows + ") + 60), "
+        + "SELECT g, '" + anchor.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "'::timestamp - make_interval(secs => ((g * 7919) % " + rows + ") * (1728000 / " + rows + ") + 60), "
         + "-8967, 'copy-test', CASE WHEN g % 3 = 0 THEN 'count' ELSE 'sample' END, g, 'db' || (g % 5), repeat('x', 200) "
         + $"FROM generate_series(1, {rows}) AS g";
 
@@ -284,7 +284,8 @@ public sealed class AttentionLegacyCopyLiveTests
         await RunAsync(timescale: true, async (store, ct) =>
         {
             var c = store.Connection;
-            await ExecAsync(c, ScatteredSeedSql(2000), ct);
+            var anchor = LiveClock.AnchoredEnd();
+            await ExecAsync(c, ScatteredSeedSql(2000, anchor), ct);
             await RunRungAsync(c, ct);
             await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
             Assert.True(await TimescaleSupport.EnsureAttentionEventsCompressionAsync(c, null, ct), "attention_events must have compression and its policy before the copy");
@@ -328,9 +329,8 @@ public sealed class AttentionLegacyCopyLiveTests
             Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) - count(DISTINCT attention_event_id) FROM collect.attention_events", ct));
             Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM pg_class WHERE oid = to_regclass('collect.attention_events_legacy')", ct));
 
-            var now = DateTime.UtcNow;
-            var floor = DateTime.SpecifyKind(now.AddDays(-30), DateTimeKind.Unspecified);
-            var ceiling = DateTime.SpecifyKind(now.AddHours(1), DateTimeKind.Unspecified);
+            var floor = DateTime.SpecifyKind(anchor.AddDays(-30), DateTimeKind.Unspecified);
+            var ceiling = DateTime.SpecifyKind(anchor.AddHours(1), DateTimeKind.Unspecified);
             var servers = new[] { -8967 };
             var control = await AttentionEventsCompressionLiveTests.ReadAllAsync(c, "collect.attention_control", servers, floor, ceiling, ct);
             var target = await AttentionEventsCompressionLiveTests.ReadAllAsync(c, "collect.attention_events", servers, floor, ceiling, ct);
