@@ -1617,7 +1617,7 @@ public partial class RemoteCollectorService
     /// (rows_collected = Σ non-empty batch counts). Synchronous (the DuckDB appender API is), returning the
     /// count so the driver can await it as a completed task.
     /// </summary>
-    private static int WriteBatch<TRow>(
+    internal static int WriteBatch<TRow>(
         DuckDBConnection duckConnection,
         ICollectorDefinition<TRow> definition,
         List<TRow> rows,
@@ -1661,31 +1661,42 @@ public partial class RemoteCollectorService
         }
 
         var rowsWritten = 0;
+
+        /* #9241: a table that has a digest column goes through a TEMP stage: its text is kept once in the dimension, in one
+           transaction, or inline when the store has no vh_ view for it. A failure anywhere stores nothing, so the whole batch counts
+           as not written and the baselines go back. */
+        var plan = TextDimensionWriter.PlanFor(duckConnection, definition.TargetTable);
+        if (plan != TextDimensionWriter.WritePlan.Plain)
+        {
+            try
+            {
+                TextDimensionWriter.CreateStage(duckConnection, definition.TargetTable);
+                using (var appender = duckConnection.CreateAppender("temp", "main", TextDimensionWriter.StageName(definition.TargetTable)))
+                {
+                    AppendRows(appender, definition, rows, serverId, serverName, collectionTime, context, ref rowsWritten);
+                }
+
+                TextDimensionWriter.Publish(duckConnection, definition.TargetTable, plan);
+            }
+            catch
+            {
+                (rows as IBaselineRollback)?.RollBackBaselines();
+                throw;
+            }
+            finally
+            {
+                TextDimensionWriter.DropStage(duckConnection, definition.TargetTable);
+            }
+
+            _queryTagSightings.Append(definition, rows, serverId, s_queryTagFlushDb);
+            return rowsWritten;
+        }
+
         try
         {
             using (var appender = duckConnection.CreateAppender(definition.TargetTable))
             {
-                var writer = new AppenderCollectorRowWriter();
-
-                foreach (var item in rows)
-                {
-                    var row = appender.CreateRow();
-
-                    if (definition.IncludesCollectionId)
-                    {
-                        row.AppendValue(GenerateCollectionId()); /* collection_id BIGINT */
-                    }
-
-                    row.AppendValue(collectionTime)              /* collection_time TIMESTAMP */
-                       .AppendValue(serverId)                    /* server_id INTEGER */
-                       .AppendValue(serverName);                 /* server_name VARCHAR */
-
-                    writer.CurrentRow = row;
-                    definition.WritePayload(item, writer, context);
-                    row.EndRow();
-
-                    rowsWritten++;
-                }
+                AppendRows(appender, definition, rows, serverId, serverName, collectionTime, context, ref rowsWritten);
             }
         }
         catch when (rowsWritten == 0)
@@ -1702,6 +1713,40 @@ public partial class RemoteCollectorService
         _queryTagSightings.Append(definition, rows, serverId, s_queryTagFlushDb);
 
         return rowsWritten;
+    }
+
+    /// <summary>Appends a batch's rows, prefix columns first and then the definition's payload, counting each row as it is appended.</summary>
+    private static void AppendRows<TRow>(
+        DuckDBAppender appender,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        int serverId,
+        string serverName,
+        DateTime collectionTime,
+        CollectorContext context,
+        ref int rowsWritten)
+    {
+        var writer = new AppenderCollectorRowWriter();
+
+        foreach (var item in rows)
+        {
+            var row = appender.CreateRow();
+
+            if (definition.IncludesCollectionId)
+            {
+                row.AppendValue(GenerateCollectionId()); /* collection_id BIGINT */
+            }
+
+            row.AppendValue(collectionTime)              /* collection_time TIMESTAMP */
+               .AppendValue(serverId)                    /* server_id INTEGER */
+               .AppendValue(serverName);                 /* server_name VARCHAR */
+
+            writer.CurrentRow = row;
+            definition.WritePayload(item, writer, context);
+            row.EndRow();
+
+            rowsWritten++;
+        }
     }
 
     /// <summary>

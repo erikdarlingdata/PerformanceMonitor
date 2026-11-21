@@ -3526,11 +3526,11 @@ public partial class DuckDbInitializer : IDisposable
         if (fromVersion < 85)
         {
             /* v85 (#9241): query text kept once in query_text_dim, keyed by a content digest (LiteTextDimensions). The step adds the
-               nullable query_text_digest BLOB to query_store_stats and query_stats and rewrites nothing: a row stored before it keeps its
+               nullable query_text_digest BLOB to query_store_stats, query_stats and plan_correction and rewrites nothing: a row stored before it keeps its
                inline text, and the vh_ views read the inline text first. Lite only, so the columns come from LiteTextDimensions and not
                from the added-columns list that follows the payload order shared with Darling. The dimension table itself is created by
                the table statements that run after the migrations. An older build refuses a file stamped v85 (SchemaVersionTooNewException). */
-            _logger?.LogInformation("Running migration to v85: adding query_text_digest to query_store_stats and query_stats");
+            _logger?.LogInformation("Running migration to v85: adding query_text_digest to query_store_stats, query_stats and plan_correction");
             await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
         }
     }

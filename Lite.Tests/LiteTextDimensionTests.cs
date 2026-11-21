@@ -139,7 +139,7 @@ public sealed class LiteTextDimensionTests : IDisposable
 
             /* The v84 shape: no digest columns, no dimension, no vh_ views, stamped 84. DuckDB refuses DROP COLUMN on an indexed
                table, so the indexes go and come straight back. */
-            foreach (var table in new[] { "query_stats", "query_store_stats" })
+            foreach (var table in new[] { "query_stats", "query_store_stats", "plan_correction" })
             {
                 using var names = connection.CreateCommand();
                 names.CommandText = $"SELECT index_name FROM duckdb_indexes() WHERE table_name = '{table}'";
@@ -187,7 +187,7 @@ public sealed class LiteTextDimensionTests : IDisposable
 
         using var upgradedConnection = await OpenAsync();
         using var freshConnection = await OpenAsync(freshPath);
-        foreach (var relation in new[] { "query_stats", "query_store_stats", "v_query_stats", "v_query_store_stats", "vh_query_stats", "vh_query_store_stats" })
+        foreach (var relation in new[] { "query_stats", "query_store_stats", "v_query_stats", "v_query_store_stats", "vh_query_stats", "vh_query_store_stats", "plan_correction", "v_plan_correction", "vh_plan_correction" })
         {
             Assert.Equal(await ColumnsAsync(freshConnection, relation), await ColumnsAsync(upgradedConnection, relation));
         }

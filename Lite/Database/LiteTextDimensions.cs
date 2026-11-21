@@ -42,6 +42,7 @@ internal static class LiteTextDimensions
     {
         new TextDimension("query_store_stats", "query_text", QueryTextDigestColumn, QueryTextDimTable),
         new TextDimension("query_stats", "query_text", QueryTextDigestColumn, QueryTextDimTable),
+        new TextDimension("plan_correction", "query_text", QueryTextDigestColumn, QueryTextDimTable),
     };
 
     /// <summary>The dimension table's DDL. No key constraint: the writer keeps one row per digest, under the store's write lock.</summary>
