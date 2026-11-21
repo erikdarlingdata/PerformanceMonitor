@@ -3207,6 +3207,34 @@ internal static partial class DarlingDataReader
         ),
         """;
 
+    /// <summary>The select list both arms of <see cref="QueryStoreTopTableSplitPrefix"/> project: every column, and the literal <c>rn</c> of <see cref="QueryStoreTopTablePrefix"/>.</summary>
+    private const string QueryStoreTopTableSplitSelect = "*, 1 AS rn";
+
+    /// <summary>The predicates both arms repeat: the database list ($5) and the execution outcome ($6).</summary>
+    private const string QueryStoreTopTableSplitTrailing =
+        "            AND   ($5::text[] IS NULL OR database_name = ANY($5))\n"
+        + "            AND   ($6::text IS NULL OR execution_type_desc = $6)";
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTablePrefix"/> with the window as two arms (#9276), for a store whose
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built: rows with an interval start take the one hour
+    /// <c>first_execution_time</c> floor, rows without one keep the <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> floor
+    /// and read through the partial index (<see cref="QueryStoreIntervalWide.IntervalStartSplitSql"/>). One floor for both was the
+    /// 26 hours, because a row placed by <c>collection_time</c> needs it, and half the heap pages a first call read were rows the
+    /// window dropped. The same rows, columns and parameters as <see cref="QueryStoreTopTablePrefix"/>.
+    /// </summary>
+    private static readonly string QueryStoreTopTableSplitPrefix = $$"""
+        WITH deduped AS (
+        {{QueryStoreIntervalWide.IntervalStartSplitSql(QueryStoreTopTableSplitSelect, QueryStoreTopTableSplitTrailing)}}
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTableSql"/> over <see cref="QueryStoreTopTableSplitPrefix"/>, chosen per call when
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built (#9276); same parameters, rows and order.
+    /// </summary>
+    public static readonly string QueryStoreTopTableSplitSql = QueryStoreTopTableSplitPrefix + QueryStoreTopSuffix;
+
     /// <summary>
     /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reads
     /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
@@ -3824,7 +3852,11 @@ internal static partial class DarlingDataReader
                the interval-table statement reads the whole window. */
             var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
 
-            var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
+            /* #9276: the window as two arms, each with the floor that holds for its rows, once the partial index for the NULL-start
+               arm is built. The daily read is placed by collection_time and keeps its statement. */
+            var splitBuilt = dailySpan is null && await QueryStoreBackgroundIndexes.IsBuiltAsync(
+                connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var topSql = dailySpan is not null ? QueryStoreTopDailyTableSql : splitBuilt ? QueryStoreTopTableSplitSql : QueryStoreTopTableSql;
 
             /* #5882: the first_execution_time floor of both reads reaches PurgeEdgeMargin (26 hours) before the window,
                because an interval may span a day. When the server's own intervals are shorter, the floor shrinks to what

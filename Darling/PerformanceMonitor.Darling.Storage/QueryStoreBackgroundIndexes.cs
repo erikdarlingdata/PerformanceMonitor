@@ -75,6 +75,9 @@ public static class QueryStoreBackgroundIndexes
     /// <summary>Name of the partial btree over the wide table's non-Regular rows (#5506).</summary>
     public const string WideNonRegularFirstExecIndexName = "collect.ix_query_store_interval_wide_nonregular_first_exec";
 
+    /// <summary>Name of the partial btree over the wide table's rows with no interval start (#9276).</summary>
+    public const string WideNullStartFirstExecIndexName = "collect.ix_query_store_interval_wide_nullstart_first_exec";
+
     /// <summary>Name of the btree that lets the one-query history read seek its query on the wide table (#5807).</summary>
     public const string WideDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_wide_db_query_first_exec";
 
@@ -173,6 +176,41 @@ public static class QueryStoreBackgroundIndexes
         + "ON collect.query_store_interval_wide (server_id, first_execution_time) WHERE " + QueryStoreRegressionBaseline.NonRegularPredicate + ";",
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_nonregular_first_exec;",
         IndexDefinition: "(server_id, first_execution_time) WHERE " + QueryStoreRegressionBaseline.NonRegularPredicate);
+
+    /// <summary>
+    /// A PARTIAL btree on <c>collect.query_store_interval_wide (server_id, first_execution_time) WHERE interval_start_time_utc IS
+    /// NULL</c> (#9276), built per partition by the partitioned path, the twin of <see cref="WideNonRegularFirstExec"/>.
+    ///
+    /// <para><b>Why.</b> The Query Store top read (<c>DarlingDataReader.QueryStoreTopTableSplitSql</c>) places a window by the
+    /// interval's start, and bounds <c>first_execution_time</c> below so the <c>(server_id, first_execution_time)</c> btree
+    /// narrows the range before the heap. A row WITH an interval start has a first execution no earlier than that start (an hour
+    /// of slack), so its floor is one hour under the window. A row WITHOUT one (the legacy shape, or a catalog join miss) is
+    /// placed by <c>collection_time</c> and needs the 26 hour floor (<see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>),
+    /// and one floor for both arms was that 26 hours: about half the heap pages a first call read were rows the window then
+    /// dropped (3286 cold blocks at 24 h where an hour's floor reads 1611). With this index the NULL-start arm is one range over
+    /// the few rows that have no start, so the other arm can take the short floor.</para>
+    ///
+    /// <para><b>HOT.</b> PostgreSQL decides heap-only updates by whether an indexed column's VALUE changes (a column named in the
+    /// index predicate counts as indexed; an equal value, and NULL to NULL, counts as unchanged), not by whether the upsert's SET
+    /// list names the column. The upsert writes <c>interval_start_time_utc = EXCLUDED.interval_start_time_utc</c>, but an
+    /// interval's start does not change between fetches of the same interval: it changes only when a NULL left by a catalog join
+    /// miss is filled, which is rare. So every ordinary update stays HOT; the rare fill is one non-HOT update. The write is
+    /// unconditional, so a later fetch that carries a NULL start would also clear a start that was filled: that update is non-HOT too,
+    /// and the row moves back to the other arm, so reads stay correct. The one place the
+    /// HOT census in <c>QueryStoreIntervalWideBrinIndexLiveTests</c> exempts a predicate-only column is this pair.
+    /// <c>QueryStoreTopSplitLiveTests.TheUpsertsSetList_StaysHot_WhenTheIntervalStartIsUnchanged_AndNotWhenANullStartIsFilled</c>
+    /// proves an unchanged start is HOT and a filled NULL start is not; <c>QueryStoreBackgroundIndexesLiveTests</c> proves the
+    /// whole set list stays HOT with the start unchanged.</para>
+    ///
+    /// <para><b>Until it is built</b> the read keeps its single 26 hour floor and the statement it had before.</para>
+    /// </summary>
+    public static readonly IndexSpec WideNullStartFirstExec = new(
+        WideNullStartFirstExecIndexName,
+        "collect.query_store_interval_wide",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_wide_nullstart_first_exec "
+        + "ON collect.query_store_interval_wide (server_id, first_execution_time) WHERE interval_start_time_utc IS NULL;",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_nullstart_first_exec;",
+        IndexDefinition: "(server_id, first_execution_time) WHERE interval_start_time_utc IS NULL");
 
     /// <summary>
     /// A btree on <c>collect.query_store_interval_latest (server_id, first_execution_time)</c> (#5507), built
@@ -298,6 +336,7 @@ public static class QueryStoreBackgroundIndexes
         WideServerFirstExec,
         LatestServerFirstExec,
         WideNonRegularFirstExec,
+        WideNullStartFirstExec,
         WideDatabaseQueryFirstExec,
         LatestDatabaseQueryFirstExec,
         StatementTextServerLastSeen,
@@ -313,6 +352,26 @@ SELECT
      FROM pg_index AS i
      WHERE i.indexrelid = to_regclass($2)) AS index_valid,
     (SELECT c.relkind::text FROM pg_class AS c WHERE c.oid = to_regclass($1)) AS table_kind;";
+
+    /// <summary>One boolean: <paramref name="indexName"/> exists and is valid. <c>to_regclass</c> answers NULL for a name that
+    /// resolves to nothing, so a store without the index answers false and raises nothing. A day-partitioned parent index is valid
+    /// once every leaf has attached its child.</summary>
+    internal const string BuiltSql =
+        "SELECT COALESCE((SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1)), FALSE);";
+
+    /// <summary>
+    /// Whether <paramref name="spec"/>'s index is built and valid on the store behind <paramref name="connection"/> (#9276), for a
+    /// read that chooses its statement by it. Run inside the read's own transaction when it has one. Never cached: the build
+    /// runs in the background after a start, and a read that finds the index gone takes the shape that needs none.
+    /// </summary>
+    public static async Task<bool> IsBuiltAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, IndexSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        await using var command = new NpgsqlCommand(BuiltSql, connection, transaction) { CommandTimeout = timeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.IndexName });
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+    }
 
     /* Reached only when StateSql reported the view exists, so a store without TimescaleDB never parses it. $1 is the
        table's schema and $2 its name (SplitTableName), each compared as it is rather than through a concatenation, so
