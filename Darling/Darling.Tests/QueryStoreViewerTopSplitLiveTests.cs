@@ -183,7 +183,7 @@ public sealed class QueryStoreViewerTopSplitLiveTests
         var ct = TestContext.Current.CancellationToken;
         var end = LiveClock.AnchoredEnd();
         var start = end.AddHours(-24);
-        var literalEnd = end.AddHours(-4);
+        var literalEnd = start.AddHours(2);
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await QueryStoreTopSplitLiveTests.OpenAsync(scratch, ct);
