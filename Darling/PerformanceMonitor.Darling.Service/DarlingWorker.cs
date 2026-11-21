@@ -446,12 +446,6 @@ public sealed partial class DarlingWorker : BackgroundService
         new("policy job retry period converge", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergePolicyJobRetryPeriodAsync(connection, logger, ct)),
 
-        /* #9274: AFTER the aggregates exist. A chunk of a rollup written once by its refresh can keep zero all-visible pages for days when
-           its one autovacuum ran beside an old open snapshot, and autovacuum never returns to it. One catalog read; a plain VACUUM only for
-           a chunk that lags, so a settled store issues none. */
-        new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
-            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct)),
-
         /* #2007/#3653: BEFORE the fallback ensure (hygiene — the retired names left the ensure list, so it
            could not recreate them anyway). Judges each superseded pair against the tier horizon, which is a
            TIME-dependent verdict: today it flips only on a restart, and this is the step that makes "drops
@@ -497,7 +491,7 @@ public sealed partial class DarlingWorker : BackgroundService
            Then create every missing day through today + 3 (the DEFAULT drain is the default) and drop whole expired
            days (and the legacy table once it is bounded below the cutoff). No ANALYZE here: the daily one is the
            background task's, because it samples the 91 GB legacy table too on PostgreSQL 16 and 17. Catalog-only, 5 s
-           lock_timeout per DDL, no sleeping. Last in the list and in the Tuning segment, so on the start path it runs
+           lock_timeout per DDL, no sleeping. Last in the Tuning segment, so on the start path it runs
            BEFORE the collectors and every hour after that, inside this pass's budget: one lock timeout costs an hour,
            not the 24 h purge's day. One table's failure never stops the other; a failure is thrown after both ran so
            the pass counts it. Counted as a delta: partitions created or dropped, and an arm, re-arm or promotion. */
@@ -513,6 +507,15 @@ public sealed partial class DarlingWorker : BackgroundService
 
                 return pass.Changed;
             }),
+
+        /* #9274: LAST in the list, so a budget cut can skip no step after it, and on the hourly pass only (the start path carries the
+           compression catch-up and runs nothing here). A chunk of a rollup written once by its refresh can keep zero all-visible pages for
+           days when its one autovacuum ran beside an old open snapshot, and autovacuum never returns to it. One catalog read; a VACUUM only
+           for a chunk that lags, paced like autovacuum, and none started after RollupVacuumStepBudget, so a settled store issues none and a
+           large one takes the rest next hour. Stage TimescaleAfterRepairLaunch only so a store without TimescaleDB skips it. */
+        new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => Task.FromResult(0),
+            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
