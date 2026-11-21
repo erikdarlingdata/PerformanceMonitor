@@ -8,6 +8,8 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -305,6 +307,75 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
 
             var insideFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: AsOf(oldestDaysAgo / 2.0));
             Assert.DoesNotContain("Retention removed it", insideFacts, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await RemoveArchiveAsync();
+        }
+    }
+
+    /// <summary>
+    /// #9218: a replay whose whole window ends before the oldest row the store keeps is answered from one lookup of that row, and
+    /// the fact collector never runs (no family is read, no coverage is measured), in <c>analyze_server</c> and in
+    /// <c>get_analysis_facts</c>. A window that reaches the oldest row, and one inside retention, still run it, and the facts the
+    /// tool returns are the ones the service scores, in severity order.
+    /// </summary>
+    [Fact]
+    public async Task AWindowWhollyBeforeRetention_ReadsNoFacts_AndAWindowThatReachesTheFloorOrSitsInsideStillDoes()
+    {
+        var now = DateTime.UtcNow;
+        string Iso(DateTime at) => at.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var oldestKept = DateTime.SpecifyKind(RetentionService.OldestRetainedInstant(now), DateTimeKind.Utc).AddHours(3);
+
+        await ArchiveWaitAsync(oldestKept);
+        try
+        {
+            for (var hours = 1; hours <= 30; hours++)
+                await PlantWaitAsync(oldestKept.AddHours(hours), BenignWait, 100L);
+            for (var minutesAgo = 600; minutesAgo >= 0; minutesAgo -= 15)
+                await PlantWaitAsync(now.AddMinutes(-minutesAgo), BenignWait, 100L);
+
+            var service = new AnalysisService(_duckDb);
+
+            var farBefore = Iso(oldestKept.AddDays(-10));
+            var removed = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 4, as_of: farBefore);
+            Assert.Equal(0, service.LastCollectionFamilyCount);
+            Assert.Null(service.LastWindowCoverage);
+            Assert.True(service.WindowEmptyRemovedByRetention);
+            var removedFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: farBefore);
+            foreach (var answer in new[] { removed, removedFacts })
+            {
+                using var doc = JsonDocument.Parse(answer);
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains("3 months of retention for wait_stats", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+            }
+
+            /* A window that starts before the oldest row and ends a day after it keeps its path: the collector runs. */
+            var straddleEnd = Iso(oldestKept.AddHours(28));
+            var straddle = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 48, as_of: straddleEnd);
+            Assert.True(service.LastCollectionFamilyCount > 0);
+            Assert.NotNull(service.LastWindowCoverage);
+            Assert.False(service.WindowEmptyRemovedByRetention);
+            using (var doc = JsonDocument.Parse(straddle))
+                Assert.NotEqual("unavailable", doc.RootElement.GetProperty("status").GetString());
+
+            /* A window inside retention returns the facts the service scores, in severity order. */
+            var insideEnd = now.AddMinutes(-30);
+            var insideJson = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: Iso(insideEnd));
+            var (scored, _, _) = await service.CollectAndScoreFactsAsync(
+                _serverId, "TestServer", 4, DateTime.SpecifyKind(insideEnd, DateTimeKind.Utc), CancellationToken.None);
+            Assert.NotEmpty(scored);
+            using (var doc = JsonDocument.Parse(insideJson))
+            {
+                Assert.True(doc.RootElement.TryGetProperty("facts", out _));
+                var returned = doc.RootElement.GetProperty("facts").EnumerateArray()
+                    .Select(f => f.GetProperty("key").GetString()!).ToList();
+                Assert.Equal(scored.OrderByDescending(f => f.Severity).Select(f => f.Key).ToList(), returned);
+            }
         }
         finally
         {

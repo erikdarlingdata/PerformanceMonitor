@@ -358,19 +358,6 @@ public sealed class DarlingMcpTools
 
         try
         {
-            var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
-
-            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
-               availability group, as of the window end; the facts below were trimmed of them. Built from the set the
-               read's own context filtered with (carried on the returned collection state), not from a second read, so
-               the note cannot disagree with what was skipped. Null when none, and then the field is simply null. */
-            var secondaryReplicaNote = AgReplicaScope.SkippedNote(collection.SecondaryReplicaDatabases);
-
-            /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
-               a family failed, the sentence is appended to the message and collection_caveats to the payload. */
-            var collectionCaveat = collection.Describe();
-
             /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
                nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
             var noticeStart = windowEnd.AddHours(-hours_back);
@@ -391,6 +378,32 @@ public sealed class DarlingMcpTools
                 var boundary = await analysisService.ReadRetentionBoundaryAsync(coverageTable, resolved.ServerId, cancellationToken);
                 return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
             }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention, and no fact
+               statement can find anything in it (the coverage table the facts are windowed on starts there). Say so from the one MIN
+               and read no fact. A window that straddles the oldest row reads the facts as before. */
+            if (anchor is not null && await RetentionRemovedAsync() is { } removedBeforeRead)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    WindowEmptyText.RemovedFactsMessage(resolved.DisplayName, removedBeforeRead),
+                    DarlingMcpWindowNotice.AttachToHints(
+                        new CollectionCaveatState([], 0).Attach(new { secondary_replica_note = (string?)null, coverage = (object?)null }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true, removedBeforeRead)));
+            }
+
+            var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
+                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
+
+            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
+               availability group, as of the window end; the facts below were trimmed of them. Built from the set the
+               read's own context filtered with (carried on the returned collection state), not from a second read, so
+               the note cannot disagree with what was skipped. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = AgReplicaScope.SkippedNote(collection.SecondaryReplicaDatabases);
+
+            /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
+               a family failed, the sentence is appended to the message and collection_caveats to the payload. */
+            var collectionCaveat = collection.Describe();
 
             if (facts.Count == 0)
             {

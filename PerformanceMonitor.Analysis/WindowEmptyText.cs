@@ -32,6 +32,26 @@ public static class WindowEmptyText
     public static string HealthPointer(bool removedByRetention) => removedByRetention ? string.Empty : CollectionHealthPointer;
 
     /// <summary>
+    /// The message for a window retention removed, answered before any fact was read (#9218). The same opening and the same
+    /// retention sentence <see cref="Compose"/> gives such a window, without the count of point-in-time facts, because none was
+    /// read: the window ends before the oldest row the store keeps, so no fact statement could find anything in it.
+    /// </summary>
+    public static string ComposeRemovedBeforeRead(AnalysisContext context, RetentionBoundary retention)
+    {
+        var window = string.Create(
+            CultureInfo.InvariantCulture,
+            $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC)");
+        return $"Nothing was measured in the analysis window {window}. " + retention.Describe() + " No fact was read for it. This is NOT an all-clear.";
+    }
+
+    /// <summary>
+    /// The get_analysis_facts message for a window retention removed, answered before any fact was read (#9218). It says what the
+    /// message for an unobserved window says, minus the count of point-in-time facts that were never read.
+    /// </summary>
+    public static string RemovedFactsMessage(string displayName, RetentionBoundary retention) =>
+        $"{retention.Describe()} The requested window for {displayName} is gone from the store, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show, and no fact was read for it. audit_config reports configuration and current state.";
+
+    /// <summary>
     /// Composes the message for a window with no observed time. <paramref name="factCount"/> is how many facts the
     /// pass still read (the point-in-time ones: configuration, trace flags, hardware), which changes the opening
     /// sentence and nothing else.

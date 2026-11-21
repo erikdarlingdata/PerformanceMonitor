@@ -295,6 +295,24 @@ public class AnalysisService
                 return [];
             }
 
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention. The coverage
+               witness reads that same table (v_wait_stats), so every fact statement below would find nothing in it and the pass would
+               land on the unobserved-window answer; one MIN says so first and the facts are not read. A window that straddles the
+               oldest row keeps the full pass. Only a replay can end that early. */
+            if (context.AsOfUtc is not null
+                && await ReadRetentionBoundaryAsync(context.ServerId, context.CancellationToken) is { } removedBoundary
+                && removedBoundary.RemovedWindow(context.TimeRangeEnd))
+            {
+                WindowEmptyMessage = WindowEmptyText.ComposeRemovedBeforeRead(context, removedBoundary);
+                WindowEmptyRemovedByRetention = true;
+                AppLogger.Info("AnalysisService",
+                    $"No collection in the analysis window for {context.ServerName} " +
+                    $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                    $"because retention removed it, not because collection is down (no fact was read). {removedBoundary.Describe()}");
+                LastAnalysisTime = DateTime.UtcNow;
+                return [];
+            }
+
             context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1. Collect facts from DuckDB
