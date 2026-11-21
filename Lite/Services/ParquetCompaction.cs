@@ -14,7 +14,6 @@
 using System.IO;
 using DuckDB.NET.Data;
 using DuckDB.NET.Native;
-using Microsoft.Extensions.Logging;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -164,8 +163,8 @@ public static class ParquetCompaction
 
        Memory cost, measured on a copy of a field store (query_store_stats day files at the 64 MiB batch budget, each
        its own batch): at a 4 GB limit the sorted merge's peak process memory was over three times the unsorted
-       merge's. A 1 GB limit did not lower it. A 512MB limit (SortedMergeMemoryLimit) brings it to about twice the
-       unsorted peak, for about half a second more per merge. 512MB, not 250MB: 512MB was measured three times and 250MB
+       merge's. A 1 GB limit did not lower it. A 512MB limit (SortedMergeMemoryLimit) brings it to two to three times the
+       unsorted peak, for one to two seconds more per merge. 512MB, not 250MB: 512MB was measured three times and 250MB
        once, and the hard-ceiling risk below grows as the limit drops. Rows and reads came out the same. At 512MB the
        sort spills a few hundred MB of temp files per merge, and the field day files all finished without the
        fallback below.
@@ -260,7 +259,7 @@ public static class ParquetCompaction
            #9255) runs at SortedMergeMemoryLimit (512MB) instead: the sort holds
            more of the batch than the streaming copy, and the lower limit makes
            it spill, which cut its peak from over three times the unsorted
-           merge's to about twice (see ServerOrderedTables). If that merge hits
+           merge's to two to three times (see ServerOrderedTables). If that merge hits
            the ceiling anyway, the batch is rerun unsorted at 4GB.
          - threads = 2: fewer per-thread row-group buffers in flight.
          - preserve_insertion_order = false: lets DuckDB stream.
@@ -276,7 +275,7 @@ public static class ParquetCompaction
         int threads = DefaultThreads,
         int rowGroupSize = DefaultRowGroupSize,
         long? rowGroupBytes = null,
-        ILogger? logger = null)
+        Action<string, int, string>? onSortFallback = null)
     {
         var orderBy = ServerOrderByFor(table);
         try
@@ -295,9 +294,7 @@ public static class ParquetCompaction
                 File.Delete(outputPath);
             }
 
-            logger?.LogWarning(
-                "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
-                table, sourcePaths.Count, ex.Message);
+            onSortFallback?.Invoke(table, sourcePaths.Count, ex.Message);
             RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
                 threads, rowGroupSize, rowGroupBytes, orderBy: null);
         }
@@ -310,7 +307,18 @@ public static class ParquetCompaction
 
     /* DuckDB's out-of-memory error type, or the temp folder filling up (the sorted merge spills under its limit). */
     private static bool IsOutOfMemoryOrTempSpace(DuckDBException ex) =>
-        ex.ErrorType == DuckDBErrorType.OutOfMemory || QueryStoreSliceRepairService.IsOutOfTempSpace(ex);
+        ex.ErrorType == DuckDBErrorType.OutOfMemory || IsOutOfTempSpace(ex);
+
+    /* True when a DuckDB failure is the temp folder filling up: its own cap (max_temp_directory_size) or the disk under
+       it. Lives here so this file stays free of Lite types, because tools/CompactionRepro compiles it too. */
+    internal static bool IsOutOfTempSpace(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static void RunMerge(
         string table,

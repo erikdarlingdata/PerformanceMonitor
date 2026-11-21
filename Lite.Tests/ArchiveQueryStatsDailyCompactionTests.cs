@@ -12,7 +12,6 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
-using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -415,16 +414,17 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     {
         var source = MakeWideDay();
         var output = P("fallback_out.parquet");
-        var log = new List<(LogLevel Level, string Message)>();
+        var fallbacks = new List<(string Table, int Files, string Error)>();
 
         ParquetCompaction.MergeBatchToFile("query_store_stats", [source], output, P("spill"),
-            memoryLimit: "2MB", logger: new CapturingLogger(log));
+            memoryLimit: "2MB", onSortFallback: (t, f, e) => fallbacks.Add((t, f, e)));
 
         Assert.Equal(60_000, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
         Assert.Equal(RowsPerServer(source), RowsPerServer(output));
-        var warning = Assert.Single(log, l => l.Level == LogLevel.Warning);
-        Assert.Contains("query_store_stats", warning.Message, StringComparison.Ordinal);
-        Assert.Contains("unsorted", warning.Message, StringComparison.Ordinal);
+        var fallback = Assert.Single(fallbacks);
+        Assert.Equal("query_store_stats", fallback.Table);
+        Assert.Equal(1, fallback.Files);
+        Assert.NotEmpty(fallback.Error);
     }
 
     /// <summary>
@@ -435,12 +435,12 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     public void ASortedMergeThatFailsForAnotherReason_StillThrows_WithoutAFallbackWarning()
     {
         var source = MakeWideDay();
-        var log = new List<(LogLevel Level, string Message)>();
+        var fallbacks = new List<string>();
 
         Assert.Throws<DuckDBException>(() => ParquetCompaction.MergeBatchToFile("query_store_stats", [source],
-            P("no_such_folder/out.parquet"), P("spill"), logger: new CapturingLogger(log)));
+            P("no_such_folder/out.parquet"), P("spill"), onSortFallback: (t, _, _) => fallbacks.Add(t)));
 
-        Assert.DoesNotContain(log, l => l.Level == LogLevel.Warning);
+        Assert.Empty(fallbacks);
     }
 
     /// <summary>
@@ -453,16 +453,6 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
         Assert.Equal(ParquetCompaction.SortedMergeMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_store_stats", null));
         Assert.Equal("1GB", ParquetCompaction.EffectiveMemoryLimit("query_store_stats", "1GB"));
         Assert.Equal(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_stats", null));
-    }
-
-    private sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger
-    {
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
     }
 
     private static async Task<long> ViewScalarAsync(string dbPath, string sql)
