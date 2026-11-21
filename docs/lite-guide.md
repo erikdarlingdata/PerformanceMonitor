@@ -237,7 +237,9 @@ Add a server with `--add-server`. The Add Server window is the only other way to
 type servers-to-add.json | PerformanceMonitorLite.exe --add-server
 ```
 
-Each entry has `host` and can have `display_name`, `auth`, `username`, `password` and `database`. The value of `auth` is `windows`, `sql`, `serviceprincipal`, `managedidentity` or `entradefault`. For one server, you can give the fields as flags instead: `--host`, `--name`, `--auth`, `--username` and `--database`. A SQL login then needs its password as one line on standard input. There is no password flag, because a flag shows in the process list. There is no password prompt either, because a command prompt does not wait for Lite. Always pipe the input, so that the shell waits for Lite and you can read the exit code.
+Each entry has `host` and can have `display_name`, `auth`, `username`, `password` and `database`. The value of `auth` is `windows`, `sql`, `serviceprincipal`, `managedidentity` or `entradefault`. For one server, you can give the fields as flags instead: `--host`, `--name`, `--auth`, `--username` and `--database`.
+
+A SQL login then needs its password as one line on standard input. There is no password flag, because a flag shows in the process list. There is no password prompt either, because a command prompt does not wait for Lite. Always pipe the input, so that the shell waits for Lite and you can read the exit code.
 
 The command runs the same checks and the same connection test as the Add Server window. It writes `servers.json`, saves the password for the user that runs it, and records the host confirmation for that user. If a server is already in the list, the command replaces its saved password and adds no second entry.
 
