@@ -4060,7 +4060,13 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
     /// Gets the actual used data size inside the database by querying pragma_database_size().
     /// Returns null if the query fails (e.g., database busy).
     /// </summary>
-    public double? GetUsedDataSizeMb()
+    public double? GetUsedDataSizeMb() => ReadUsedDataSize().Mb;
+
+    /// <summary>
+    /// <see cref="GetUsedDataSizeMb"/> with the reason when it gave nothing (#9250): the read lock was busy, or the query failed.
+    /// The per-tick size check logs a run of failures with it. The status bar and the other callers use the plain method.
+    /// </summary>
+    internal UsedDataRead ReadUsedDataSize()
     {
         /* Under the read lock (#2594). This was the one periodic connection site that opened without it,
            on the UI's 30-second timer, which put a live handle on the database file at moments the
@@ -4070,7 +4076,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
 
         if (readLock is null)
         {
-            return null;
+            return new UsedDataRead(null, UsedDataReadFailure.LockBusy);
         }
 
         try
@@ -4082,14 +4088,14 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
             var result = cmd.ExecuteScalar();
             if (result != null && result != DBNull.Value)
             {
-                return Convert.ToInt64(result) / (1024.0 * 1024.0);
+                return new UsedDataRead(Convert.ToInt64(result) / (1024.0 * 1024.0), UsedDataReadFailure.None);
             }
         }
         catch
         {
-            /* Database may be busy — fall back to null */
+            /* Database may be busy: fall back to null, with the reason for the caller that logs it */
         }
-        return null;
+        return new UsedDataRead(null, UsedDataReadFailure.QueryFailed);
     }
 
     /// <summary>
