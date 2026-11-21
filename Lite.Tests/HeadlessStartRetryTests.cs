@@ -42,7 +42,7 @@ public sealed class HeadlessStartRetryTests
 
         await HeadlessStartRetry.RunAsync(
             () => ++attempts < 3 ? Task.FromException(Locked) : Task.CompletedTask,
-            time.Timing, log.Add, () => { }, CancellationToken.None);
+            time.Timing, log.Add, () => { }, () => { }, CancellationToken.None);
 
         Assert.Equal(3, attempts);
         Assert.Equal([TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(20)], time.Waits);
@@ -57,7 +57,7 @@ public sealed class HeadlessStartRetryTests
 
         var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => HeadlessStartRetry.RunAsync(
             () => { attempts++; return Task.FromException(Locked); },
-            time.Timing, _ => { }, () => { }, CancellationToken.None));
+            time.Timing, _ => { }, () => { }, () => { }, CancellationToken.None));
 
         Assert.Equal(Locked.Message, thrown.Message);
         Assert.Equal(HeadlessStartRetry.Window, time.Now);
@@ -70,7 +70,7 @@ public sealed class HeadlessStartRetryTests
         var time = new FakeTime();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => HeadlessStartRetry.RunAsync(
-            () => Task.FromException(Locked), time.Timing, _ => { }, () => { }, CancellationToken.None));
+            () => Task.FromException(Locked), time.Timing, _ => { }, () => { }, () => { }, CancellationToken.None));
 
         Assert.Equal(TimeSpan.FromSeconds(10), time.Waits[0]);
         Assert.Equal(TimeSpan.FromSeconds(20), time.Waits[1]);
@@ -95,7 +95,7 @@ public sealed class HeadlessStartRetryTests
                 time.Now += TimeSpan.FromMinutes(7);
                 return Task.FromException(Locked);
             },
-            time.Timing, _ => { }, () => { }, CancellationToken.None));
+            time.Timing, _ => { }, () => { }, () => { }, CancellationToken.None));
 
         /* Each attempt costs seven minutes, so the window holds far fewer than the eleven it holds for an instant failure. */
         Assert.InRange(attempts, 2, 5);
@@ -109,7 +109,7 @@ public sealed class HeadlessStartRetryTests
         var log = new List<string>();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => HeadlessStartRetry.RunAsync(
-            () => Task.FromException(Locked), time.Timing, log.Add, () => { }, CancellationToken.None));
+            () => Task.FromException(Locked), time.Timing, log.Add, () => { }, () => { }, CancellationToken.None));
 
         var attempts = time.Waits.Count + 1;
         Assert.Contains("attempt 1 failed", log[0]);
@@ -126,7 +126,7 @@ public sealed class HeadlessStartRetryTests
     }
 
     [Fact]
-    public async Task TheStopListenerIsOpenedBeforeEachWait()
+    public async Task TheStopListenerIsOpenOnlyWhileWaiting_AndClosedBeforeEveryAttempt()
     {
         var events = new List<string>();
         var time = new FakeTime();
@@ -140,10 +140,43 @@ public sealed class HeadlessStartRetryTests
             () => time.Now);
 
         await HeadlessStartRetry.RunAsync(
-            () => ++attempts < 3 ? Task.FromException(Locked) : Task.CompletedTask,
-            timing, _ => { }, () => events.Add("listener"), CancellationToken.None);
+            () => { events.Add("attempt"); return ++attempts < 3 ? Task.FromException(Locked) : Task.CompletedTask; },
+            timing, _ => { }, () => events.Add("open"), () => events.Add("close"), CancellationToken.None);
 
-        Assert.Equal(["listener", "wait", "listener", "wait"], events);
+        Assert.Equal(
+            ["attempt", "open", "wait", "close", "attempt", "open", "wait", "close", "attempt"], events);
+    }
+
+    [Fact]
+    public async Task AWaitThatIsCancelled_ClosesTheStopListener_BeforeTheRetryEnds()
+    {
+        var open = false;
+        using var stop = new CancellationTokenSource();
+        var timing = new HeadlessStartRetry.Timing(
+            (_, ct) => { stop.Cancel(); ct.ThrowIfCancellationRequested(); return Task.CompletedTask; },
+            () => TimeSpan.Zero);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => HeadlessStartRetry.RunAsync(
+            () => Task.FromException(Locked),
+            timing, _ => { }, () => open = true, () => open = false, stop.Token));
+
+        Assert.False(open);
+    }
+
+    [Fact]
+    public async Task AStopThatArrivesDuringAWaitThatEndsNormally_EndsTheRetryBeforeTheNextAttempt()
+    {
+        var attempts = 0;
+        using var stop = new CancellationTokenSource();
+        var timing = new HeadlessStartRetry.Timing(
+            (_, _) => { stop.Cancel(); return Task.CompletedTask; },
+            () => TimeSpan.Zero);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => HeadlessStartRetry.RunAsync(
+            () => { attempts++; return Task.FromException(Locked); },
+            timing, _ => { }, () => { }, () => { }, stop.Token));
+
+        Assert.Equal(1, attempts);
     }
 
     [Fact]
@@ -163,7 +196,7 @@ public sealed class HeadlessStartRetryTests
 
         var run = HeadlessStartRetry.RunAsync(
             () => { attempts++; return Task.FromException(Locked); },
-            timing, log.Add, () => { }, stop.Token);
+            timing, log.Add, () => { }, () => { }, stop.Token);
         await waiting.Task;
         Assert.False(run.IsCompleted);
 
@@ -187,9 +220,25 @@ public sealed class HeadlessStartRetryTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => HeadlessStartRetry.RunAsync(
             () => { stop.Cancel(); return Task.FromException(Locked); },
-            timing, log.Add, () => { }, stop.Token));
+            timing, log.Add, () => { }, () => { }, stop.Token));
 
         Assert.Equal(0, waits);
         Assert.Empty(log);
+    }
+
+    [Fact]
+    public async Task AStopThatArrivesWhileAnAttemptRuns_AndTheAttemptThenSucceeds_EndsTheRetryWithoutReturning()
+    {
+        var waits = 0;
+        using var stop = new CancellationTokenSource();
+        var timing = new HeadlessStartRetry.Timing(
+            (_, _) => { waits++; return Task.CompletedTask; },
+            () => TimeSpan.Zero);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => HeadlessStartRetry.RunAsync(
+            () => { stop.Cancel(); return Task.CompletedTask; },
+            timing, _ => { }, () => { }, () => { }, stop.Token));
+
+        Assert.Equal(0, waits);
     }
 }

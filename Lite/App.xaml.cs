@@ -1040,6 +1040,12 @@ public partial class App : Application
     /// </summary>
     public void EnableUpgradeHandoff() => _instanceCoordinator?.EnableUpgradeHandoff();
 
+    /// <summary>
+    /// Closes the channel <see cref="EnableUpgradeHandoff"/> opened. A headless start that retries its store open keeps it
+    /// open only while it waits, so a newer build never kills a start that is in the middle of opening the store (#9184).
+    /// </summary>
+    public void DisableUpgradeHandoff() => _instanceCoordinator?.DisableUpgradeHandoff();
+
     protected override void OnExit(ExitEventArgs e)
     {
         AppLogger.Info("App", "Shutting down");
