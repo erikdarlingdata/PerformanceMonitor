@@ -291,6 +291,27 @@ public sealed class QueryFleetSummaryDailyHashIndexLiveTests
         return chunks;
     }
 
+    /// <summary>Per daily chunk: its rows, its heap size and the size of its piece of the new index, for the diagnostic line.</summary>
+    private static async Task<string> ChunkSizesAsync(NpgsqlConnection c, CancellationToken ct)
+    {
+        var parts = new List<string>();
+        await using var command = new NpgsqlCommand(
+            @"SELECT t.relname, t.reltuples::bigint, pg_relation_size(t.oid), pg_relation_size(i.indexrelid)
+              FROM pg_index i
+              JOIN pg_class ic ON ic.oid = i.indexrelid
+              JOIN pg_class t ON t.oid = i.indrelid
+              WHERE ic.relname LIKE '%' || $1 || '%' AND t.relname LIKE '_hyper_%'
+              ORDER BY t.relname", c);
+        command.Parameters.AddWithValue(IndexName);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            parts.Add($"{reader.GetString(0)}: {reader.GetInt64(1)} rows, heap {reader.GetInt64(2) / 1024} kB, index {reader.GetInt64(3) / 1024} kB");
+        }
+
+        return string.Join("; ", parts);
+    }
+
     private sealed record Shaped(string? Server, string? Database, long Executions, double CpuMs, double ElapsedMs, string? First, string? Last);
 
     private static async Task<Shaped[]> ReplyAsync(NpgsqlDataSource pg, Timeline t, CancellationToken ct)
@@ -368,6 +389,7 @@ public sealed class QueryFleetSummaryDailyHashIndexLiveTests
             var (plan, rawFrom) = await PlanAsync(pg, t, ct);
 
             AssertIsTheCoveringIndex(await IndexAsync(c, ct), "on the seeded store");
+            TestContext.Current.SendDiagnosticMessage("daily chunks with the index: " + await ChunkSizesAsync(c, ct));
             var withReply = await ReplyAsync(pg, t, ct);
             var with = await ExplainMidAsync(pg, t, rawFrom, plan, dailyChunks, ct);
             Assert.NotEmpty(withReply);
