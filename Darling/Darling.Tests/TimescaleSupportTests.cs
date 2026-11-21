@@ -44,7 +44,7 @@ public sealed class TimescaleSupportTests
     {
         /* Scope = the catalog, table-for-table: 26 collector tables, nothing else. */
         Assert.Equal(
-            CollectorCatalog.All.Where(s => !s.StaysPlainTable && !s.CompressionDeferred).Select(s => s.TargetTable).ToArray(),
+            CollectorCatalog.All.Where(s => !s.StaysPlainTable && !s.CompressionOffGrid).Select(s => s.TargetTable).ToArray(),
             TimescaleSupport.HypertableTables.Select(s => s.TargetTable).ToArray());
 
         /* The registry/config/analysis tables stay plain: registries keep their PRIMARY KEYs
@@ -142,8 +142,9 @@ public sealed class TimescaleSupportTests
 
         foreach (var schema in CollectorCatalog.All)
         {
-            /* #5574: perfmon_stats segments by counter as well; every other collector table keeps server_id alone. */
-            var wantedSegmentBy = schema.TargetTable == TimescaleSupport.PerfmonStatsTable ? "server_id, counter_name" : "server_id";
+            /* #5574: perfmon_stats segments by counter as well; #9216: attention_events by event kind; every other collector table keeps server_id alone. */
+            var wantedSegmentBy = schema.TargetTable == TimescaleSupport.PerfmonStatsTable ? "server_id, counter_name"
+                : schema.TargetTable == TimescaleSupport.AttentionEventsTable ? "server_id, event_kind" : "server_id";
             Assert.Contains($"timescaledb.compress_segmentby = '{wantedSegmentBy}'",
                 TimescaleSupport.EnableCompressionSql(schema), StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true",
@@ -166,7 +167,7 @@ public sealed class TimescaleSupportTests
         Assert.Equal(TimescaleSupport.CollectionLogSegmentBy, TimescaleSupport.CompressionSegmentByFor(TimescaleSupport.CollectionLogTable));
         /* #5574: perfmon_stats alone among the collector tables also segments by counter. */
         Assert.Equal("server_id, counter_name", TimescaleSupport.PerfmonStatsSegmentBy);
-        Assert.All(CollectorCatalog.All.Where(schema => schema.TargetTable != TimescaleSupport.PerfmonStatsTable), schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor(schema.TargetTable)));
+        Assert.All(CollectorCatalog.All.Where(schema => schema.TargetTable != TimescaleSupport.PerfmonStatsTable && schema.TargetTable != TimescaleSupport.AttentionEventsTable), schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor(schema.TargetTable)));
         Assert.Equal(TimescaleSupport.PerfmonStatsSegmentBy, TimescaleSupport.CompressionSegmentByFor(TimescaleSupport.PerfmonStatsTable));
 
         /* Callers spell tables both ways ("collect.x" and bare "x"). A schema-qualified collection_log must get the
@@ -176,7 +177,7 @@ public sealed class TimescaleSupportTests
         Assert.Equal(
             "ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
             TimescaleSupport.EnableCompressionSql("collect." + TimescaleSupport.CollectionLogTable));
-        Assert.All(CollectorCatalog.All.Where(schema => schema.TargetTable != TimescaleSupport.PerfmonStatsTable), schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor("collect." + schema.TargetTable)));
+        Assert.All(CollectorCatalog.All.Where(schema => schema.TargetTable != TimescaleSupport.PerfmonStatsTable && schema.TargetTable != TimescaleSupport.AttentionEventsTable), schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor("collect." + schema.TargetTable)));
         Assert.Equal(TimescaleSupport.PerfmonStatsSegmentBy, TimescaleSupport.CompressionSegmentByFor("collect." + TimescaleSupport.PerfmonStatsTable));
         Assert.Equal("3s", TimescaleSupport.HourlyDdlLockTimeout);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
