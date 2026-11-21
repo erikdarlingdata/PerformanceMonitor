@@ -484,22 +484,27 @@ public partial class DuckDbInitializer : IDisposable
     /// finish, so a tail shorter than a read that is in flight at the park times the writer out: one MCP client reading tool
     /// after tool, each read holding the lock for 1.3 to 2.6 s, left a writer with a 5 s budget and a 1 s tail parked behind
     /// a read that outlasted its budget. The tail is therefore the longer of <see cref="WriteLockParkTail"/> and
-    /// <see cref="ReadHoldTailFactor"/> times the longest read hold this initializer has seen within <see cref="ReadHoldMemory"/>,
-    /// but never more than <see cref="MaxAdaptiveTailShare"/> of the budget, so a writer always polls for the first part of
-    /// its budget and a tab read still flows around it then (#7256). With no long read seen the tail is the configured one,
-    /// so the ordinary store reads, which take milliseconds, still see a writer park for one second at most.
+    /// <see cref="ReadHoldTailFactor"/> times the longest counted read hold seen within <see cref="ReadHoldMemory"/>, but
+    /// never more than <see cref="MaxAdaptiveTailShare"/> of the budget, so a writer always polls for the first part of
+    /// its budget and a tab read still flows around it then (#7256).
+    /// <para>A hold counts only when it is no longer than that cap (<see cref="MaxAdaptiveTailShare"/> times the writer's budget).
+    /// A longer read, such as an archive read of minutes, cannot be outwaited by any park inside the budget, so letting it
+    /// move the tail would only make each writer park at the cap, hold new tab reads there for the rest of its budget and
+    /// still time out. The budget is the writer's, so the holds are kept and each call filters them against its own budget.
+    /// With no counted hold the tail is the configured one, so the ordinary store reads, which take milliseconds, still see
+    /// a writer park for one second at most.</para>
     /// </summary>
     internal TimeSpan EffectiveWriteLockParkTail(TimeSpan timeout)
     {
         var configured = WriteLockParkTail < timeout ? WriteLockParkTail : timeout;
-        var longest = LongestRecentReadHold();
+        var cap = timeout * MaxAdaptiveTailShare;
+        var longest = LongestRecentReadHoldWithin(cap);
         if (longest <= TimeSpan.Zero)
         {
             return configured;
         }
 
         var wanted = longest * ReadHoldTailFactor;
-        var cap = timeout * MaxAdaptiveTailShare;
         var adaptive = wanted < cap ? wanted : cap;
         return adaptive > configured ? adaptive : configured;
     }
@@ -510,50 +515,58 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>The most of a writer's budget the longest-read tail may take, so the writer always polls for the first part of it.</summary>
     private const double MaxAdaptiveTailShare = 0.8;
 
-    /// <summary>How long a long read is remembered. A test sets it on its own initializer.</summary>
+    /// <summary>How long a read hold is remembered. A test sets it on its own initializer.</summary>
     internal TimeSpan ReadHoldMemory { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>How many recent read holds are kept. Reads past this many displace the oldest, and they are the current load.</summary>
+    private const int ReadHoldRingSize = 64;
+
     private readonly object _readHoldLock = new();
-    private long _longestReadHoldTicks;
-    private long _longestReadHoldSeenAt;
+    private readonly long[] _readHoldTicks = new long[ReadHoldRingSize];
+    private readonly long[] _readHoldSeenAt = new long[ReadHoldRingSize];
+    private int _readHoldNext;
 
     /// <summary>
-    /// Notes how long a read lock was held, when it is the longest within <see cref="ReadHoldMemory"/>. Called when a read
-    /// lock is released. Reads that are shorter than the one remembered cost one comparison.
+    /// Notes how long a read lock was held, in a ring of the last <see cref="ReadHoldRingSize"/> holds. Called when a read
+    /// lock is released: one lock and one slot write, no allocation.
     /// </summary>
     internal void RecordReadHold(TimeSpan held)
     {
-        var ticks = (long)(held.TotalSeconds * Stopwatch.Frequency);
-        var now = Stopwatch.GetTimestamp();
-        if (ticks <= Volatile.Read(ref _longestReadHoldTicks)
-            && now - Volatile.Read(ref _longestReadHoldSeenAt) < ToTimestampTicks(ReadHoldMemory))
+        var ticks = ToTimestampTicks(held);
+        if (ticks <= 0)
         {
             return;
         }
 
+        var now = Stopwatch.GetTimestamp();
         lock (_readHoldLock)
         {
-            var expired = now - _longestReadHoldSeenAt >= ToTimestampTicks(ReadHoldMemory);
-            if (ticks > _longestReadHoldTicks || expired)
-            {
-                _longestReadHoldTicks = ticks;
-                _longestReadHoldSeenAt = now;
-            }
+            _readHoldTicks[_readHoldNext] = ticks;
+            _readHoldSeenAt[_readHoldNext] = now;
+            _readHoldNext = (_readHoldNext + 1) % ReadHoldRingSize;
         }
     }
 
-    private TimeSpan LongestRecentReadHold()
+    /// <summary>The longest hold within <see cref="ReadHoldMemory"/> that is no longer than <paramref name="cap"/>, or zero.</summary>
+    private TimeSpan LongestRecentReadHoldWithin(TimeSpan cap)
     {
+        var capTicks = ToTimestampTicks(cap);
+        var memoryTicks = ToTimestampTicks(ReadHoldMemory);
+        var now = Stopwatch.GetTimestamp();
+        long longest = 0;
         lock (_readHoldLock)
         {
-            if (_longestReadHoldTicks == 0
-                || Stopwatch.GetTimestamp() - _longestReadHoldSeenAt >= ToTimestampTicks(ReadHoldMemory))
+            for (var i = 0; i < ReadHoldRingSize; i++)
             {
-                return TimeSpan.Zero;
+                var ticks = _readHoldTicks[i];
+                if (ticks > longest && ticks <= capTicks && now - _readHoldSeenAt[i] < memoryTicks)
+                {
+                    longest = ticks;
+                }
             }
-
-            return Stopwatch.GetElapsedTime(0, _longestReadHoldTicks);
         }
+
+        return longest == 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(0, longest);
     }
 
     /// <summary>

@@ -127,8 +127,8 @@ public sealed class BudgetedWriterLongReadTests : IDisposable
     public void AWriterStillPollsFirst_AfterLongReadsHaveLengthenedItsTail_SoANewReaderIsNotHeldAtTheDoor()
     {
         using var initializer = NewInitializer(ShortTail);
-        /* A read far longer than the writer's whole budget was seen: the tail grows to its cap and no further. */
-        initializer.RecordReadHold(TimeSpan.FromSeconds(30));
+        /* A read just inside the cap on the writer's budget was seen: the tail grows to its cap and no further. */
+        initializer.RecordReadHold(TimeSpan.FromMilliseconds(700));
 
         var longReadHeld = new ManualResetEventSlim(false);
         var releaseLongRead = new ManualResetEventSlim(false);
@@ -196,7 +196,11 @@ public sealed class BudgetedWriterLongReadTests : IDisposable
         initializer.RecordReadHold(TimeSpan.FromSeconds(1));
         AssertNear(TimeSpan.FromSeconds(2.5), initializer.EffectiveWriteLockParkTail(budget));
 
+        /* A read longer than the cap (4 s of a 5 s budget) cannot be outwaited, so it leaves the tail where the 2 s read put it. */
         initializer.RecordReadHold(TimeSpan.FromSeconds(30));
+        AssertNear(TimeSpan.FromSeconds(2.5), initializer.EffectiveWriteLockParkTail(budget));
+
+        initializer.RecordReadHold(TimeSpan.FromSeconds(3.9));
         AssertNear(TimeSpan.FromSeconds(4), initializer.EffectiveWriteLockParkTail(budget));
 
         /* A tail no shorter than the budget parks at once, whatever was seen. */
@@ -221,5 +225,31 @@ public sealed class BudgetedWriterLongReadTests : IDisposable
 
         TestWait.Elapse(ReadHold);
         AssertNear(ShortTail, initializer.EffectiveWriteLockParkTail(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void AReadLongerThanTheCapIsIgnored_SoShortReadsAfterItSizeTheTail()
+    {
+        var budget = TimeSpan.FromSeconds(5);
+        using var initializer = NewInitializer(TimeSpan.FromSeconds(1));
+
+        initializer.RecordReadHold(TimeSpan.FromMinutes(3));
+        initializer.RecordReadHold(TimeSpan.FromSeconds(2));
+        initializer.RecordReadHold(TimeSpan.FromSeconds(1.5));
+
+        AssertNear(TimeSpan.FromSeconds(2.5), initializer.EffectiveWriteLockParkTail(budget));
+        /* The cap is the writer's: against a 5 minute budget the 3 minute read fits inside it and counts. */
+        AssertNear(TimeSpan.FromMinutes(3.75), initializer.EffectiveWriteLockParkTail(TimeSpan.FromMinutes(5)));
+    }
+
+    [Fact]
+    public void AReadLongerThanTheCapAlone_LeavesTheConfiguredTail()
+    {
+        var budget = TimeSpan.FromSeconds(5);
+        using var initializer = NewInitializer(TimeSpan.FromSeconds(1));
+
+        initializer.RecordReadHold(TimeSpan.FromMinutes(3));
+
+        AssertNear(TimeSpan.FromSeconds(1), initializer.EffectiveWriteLockParkTail(budget));
     }
 }
