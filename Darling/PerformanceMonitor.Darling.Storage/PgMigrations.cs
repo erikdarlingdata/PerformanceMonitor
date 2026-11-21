@@ -11355,8 +11355,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// PostgreSQL 18.6, see <see cref="V281Sql"/>), and it runs under its own longer bound,
     /// <see cref="V281CommandTimeoutSeconds"/>. The budget is the larger of two sums, each with one default
     /// rung bound of margin, sized at one rung bound because that is the granularity this ladder grows by — one
-    /// new data-moving rung. The first is every floor-setting rung at the default bound: five rungs and the
-    /// margin, six default bounds. The second is the longest bound in
+    /// new data-moving rung. The first is every floor-setting rung at the default bound: six rungs (V293, #9277, is the sixth) and the
+    /// margin, seven default bounds. The second is the longest bound in
     /// <see cref="DeclaredRungCommandTimeoutSeconds"/> and the margin, which is the larger and is this constant.
     /// The two are not added together, because V281 and the three oldest floor-setting rungs are never expensive
     /// in one upgrade: V281 reads rows only on a store that already had the text table (V74), and V22, V23 and
