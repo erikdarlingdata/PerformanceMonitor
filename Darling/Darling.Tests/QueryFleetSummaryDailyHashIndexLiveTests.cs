@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /* #1776 own-store: this class mints its own scratch databases through ScratchPostgres and never touches another test's rows. */
 
 /// <summary>
-/// #9223 (V291): the covering <c>(query_hash, bucket DESC)</c> index on the corrected daily Query Store rollup. A fresh store and an upgraded one
+/// #9223 (V292): the covering <c>(query_hash, bucket DESC)</c> index on the corrected daily Query Store rollup. A fresh store and an upgraded one
 /// both end with it, a second convergence pass and a second run of the rung change nothing, the <c>mid</c> arm of the Query Store fleet statement
 /// reads the daily rollup through it, and the fleet summary's rows are the same with and without it.
 /// </summary>
@@ -136,9 +136,9 @@ public sealed class QueryFleetSummaryDailyHashIndexLiveTests
         await tx.CommitAsync(ct);
     }
 
-    private static async Task RunV291Async(NpgsqlConnection c, CancellationToken ct)
+    private static async Task RunV292Async(NpgsqlConnection c, CancellationToken ct)
     {
-        var sql = PgMigrations.Scripts.Single(m => m.Version == 291).Sql;
+        var sql = PgMigrations.Scripts.Single(m => m.Version == 292).Sql;
         await using var tx = await c.BeginTransactionAsync(ct);
         await Exec(c, sql, ct);
         await tx.CommitAsync(ct);
@@ -185,8 +185,8 @@ public sealed class QueryFleetSummaryDailyHashIndexLiveTests
         }
     }
 
-    /// <summary>An upgraded store (the index absent, as before V291) gets it from the rung, a second run keeps the same index object, and the convergence
-    /// pass that follows does not rebuild it. Red when V291 does not build the index.</summary>
+    /// <summary>An upgraded store (the index absent, as before V292) gets it from the rung, a second run keeps the same index object, and the convergence
+    /// pass that follows does not rebuild it. Red when V292 does not build the index.</summary>
     [Fact]
     public async Task UpgradedStore_GetsTheIndexFromTheRung_AndASecondRunChangesNothing()
     {
@@ -200,11 +200,11 @@ public sealed class QueryFleetSummaryDailyHashIndexLiveTests
             await DropIndexAsync(c, ct);
             Assert.Null(await IndexAsync(c, ct));
 
-            await RunV291Async(c, ct);
+            await RunV292Async(c, ct);
             var built = await IndexAsync(c, ct);
             AssertIsTheCoveringIndex(built, "after the rung ran");
 
-            await RunV291Async(c, ct);
+            await RunV292Async(c, ct);
             var again = await IndexAsync(c, ct);
             AssertIsTheCoveringIndex(again, "after the rung ran twice");
             Assert.Equal(built!.Oid, again!.Oid);
@@ -307,7 +307,7 @@ public sealed class QueryFleetSummaryDailyHashIndexLiveTests
     }
 
     /// <summary>A store at the shape the field read hurts on: several servers, the hash on one row per day per pair among many other hashes, the daily
-    /// rollup's chunks uncompressed. With the index the mid arm reads every daily chunk through it (red on the code before V291, where the arm scans the
+    /// rollup's chunks uncompressed. With the index the mid arm reads every daily chunk through it (red on the code before V292, where the arm scans the
     /// chunk or walks the bucket index), and the fleet summary's rows are identical with the index dropped. The pages read before and after are reported.</summary>
     [Fact]
     public async Task MidArm_ReadsTheDailyRollupThroughTheIndex_AndTheReplyIsUnchanged()

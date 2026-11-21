@@ -3347,6 +3347,29 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     WHERE recommendation_name IS NOT NULL;";
 
     /// <summary>
+    /// V291 (#9215): the covering <c>(server_id, bucket DESC)</c> index on <c>query_store_stats_corrected_hourly</c>'s materialization, replacing the plain
+    /// <c>(server_id, bucket)</c> group index. See <see cref="TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql"/>: a catalog read first, the
+    /// V152 lock timeout, a no-op on a store without TimescaleDB or without the view (a fresh store gets the same index when the view is created).
+    /// </summary>
+    private static readonly string V291Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql;
+
+    /// <summary>
+    /// V292 (#9223): <c>ix_qs_corrected_daily_hash_bucket</c>, <c>(query_hash, bucket DESC) INCLUDE (server_id, database_name, execution_count_sum,
+    /// cpu_us_weighted_sum, duration_us_weighted_sum)</c> on the corrected daily Query Store rollup's materialization. The <c>mid</c> arm of
+    /// <c>get_query_fleet_summary</c>'s Query Store statement filters that rollup on the hash alone, and its newest chunks are still uncompressed
+    /// (inside the rollup's compress-after window) with a bucket index and the kept <c>server_id</c> index only, so the plan scanned every row of each
+    /// one. The hourly rollup got the same index in V246 and V284, and both of the statement's edges read it.
+    ///
+    /// <para><b>Cost.</b> One build per materialization chunk, under a SHARE lock that blocks the refresh's writes and not reads, with the lock
+    /// timeout of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
+    /// the uncompressed chunks (the newest days, one row per query per server per day). No narrow index of this name exists, so unlike V284 nothing is
+    /// dropped and readers are never blocked. The statement is a catalog read on a store that already has the index, and a store without TimescaleDB or
+    /// without the view returns before touching anything. A fresh store gets the same index right after the view is created. Additive for an older
+    /// build: it ignores the index, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private static readonly string V292Sql = TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql;
+
+    /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
     /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
     /// the answer), and read one heap page per matching hourly row through a plain (query_hash, bucket) index. The rung gives
@@ -3366,22 +3389,6 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// </summary>
     private static readonly string V284Sql =
         TimescaleSupport.CreateQueryStoreCorrectedHourlyHashCoveringIndexSql + "\n" + TimescaleSupport.CreateQueryStatsHourlyHashCoveringIndexesSql;
-
-    /// <summary>
-    /// V291 (#9223): <c>ix_qs_corrected_daily_hash_bucket</c>, <c>(query_hash, bucket DESC) INCLUDE (server_id, database_name, execution_count_sum,
-    /// cpu_us_weighted_sum, duration_us_weighted_sum)</c> on the corrected daily Query Store rollup's materialization. The <c>mid</c> arm of
-    /// <c>get_query_fleet_summary</c>'s Query Store statement filters that rollup on the hash alone, and its newest chunks are still uncompressed
-    /// (inside the rollup's compress-after window) with a bucket index and the kept <c>server_id</c> index only, so the plan scanned every row of each
-    /// one. The hourly rollup got the same index in V246 and V284, and both of the statement's edges read it.
-    ///
-    /// <para><b>Cost.</b> One build per materialization chunk, under a SHARE lock that blocks the refresh's writes and not reads, with the lock
-    /// timeout of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
-    /// the uncompressed chunks (the newest days, one row per query per server per day). No narrow index of this name exists, so unlike V284 nothing is
-    /// dropped and readers are never blocked. The statement is a catalog read on a store that already has the index, and a store without TimescaleDB or
-    /// without the view returns before touching anything. A fresh store gets the same index right after the view is created. Additive for an older
-    /// build: it ignores the index, and no GRANT is needed for an index.</para>
-    /// </summary>
-    private static readonly string V291Sql = TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql;
 
     /// <summary>
     /// V281 (#9043): <c>collect.query_store_text_seen</c>, the narrow table that holds the Query Store text liveness stamp
@@ -3838,10 +3845,15 @@ END $$;";
            stays fast, and a server with no floor row has no floor. The floor move writes one row here instead of deleting summary rows inside
            the batch. An older build ignores the table, so after a rollback with a hole it can read the summary across the hole. */
         new Migration(QueryStatsCollectionSummary.FloorRungVersion, "query-stats-collection-floor", QueryStatsCollectionSummary.FloorCreateSql),
-        /* V291 (#9223): a covering (query_hash, bucket DESC) index on the corrected daily Query Store rollup's materialization, so the mid arm of
+        /* V291 (#9215): the corrected hourly Query Store rollup's one server index becomes the covering (server_id, bucket DESC) INCLUDE (database_name,
+           execution_count_sum, duration_us_weighted_sum) index under its own name, built before the plain (server_id, bucket) index is dropped. Catalog work
+           plus one index build over the uncompressed chunks of the materialization; no row moves. An older build ignores the covering index, and its
+           next convergence pass builds the plain index again beside it, which does no harm. */
+        new Migration(291, "qs-corrected-hourly-server-covering-index", V291Sql),
+        /* V292 (#9223): a covering (query_hash, bucket DESC) index on the corrected daily Query Store rollup's materialization, so the mid arm of
            get_query_fleet_summary's Query Store statement reads the newest uncompressed daily chunks through it instead of scanning them whole.
            Catalog-only for the data: no row moves. An older build ignores the index. */
-        new Migration(291, "query-store-corrected-daily-hash-index", V291Sql),
+        new Migration(292, "query-store-corrected-daily-hash-index", V292Sql),
     };
 
     /// <summary>

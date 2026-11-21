@@ -30,11 +30,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class CaggGroupIndexDropLiveTests
 {
-    /// <summary>The six views #4503 touches, with the key column(s) each KEEPS.</summary>
+    /// <summary>The six views #4503 touches, with the key column(s) each KEEPS. The corrected hourly keeps no plain <c>(server_id, bucket)</c> index since #9215: its covering one replaced it.</summary>
     private static readonly (string View, string[] KeptColumns)[] Views =
     {
         (TimescaleSupport.QueryStoreStatsHourlyView, new[] { "server_id", "server_name" }),
-        (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_id", "server_name" }),
+        (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_name" }),
         (TimescaleSupport.QueryStoreStatsDailyView, new[] { "server_id" }),
         (TimescaleSupport.QueryStoreStatsCorrectedDailyView, new[] { "server_id" }),
         (TimescaleSupport.QueryStoreStatsIntervalDailyView, new[] { "server_id" }),
@@ -46,7 +46,7 @@ public sealed class CaggGroupIndexDropLiveTests
     private static readonly IReadOnlyDictionary<string, string[]> DroppedColumns = new Dictionary<string, string[]>(StringComparer.Ordinal)
     {
         [TimescaleSupport.QueryStoreStatsHourlyView] = new[] { "database_name", "module_name", "query_hash" },
-        [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = new[] { "database_name", "module_name", "query_hash" },
+        [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = new[] { "database_name", "module_name", "query_hash", "server_id" },
         [TimescaleSupport.QueryStoreStatsDailyView] = new[] { "database_name", "module_name", "query_hash", "server_name" },
         [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = new[] { "database_name", "module_name", "query_hash", "server_name" },
         [TimescaleSupport.QueryStoreStatsIntervalDailyView] = new[]
