@@ -102,6 +102,15 @@ GROUP BY f.server_id, f.database_name";
         await Exec(c, "VACUUM (ANALYZE) collect.query_store_stats_corrected_hourly", ct);
         await using (var q = new NpgsqlCommand("SELECT count(*), count(*) FILTER (WHERE is_compressed) FROM timescaledb_information.chunks WHERE hypertable_name LIKE '_materialized_hypertable_%'", c))
         await using (var r = await q.ExecuteReaderAsync(ct)) { await r.ReadAsync(ct); outp.AppendLine($"M chunks={r.GetInt64(0)} compressed={r.GetInt64(1)} servers={servers} groups={groups}"); }
+        await using (var q = new NpgsqlCommand(@"SELECT string_agg(format('%s heap=%s toast=%s idx=%s batches=%s', t.relname, pg_relation_size(t.oid)/8192, coalesce(pg_relation_size(t.reltoastrelid)/8192, 0), pg_indexes_size(t.oid)/8192, t.reltuples::bigint), ' ; ')
+                FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '_timescaledb_internal' AND t.relname LIKE 'compress_hyper_%' AND t.relkind = 'r'", c))
+        { outp.AppendLine("M compressed " + await q.ExecuteScalarAsync(ct)); }
+        await using (var q = new NpgsqlCommand(@"SELECT string_agg(indexdef, ' ; ') FROM pg_indexes WHERE schemaname = '_timescaledb_internal' AND tablename LIKE 'compress_hyper_%'", c))
+        { outp.AppendLine("M compidx " + await q.ExecuteScalarAsync(ct)); }
+        await Exec(c, "SET enable_seqscan = off", ct);
+        outp.AppendLine("M noseq current " + await Explain(c, Current, start, dStart, ct));
+        outp.AppendLine("M noseq perserver " + await Explain(c, PerServer, start, dStart, ct));
+        await Exec(c, "RESET enable_seqscan", ct);
         for (var round = 1; round <= 2; round++)
         {
             outp.AppendLine($"M current r{round} " + await Explain(c, Current, start, dStart, ct));
