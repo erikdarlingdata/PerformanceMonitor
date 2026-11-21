@@ -3347,6 +3347,13 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     WHERE recommendation_name IS NOT NULL;";
 
     /// <summary>
+    /// V291 (#9215): the covering <c>(server_id, bucket DESC)</c> index on <c>query_store_stats_corrected_hourly</c>'s materialization, replacing the plain
+    /// <c>(server_id, bucket)</c> group index. See <see cref="TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql"/>: a catalog read first, the
+    /// V152 lock timeout, a no-op on a store without TimescaleDB or without the view (a fresh store gets the same index when the view is created).
+    /// </summary>
+    private static readonly string V291Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql;
+
+    /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
     /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
     /// the answer), and read one heap page per matching hourly row through a plain (query_hash, bucket) index. The rung gives
@@ -3822,6 +3829,11 @@ END $$;";
            stays fast, and a server with no floor row has no floor. The floor move writes one row here instead of deleting summary rows inside
            the batch. An older build ignores the table, so after a rollback with a hole it can read the summary across the hole. */
         new Migration(QueryStatsCollectionSummary.FloorRungVersion, "query-stats-collection-floor", QueryStatsCollectionSummary.FloorCreateSql),
+        /* V291 (#9215): the corrected hourly Query Store rollup's one server index becomes the covering (server_id, bucket DESC) INCLUDE (database_name,
+           execution_count_sum, duration_us_weighted_sum) index under its own name, built before the plain (server_id, bucket) index is dropped. Catalog work
+           plus one index build over the uncompressed chunks of the materialization; no row moves. An older build ignores the covering index, and its
+           next convergence pass builds the plain index again beside it, which does no harm. */
+        new Migration(291, "qs-corrected-hourly-server-covering-index", V291Sql),
     };
 
     /// <summary>
