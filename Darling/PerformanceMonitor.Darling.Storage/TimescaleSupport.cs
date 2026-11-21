@@ -8099,9 +8099,9 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     /// <summary>
     /// The uncompressed chunks of the <c>collect</c> rollups that lag on the visibility map (#9274): under
     /// <see cref="RollupVacuumAllVisibleFloorPercent"/> percent of their pages all-visible, at least <see cref="RollupVacuumMinPages"/> pages,
-    /// a last vacuum at least <see cref="RollupVacuumMinAge"/> old (<c>$1</c>, so a test can ask for none; a chunk whose stats were reset counts as old), and
+    /// a last vacuum at least <see cref="RollupVacuumMinAge"/> old (<c>$2</c>, so a test can ask for none; a chunk whose stats were reset counts as old), and
     /// either no insert since the last vacuum (autovacuum's insert trigger will not come back for it) or a range that ends before its aggregate's refresh
-    /// window starts (<c>range_end</c> older than now minus the refresh policy's <c>start_offset</c>), so no refresh can write it again and the inserts it
+    /// window starts (<c>range_end</c> older than <c>$1</c>, the clock the caller binds as a timestamptz, minus the refresh policy's <c>start_offset</c>), so no refresh can write it again and the inserts it
     /// counts are the refresh's own, below the insert trigger. An aggregate with no refresh policy keeps the first test only, and a chunk inside the window is
     /// never listed for having inserts. Compressed chunks are never listed: their heap is empty and the compression policy has rewritten them. One catalog
     /// read, no row on a settled store. Worst lag first, at most <see cref="RollupVacuumMaxChunksPerPass"/>.
@@ -8124,8 +8124,8 @@ WHERE ca.view_schema = 'collect'
 AND   NOT ch.is_compressed
 AND   c.relpages >= {RollupVacuumMinPages}
 AND   c.relallvisible::bigint * 100 < c.relpages::bigint * {RollupVacuumAllVisibleFloorPercent}
-AND   (st.n_ins_since_vacuum = 0 OR ch.range_end < now() - rp.start_offset)
-AND   coalesce(greatest(st.last_vacuum, st.last_autovacuum), '-infinity'::timestamptz) < now() - $1::interval
+AND   (st.n_ins_since_vacuum = 0 OR ch.range_end < $1::timestamptz - rp.start_offset)
+AND   coalesce(greatest(st.last_vacuum, st.last_autovacuum), '-infinity'::timestamptz) < $1::timestamptz - $2::interval
 ORDER BY (c.relpages - c.relallvisible) DESC
 LIMIT {RollupVacuumMaxChunksPerPass}";
 
@@ -8168,6 +8168,7 @@ SELECT set_config('vacuum_cost_delay',
         try
         {
             using var probe = new NpgsqlCommand(RollupChunkVisibilityLagSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            probe.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.TimestampTz, DateTime.UtcNow);
             probe.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Interval, minVacuumAge ?? RollupVacuumMinAge);
             await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))

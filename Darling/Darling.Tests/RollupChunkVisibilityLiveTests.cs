@@ -123,6 +123,7 @@ public sealed class RollupChunkVisibilityLiveTests
     {
         await Exec(c, "SELECT pg_stat_force_next_flush()", ct);
         await using var command = new NpgsqlCommand(TimescaleSupport.RollupChunkVisibilityLagSql, c);
+        command.Parameters.AddWithValue(NpgsqlDbType.TimestampTz, DateTime.UtcNow);
         command.Parameters.AddWithValue(NpgsqlDbType.Interval, TimeSpan.Zero);
         await using var reader = await command.ExecuteReaderAsync(ct);
         var rows = 0;
@@ -153,9 +154,18 @@ public sealed class RollupChunkVisibilityLiveTests
         await TimescaleSupport.EnsureContinuousAggregatesAsync(c, null, ct);
         await Exec(c, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
-        var end = DateTime.SpecifyKind(LiveClock.Now().Date.AddDays(-8).AddHours(12), DateTimeKind.Unspecified);
-        var from = end.AddHours(-167).Date;
-        var to = end.Date;
+        /* One chunk of the daily rollup, aligned to the hypertable's own chunk grid: a week starting at a day chosen from the date would straddle a
+           chunk boundary on some days, and the test would find two chunks near a weekly boundary. */
+        var dailyHypertable = await Scalar<string>(c,
+            $"SELECT materialization_hypertable_name FROM timescaledb_information.continuous_aggregates WHERE view_name = '{TimescaleSupport.QueryStoreStatsCorrectedDailyView}'", ct);
+        var chunkSeconds = await Scalar<long>(c,
+            $"SELECT extract(epoch FROM time_interval)::bigint FROM timescaledb_information.dimensions WHERE hypertable_name = '{dailyHypertable}' AND dimension_number = 1", ct);
+        Assert.True(chunkSeconds >= 7 * 86400 && chunkSeconds % 86400 == 0, $"the daily rollup's chunk is {chunkSeconds} s wide; the seed expects whole days, a week or more");
+        var epoch = new DateTime(1970, 1, 1);
+        var latestSeconds = (long)(LiveClock.Now().Date.AddDays(-8) - epoch).TotalSeconds;
+        var from = DateTime.SpecifyKind(epoch.AddSeconds((latestSeconds / chunkSeconds - 1) * chunkSeconds), DateTimeKind.Unspecified);
+        var to = from.AddDays(7);
+        var end = to;
         for (var i = 1; i <= ServerCount; i++)
         {
             await DarlingMcpTestData.RegisterServerAsync(c, -927400 - i, "p9274q-" + i, ct);
