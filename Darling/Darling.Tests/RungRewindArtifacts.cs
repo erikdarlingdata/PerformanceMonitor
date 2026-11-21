@@ -929,6 +929,9 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // catalog (it lives in the materialization's schema), so a re-run of V292 builds it again. Safe on a store that never had it.
         new(292, "hasQueryStoreCorrectedDailyHashIndex",
             @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_daily_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
+        // V293 (#9277): the partial counter-row index on collect.attention_events. It is the probe's newest sentinel, found by the index's name. The rewind drops it by name, so a re-run of V293
+        // builds it again. Safe on a store that never had it.
+        new(293, "hasAttentionCountIndex", @"DROP INDEX IF EXISTS collect.idx_attention_events_count_time;"),
     ];
 
     /// <summary>
