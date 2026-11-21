@@ -131,8 +131,11 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var service = new ArchiveService(initializer, _archiveDir, logger)
         {
             /* Every file its own batch: each group's output is two part files, which the views built above
-               have no glob for yet. */
-            CompactionBatchInputBytes = 1
+               have no glob for yet. collection_log is merged in server order (#9258), so it takes the sorted
+               budget, not the default: both settings are needed, or both files land in one batch and the
+               stale-glob window this class covers never opens. */
+            CompactionBatchInputBytes = 1,
+            SortedCompactionBatchInputBytes = 1
         };
         return (initializer, service);
     }
