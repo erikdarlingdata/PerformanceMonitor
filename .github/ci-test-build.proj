@@ -5,7 +5,7 @@
     libraries and could write the same files at once (MSB3026, MSB3027). One MSBuild process builds each project once and
     runs the two test projects' own chains side by side. The projects build exactly as they do alone: this file passes no
     property and sets no output path, and it has no SDK, so no props file of the repository applies to it. The
-    configuration and the other options come from the command line (-c Release --no-restore) and reach each project as global
+    configuration and the other options come from the command line (the Release configuration and no restore) and reach each project as global
     properties.
   -->
   <ItemGroup>
