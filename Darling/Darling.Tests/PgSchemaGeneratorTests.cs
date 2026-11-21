@@ -851,7 +851,7 @@ public sealed class PgSchemaGeneratorTests
         var keptColumnsByView = new (string View, string[] KeptColumns)[]
         {
             (TimescaleSupport.QueryStoreStatsHourlyView, new[] { "server_id", "server_name" }),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_id", "server_name" }),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_name" }),
             (TimescaleSupport.QueryStoreStatsDailyView, new[] { "server_id" }),
             (TimescaleSupport.QueryStoreStatsCorrectedDailyView, new[] { "server_id" }),
             (TimescaleSupport.QueryStoreStatsIntervalDailyView, new[] { "server_id" }),
