@@ -8117,7 +8117,8 @@ LEFT JOIN LATERAL (
     SELECT (j.config->>'start_offset')::interval AS start_offset
     FROM timescaledb_information.jobs AS j
     WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
-    AND   j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name
+    AND   ((j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+           OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name))
     ORDER BY j.job_id
     LIMIT 1) AS rp ON true
 WHERE ca.view_schema = 'collect'

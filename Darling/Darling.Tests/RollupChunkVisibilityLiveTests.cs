@@ -412,7 +412,7 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.True(inserts > 0, "the chunk shows no insert since its vacuum, so the seed does not test the refresh window");
 
             var jobId = await Scalar<int>(c,
-                $"SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate' AND hypertable_name = (SELECT materialization_hypertable_name FROM timescaledb_information.continuous_aggregates WHERE view_name = '{TimescaleSupport.QueryStoreStatsCorrectedDailyView}')", ct);
+                $"SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate' AND hypertable_name IN (SELECT view_name FROM timescaledb_information.continuous_aggregates WHERE view_name = '{TimescaleSupport.QueryStoreStatsCorrectedDailyView}' UNION ALL SELECT materialization_hypertable_name FROM timescaledb_information.continuous_aggregates WHERE view_name = '{TimescaleSupport.QueryStoreStatsCorrectedDailyView}')", ct);
 
             /* Inside the window: the refresh could still write the chunk. */
             await Exec(c, $"SELECT alter_job({jobId}, config => jsonb_set((SELECT config FROM timescaledb_information.jobs WHERE job_id = {jobId}), '{{start_offset}}', to_jsonb('3650 days'::text)))", ct);
