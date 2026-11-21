@@ -363,6 +363,17 @@ public partial class ViewerServerTab
             SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
             /* #8549: the banner names the slicer's start from the source that served the slicer, so it is written once that read has answered. */
             var slicerPlan = await QueryStoreSlicerPlanAsync(slicerTask);
+            /* #9287: the slow-load line says what each read read: closed days from the rollups, the rest from the interval table. */
+            if (widePlan?.Source is { } gridSource)
+            {
+                timer?.NotePhase("grid read", gridSource.Describe());
+            }
+
+            if (slicerPlan?.Source is { } slicerSource)
+            {
+                timer?.NotePhase("slicer read", slicerSource.Describe());
+            }
+
             _queryStoreSlicerPlan = slicerPlan;
             UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan, slicerPlan: slicerPlan);
             await LoadQueryStoreSlicerAsync(startUtc, endUtc, slicerTask);
@@ -430,6 +441,7 @@ public partial class ViewerServerTab
                 {
                     var showingSince = BannerTime(servedStart!.Value);
                     text = $"Showing since {showingSince}{startReason}"
+                        + (widePlan?.Source?.BannerNote() is { } rollupNote ? $" · {rollupNote}" : string.Empty)
                         + (slicerSince is null || slicerSince == showingSince ? string.Empty : $" · slicer since {slicerSince}");
                 }
                 else if (hourlyServed && hourly!.Value.FirstBucket is null)

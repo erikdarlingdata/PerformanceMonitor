@@ -267,6 +267,71 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
     }
 
+    /// <summary>#9287: the read result the slow-load line and the grid banner are built from names the UTC days a read took from the
+    /// rollups and the days it read from the interval table. Asserted on the day lists, never on time.</summary>
+    [Fact]
+    public async Task TheReadsSource_NamesTheRollupDaysAndTheIntervalRemainder_AndWhyWhenNoneWereTaken()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 read source live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        var start = DataEnd.AddDays(-30);
+
+        async Task<(QueryStoreIntervalWide.WideReadPlan Plan, QueryStoreIntervalWide.WideReadPlan SlicerPlan)> ReadAsync()
+        {
+            var grid = await store.Viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, start, DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+            var slicer = await store.Viewer.GetQueryStoreSlicerWithReachAsync(ServerId, start, DataEnd, null, ct);
+            Assert.True(grid.Plan is { UseTable: true, Source: not null }, "the grid read did not take the interval-table route");
+            Assert.True(slicer.Plan is { UseTable: true, Source: not null }, "the slicer read did not take the interval-table route");
+            return (grid.Plan!.Value, slicer.Plan!.Value);
+        }
+
+        /* Nothing is built: every day is read from the interval table, and the source says the days are not built. */
+        var (plan, slicerPlan) = await ReadAsync();
+        var touched = DateOnly.FromDateTime(DataEnd).DayNumber - DateOnly.FromDateTime(plan.ReadStart).DayNumber;
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.Empty(p.Source!.RollupDays);
+            Assert.Equal(touched, p.Source.IntervalDays.Count);
+            Assert.Equal(QueryStoreClosedDayRollup.SourceReason.NoBuiltDays, p.Source.Reason);
+        }
+
+        /* Every day built: no closed day is read as interval rows. The only interval day left is the window's partial first day. */
+        await TickAsync(store, KeepEverything, ct);
+        (plan, slicerPlan) = await ReadAsync();
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.All(p.Source!.IntervalDays, d => Assert.Equal(DateOnly.FromDateTime(p.ReadStart), d));
+            Assert.True(p.Source.RollupDays.Count >= touched - 1, $"{p.Source.RollupDays.Count} rollup days of {touched}");
+            Assert.Equal(QueryStoreClosedDayRollup.SourceReason.Served, p.Source.Reason);
+        }
+
+        /* One built day and the rest unbuilt: one rollup day, and the interval table for the remainder. */
+        var built = DateOnly.FromDateTime(DataEnd.AddDays(-12));
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc <> @day", ct,
+            ("server_id", ServerId), ("day", built));
+        (plan, slicerPlan) = await ReadAsync();
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.Equal(new[] { built }, p.Source!.RollupDays);
+            Assert.Equal(touched - 1, p.Source.IntervalDays.Count);
+            Assert.DoesNotContain(built, p.Source.IntervalDays);
+            Assert.Contains("1 day from rollups", p.Source.Describe(), StringComparison.Ordinal);
+        }
+
+        /* Built days with a heartbeat older than two hours: no rollup day is taken, and the source says why. */
+        await TickAsync(store, KeepEverything, ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = (now() AT TIME ZONE 'UTC') - interval '3 hours'", ct);
+        (plan, slicerPlan) = await ReadAsync();
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.Empty(p.Source!.RollupDays);
+            Assert.Equal(touched, p.Source.IntervalDays.Count);
+            Assert.Equal(QueryStoreClosedDayRollup.SourceReason.HeartbeatStale, p.Source.Reason);
+            Assert.NotNull(p.Source.BannerNote());
+        }
+    }
+
     [Fact]
     public async Task BuiltDaysPlusEdges_EqualTheIntervalTable_ThroughALateRow_AnUnbuiltDay_AndStoppedBuilds()
     {
