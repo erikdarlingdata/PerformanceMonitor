@@ -404,6 +404,31 @@ try {
       });
       return { sections };
     },
+    /* #9203: two stores on different builds. Each Fleet section shows its own store's build next to the name, and a store that said none shows none. */
+    fleetStoreBuilds: async () => {
+      util.setFrontDoor(true);
+      util.setStore("use1");
+      handler = (url, init) => {
+        if (url === "/api/front-door") {
+          return reply(200, { front_door: true, stores: [
+            { name: "use1", health: "ok", server_count: 1, last_ok_utc: null, service_build: "Version 3.12.0 (commit 111111111)" },
+            { name: "use2", health: "ok", server_count: 1, last_ok_utc: null, service_build: "Version 3.13.0 (commit 222222222)" },
+            { name: "use3", health: "ok", server_count: 1, last_ok_utc: null }] });
+        }
+        if (url === "/api/fleet") return reply(200, fleetBody(["alpha"]));
+        return reply(200, {});
+      };
+      await picker.refreshStores();
+      const page = await load("pages/fleet.js");
+      const main = new FakeNode("main");
+      await page.renderFleet(main);
+      await settle();
+      const sections = all(main, (n) => n.tag === "section").map((s) => {
+        const head = all(s, (n) => String(n.className).includes("fleet-store-head"))[0];
+        return { store: s.dataset.store, builds: all(head, (n) => String(n.className).includes("fleet-store-build")).map((n) => n.textContent) };
+      });
+      return { sections };
+    },
     sidebarCurrentSecond: async () => {
       util.setFrontDoor(true);
       util.setStore("use2");

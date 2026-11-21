@@ -514,6 +514,8 @@ const STORE_SIZE_TTL_MS = 5 * 60 * 1000;
 const NON_OK_COLLECTION_STATES = new Set(["starting", "degraded", "stopped"]);
 let statusFleet = null;
 let statusSeat = null;
+/* #9203: the dashboard's own build line, as /api/session says it (the same words the Viewer's About shows). Null until it has said one. */
+let statusBuild = null;
 let statusCollection = null;
 let storeSizeBytes = null;
 let storeSizeStale = false;
@@ -583,15 +585,22 @@ async function refreshStatusExtras() {
     refreshStoreSize(Date.now()),
   ]);
   statusSeat = seatLabel(session);
+  statusBuild = session && typeof session.build === "string" && session.build !== "" ? session.build : null;
   statusCollection = state;
   renderStatusBar();
+}
+
+/* The quiet build item, last on the bar so it sits in the same place on every page. */
+function buildItem() {
+  return el("span", { class: "sb-item sb-build muted", text: statusBuild, title: "The build of the service serving this page" });
 }
 
 function renderStatusBar() {
   if (!statusbar) return;
   const d = statusFleet;
   if (!d) {
-    mount(statusbar, el("span", { class: "sb-item muted", text: "Fleet unavailable" }));
+    const unavailable = el("span", { class: "sb-item muted", text: "Fleet unavailable" });
+    mount(statusbar, statusBuild ? [unavailable, el("span", { class: "sb-sep", text: "·" }), buildItem()] : unavailable);
     return;
   }
   let healthy = 0;
@@ -632,6 +641,7 @@ function renderStatusBar() {
   const updated = statusPageUpdatedAt != null ? new Date(statusPageUpdatedAt).toISOString() : d.generated_at;
   items.push(el("span", { class: "sb-item sb-updated", text: "Updated " + localTime(updated) }));
   items.push(el("span", { class: "sb-item", id: "refresh-hint" }));
+  if (statusBuild) items.push(buildItem());
 
   const children = [];
   items.forEach((item, i) => {
