@@ -331,6 +331,78 @@ public sealed class ViewerFirstOpenSlowLoadTests
         Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
     }
 
+    /* #9249: the loader awaits a read's task and then finishes the clock, and the clock's own watcher of the same task is a separate
+       continuation. When the loader's runs first, the read has ended but is not booked yet. Its run was then counted as client work. The
+       gate holds the watcher back, so the order is fixed instead of left to the thread pool. */
+    [Fact]
+    public async Task AReadThatEndedBeforeItsWatcherBookedIt_IsOnTheSlowLoadLine_NotInTheClientWork()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timer = new ViewerLoadTimer(slowThresholdMs: 3000, alreadyElapsedMs: 10000) { BookingGate = gate.Task };
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stillOut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tracked = timer.Track("grid read", ended.Task);
+        timer.Track("side read", stillOut.Task);
+        timer.Track("cancelled read", cancelled.Task);
+        ended.SetResult();
+        cancelled.SetCanceled();
+        await tracked;
+        Assert.Equal(0, timer.PhaseCount);
+
+        var line = timer.Finish("Overview");
+
+        Assert.NotNull(line);
+        Assert.Contains("store reads [", line, StringComparison.Ordinal);
+        Assert.Contains("grid read ", line, StringComparison.Ordinal);
+        Assert.Contains("cancelled read ", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("side read", line, StringComparison.Ordinal);
+        var marker = ", then ";
+        var clientMs = long.Parse(line.Substring(line.IndexOf(marker, StringComparison.Ordinal) + marker.Length).Split(' ')[0]);
+        Assert.True(clientMs < 3000, $"the ended reads' time was counted as client work: {line}");
+
+        gate.SetResult();
+        stillOut.SetResult();
+    }
+
+    /* #9249: the watcher that books late must not put the read on a line twice. Finish only copies the lists, so the first line is
+       unchanged, and a second line built after the watcher ran names the read once. */
+    [Fact]
+    public async Task AReadBookedLateByItsWatcher_IsOnTheLineOnce()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timer = new ViewerLoadTimer(slowThresholdMs: 0) { BookingGate = gate.Task };
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tracked = timer.Track("grid read", ended.Task);
+        ended.SetResult();
+        await tracked;
+
+        var before = timer.Finish("Overview");
+        gate.SetResult();
+        while (timer.PhaseCount == 0)
+        {
+            await Task.Yield();
+        }
+
+        var after = timer.Finish("Overview");
+
+        Assert.NotNull(before);
+        Assert.NotNull(after);
+        Assert.Equal(1, CountOf("grid read ", before!));
+        Assert.Equal(1, CountOf("grid read ", after!));
+    }
+
+    private static int CountOf(string text, string line)
+    {
+        var count = 0;
+        for (var at = line.IndexOf(text, StringComparison.Ordinal); at >= 0; at = line.IndexOf(text, at + text.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     [Fact]
     public void AClockStartedAfterTheTabsConstruction_CountsTheConstructionInItsTotal()
     {
