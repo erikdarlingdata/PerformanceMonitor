@@ -82,6 +82,10 @@ public class ArchiveService
     /* The per-batch input budget for the tables merged one day at a time (query_snapshots, #5393; query_stats and query_store_stats, #5410). */
     internal long DailyCompactionBatchInputBytes { get; set; } = ParquetCompaction.DailyBatchInputBytes;
 
+    /* The per-batch input budget for a monthly table whose merge sorts by server (#9258): smaller than the 200 MB
+       the unsorted tables use, because the sort holds more of a batch than the streaming copy. */
+    internal long SortedCompactionBatchInputBytes { get; set; } = ParquetCompaction.SortedBatchInputBytes;
+
     /// <summary>
     /// The most disk space (bytes) the last compaction pass found a single month/table group would need for its
     /// merged output: the on-disk size of the files it would read, which its temps match until the swap removes
@@ -1546,12 +1550,16 @@ COPY (
                     .ToList();
 
                 /* Bucket files into size-budgeted batches so a single COPY never
-                   merges an unbounded amount of data. Most tables compress mildly, so
-                   the on-disk budget is a fine proxy and they fit one batch with many
-                   files (#933). query_snapshots, whose query-plan XML expands about 30x
-                   on read, gets a much smaller budget (#5393). */
+                   merges an unbounded amount of data. The budget is ParquetCompaction.BatchInputBytesFor
+                   with this service's three settings: a daily table (query_snapshots, query_stats and
+                   query_store_stats) takes the daily budget, which is much smaller because query-plan
+                   XML expands about 30x on read (#5393, #5410), a monthly table whose merge sorts by
+                   server takes the sorted budget (#9258), and every other monthly table takes the
+                   default, a fine proxy because they compress mildly (#933). */
                 var isDaily = ParquetCompaction.IsDailyTable(table);
-                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, isDaily ? DailyCompactionBatchInputBytes : CompactionBatchInputBytes);
+                var batchBudget = ParquetCompaction.BatchInputBytesFor(
+                    table, CompactionBatchInputBytes, DailyCompactionBatchInputBytes, SortedCompactionBatchInputBytes);
+                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBudget);
 
                 /* Merge only what changes, and only what fits (#5377).
 
