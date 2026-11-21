@@ -1,0 +1,375 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using PerformanceMonitor.Analysis;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
+using Xunit;
+
+namespace PerformanceMonitorLite.Tests;
+
+/// <summary>
+/// #9195: the plan regression cost read carries the statement text for the candidate queries only, not on every row of the 14-day
+/// window. The result must stay what it was. Each test runs the statement as it stood before (<see cref="ReferenceSql"/>, kept here
+/// as the oracle) and the shipped one over the same store and compares every candidate, text included.
+/// The store holds hot rows (the text behind a digest, as the collector writes it now) and Parquet rows (inline text, as an archive
+/// from before that holds it), ties on collection_time, NULL execution counts and row counts, two replica roles, a forced plan,
+/// two plan_ids sharing one plan hash, rows collected after the window end, and text that only a row the read must ignore carries.
+/// </summary>
+public sealed class PlanRegressionReadEquivalenceTests : IDisposable
+{
+    private const int ServerId = 9195;
+    private static readonly DateTime Now = Whole(DateTime.UtcNow);
+    private static readonly DateTime Old = Now.AddDays(-5);
+    private static readonly DateTime Recent = Now.AddHours(-1);
+
+    private readonly string _tempDir;
+    private readonly DuckDbInitializer _duckDb;
+    private readonly List<string> _statements = new();
+    private long _nextId = 1;
+
+    public PlanRegressionReadEquivalenceTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(Path.Combine(_tempDir, "archive"));
+        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _duckDb.InitializeFromTemplateAsync().GetAwaiter().GetResult();
+    }
+
+    public void Dispose()
+    {
+        _duckDb.Dispose();
+        try
+        {
+            if (Directory.Exists(_tempDir))
+                Directory.Delete(_tempDir, recursive: true);
+        }
+        catch
+        {
+            /* Best-effort cleanup */
+        }
+    }
+
+    private static DateTime Whole(DateTime t) =>
+        DateTime.SpecifyKind(new DateTime(t.Ticks - (t.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+
+    private static string Ts(DateTime t) => $"TIMESTAMP '{t:yyyy-MM-dd HH:mm:ss}'";
+
+    private static string Lit(string? s) => s is null ? "NULL" : "'" + s.Replace("'", "''") + "'";
+
+    private static string Num(object? v) => v is null ? "NULL" : Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture)!;
+
+    private static AnalysisContext Context() => new()
+    {
+        ServerId = ServerId,
+        ServerName = "TestSrv",
+        TimeRangeStart = Now.AddHours(-4),
+        TimeRangeEnd = Now,
+    };
+
+    /* Synchronous on purpose: the database lock is thread-affine (#2463), so no await may sit between taking it and releasing it. */
+    private void Execute(params string[] statements)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        connection.Open();
+        foreach (var sql in statements)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>One Query Store snapshot row. The text is stored inline, or behind a digest in the text table when
+    /// <paramref name="digest"/> is set (what the collector writes now).</summary>
+    private string Row(long query, long plan, string hash, long interval, DateTime collected, DateTime lastExec, long? execs, double cpu,
+        double? rows = 10, string? role = null, bool forced = false, long failures = 0, string? text = null, bool digest = false,
+        string execType = "Regular", string database = "Db1")
+    {
+        var textColumn = digest ? "NULL" : Lit(text);
+        var digestColumn = digest && text is not null ? $"unhex(sha256({Lit(text)}))" : "NULL";
+        return $@"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+     execution_type_desc, first_execution_time, last_execution_time, query_text, query_text_digest, query_hash, execution_count, avg_cpu_time_us,
+     avg_duration_us, query_plan_hash, is_forced_plan, force_failure_count, runtime_stats_interval_id, interval_start_time_utc, replica_role, avg_rowcount)
+VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {query}, {plan}, {Lit(execType)}, {Ts(lastExec.AddHours(-1))}, {Ts(lastExec)},
+     {textColumn}, {digestColumn}, {Lit("0xQ" + query)}, {Num(execs)}, {Num(cpu)}, {Num(cpu + 20000)}, {Lit(hash)}, {(forced ? "true" : "false")}, {failures},
+     {interval}, {Ts(lastExec.AddHours(-1))}, {Lit(role)}, {Num(rows)})";
+    }
+
+    private static string DimRow(string text) =>
+        $"INSERT INTO query_text_dim (digest, query_text) SELECT unhex(sha256({Lit(text)})), {Lit(text)} WHERE NOT EXISTS (SELECT 1 FROM query_text_dim WHERE digest = unhex(sha256({Lit(text)})))";
+
+    /// <summary>A query's cheap plan in the archive (two intervals, two snapshots each) and its costly newest plan in the hot store.</summary>
+    private void Query(long q, string? coldText, string? hotText, double costlyCpu, string? role = null, string database = "Db1",
+        bool hotDigest = true, bool forced = false, long failures = 0, DateTime? latest = null)
+    {
+        var newest = latest ?? Recent;
+        var cheap = q * 10 + 1;
+        var costly = q * 10 + 2;
+        for (var interval = 0; interval < 2; interval++)
+        {
+            var coldLast = Old.AddHours(interval);
+            _statements.Add(Row(q, cheap, "0xCHEAP" + cheap, 1 + interval, coldLast.AddMinutes(1), coldLast, 30, 20_000, 10, role, text: coldText, database: database));
+            _statements.Add(Row(q, cheap, "0xCHEAP" + cheap, 1 + interval, coldLast.AddMinutes(2), coldLast, 60, 20_000, 10, role, text: coldText, database: database));
+            var hotLast = newest.AddMinutes(interval * 10);
+            _statements.Add(Row(q, costly, "0xCOSTLY" + costly, 11 + interval, newest.AddMinutes(interval * 10 + 1), hotLast, 30, costlyCpu, 10, role, forced, failures, hotText, hotDigest, database: database));
+            _statements.Add(Row(q, costly, "0xCOSTLY" + costly, 11 + interval, newest.AddMinutes(interval * 10 + 2), hotLast, 60, costlyCpu, 10, role, forced, failures, hotText, hotDigest, database: database));
+        }
+    }
+
+    private async Task SeedAsync()
+    {
+        /* 1: ties on collection_time. Two snapshots of one interval share a stamp: the higher count wins, and on equal counts the higher id. */
+        Query(1, null, "SELECT 1 FROM dbo.tie1", 200_000);
+        _statements.Add(Row(1, 12, "0xCOSTLY12", 11, Recent.AddMinutes(2), Recent, 60, 450_000, text: "SELECT 1 FROM dbo.tie1", digest: true));
+        _statements.Add(Row(1, 12, "0xCOSTLY12", 11, Recent.AddMinutes(2), Recent, 60, 300_000, text: "SELECT 1 FROM dbo.tie1", digest: true));
+        /* 2: NULL counts and NULL row counts. A NULL count sorts below every number in a tie, and a NULL row count blanks the plan's rows per call. */
+        Query(2, "SELECT 2 FROM dbo.nullcount", "SELECT 2 FROM dbo.nullcount", 210_000, hotDigest: false);
+        _statements.Add(Row(2, 22, "0xCOSTLY22", 11, Recent.AddMinutes(2), Recent, null, 900_000, rows: null));
+        _statements.Add(Row(2, 22, "0xCOSTLY22", 12, Recent.AddMinutes(12), Recent.AddMinutes(10), 40, 210_000, rows: null));
+        /* 3: two replica roles. The primary regressed, the secondary did not. */
+        Query(3, "SELECT 3 FROM dbo.replica", "SELECT 3 FROM dbo.replica", 220_000, role: "PRIMARY");
+        for (var interval = 0; interval < 2; interval++)
+        {
+            _statements.Add(Row(3, 31, "0xCHEAP31", 1 + interval, Old.AddMinutes(5), Old, 60, 20_000, role: "SECONDARY", text: "SELECT 3 FROM dbo.replica"));
+            _statements.Add(Row(3, 32, "0xCOSTLY32", 11 + interval, Recent.AddMinutes(5), Recent, 60, 20_000, role: "SECONDARY", text: "SELECT 3 FROM dbo.replica", digest: true));
+        }
+        /* 4: a forced plan with failures. */
+        Query(4, "SELECT 4 FROM dbo.forced", "SELECT 4 FROM dbo.forced", 230_000, forced: true, failures: 3);
+        /* 5: two plan_ids that share one plan hash. */
+        Query(5, null, "SELECT 5 FROM dbo.samehash", 240_000);
+        for (var interval = 0; interval < 2; interval++)
+            _statements.Add(Row(5, 53, "0xCOSTLY52", 11 + interval, Recent.AddMinutes(interval * 10 + 3), Recent.AddMinutes(interval * 10), 60, 240_000, text: "SELECT 5 FROM dbo.samehash", digest: true));
+        /* 6: rows the read must ignore carry text of their own: one collected after the window end, one Aborted, one last run before the
+           14-day window. The candidate carries no text, because none of those rows counts. */
+        Query(6, null, null, 250_000, hotDigest: false);
+        _statements.Add(Row(6, 62, "0xCOSTLY62", 11, Now.AddMinutes(5), Recent, 60, 250_000, text: "SELECT 'after the window end'"));
+        _statements.Add(Row(6, 62, "0xCOSTLY62", 11, Recent, Recent, 60, 250_000, text: "SELECT 'aborted'", execType: "Aborted"));
+        _statements.Add(Row(6, 61, "0xCHEAP61", 1, Now.AddDays(-30), Now.AddDays(-30), 60, 20_000, text: "SELECT 'too old'"));
+        /* 7: SQL Server housekeeping text is left out. */
+        Query(7, "EXEC sp_flush_commit_table_on_demand 1000", "EXEC sp_flush_commit_table_on_demand 1000", 260_000);
+        /* 8: the newest plan sits in the archive too, so its text comes from Parquet alone, and the same query_id exists in a second
+           database whose text differs. */
+        Query(8, "SELECT 8 FROM dbo.archiveonly", "SELECT 8 FROM dbo.archiveonly", 270_000, hotDigest: false, latest: Now.AddDays(-2));
+        Query(8, "SELECT 'other database' FROM dbo.archiveonly", "SELECT 'other database' FROM dbo.archiveonly", 130_000, database: "Db2", hotDigest: false, latest: Now.AddDays(-2));
+        /* 10: the newest plan's rows carry no text while the cheap plan's rows do: the candidate has none, as before. */
+        Query(10, "SELECT 10 FROM dbo.coldonly", null, 280_000, hotDigest: false);
+        /* 9: no regression: the newest plan costs what the cheap one does. */
+        Query(9, "SELECT 9", "SELECT 9", 20_000);
+
+        var dims = new[] { "SELECT 1 FROM dbo.tie1", "SELECT 3 FROM dbo.replica", "SELECT 4 FROM dbo.forced", "SELECT 5 FROM dbo.samehash", "EXEC sp_flush_commit_table_on_demand 1000", "SELECT 9" };
+        Execute(dims.Select(DimRow).ToArray());
+        Execute(_statements.ToArray());
+        /* Everything older than a day moves to a Parquet file, which keeps the inline text. The hot store keeps the digests. */
+        var path = Path.Combine(_tempDir, "archive", "20260101_000000_query_store_stats.parquet").Replace("\\", "/");
+        var before = Ts(Now.AddDays(-1));
+        Execute(
+            $"COPY (SELECT * FROM query_store_stats WHERE collection_time < {before}) TO '{DuckDbInitializer.EscapeSqlPath(path)}' (FORMAT PARQUET)",
+            $"DELETE FROM query_store_stats WHERE collection_time < {before}");
+        await _duckDb.CreateArchiveViewsAsync();
+    }
+
+    private async Task<List<DuckDbFactCollector.PlanRegressionCandidate>> ReadAsync(string sql)
+    {
+        var context = Context();
+        var token = TestContext.Current.CancellationToken;
+        var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), token);
+        using var readLock = _duckDb.AcquireReadLock(token);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(token);
+        return await DuckDbFactCollector.ReadPlanRegressionCandidatesAsync(connection, context, plan, sql);
+    }
+
+    [Fact]
+    public async Task TheShippedRead_ReturnsTheCandidatesTheReferenceReadReturns_TextIncluded()
+    {
+        await SeedAsync();
+
+        var reference = await ReadAsync(ReferenceSql);
+        var shipped = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
+
+        /* The comparison is not vacuous: every regressed query is there, with the text its rows hold, and nothing else. */
+        var byKey = reference.ToDictionary(c => (c.DatabaseName, c.QueryId));
+        Assert.Equal(
+            new[] { ("Db1", 1L), ("Db1", 2L), ("Db1", 3L), ("Db1", 4L), ("Db1", 5L), ("Db1", 6L), ("Db1", 8L), ("Db1", 10L), ("Db2", 8L) }.OrderBy(k => k),
+            byKey.Keys.OrderBy(k => k));
+        Assert.Equal("SELECT 1 FROM dbo.tie1", byKey[("Db1", 1)].QueryText);
+        Assert.Equal("SELECT 2 FROM dbo.nullcount", byKey[("Db1", 2)].QueryText);
+        Assert.Equal("SELECT 8 FROM dbo.archiveonly", byKey[("Db1", 8)].QueryText);
+        Assert.Equal("SELECT 'other database' FROM dbo.archiveonly", byKey[("Db2", 8)].QueryText);
+        Assert.Null(byKey[("Db1", 10)].QueryText);
+        Assert.Null(byKey[("Db1", 6)].QueryText);
+        Assert.Equal(1, byKey[("Db1", 4)].LatestIsForced);
+
+        /* Ordered by key: two queries whose lost CPU and factor tie are in either order. */
+        Assert.Equal(reference.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId), shipped.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId));
+    }
+
+    [Fact]
+    public async Task TheFact_NamesTheOffendersTheReferenceReadFinds()
+    {
+        await SeedAsync();
+        var context = Context();
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(context);
+
+        var reference = await ReadAsync(ReferenceSql);
+        Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(
+            reference.Select(c => (c.DatabaseName, c.QueryId)).OrderBy(k => k),
+            context.PlanRegressionOffenders!.Select(o => (o.DatabaseName, o.QueryId)).OrderBy(k => k));
+    }
+
+    /// <summary>The statement as it stood before #9195: the statement text rides through every step and is read from the deduplicated rows.</summary>
+    private static readonly string ReferenceSql = @"
+WITH deduped AS
+(
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        query_plan_hash,
+        execution_count,
+        avg_cpu_time_us,
+        avg_duration_us,
+        avg_rowcount,
+        last_execution_time,
+        is_forced_plan,
+        force_failure_count,
+        query_text,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+            ORDER BY collection_time DESC, execution_count DESC, collection_id DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   execution_type_desc = 'Regular'
+    AND   last_execution_time >= $2
+    AND   collection_time <= $3
+    /*SEC*/
+),
+plan_agg AS
+(
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        any_value(query_plan_hash) AS query_plan_hash,
+        SUM(execution_count) AS execs,
+        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
+        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        MAX(last_execution_time) AS last_exec,
+        bool_or(is_forced_plan) AS is_forced_plan,
+        MAX(force_failure_count) AS force_failure_count,
+        any_value(query_text) AS query_text,
+        CASE WHEN COUNT(avg_rowcount) < COUNT(*) THEN NULL
+             ELSE SUM(avg_rowcount * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+        END AS rows_per_exec
+    FROM deduped
+    WHERE rn = 1
+    GROUP BY database_name, query_id, plan_id, replica_role
+),
+plan_dedup AS
+(
+    SELECT
+        database_name,
+        query_id,
+        replica_role,
+        query_plan_hash,
+        SUM(execs) AS execs,
+        SUM(cpu_per_exec * execs) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_per_exec * execs) / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        MAX(last_exec) AS last_exec,
+        bool_or(is_forced_plan) AS is_forced_plan,
+        MAX(force_failure_count) AS force_failure_count,
+        arg_max(plan_id, (last_exec, plan_id)) AS newest_plan_id,
+        arg_max(plan_id, (execs, plan_id)) AS busiest_plan_id,
+        any_value(query_text) AS query_text,
+        CASE WHEN COUNT(rows_per_exec) < COUNT(*) THEN NULL
+             ELSE SUM(rows_per_exec * execs) / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec
+    FROM plan_agg
+    GROUP BY database_name, query_id, replica_role, query_plan_hash
+    HAVING SUM(execs) >= 25
+),
+ranked AS
+(
+    SELECT
+        *,
+        ROW_NUMBER() OVER (PARTITION BY database_name, query_id, replica_role ORDER BY last_exec DESC) AS recency,
+        ROW_NUMBER() OVER (PARTITION BY database_name, query_id, replica_role ORDER BY cpu_per_exec ASC) AS cheapness
+    FROM plan_dedup
+),
+compared AS
+(
+    SELECT
+        l.query_id,
+        l.cpu_per_exec AS latest_cpu,
+        l.dur_per_exec AS latest_dur,
+        l.is_forced_plan AS latest_is_forced,
+        l.force_failure_count AS force_failure_count,
+        b.cpu_per_exec AS best_cpu,
+        b.dur_per_exec AS best_dur,
+        CASE
+            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
+                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
+            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
+             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
+                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
+        END AS regression_factor,
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
+        l.database_name,
+        b.last_exec AS best_last_exec,
+        l.query_text AS query_text,
+        l.newest_plan_id AS latest_plan_id,
+        b.busiest_plan_id AS best_plan_id,
+        l.rows_per_exec AS latest_rows,
+        b.rows_per_exec AS best_rows
+    FROM ranked AS l
+    JOIN ranked AS b
+      ON  b.database_name = l.database_name
+      AND b.query_id = l.query_id
+      AND b.replica_role IS NOT DISTINCT FROM l.replica_role
+      AND b.cheapness = 1
+    WHERE l.recency = 1
+    AND   l.query_plan_hash <> b.query_plan_hash
+)
+SELECT
+    query_id,
+    latest_cpu,
+    latest_dur,
+    latest_is_forced,
+    force_failure_count,
+    best_cpu,
+    best_dur,
+    regression_factor,
+    database_name,
+    best_last_exec,
+    query_text,
+    latest_plan_id,
+    best_plan_id,
+    latest_rows,
+    best_rows
+FROM compared
+WHERE regression_factor >= 2
+AND   latest_total_cpu_us >= 10000000
+AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
+AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+LIMIT 100";
+}

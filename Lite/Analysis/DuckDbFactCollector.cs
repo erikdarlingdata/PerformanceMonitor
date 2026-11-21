@@ -31,14 +31,23 @@ public partial class DuckDbFactCollector : IFactCollector
     /// </summary>
     private readonly IQueryStorePlanSource? _queryStorePlanSource;
 
+    /// <summary>
+    /// What the inputs check decided about plan pairs it already compared (#9195), so a later pass does not fetch
+    /// them again. <see cref="AnalysisService"/> passes the store's own cache; a collector built without one keeps a private
+    /// cache of its own, which only lives as long as it does.
+    /// </summary>
+    private readonly PlanInputOutcomeCache _planInputCache;
+
     public DuckDbFactCollector(
         DuckDbInitializer duckDb,
         Func<int, string, int?>? collectorFrequencyMinutes = null,
-        IQueryStorePlanSource? queryStorePlanSource = null)
+        IQueryStorePlanSource? queryStorePlanSource = null,
+        PlanInputOutcomeCache? planInputCache = null)
     {
         _duckDb = duckDb;
         _collectorFrequencyMinutes = collectorFrequencyMinutes;
         _queryStorePlanSource = queryStorePlanSource;
+        _planInputCache = planInputCache ?? new PlanInputOutcomeCache();
     }
 
     /// <summary>

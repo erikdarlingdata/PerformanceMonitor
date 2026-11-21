@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -30,8 +33,11 @@ public partial class DuckDbFactCollector
     /// <summary>All of a pass's fetches together. Past it the remaining candidates are unverified.</summary>
     internal static readonly TimeSpan PlanInputTotalTimeout = TimeSpan.FromSeconds(15);
 
+    /// <summary>A plan check that takes longer than this logs one Information line with its split (#9195).</summary>
+    internal static readonly TimeSpan PlanInputSlowThreshold = TimeSpan.FromSeconds(1);
+
     /// <summary>One row of the detector's read: a query whose latest plan costs 2x or more of its best plan.</summary>
-    private sealed record PlanRegressionCandidate(
+    internal sealed record PlanRegressionCandidate(
         long QueryId,
         double LatestCpu,
         int LatestIsForced,
@@ -59,6 +65,15 @@ public partial class DuckDbFactCollector
 
         /// <summary>True once the pass has logged a plan-input fault, so a broken source is one event, not one per fetch.</summary>
         public bool FaultReported;
+
+        /* #9195: what the pass did, for the one line a slow check logs and for nothing else. */
+        public int Fetches;
+        public int PlansRead;
+        public int NoPlan;
+        public int Timeouts;
+        public int Faults;
+        public int CacheHits;
+        public long FetchTicks;
     }
 
     /// <summary>
@@ -88,6 +103,7 @@ public partial class DuckDbFactCollector
         var judgements = new Dictionary<int, PlanInputJudgement>();
         var outcomes = new Dictionary<(string Database, long Latest, long Best), PlanInputOutcome>();
         var budget = new PlanFetchBudget();
+        var started = Stopwatch.GetTimestamp();
 
         using var overall = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
         overall.CancelAfter(PlanInputTotalTimeout);
@@ -120,7 +136,26 @@ public partial class DuckDbFactCollector
             kept.Add(candidate with { Unverified = judgements[i].Unverified, InputBasis = judgements[i].Basis });
         }
 
-        return new PlanRegressionVerification(kept, excludedKeys.Count, kept.Count(k => k.Unverified));
+        var unverified = kept.Count(k => k.Unverified);
+        ReportSlowPlanCheck(context, candidates.Count, budget, unverified, Stopwatch.GetElapsedTime(started));
+        return new PlanRegressionVerification(kept, excludedKeys.Count, unverified);
+    }
+
+    /// <summary>
+    /// #9195: one Information line when the plan check took over <see cref="PlanInputSlowThreshold"/>, naming where the time
+    /// went: the live fetches (and how each ended) or the plan pairs answered from an earlier pass. A fast check logs
+    /// nothing. Counts and times only, never a plan or a statement.
+    /// </summary>
+    private static void ReportSlowPlanCheck(
+        AnalysisContext context, int candidateCount, PlanFetchBudget budget, int unverified, TimeSpan elapsed)
+    {
+        if (elapsed <= PlanInputSlowThreshold) return;
+
+        AppLogger.Info("DuckDbFactCollector",
+            string.Create(CultureInfo.InvariantCulture,
+                $"Plan regression input check took {(long)elapsed.TotalMilliseconds} ms for {context.ServerName} (server {context.ServerId}): " +
+                $"{candidateCount} candidates, {budget.Fetches} fetches ({budget.PlansRead} plans, {budget.NoPlan} none, {budget.Timeouts} timeouts, " +
+                $"{budget.Faults} faults, {(long)Stopwatch.GetElapsedTime(0, budget.FetchTicks).TotalMilliseconds} ms), {budget.CacheHits} answered from an earlier pass, {unverified} unverified"));
     }
 
     /// <summary>What the inputs check decided about one row: leave its query out, or keep it (checked or not) with its basis.</summary>
@@ -144,8 +179,20 @@ public partial class DuckDbFactCollector
                 var key = (candidate.DatabaseName, latestPlanId, bestPlanId);
                 if (!outcomes.TryGetValue(key, out outcome))
                 {
-                    outcome = await JudgeFetchedPlansAsync(
-                        context, budget, candidate.DatabaseName, latestPlanId, bestPlanId, overallToken);
+                    /* #9195: a pair an earlier pass compared is answered from the cache and uses no fetch. Only a
+                       conclusive outcome is ever stored (see PlanInputOutcomeCache), so a miss is a pair never compared. */
+                    var cacheKey = new PlanInputOutcomeCache.Key(context.ServerId, candidate.DatabaseName, latestPlanId, bestPlanId);
+                    if (_planInputCache.TryGet(cacheKey, out outcome))
+                    {
+                        budget.CacheHits++;
+                    }
+                    else
+                    {
+                        outcome = await JudgeFetchedPlansAsync(
+                            context, budget, candidate.DatabaseName, latestPlanId, bestPlanId, overallToken);
+                        _planInputCache.Store(cacheKey, outcome);
+                    }
+
                     outcomes[key] = outcome;
                 }
             }
@@ -204,28 +251,61 @@ public partial class DuckDbFactCollector
     {
         if (budget.Left <= 0 || overallToken.IsCancellationRequested) return null;
         budget.Left--;
+        budget.Fetches++;
 
         using var one = CancellationTokenSource.CreateLinkedTokenSource(overallToken);
         one.CancelAfter(PlanInputFetchTimeout);
+
+        /* #9195: each fetch's time and how it ended goes to the Debug log with the plan's size in characters, never its text. */
+        var started = Stopwatch.GetTimestamp();
+        var result = "cancelled";
+        var chars = 0;
         try
         {
             /* WaitAsync as well as the token: a source that ignores its token still cannot hold the pass. */
             var xml = await _queryStorePlanSource!
                 .FetchQueryStorePlanXmlAsync(context.ServerId, databaseName, planId, one.Token)
                 .WaitAsync(one.Token);
-            return string.IsNullOrWhiteSpace(xml) ? null : xml;
+            if (string.IsNullOrWhiteSpace(xml))
+            {
+                result = "none";
+                budget.NoPlan++;
+                return null;
+            }
+
+            result = "plan";
+            chars = xml.Length;
+            budget.PlansRead++;
+            return xml;
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
             /* One fetch's own timeout is an OperationCanceledException with the pass's token unfired: expected, so unverified
-               and not logged. Anything else is a fault in the plan source. */
-            if (ex is not OperationCanceledException && !budget.FaultReported)
+               and not logged as a fault. Anything else is a fault in the plan source. */
+            if (ex is OperationCanceledException)
             {
-                budget.FaultReported = true;
-                ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync), record: false);
+                result = "timeout";
+                budget.Timeouts++;
+            }
+            else
+            {
+                result = "fault";
+                budget.Faults++;
+                if (!budget.FaultReported)
+                {
+                    budget.FaultReported = true;
+                    ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync), record: false);
+                }
             }
 
             return null;
+        }
+        finally
+        {
+            var elapsedTicks = Stopwatch.GetTimestamp() - started;
+            budget.FetchTicks += elapsedTicks;
+            AppLogger.Debug("DuckDbFactCollector", string.Create(CultureInfo.InvariantCulture,
+                $"Plan input fetch {result} in {(long)Stopwatch.GetElapsedTime(0, elapsedTicks).TotalMilliseconds} ms ({chars} characters) for plan {planId} in {databaseName} on {context.ServerName} (server {context.ServerId})"));
         }
     }
 }

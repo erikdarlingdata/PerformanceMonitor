@@ -160,7 +160,9 @@ public class AnalysisService
         _collector = new DuckDbFactCollector(
             duckDb, collectorFrequencyMinutes,
             /* #5630: the same fetcher serves the plan-regression inputs check; a caller with none passes no source. */
-            planFetcher as IQueryStorePlanSource);
+            planFetcher as IQueryStorePlanSource,
+            /* #9195: a service is built per pass, so the judged plan pairs live with the store. */
+            PlanInputOutcomeCache.For(duckDb));
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
