@@ -209,7 +209,7 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
     {
         Assert.SkipUnless(Phase == label, "S9280 != " + label);
         var ct = TestContext.Current.CancellationToken;
-        var cs = new NpgsqlConnectionStringBuilder(BaseCs) { Database = Db, Pooling = false }.ConnectionString;
+        var cs = new NpgsqlConnectionStringBuilder(BaseCs) { Database = Db, Pooling = false, SearchPath = "collect,public" }.ConnectionString;
         await using var source = NpgsqlDataSource.Create(cs);
         await using var connection = await source.OpenConnectionAsync(ct);
         DateTime qsEnd, procEnd;
