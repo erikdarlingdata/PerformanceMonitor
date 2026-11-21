@@ -20,28 +20,40 @@ namespace PerformanceMonitorLite.Services;
 /// one to shut down. <see cref="App"/> reads the plan once and every start-up step that would put something on a screen
 /// asks it first.
 /// </summary>
-public sealed record LiteStartupPlan(bool Headless, bool Stop)
+public sealed record LiteStartupPlan(bool Headless, bool Stop, bool PrintMcpToken = false)
 {
     public const string HeadlessArg = "--headless";
     public const string StopArg = "--stop";
+
+    /// <summary>#9185: prints the stored MCP token to standard output and exits (Darling's <c>--print-mcp-token</c>).</summary>
+    public const string PrintMcpTokenArg = "--print-mcp-token";
 
     public static LiteStartupPlan FromArgs(IEnumerable<string> args)
     {
         var headless = false;
         var stop = false;
+        var printMcpToken = false;
         foreach (var arg in args)
         {
             if (string.Equals(arg, HeadlessArg, StringComparison.OrdinalIgnoreCase))
                 headless = true;
             else if (string.Equals(arg, StopArg, StringComparison.OrdinalIgnoreCase))
                 stop = true;
+            else if (string.Equals(arg, PrintMcpTokenArg, StringComparison.OrdinalIgnoreCase))
+                printMcpToken = true;
         }
 
-        return new LiteStartupPlan(headless, stop);
+        return new LiteStartupPlan(headless, stop, printMcpToken);
     }
 
-    /// <summary>A stop request starts nothing: it asks the running instance to stop and leaves.</summary>
-    public bool StartsServices => !Stop;
+    /// <summary>
+    /// A stop request starts nothing: it asks the running instance to stop and leaves. So does a token print (#9185): it reads one
+    /// Credential Manager entry and leaves, with no window, no tray icon, no data folder, no log file and no single-instance lock.
+    /// </summary>
+    public bool StartsServices => !Stop && !PrintMcpToken;
+
+    /// <summary>The single-instance lock is taken by a start that runs Lite. A stop or a token print leaves a running Lite alone.</summary>
+    public bool TakesInstanceLock => StartsServices;
 
     /// <summary>The main window is shown. Headless never shows it, and never creates a window handle for it.</summary>
     public bool ShowsMainWindow => StartsServices && !Headless;

@@ -8,6 +8,8 @@
 
 using System;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Services;
 using Velopack;
 using Velopack.Locators;
 
@@ -18,6 +20,14 @@ namespace PerformanceMonitorLite
         [STAThread]
         public static int Main(string[] args)
         {
+            /* #9185: --print-mcp-token reads one Credential Manager entry and prints it. It runs before anything else: no Velopack
+               hook, no registry stamp, no WPF application, no log file, no single-instance lock, so a running Lite is not disturbed
+               and the token reaches nothing but standard output. */
+            if (LiteStartupPlan.FromArgs(args).PrintMcpToken)
+            {
+                return PrintMcpTokenCommand.RunProcess();
+            }
+
             VelopackApp.Build().Run();
 
             // #8430: Settings > Apps shows this install's full version, a nightly's tag included. The Setup.exe

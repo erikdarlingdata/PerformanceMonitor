@@ -76,7 +76,7 @@ A headless Lite does these things as usual:
 - It collects from every server, and it checks alerts.
 - It sends alerts by email, Slack, Teams and webhook.
 - It runs retention and archiving.
-- It runs the MCP server, if you turned it on.
+- It runs the MCP server, if you turned it on. See [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite).
 - It checks for updates. It writes the result to the log. It cannot show a balloon.
 
 A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each headless start writes these two lines to the log, at Information level:
@@ -187,15 +187,57 @@ Suppose you start the new version with `--headless` while the old version still 
 
 A headless Lite writes the same files as a Lite with a window. The logs are in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs` of the dedicated user. The files are `lite_<date>.log`. Lite keeps each file for 7 days. The data folder is `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the same user.
 
+#### Use MCP on a headless Lite
+
+A headless Lite has no Settings window. You turn MCP on in `settings.json`, and you read the token with a command.
+
+To turn MCP on, add these keys to the `settings.json` of the dedicated user. The file is in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config`. Restart Lite after you change it.
+
+| Key | Value | What it does |
+|---|---|---|
+| `mcp_enabled` | `true` | Turns the MCP server on. The default is `false`. |
+| `mcp_port` | A port number | The port that the server listens on, on localhost. The default is `5151`. |
+| `mcp_allow_tokenless_loopback` | `true` | Optional. The server then accepts requests with no token. Leave it out to keep the token. |
+
+With `mcp_allow_tokenless_loopback` set to `true`, Lite does not read its stored token. Any program on the machine that can reach localhost can then call the read tools, whichever Windows user runs it. Lite does not serve the write tools or the investigation tools in this mode, because they need a token. We recommend that you leave the setting off.
+
+With the setting off, Lite makes a token at its first start with MCP on. Lite keeps the token in the Windows Credential Manager of the user that runs Lite. Each request must carry it in an `Authorization: Bearer <token>` header. The dedicated user never signs in, so you read the token with `--print-mcp-token`. Run the command as the dedicated user, after Lite starts once as that user with MCP on:
+
+```
+PerformanceMonitorLite.exe --print-mcp-token
+```
+
+The command prints the token and a new line to standard output, and then it exits. It only reads. It never makes or changes a token, it does not start Lite, and it does not disturb a Lite that runs. It writes the token nowhere except standard output. The token is a live secret, so do not leave it in a shared window or in a log.
+
+Lite has no console of its own. A command prompt or PowerShell can give the prompt back before Lite writes. To read the token as the dedicated user:
+
+1. Open a command prompt as that user: `runas /user:<name> cmd`
+2. In the new window, run `cmd /c "<path>\PerformanceMonitorLite.exe" --print-mcp-token`. The `cmd /c` makes the window wait for Lite. To keep the token in a file, add `> "%USERPROFILE%\mcp-token.txt"` at the end of the line. A file in the profile folder of the user can be read only by that user and by administrators. Do not write the token to a folder that other users can read, for example the folder that the window opens in. Delete the file after you copy the token.
+
+In PowerShell, pipe the output to get it: `& "<path>\PerformanceMonitorLite.exe" --print-mcp-token | Out-String`.
+
+If a policy turns on PowerShell module logging or transcription, PowerShell records the token in the event log or in the transcript folder. In that case, use the command prompt steps above.
+
+The exit code says what happened:
+
+| Code | Meaning | Standard output | Standard error |
+|---|---|---|---|
+| 0 | Lite printed the token. | The token | Nothing |
+| 1 | No token is stored for this user. Lite made none. | Nothing | One line |
+| 2 | The read of the Credential Manager entry failed, or the entry is empty. A token might exist. | Nothing | The reason |
+| 3 | The command has nowhere to write: no console and no redirect. Lite did not read the token. | Nothing | Nothing |
+
+For code 1, turn MCP on and start Lite as that user once. Lite then makes the token.
+
 ### Lite Data Storage
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints and free block reuse. The hot store holds the most recent data, about 7 days. Each hour, Lite moves older data to Parquet. The hot store has a size limit of 512 MB. When the file reaches 512 MB, Lite writes the collected data to Parquet and deletes the file. It then creates a new small file and puts back the settings, tags, mute rules and investigation records. Collection pauses for a short time while the reset runs. After the reset, Lite compacts the Parquet files into monthly archives, and collection continues during compaction.
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
-- Typical size: ~50–200 MB per server per week
+- Typical size: it depends on the number of servers, the number of collectors, and whether Query Store collection is on. The hot file does not grow past about 512 MB, because Lite resets it at that size. The Parquet archive grows with the 3 months of history that Lite keeps.
 
 Compaction merges the per-run Parquet files into one file for each month. `--stop` does not wait for it to finish. Lite checks for the stop before it starts each group of files, and it waits up to 5 seconds for a merge that is already running. If that merge is still running at the end of the 5 seconds, Lite exits and the merge ends with it. In both cases a group of files is either fully merged or left as it was, so a read returns each row once. A merge writes to a `.tmp` file first, and a read never opens that file. The first archive pass after the next start runs about an hour after the start. It deletes a leftover `.tmp` file and runs the compaction again. Lite logs one line when compaction ends: complete, cancelled by shutdown, or failed.
 
