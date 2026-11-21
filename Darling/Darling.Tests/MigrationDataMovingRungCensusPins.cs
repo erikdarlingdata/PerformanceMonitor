@@ -517,6 +517,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "5 uncompressed six-hour chunks holding 1,700,000 rows (40 servers, 40 collector names) plus 135 compressed chunks: 3.2 to 3.3 s for "
             + "the whole rung on PostgreSQL 18.7, every one of the 140 chunks ending with one covering index. Far inside one command timeout, so it "
             + "does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            294,
+            SetsTheFloor: false,
+            "#9284: CREATE INDEX on collect.aggregate_compression_order_history (created V279), the rung's sentinel and a read of one aggregate's "
+            + "latest outcome. The table gets one row per rung run that reached an ALTER and is never purged, so it holds a handful of rows on any "
+            + "store and the build is instant. The rung's other statement is a catalog-only ALTER of the corrected daily rollup's compression "
+            + "settings (no chunk is rewritten) and an INSERT of one history row. Far inside one command timeout, so it does not move the "
+            + "MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>
