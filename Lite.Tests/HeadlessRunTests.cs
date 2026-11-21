@@ -268,6 +268,33 @@ public sealed class HeadlessRunTests
     }
 
     [Fact]
+    public async Task ADisabledUpgradeHandoff_IsNotListening_AndAnEnableOpensItAgain()
+    {
+        var unique = Guid.NewGuid().ToString("N");
+        var eventName = $"HeadlessRunTests_Exit_{unique}";
+        var shutdownRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var running = new SingleInstanceCoordinator(new SingleInstanceOptions
+        {
+            MutexName = $"HeadlessRunTests_Mutex_{unique}",
+            ProcessName = "HeadlessRunTests",
+            ExitEventName = eventName,
+            GracefulSelfExit = () => shutdownRan.TrySetResult(),
+            Prompts = new HeadlessHandoffPrompts(),
+        });
+        Assert.True(running.TryBecomeOwner());
+
+        running.DisableUpgradeHandoff();
+        running.EnableUpgradeHandoff();
+        running.DisableUpgradeHandoff();
+        Assert.False(SingleInstanceSignal.TrySignal(eventName));
+        Assert.False(shutdownRan.Task.IsCompleted);
+
+        running.EnableUpgradeHandoff();
+        Assert.True(SingleInstanceSignal.TrySignal(eventName));
+        await shutdownRan.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public void Stop_BeforeTheInstanceIsPastItsStartup_FindsNobodyListening()
     {
         var unique = Guid.NewGuid().ToString("N");

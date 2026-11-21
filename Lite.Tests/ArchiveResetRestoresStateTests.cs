@@ -498,10 +498,10 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     {
         /* Guards the start-up order the recovery relies on; it holds today. */
         var source = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(RepoPath("Lite", "MainWindow.xaml.cs")));
-        var body = MethodBody(source, "private async void MainWindow_Loaded(");
+        var body = MethodBody(source, "private async Task InitializeServicesAsync(");
 
-        var init = body.IndexOf("_databaseInitializer.InitializeAsync(", StringComparison.Ordinal);
-        Assert.True(init >= 0, "MainWindow_Loaded initializes the database");
+        var init = body.IndexOf("InitializeStoreAsync(", StringComparison.Ordinal);
+        Assert.True(init >= 0, "the start initializes the database");
         foreach (var later in new[] { "new CollectionBackgroundService(", "new AlertEngine(", "_muteRuleService.LoadAsync(", "StartMcpServerAsync(" })
         {
             var at = body.IndexOf(later, StringComparison.Ordinal);
