@@ -84,6 +84,7 @@ public sealed class LiveClockCensusTests
         ["RawPurgeTriggerLiveTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
         ["RawTablesLeaveCatalogSweepLiveTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
         ["ServerListAndSummaryPlanShapeTests.cs"] = "The newest row is one minute old and the assert is at most two chunks visited, true on either side of midnight. No time goes to the product.",
+        ["AttentionHypertableSwapLiveTests.cs"] = "The chunk read compares the number of chunks with the number of chunk indexes, so it holds for any layout, and the one direct clock read is a stamp on a copied row.",
         ["StoreMetricsLatestSkipScanLiveTests.cs"] = "A plain table; it asserts index names, not chunks.",
         ["StoreSelfMetricsTests.cs"] = "Seeds are placed at midday of a date (#1972); the clock is only a stamp.",
         ["TimescaleSupportTests.cs"] = "Seeds are placed at midday of a date (#1972); the clock is only a stamp.",
