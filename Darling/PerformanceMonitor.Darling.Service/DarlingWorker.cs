@@ -450,7 +450,7 @@ public sealed partial class DarlingWorker : BackgroundService
            its one autovacuum ran beside an old open snapshot, and autovacuum never returns to it. One catalog read; a plain VACUUM only for
            a chunk that lags, so a settled store issues none. */
         new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
-            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, ct)),
+            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct)),
 
         /* #2007/#3653: BEFORE the fallback ensure (hygiene — the retired names left the ensure list, so it
            could not recreate them anyway). Judges each superseded pair against the tier horizon, which is a

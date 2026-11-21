@@ -184,16 +184,16 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.True(await HeapFetchesAsync(c, from, to, ct) > 0, "the stuck chunk's index-only read made no heap fetch, so the seed is not the stuck state");
 
             /* Just vacuumed, so the default minimum age leaves it for a later pass. */
-            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, ct));
+            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, cancellationToken: ct));
             Assert.Equal(0, (await DailyChunkAsync(c, ct)).AllVisible);
 
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, ct, TimeSpan.Zero));
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             Assert.Equal(0, await HeapFetchesAsync(c, from, to, ct));
 
             /* Settled: no chunk lags, so no VACUUM is issued (the last vacuum time is the same). */
-            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, ct, TimeSpan.Zero));
+            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
             Assert.Equal(settled.LastVacuum, (await DailyChunkAsync(c, ct)).LastVacuum);
             bodySucceeded = true;
         }

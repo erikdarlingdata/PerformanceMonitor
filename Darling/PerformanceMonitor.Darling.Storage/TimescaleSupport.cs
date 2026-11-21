@@ -8121,7 +8121,7 @@ LIMIT {RollupVacuumMaxChunksPerPass}";
     /// Returns how many chunks it vacuumed.
     /// </summary>
     public static async Task<int> EnsureRollupChunkVisibilityAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default, TimeSpan? minVacuumAge = null)
+        NpgsqlConnection connection, ILogger? logger, TimeSpan? minVacuumAge = null, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {

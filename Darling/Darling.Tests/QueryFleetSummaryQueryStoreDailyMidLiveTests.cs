@@ -91,6 +91,12 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
         }
     }
 
+    private static async Task<T> Scalar<T>(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return (T)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task Exec(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
@@ -281,6 +287,44 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
             var ties = all.Where(r => r.Database is "TieA" or "TieB").ToArray();
             Assert.Equal(2, ties.Length);
             Assert.Equal(ties[0].CpuUs, ties[1].CpuUs);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>#9223: the edge that reads the window's first partial day probes the hourly rollup once per server. With the hourly rollup's chunks compressed
+    /// (the state of the oldest hours on a settled store) the statement still answers what the hourly-only oracle answers, across the NULL database pair, the
+    /// CPU ties and every row cap. Red when a server's rows are lost or doubled by the per-server read.</summary>
+    [Fact]
+    public async Task MidRoute_AnswersWhatTheHourlyRollupAnswers_WhenTheHourlyChunksAreCompressed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t = NewTimeline();
+        var store = await CreateStoreAsync(ct);
+        await using var scratch = store.Scratch;
+        await using var connection = store.Connection;
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(connection, ct, t);
+            await RefreshAllAsync(connection, ct, t, t.DEnd);
+            await InsertTailAsync(connection, ct, t);
+            await Exec(connection, TimescaleSupport.EnableAggregateCompressionSql(TimescaleSupport.QueryStoreStatsCorrectedHourlyView), ct);
+            await Exec(connection,
+                @"SELECT compress_chunk(ch, if_not_compressed => true) FROM show_chunks((SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)
+                  FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = 'query_store_stats_corrected_hourly')::regclass) AS ch", ct);
+            Assert.True(await Scalar<long>(connection,
+                @"SELECT count(*) FROM timescaledb_information.chunks ch JOIN timescaledb_information.continuous_aggregates ca
+                  ON ca.materialization_hypertable_name = ch.hypertable_name AND ca.materialization_hypertable_schema = ch.hypertable_schema
+                  WHERE ca.view_name = 'query_store_stats_corrected_hourly' AND ch.is_compressed", ct) > 0, "no hourly chunk was compressed");
+            await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var (plan, rawFrom) = await PlanAsync(pg, t, LiveClock.Now(), ct);
+            Assert.NotNull(plan);
+            await AssertMidSameAsOracleAsync(pg, t, plan!, rawFrom, 200, 2, 3, 4, 5, 6);
             bodySucceeded = true;
         }
         finally
