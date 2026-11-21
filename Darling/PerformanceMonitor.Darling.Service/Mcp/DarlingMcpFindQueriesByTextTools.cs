@@ -335,6 +335,68 @@ FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
 ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
+    /// <summary>#9219: <see cref="PlanCacheAllServersSpanSql"/> for the newest spans (<see cref="AllServersLookupSpans"/>): the same parameters and the same
+    /// rows, but the pattern is tested only on the texts the span's own samples carry, each read by primary key, and not on every text in the store. The
+    /// window join repeats a whole text match in every span, which on a common pattern reads most of the text table before the span's rows can be
+    /// listed (about 29,000 heap blocks on the measured store, most of the first span's time), so a budget that fit the span's samples still ran out. The
+    /// <c>LIMIT 1</c> keeps the planner from flattening the lookup back into a join with the whole table. Measured on 320,000 texts and 3.0 M samples over
+    /// four days, a first span of one hour (about 26,000 distinct texts): a pattern every text contains took 2.3 s with the window join and 0.7 s with
+    /// this statement. It is not used past the newest spans: the lookup costs more per text than the join's single pass over the table, so it stops
+    /// paying once a span carries a large share of the texts (the four-hour span took 1.3 to 2.7 s here against 2.4 s for the join).</summary>
+    internal const string PlanCacheAllServersLookupSpanSql = @"
+WITH seen AS MATERIALIZED (
+    SELECT DISTINCT s.query_text_digest AS digest
+    FROM query_stats AS s
+    JOIN servers AS v ON v.server_id = s.server_id AND v.is_enabled
+    WHERE s.collection_time >= $3
+    AND   s.collection_time < $4
+    AND   s.query_text_digest IS NOT NULL
+),
+matched AS MATERIALIZED (
+    SELECT f.digest
+    FROM seen AS f
+    CROSS JOIN LATERAL (SELECT 1 AS hit
+                        FROM query_text_dim AS d
+                        WHERE d.digest = f.digest
+                        AND   d.query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+                        LIMIT 1) AS t
+),
+hits AS (
+    SELECT DISTINCT ON (s.server_id, s.query_hash, s.database_name)
+           s.server_id, s.query_hash, s.database_name, s.collection_time AS last_collected, s.query_text_digest
+    FROM query_stats AS s
+    JOIN matched AS m ON m.digest = s.query_text_digest
+    JOIN servers AS v ON v.server_id = s.server_id AND v.is_enabled
+    WHERE s.collection_time >= $3
+    AND   s.collection_time < $4
+    ORDER BY s.server_id, s.query_hash, s.database_name, s.collection_time DESC
+),
+page AS (
+    SELECT h.server_id, h.query_hash, h.database_name, h.last_collected, h.query_text_digest
+    FROM hits AS h
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM unnest($5::integer[], $6::text[], $7::text[]) AS k(server_id, query_hash, database_name)
+        WHERE k.server_id = h.server_id
+        AND   k.query_hash IS NOT DISTINCT FROM h.query_hash
+        AND   k.database_name IS NOT DISTINCT FROM h.database_name
+    )
+    ORDER BY h.last_collected DESC, h.server_id, h.query_hash, h.database_name
+    LIMIT $2
+)
+SELECT p.server_id, p.query_hash, p.database_name, p.last_collected, d.query_text
+FROM page AS p
+JOIN query_text_dim AS d ON d.digest = p.query_text_digest
+ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
+
+    /// <summary>#9219: how many of the newest spans the all-servers window join reads with <see cref="PlanCacheAllServersLookupSpanSql"/>: the first two, an hour
+    /// each of a four-day tier. The spans after them are wider and carry too large a share of the texts for a lookup per text to beat the join.</summary>
+    internal const int AllServersLookupSpans = 2;
+
+    /// <summary>#9219: the window-join statement the all-servers search runs for span <paramref name="step"/> (0 is the newest).</summary>
+    internal static string AllServersJoinSql(int step) =>
+        step < AllServersLookupSpans ? PlanCacheAllServersLookupSpanSql : PlanCacheAllServersSpanSql;
+
     /// <summary>
     /// #7849: how many matched texts the all-servers sample read takes as an array (<see cref="PlanCacheAllServersProbeSql"/>) before it falls back to
     /// the window join (<see cref="PlanCacheAllServersSpanSql"/>). Measured on a seeded large store (40 servers, 3.0 M sample rows over four days, 300,000
@@ -914,7 +976,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     var wanted = limit + 1 - collected.Count;
                     var probed = digests;
                     return probed is null
-                        ? new SourceStatement(PlanCacheAllServersSpanSql, p => BindAllServersSpan(
+                        ? new SourceStatement(AllServersJoinSql(step), p => BindAllServersSpan(
                             p, new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped }, wanted, span, collected))
                         : new SourceStatement(PlanCacheAllServersProbeSql, p => BindAllServersSpan(
                             p, new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = probed }, wanted, span, collected));
