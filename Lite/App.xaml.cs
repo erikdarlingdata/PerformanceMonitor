@@ -663,6 +663,19 @@ public partial class App : Application
 
         if (!_instanceCoordinator.TryBecomeOwner())
         {
+            /* #9197: the mutex could not be created or opened and no other instance is running. That is a failed start, not a
+               hand-off to a running Lite: it leaves a reason in the log (AppLogger.Initialize has not run, so the log folder is
+               created here) and ends with the init-failed code, where a quiet exit 0 would read as success to a scheduled task.
+               A start with a window also shows the reason once. */
+            if (_instanceCoordinator.FailureReason is { } startFailure)
+            {
+                StartFailureLog.Write(startFailure, Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Services.DataRootMigration.DataRootName, "logs"));
+                Shutdown(_startupPlan.ExitCodeAfterOwnershipFailure(
+                    startFailure, reason => MessageBoxHandoffPrompts.ShowStartFailed("Performance Monitor Lite", reason)));
+                return;
+            }
+
             Shutdown();
             return;
         }

@@ -101,7 +101,7 @@ A normal headless start can therefore write no `Headless: skipped` line. After a
 
 Only one Lite runs in a Windows session. If you start Lite a second time in that session, the second start exits. A headless Lite does not show a window when the second start asks it to.
 
-If a headless Lite fails to start, it writes the error to the log and exits with code 3. Task Scheduler then sees a failed run, and its restart setting starts Lite again.
+If a headless Lite fails to start, it writes the error to the log and exits with code 3. Task Scheduler then sees a failed run, and its restart setting starts Lite again. A start also fails this way when the account is not allowed to create the lock that keeps Lite to one copy and no other Lite is running.
 
 #### Set up a dedicated Windows user
 
