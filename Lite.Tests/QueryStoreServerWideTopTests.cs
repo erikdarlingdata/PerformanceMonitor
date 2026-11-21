@@ -149,6 +149,40 @@ public sealed class QueryStoreServerWideTopTests : IDisposable
     }
 
     [Fact]
+    public async Task NewestSnapshot_OnATimeTieWithANullExecutionCount_IsTheRowWithTheCount()
+    {
+        /* #9195: execution_count is nullable. Inside a struct DuckDB orders a NULL field above every value, so the aggregate's
+           (collection_time, execution_count) pick took the NULL row where the window put it last (NULLS LAST under DESC). Two snapshots of one
+           interval at one collection_time, counts 5 and NULL, the NULL row inserted last: the read must answer with the 5 row. */
+        Directory.CreateDirectory(_dir);
+        _duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
+        await _duckDb.InitializeFromTemplateAsync();
+        var collected = _now.AddHours(-2).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var intervalStart = _now.AddHours(-3).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+        using (var readLock = _duckDb.AcquireReadLock())
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, "
+                + "first_execution_time, last_execution_time, query_hash, execution_count, avg_cpu_time_us, avg_duration_us, query_plan_hash, is_forced_plan, "
+                + "force_failure_count, runtime_stats_interval_id, replica_role, interval_start_time_utc) VALUES "
+                + $"(1, TIMESTAMP '{collected}', {ServerId}, 'srv', 'db0', 7, 7, 'Regular', TIMESTAMP '{intervalStart}', TIMESTAMP '{collected}', '0xQH7', 5, 100, 100, '0xPH7', false, 0, 100, NULL, TIMESTAMP '{intervalStart}'),"
+                + $"(2, TIMESTAMP '{collected}', {ServerId}, 'srv', 'db0', 7, 7, 'Regular', TIMESTAMP '{intervalStart}', TIMESTAMP '{collected}', '0xQH7', NULL, 900, 900, '0xPH7', false, 0, 100, NULL, TIMESTAMP '{intervalStart}')";
+            await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+        var service = new LocalDataService(_duckDb);
+
+        var rows = await service.GetQueryStoreTopQueriesAsync(ServerId, 24, 10, asOfUtc: _now);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(5, row.TotalExecutions);
+        Assert.Equal(0.1, row.AvgDurationMs, 6);
+    }
+
+    [Fact]
     public async Task OneDatabaseTop_IsTheSameRowsAsBefore()
     {
         var service = await SeedAsync();

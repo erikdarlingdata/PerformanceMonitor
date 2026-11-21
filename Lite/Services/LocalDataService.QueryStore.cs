@@ -235,9 +235,11 @@ WITH latest AS (
     /* #9195: the newest snapshot per interval by a hash aggregate on the narrow columns, not ROW_NUMBER() over them: the window sorts
        every row of the window (about 4x the aggregate's time on 480,000 rows) and a server-wide read has the most rows. arg_max picks
        the greatest (collection_time, execution_count), the row the window's ORDER BY collection_time DESC, execution_count DESC put first,
-       and the NULL-safe grouping is the window partition's. */
+       and the NULL-safe grouping is the window partition's. execution_count is nullable and DuckDB orders a NULL struct field above every
+       value, so COALESCE(execution_count, -1) sorts a NULL count lowest (a count is never below 0), which keeps the window's NULLS LAST
+       order on an execution_count tie (#9195). collection_time cannot be NULL here, the bounds below drop those rows. */
     SELECT
-        arg_max(collection_id, (collection_time, execution_count)) AS latest_id,
+        arg_max(collection_id, (collection_time, COALESCE(execution_count, -1))) AS latest_id,
         MAX(collection_time) AS latest_time
     FROM v_query_store_stats
     WHERE server_id = $1
