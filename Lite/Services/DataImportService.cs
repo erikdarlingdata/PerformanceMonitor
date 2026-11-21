@@ -58,6 +58,40 @@ public class DataImportService
     }
 
     /// <summary>
+    /// What a flush reads from <paramref name="table"/> of the old store (#9241). A store at schema 85 or later keeps the query
+    /// text of a diverted table once in a text table and leaves the row's own text NULL, so the flush reads the <c>vh_</c> view,
+    /// which resolves the text and leaves the digest columns out: the Parquet file then has the text on every row and the shape
+    /// of a file written before the change. A store older than that has no view and no digest column, and is read as the table.
+    /// A store that has its digest column but no view (a view build that failed and is retried at the next start) is read as the
+    /// table without the digest column, which is every row's inline text and nothing the file must not carry.
+    /// </summary>
+    internal static string SelectForFlush(DuckDBConnection connection, string table)
+    {
+        var digests = LiteTextDimensions.For(table).Select(d => d.DigestColumn).Distinct().ToList();
+        if (digests.Count == 0)
+        {
+            return $"SELECT * FROM {table}";
+        }
+
+        using var probe = connection.CreateCommand();
+        probe.CommandText = $@"
+SELECT
+    (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_type = 'VIEW' AND table_name = '{LiteTextDimensions.ViewName(table)}'),
+    (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'main' AND table_name = '{table}' AND column_name IN ({string.Join(", ", digests.Select(c => $"'{c}'"))}))";
+        using var reader = probe.ExecuteReader();
+        reader.Read();
+        var hasView = Convert.ToInt64(reader.GetValue(0)) > 0;
+        var digestColumns = Convert.ToInt64(reader.GetValue(1));
+
+        if (hasView)
+        {
+            return $"SELECT * FROM {LiteTextDimensions.ViewName(table)}";
+        }
+
+        return digestColumns == 0 ? $"SELECT * FROM {table}" : $"SELECT * EXCLUDE ({string.Join(", ", digests)}) FROM {table}";
+    }
+
+    /// <summary>
     /// Opens the old DuckDB in read-write mode to flush hot table data to parquet. <c>Failure</c> says why the open
     /// failed, <see cref="DataImportOpenFailure.None"/> when it opened, and <c>OpenError</c> is the exception behind a
     /// failure, whose text the caller's message carries.
@@ -121,7 +155,7 @@ public class DataImportService
                        in a Windows path — so escape it for the SQL literal the way every sibling COPY does
                        (ArchiveService, ParquetCompaction), instead of interpolating it raw. */
                     using var exportCmd = connection.CreateCommand();
-                    exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{DuckDbInitializer.EscapeSqlPath(parquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
+                    exportCmd.CommandText = $"COPY ({SelectForFlush(connection, table)}) TO '{DuckDbInitializer.EscapeSqlPath(parquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                     exportCmd.ExecuteNonQuery();
 
                     tablesFlushed++;

@@ -209,6 +209,8 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
                 "query_plan_text" => "repeat('<ShowPlanXML><RelOp NodeId=\"0\"/></ShowPlanXML>', 40) || q",
                 "execution_count" => "1 + hash(i) % 50",
                 _ when type.Contains("VARCHAR", StringComparison.OrdinalIgnoreCase) => "'v' || (q % 50)",
+                /* The query text digest column (#9241) is a BLOB, which a number cannot be cast to. */
+                _ when type.Equals("BLOB", StringComparison.OrdinalIgnoreCase) => "unhex(sha256('d' || (q % 50)))",
                 _ when type.Equals("BOOLEAN", StringComparison.OrdinalIgnoreCase) => "false",
                 _ when type.Contains("TIMESTAMP", StringComparison.OrdinalIgnoreCase) => "TIMESTAMP '2026-10-01 00:00:00'",
                 _ when type.Equals("DOUBLE", StringComparison.OrdinalIgnoreCase) => $"(hash(i + {index}) % 100000) / 7.0",

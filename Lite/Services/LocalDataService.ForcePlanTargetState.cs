@@ -251,7 +251,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     internal static Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
         PerformanceMonitorLite.Database.ArchiveReadPlan plan, CancellationToken cancellationToken) =>
-        ReadAsync(command, serverId, targets, nowUtc, table => plan.IsHot(table) ? table : "v_" + table, cancellationToken);
+        ReadAsync(command, serverId, targets, nowUtc, plan.SourceFor, cancellationToken);
 
     /// <summary>The same read over the relation <paramref name="relationFor"/> names for each of <see cref="ArchivedTables"/>:
     /// its <c>v_</c> view or its hot table (#7256, from the analysis service's read).</summary>

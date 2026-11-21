@@ -1181,7 +1181,7 @@ ORDER BY collection_time DESC";
     private Task<List<JsonObject>> ReadClientTimeoutsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken) =>
         WithConnectionAsync(async (connection, plan) =>
         {
-            var events = plan.IsHot("attention_events") ? "attention_events" : "v_attention_events";
+            var events = plan.SourceFor("attention_events");
             async Task<List<T>> Query<T>(string sql, Func<DuckDBDataReader, T> map)
             {
                 using var command = Command(connection, sql, serverId, from, to);
