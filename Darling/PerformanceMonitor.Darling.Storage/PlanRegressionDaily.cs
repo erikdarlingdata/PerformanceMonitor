@@ -429,8 +429,9 @@ AND   day = $2::date;";
 
     /// <summary>What one tick did. <paramref name="Skipped"/> counts items another builder held the server's lock for.
     /// <paramref name="Advanced"/> counts the partial days whose watermark moved without a build (<see cref="AdvanceIdleSql"/>),
-    /// <paramref name="Stamped"/> the tomorrows stamped with no totals (<see cref="StampTomorrowSql"/>).</summary>
-    public readonly record struct TickResult(int Built, int Failed, int Skipped, long DaysRemoved, int Deferred = 0, int Advanced = 0, int Stamped = 0);
+    /// <paramref name="Stamped"/> the tomorrows stamped with no totals (<see cref="StampTomorrowSql"/>), <paramref name="BlocksBuilt"/> the
+    /// blocks of days summed after the day builds (<see cref="PlanRegressionBlock"/>, #9225), which never changes the other counts.</summary>
+    public readonly record struct TickResult(int Built, int Failed, int Skipped, long DaysRemoved, int Deferred = 0, int Advanced = 0, int Stamped = 0, int BlocksBuilt = 0);
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -666,7 +667,20 @@ AND   day = $2::date;";
         }
 
         var deferred = plan.Count - started;
-        var result = new TickResult(built, failed, skipped, removed, deferred, advanced, stamped);
+
+        // The block pre-aggregate is a copy of the daily rows the builder just kept (#9225): a failure here costs the read its gain and nothing else,
+        // so it is logged and never fails the tick or changes the day counts.
+        var blocksBuilt = 0;
+        try
+        {
+            blocksBuilt = (await PlanRegressionBlock.RunStepAsync(connection, nowUtc, logger, elapsed, cancellationToken)).Built;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "PLAN_REGRESSION blocks: the block step failed and is retried next tick (the read uses the daily rows): {Message}", ex.Message);
+        }
+
+        var result = new TickResult(built, failed, skipped, removed, deferred, advanced, stamped, blocksBuilt);
         logger.LogInformation("PLAN_REGRESSION daily totals: built {Built}, failed {Failed}, skipped {Skipped}, deferred {Deferred}, advanced {Advanced} and stamped {Stamped} without a build, removed {Removed} day(s), {ElapsedMs} ms",
             built, failed, skipped, deferred, advanced, stamped, removed, (long)elapsed().TotalMilliseconds);
         return result;

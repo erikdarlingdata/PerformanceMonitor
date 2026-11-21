@@ -929,6 +929,9 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // catalog (it lives in the materialization's schema), so a re-run of V292 builds it again. Safe on a store that never had it.
         new(292, "hasQueryStoreCorrectedDailyHashIndex",
             @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_daily_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
+        // V294 (#9225): the plan regression block tables, the probe's newest sentinel. The rewind drops both, so a re-run of V294 creates them empty and the builder
+        // sums the blocks again from the daily rows. Safe on a store that never had them.
+        new(294, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
     ];
 
     /// <summary>

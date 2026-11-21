@@ -3854,6 +3854,10 @@ END $$;";
            get_query_fleet_summary's Query Store statement reads the newest uncompressed daily chunks through it instead of scanning them whole.
            Catalog-only for the data: no row moves. An older build ignores the index. */
         new Migration(292, "query-store-corrected-daily-hash-index", V292Sql),
+        /* V294 (#9225): the plan regression block tables, the pre-aggregate of collect.plan_regression_daily the PLAN_REGRESSION read will take whole blocks of days
+           from. Two plain tables and one unique index, created empty: no data moves, and the builder fills the blocks from the daily rows as it runs. An older
+           build ignores them. (V293 is held by an open change, so the numbers skip it.) */
+        new Migration(PlanRegressionBlock.Version, "plan-regression-block", PlanRegressionBlock.CreateSql),
     };
 
     /// <summary>
