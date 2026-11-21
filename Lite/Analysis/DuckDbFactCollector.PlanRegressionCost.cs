@@ -44,6 +44,8 @@ WITH deduped AS
         last_execution_time,
         is_forced_plan,
         force_failure_count,
+        -- #9195: the row's key, carried so the candidates' text is read by it after the gates (`texts` below).
+        collection_id,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
@@ -76,6 +78,7 @@ plan_agg AS
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count,
+        MAX(collection_id) AS text_collection_id,
         -- #5631: rows returned per call, weighted by executions over the same deduplicated intervals as
         -- cpu_per_exec. NULL when any interval has no avg_rowcount: a partial average would understate the
         -- output, and the output rule must not fire on it.
@@ -101,6 +104,8 @@ plan_dedup AS
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count,
+        -- #9195: the group's newest deduplicated row, whose text `texts` reads for a candidate.
+        MAX(text_collection_id) AS text_collection_id,
         -- #5630: one representative plan_id per plan group, for the compiled-inputs check. The latest group's is
         -- the plan that ran last; the best group's is the one that ran most. Their XML is fetched live, for
         -- candidates only.
@@ -174,7 +179,8 @@ compared AS
         b.busiest_plan_id AS best_plan_id,
         -- #5631: rows per call of the two plans, for the output rule (a newer plan that returns far more rows).
         l.rows_per_exec AS latest_rows,
-        b.rows_per_exec AS best_rows
+        b.rows_per_exec AS best_rows,
+        l.text_collection_id
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -200,22 +206,18 @@ candidates AS
 ),
 texts AS
 (
-    /* #9195: the statement text of the candidates only, from the rows of the plan group each candidate's latest plan belongs to.
-       It used to ride through the dedup, the per-plan sum and the plan grouping on every row of the window (about 465 MB of text
-       on a busy server, sorted, hashed and copied) to be read for the few rows that survive the gates above. any_value skips
-       NULLs, as it did in plan_agg. The text of one query_id is the same on every row of it (Query Store keeps it once per query),
-       so the pick is the same. replica_role is compared NULL-safe: it is NULL on every standalone server. */
-    SELECT s.database_name, s.query_id, s.replica_role, s.query_plan_hash, any_value(s.query_text) AS query_text
+    /* #9195: the statement text of the candidates only, one row each: the newest deduplicated row of the plan group the
+       candidate's latest plan belongs to (text_collection_id). The text rides through none of the steps above, and the read
+       below fetches the candidates' rows by key, so it decodes the text of those rows and no others. The text of one query_id
+       is the same on every row of it (Query Store keeps it once per query), so one row of the group gives the group's text.
+       collection_id is unique per row (CollectionIdGenerator). The GROUP BY keeps one row per key if the hot table and the
+       archive both hold a row, as they can between an archival's copy and its delete. That row passed the window, Regular and
+       replica filters in `deduped`, so they are not repeated here. */
+    SELECT s.collection_id, any_value(s.query_text) AS query_text
     FROM v_query_store_stats AS s
     WHERE s.server_id = $1
-    AND   s.execution_type_desc = 'Regular'
-    AND   s.last_execution_time >= $2
-    AND   s.collection_time <= $3
-    /*SEC*/
-    -- Keyed on the query alone: a join on the plan hash and the replica too ran 50 percent slower (measured, #9195). The grouping
-    -- below keeps each plan group's text apart, and the final join picks the candidate's own.
-    AND   (s.database_name, s.query_id) IN (SELECT database_name, query_id FROM candidates)
-    GROUP BY s.database_name, s.query_id, s.replica_role, s.query_plan_hash
+    AND   s.collection_id IN (SELECT text_collection_id FROM candidates)
+    GROUP BY s.collection_id
 )
 SELECT
     c.query_id,
@@ -240,10 +242,7 @@ SELECT
     c.best_rows
 FROM candidates AS c
 LEFT JOIN texts AS t
-  ON  t.database_name = c.database_name
-  AND t.query_id = c.query_id
-  AND t.replica_role IS NOT DISTINCT FROM c.replica_role
-  AND t.query_plan_hash = c.latest_plan_hash
+  ON  t.collection_id = c.text_collection_id
 -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
 -- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
 WHERE NOT regexp_matches(lower(COALESCE(t.query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')

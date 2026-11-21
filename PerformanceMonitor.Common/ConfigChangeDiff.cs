@@ -149,6 +149,52 @@ public static class ConfigChangeDiff
         "is_accelerated_database_recovery_on", "is_memory_optimized_enabled", "is_optimized_locking_on",
     };
 
+    /// <summary>
+    /// #9270: the <c>state_desc</c> values of a database that is not settled. A capture taken while a database is in one of these
+    /// holds engine defaults for most of its settings (a restoring database reads snapshot isolation OFF, for one), so the capture is
+    /// never a side of a settings comparison.
+    /// </summary>
+    public static readonly IReadOnlyList<string> TransitionalDatabaseStates = new[] { "RESTORING", "RECOVERING", "RECOVERY_PENDING" };
+
+    /// <summary>#9270: whether <paramref name="stateDesc"/> is one of <see cref="TransitionalDatabaseStates"/> (any letter case; null is settled).</summary>
+    public static bool IsTransitionalDatabaseState(string? stateDesc)
+    {
+        if (stateDesc is null)
+        {
+            return false;
+        }
+
+        foreach (var transitional in TransitionalDatabaseStates)
+        {
+            if (string.Equals(stateDesc, transitional, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>#9270: where <c>state_desc</c> sits in <see cref="DatabaseConfigChangeSettingNames"/> and so in a snapshot's values, found by name so a reorder of the list cannot turn the transitional skip off.</summary>
+    private const string StateSettingName = "state_desc";
+
+    private static readonly int StateIndex = IndexOfSetting(StateSettingName);
+
+    private static string? StateOf(DatabaseConfigSnapshot snapshot) => StateIndex < snapshot.Values.Count ? snapshot.Values[StateIndex] : null;
+
+    private static int IndexOfSetting(string name)
+    {
+        for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)
+        {
+            if (string.Equals(DatabaseConfigChangeSettingNames[i], name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return int.MaxValue;
+    }
+
     /* ─────────────────────────── C# snapshot diffs (pure, unit-testable, no live store) ─────────────────────────── */
 
     /// <summary>
@@ -187,6 +233,13 @@ public static class ConfigChangeDiff
     /// consecutive captures — the WIDE row is UNPIVOTed against <see cref="DatabaseConfigChangeSettingNames"/> so
     /// the setting_name is the literal column name. Emits changes in (<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], newest first.
+    /// <para>#9270: a capture of a database in a transitional state (<see cref="IsTransitionalDatabaseState"/>) holds engine defaults for
+    /// its other settings, so it never supplies them: every setting but <c>state_desc</c> compares a settled capture with the newest settled
+    /// one before it, and a setting changed across a restoring capture still shows. A run of transitional captures (consecutive, after a
+    /// settled one) that ends before it is stuck (<see cref="TransitionalDatabaseRuns.StuckAfter"/> after its first capture), such as the
+    /// minutes after a restart or failover, gives no row. A stuck run gives a <c>state_desc</c> row from the settled state to the
+    /// transitional one, stamped at the capture that made it stuck, and a settled capture that ends it gives one from the run's last
+    /// transitional state to the settled state. A database transitional since it was first seen gives no row.</para>
     /// </summary>
     public static List<DatabaseConfigChange> DiffDatabaseConfigChanges(
         IReadOnlyList<DatabaseConfigSnapshot> snapshots, DateTime startUtc, DateTime endUtc)
@@ -195,12 +248,47 @@ public static class ConfigChangeDiff
         foreach (var dbGroup in snapshots.GroupBy(s => s.DatabaseName))
         {
             DatabaseConfigSnapshot? prev = null;
+            DatabaseConfigSnapshot? runFirst = null;
+            DatabaseConfigSnapshot? runLast = null;
+            var stuck = false;
             foreach (var cur in dbGroup.OrderBy(s => s.CaptureTime))
             {
+                if (StateIndex < cur.Values.Count && IsTransitionalDatabaseState(cur.Values[StateIndex]))
+                {
+                    if (prev is null)
+                    {
+                        continue;
+                    }
+
+                    runFirst ??= cur;
+                    runLast = cur;
+                    if (!stuck && cur.CaptureTime - runFirst.CaptureTime >= TransitionalDatabaseRuns.StuckAfter)
+                    {
+                        stuck = true;
+                        if (cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
+                        {
+                            changes.Add(new DatabaseConfigChange(
+                                cur.CaptureTime, cur.DatabaseName, StateSettingName, StateOf(prev), StateOf(cur), prev.CaptureTime));
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (stuck && runLast is not null && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
+                {
+                    changes.Add(new DatabaseConfigChange(
+                        cur.CaptureTime, cur.DatabaseName, StateSettingName, StateOf(runLast), StateOf(cur), runLast.CaptureTime));
+                }
+
                 if (prev is not null && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
                 {
                     for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)
                     {
+                        /* A stuck run's two state rows were emitted above; the settled states themselves are not compared again. */
+                        if (stuck && i == StateIndex)
+                            continue;
+
                         var oldVal = i < prev.Values.Count ? prev.Values[i] : null;
                         var newVal = i < cur.Values.Count ? cur.Values[i] : null;
                         if (!string.Equals(oldVal, newVal, StringComparison.Ordinal))
@@ -219,6 +307,9 @@ public static class ConfigChangeDiff
                 }
 
                 prev = cur;
+                runFirst = null;
+                runLast = null;
+                stuck = false;
             }
         }
 
