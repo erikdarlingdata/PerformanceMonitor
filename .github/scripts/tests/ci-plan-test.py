@@ -207,7 +207,12 @@ check("a dev push's legs_json", run(["README.md"], event="push", cat=full)["legs
 # an unknown class weighs the mean; a missing Lite table falls back to the stand-in constants
 mean_cat = {"classes": {"darling": classes(["D1", "D2", "New"]), "lite": {}},
             "darling_weights": {"D1": 60, "D2": 180}, "lite_weights": {}}
-check("unweighted class weighs the mean", cp.estimate(mean_cat, "full", "none")[0], (60 + 180 + 120) / 60)
+check("unweighted class weighs the median of its kind (only kind known)", cp.estimate(mean_cat, "full", "none")[0], (60 + 180 + 120) / 60)
+# #9262: a class missing from the table weighs the median of its own kind, a live class and any other class apart
+kind_cat = {"classes": {"darling": classes(["A", "B", "C", "XLiveTests", "YLiveTests", "NewLiveTests", "NewPlain"]), "lite": {}},
+            "darling_weights": {"A": 6, "B": 12, "C": 600, "XLiveTests": 60, "YLiveTests": 180}, "lite_weights": {}}
+check("missing live class weighs the live median, missing other class the other median",
+      cp.estimate(kind_cat, "full", "none")[0], (6 + 12 + 600 + 60 + 180 + 120 + 12) / 60)
 no_lite = {"classes": {"darling": {}, "lite": l_cls}, "darling_weights": {}, "lite_weights": {}}
 check("missing Lite weights: full fallback", cp.estimate(no_lite, "none", "full")[1], cp.LITE_FULL_FALLBACK_MINUTES)
 check("missing Lite weights: reads fallback", cp.estimate(no_lite, "none", "reads")[1], cp.LITE_READS_FALLBACK_MINUTES)

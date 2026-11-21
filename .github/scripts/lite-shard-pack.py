@@ -210,6 +210,33 @@ def hash_shard(name, shards):
     return hashlib.sha256(name.encode("utf-8")).digest()[0] % shards
 
 
+LIVE_CLASS_SUFFIX = "LiveTests"
+
+
+def class_kind(name):
+    """The kind of a class, from its name alone: "live" when the simple name ends in LiveTests (a class that stands up a
+    PostgreSQL store, or a Lite class that reads a real one), else "other". #9262: the two kinds cost very different seconds,
+    so a class the weight tables do not know weighs the median of its own kind, not one number for every class."""
+    return "live" if re.split(r"[.+/]", name)[-1].split("`")[0].endswith(LIVE_CLASS_SUFFIX) else "other"
+
+
+def _median(values):
+    v = sorted(values)
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
+
+
+def missing_class_weight(known):
+    """A function name -> weight for a class the table does not know (#9262): the median of the known weights of that
+    class's kind. A kind with no known class takes the median of all known weights. With nothing known it weighs 0."""
+    by_kind = {}
+    for name, w in known.items():
+        by_kind.setdefault(class_kind(name), []).append(w)
+    overall = _median(list(known.values())) if known else 0.0
+    medians = {k: _median(v) for k, v in by_kind.items()}
+    return lambda name: medians.get(class_kind(name), overall)
+
+
 def class_weight(raw, is_serial):
     """Wall-clock cost of a class: a serial class's seconds, or a parallel class's seconds spread over the overlap."""
     return raw if is_serial else raw / PARALLEL_CONCURRENCY
@@ -217,11 +244,10 @@ def class_weight(raw, is_serial):
 
 def predicted_walls(assignment, weights, serial):
     """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds. A class with no
-    timing counts at the mean of the timed classes, as `pack` places it (#5208)."""
+    timing counts at the median of the timed classes of its kind, as `pack` places it (#5208, #9262)."""
     assigned = {c for shard in assignment for c in shard}
-    known = [weights[c] for c in assigned if c in weights]
-    default = sum(known) / len(known) if known else 0.0
-    return [sum(class_weight(weights.get(c, default), c in serial) for c in shard) for shard in assignment]
+    fill = missing_class_weight({c: weights[c] for c in assigned if c in weights})
+    return [sum(class_weight(weights[c] if c in weights else fill(c), c in serial) for c in shard) for shard in assignment]
 
 
 def shard_results(d):
@@ -321,10 +347,10 @@ def pack(classes, shards, weights, serial=frozenset()):
         for c in unique:
             out[hash_shard(c, shards)].append(c)
         return out, "hash"
-    default = sum(known.values()) / len(known)
+    fill = missing_class_weight(known)
     # The floor makes an empty shard impossible whenever there are at least as many classes as shards: a zero-time
     # class (every test skipped) would otherwise never move a shard's load off zero.
-    weight = {c: max(class_weight(known.get(c, default), c in serial), MIN_WEIGHT) for c in unique}
+    weight = {c: max(class_weight(known[c] if c in known else fill(c), c in serial), MIN_WEIGHT) for c in unique}
     load = [0.0] * shards
     for c in sorted(unique, key=lambda c: (-weight[c], c)):
         k = min(range(shards), key=lambda i: (load[i], i))
