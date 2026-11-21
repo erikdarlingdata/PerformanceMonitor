@@ -180,6 +180,8 @@ public sealed class TuningServerHashBuildBoundTests
                 Assert.Contains(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("ran out of time", StringComparison.Ordinal));
                 await ExecAsync(holder, "ROLLBACK", ct);
             }
+
+            Assert.NotNull(await ReadRecordAsync(ct));
         }
 
         public async Task<bool> IndexExistsAsync(CancellationToken ct)
