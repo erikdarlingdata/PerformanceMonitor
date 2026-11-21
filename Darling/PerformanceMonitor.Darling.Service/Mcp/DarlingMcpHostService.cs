@@ -1118,7 +1118,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                finds it held. A front door holds no store. */
             if (frontDoor is null)
             {
-                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken);
+                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken: stoppingToken);
             }
 
             _runningPort = effectivePort;

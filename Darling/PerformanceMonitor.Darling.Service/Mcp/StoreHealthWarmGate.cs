@@ -29,7 +29,8 @@ public sealed class StoreHealthWarmGate
     public static StoreHealthWarmGate Shared { get; } = new();
 
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly SemaphoreSlim _oneAtATime = new(1, 1);
+    private readonly object _chainGate = new();
+    private Task _tail = Task.CompletedTask;
 
     /// <summary>The store's migrations are done: every pass waiting starts, and a host that asks later starts at once.</summary>
     public void MarkStoreReady() => _ready.TrySetResult();
@@ -39,7 +40,7 @@ public sealed class StoreHealthWarmGate
     /// ready, in the background. A test hands in <paramref name="cache"/> over reads it counts. A failed read is logged as a warning (once for each failure) and never stops the host. The returned task ends
     /// with the pass; the hosts do not wait on it.
     /// </summary>
-    public Task WarmWhenReady(NpgsqlDataSource source, ILogger logger, CancellationToken stoppingToken = default, DarlingStoreTableHealthCache? cache = null)
+    public Task WarmWhenReady(NpgsqlDataSource source, ILogger logger, DarlingStoreTableHealthCache? cache = null, CancellationToken stoppingToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(logger);
@@ -47,25 +48,24 @@ public sealed class StoreHealthWarmGate
         held.OnReadFailed = (part, ex) => logger.LogWarning(
             ex, "Store table health read of {Part} failed ({Reason}); a later call reads it again",
             part, ex.GetType().Name);
-        return Task.Run(async () =>
+        lock (_chainGate)
         {
-            try
+            /* One pass at a time: each waits for the one before it (which never throws). */
+            var before = _tail;
+            _tail = Task.Run(async () =>
             {
-                await _ready.Task.WaitAsync(stoppingToken).ConfigureAwait(false);
-                await _oneAtATime.WaitAsync(stoppingToken).ConfigureAwait(false);
                 try
                 {
+                    await _ready.Task.WaitAsync(stoppingToken).ConfigureAwait(false);
+                    await before.WaitAsync(stoppingToken).ConfigureAwait(false);
                     await held.WarmAsync(source, stoppingToken).ConfigureAwait(false);
                 }
-                finally
+                catch (OperationCanceledException)
                 {
-                    _oneAtATime.Release();
+                    /* The host is stopping before its pass started. */
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                /* The host is stopping before its pass started. */
-            }
-        });
+            });
+            return _tail;
+        }
     }
 }

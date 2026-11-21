@@ -1448,7 +1448,7 @@ public sealed class DarlingWebHostService : BackgroundService
                Store Health page's first open finds it held. A front door holds no store. */
             if (postgres is not null)
             {
-                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken);
+                _ = StoreHealthWarmGate.Shared.WarmWhenReady(postgres, _logger, stoppingToken: stoppingToken);
             }
 
             _runningPort = effectivePort;
