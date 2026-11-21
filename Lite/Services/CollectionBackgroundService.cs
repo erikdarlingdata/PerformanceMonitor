@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -162,11 +163,13 @@ public class CollectionBackgroundService : BackgroundService
     /* dismissed_archive_alerts sidecar purge — the same daily cadence as its retention siblings. */
     internal static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
 
-    /* Size-based trigger — when the database exceeds this size, archive ALL data
+    /* Size-based trigger — when the database reaches the reset point, archive ALL data
        to parquet and reset the database. INSERT performance degrades badly with
        large tables (33x slower at 667MB in testing). Data remains fully queryable
-       through the archive views (hot UNION parquet). */
-    internal const double ArchiveSizeThresholdMb = 512;
+       through the archive views (hot UNION parquet). The reset point is 512 MB unless
+       settings.json sets hot_store_reset_mb (#9238), and every reader takes it from
+       HotStoreResetLimit.Current so the check, the log line and Store Health agree. */
+    internal HotStoreResetLimit HotStoreReset { get; set; } = HotStoreResetLimit.Current;
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
@@ -782,7 +785,13 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
-        var sizeDue = _duckDb != null && _duckDb.GetDatabaseSizeMb() >= ArchiveSizeThresholdMb;
+        /* #9238: the data in the store (used blocks) counts, not the file length, because the file keeps its freed blocks. The data
+           cannot exceed the file, so the used read (a connection under the read lock) is made only once the file has reached the
+           reset point. The read waits only the UI's 100 ms budget, so a collection checkpoint can make it return null. A null read
+           leaves only the file's own ceiling (twice the reset point) to decide, and the next tick reads again. */
+        var fileMb = _duckDb?.GetDatabaseSizeMb() ?? 0;
+        var usedMb = _duckDb != null && fileMb >= HotStoreReset.Mb ? _duckDb.GetUsedDataSizeMb() : null;
+        var sizeDue = _duckDb != null && HotStoreReset.IsReached(usedMb, fileMb);
 
         if (!timeDue && !sizeDue)
         {
@@ -794,8 +803,16 @@ public class CollectionBackgroundService : BackgroundService
             var complete = true;
             if (sizeDue)
             {
-                _logger?.LogInformation("Database size ({SizeMb:F0} MB) exceeds {Threshold} MB — archiving all data and resetting database",
-                    _duckDb!.GetDatabaseSizeMb(), ArchiveSizeThresholdMb);
+                if (usedMb is { } used && used >= HotStoreReset.Mb)
+                {
+                    _logger?.LogInformation("Store data ({UsedMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}), file {FileMb:F0} MB. Archiving all data and resetting the database",
+                        used, HotStoreReset.Mb, HotStoreReset.Source, fileMb);
+                }
+                else
+                {
+                    _logger?.LogInformation("Store file ({FileMb:F0} MB) reached twice the {Threshold:F0} MB reset point ({Source}), data {UsedMb} MB or not read. Archiving all data and resetting the database",
+                        fileMb, HotStoreReset.Mb, HotStoreReset.Source, usedMb is { } u ? u.ToString("F0", CultureInfo.InvariantCulture) : "not read");
+                }
                 await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
             }
             else
