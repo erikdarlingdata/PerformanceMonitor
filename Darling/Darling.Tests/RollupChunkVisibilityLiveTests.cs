@@ -12,6 +12,7 @@ using System.Data;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
@@ -135,14 +136,16 @@ public sealed class RollupChunkVisibilityLiveTests
         return rows;
     }
 
-    private sealed record Seeded(DateTime From, DateTime To, string Daily, string Hourly);
+    /// <summary><paramref name="ReleasePin"/> is set only when the seed was asked to keep its snapshot open: it commits and closes that snapshot.</summary>
+    private sealed record Seeded(DateTime From, DateTime To, string Daily, string Hourly, Func<Task>? ReleasePin = null);
 
     /// <summary>
     /// Migrates the scratch store, builds the aggregates and seeds a week of Query Store rows. The daily rollup's one chunk is then in the stuck state: written
     /// while an older snapshot is open and vacuumed once, so no page is all-visible and no insert is counted since that vacuum. With <paramref name="stuckHourly"/>
-    /// the hourly rollup's chunks are put in the same state, so several chunks lag.
+    /// the hourly rollup's chunks are put in the same state, so several chunks lag. With <paramref name="keepSnapshotOpen"/> the snapshot that was open
+    /// when the chunk was written stays open after the seed (the horizon stays pinned) until <see cref="Seeded.ReleasePin"/> is called.
     /// </summary>
-    private static async Task<Seeded> SeedStuckAsync(NpgsqlConnection c, ScratchPostgres scratch, bool stuckHourly, CancellationToken ct)
+    private static async Task<Seeded> SeedStuckAsync(NpgsqlConnection c, ScratchPostgres scratch, bool stuckHourly, CancellationToken ct, bool keepSnapshotOpen = false)
     {
         await c.OpenAsync(ct);
         await PgMigrations.MigrateAsync(c, ct);
@@ -196,10 +199,12 @@ public sealed class RollupChunkVisibilityLiveTests
         }
 
         /* The stuck state: a snapshot that began before the refresh commits is still open when the one vacuum runs, so that vacuum marks no page. */
-        await using (var snapshot = new NpgsqlConnection(scratch.ConnectionString))
+        var snapshot = new NpgsqlConnection(scratch.ConnectionString);
+        NpgsqlTransaction? tx = null;
+        try
         {
             await snapshot.OpenAsync(ct);
-            await using var tx = await snapshot.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
+            tx = await snapshot.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
             _ = await Scalar<long>(snapshot, "SELECT count(*) FROM servers", ct);
             if (stuckHourly)
             {
@@ -212,10 +217,31 @@ public sealed class RollupChunkVisibilityLiveTests
             {
                 await Exec(c, $"VACUUM {hourly}", ct);
             }
+        }
+        catch
+        {
+            if (tx is not null)
+            {
+                await tx.DisposeAsync();
+            }
 
-            await tx.CommitAsync(ct);
+            await snapshot.DisposeAsync();
+            throw;
         }
 
+        async Task Release()
+        {
+            await tx!.CommitAsync(CancellationToken.None);
+            await tx.DisposeAsync();
+            await snapshot.DisposeAsync();
+        }
+
+        if (keepSnapshotOpen)
+        {
+            return new Seeded(from, to, daily, hourly, Release);
+        }
+
+        await Release();
         return new Seeded(from, to, daily, hourly);
     }
 
@@ -432,6 +458,123 @@ public sealed class RollupChunkVisibilityLiveTests
         }
         finally
         {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// A chunk the step's login does not own: <c>VACUUM (SKIP_LOCKED)</c> skips it with a plain warning (SQLSTATE 01000, no code of its own) and reports
+    /// success, so a step that counts every vacuum that did not raise a known code reports a change it never made, and logs "vacuumed" every hour. The
+    /// step run as a login that owns nothing lists no chunk (while the owner lists it), counts none, writes no Information line, and leaves the chunk as it
+    /// was. Red on a step that counts a chunk whenever its VACUUM returns.
+    /// </summary>
+    [Fact]
+    public async Task AChunkTheLoginDoesNotOwn_IsNotListedNorCounted_AndLogsNoVacuum()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratchHandle = scratch;
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        const string role = "p9274_not_owner";
+        var password = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        var bodySucceeded = false;
+        var roleCreated = false;
+        try
+        {
+            await SeedStuckAsync(c, scratch, stuckHourly: false, ct);
+            var stuck = await DailyChunkAsync(c, ct);
+            Assert.Equal(0, stuck.AllVisible);
+            Assert.Equal(1, await LaggingAsync(c, ct));
+
+            await Exec(c, $"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{password}'", ct);
+            roleCreated = true;
+            await using var asRole = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = role,
+                Password = password,
+                Pooling = false,
+            }.ConnectionString);
+            await asRole.OpenAsync(ct);
+
+            /* The login sees the chunk in TimescaleDB's own catalog, so an empty list below is the owner test and nothing else. */
+            Assert.True(
+                await Scalar<long>(asRole, $"SELECT count(*) FROM timescaledb_information.chunks WHERE format('%I.%I', chunk_schema, chunk_name) = '{stuck.Name}'", ct) > 0,
+                "the non-owner login cannot see the chunk, so an empty list proves nothing about ownership");
+            Assert.Equal(0, await LaggingAsync(asRole, ct));
+
+            var log = new CapturingTestLogger();
+            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(asRole, log, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(0, log.CountAtLevel(LogLevel.Information));
+            var after = await DailyChunkAsync(c, ct);
+            Assert.Equal(0, after.AllVisible);
+            Assert.Equal(stuck.LastVacuum, after.LastVacuum);
+
+            /* The owner's step still takes the chunk. */
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (conn, _) =>
+            {
+                if (roleCreated)
+                {
+                    await Exec(conn, $"DROP OWNED BY {role}", CancellationToken.None);
+                }
+            });
+            if (roleCreated)
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => Exec(c, $"DROP ROLE IF EXISTS {role}", CancellationToken.None));
+            }
+        }
+    }
+
+    /// <summary>
+    /// A VACUUM that runs but can mark no page, because a snapshot that began before the chunk was written is still open and pins the horizon, is not a
+    /// change: the step does not count it and logs no Information line (it can repeat every hour). Once the snapshot is closed the next pass marks the pages,
+    /// counts the chunk and logs it at Information. Red on a step that counts every VACUUM that returns.
+    /// </summary>
+    [Fact]
+    public async Task APinnedHorizon_IsNotCounted_UntilTheSnapshotIsClosed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratchHandle = scratch;
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        var bodySucceeded = false;
+        Func<Task>? release = null;
+        try
+        {
+            var seeded = await SeedStuckAsync(c, scratch, stuckHourly: false, ct, keepSnapshotOpen: true);
+            release = seeded.ReleasePin;
+            Assert.Equal(0, (await DailyChunkAsync(c, ct)).AllVisible);
+
+            var pinned = new CapturingTestLogger();
+            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, pinned, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(0, pinned.CountAtLevel(LogLevel.Information));
+            Assert.True(pinned.CountAtLevel(LogLevel.Debug) > 0, "the step ran a VACUUM that marked nothing and said nothing about it");
+            Assert.Equal(0, (await DailyChunkAsync(c, ct)).AllVisible);
+
+            await release!();
+            release = null;
+            var open = new CapturingTestLogger();
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, open, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(1, open.CountAtLevel(LogLevel.Information));
+            var settled = await DailyChunkAsync(c, ct);
+            Assert.Equal(settled.Pages, settled.AllVisible);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            if (release is not null)
+            {
+                await release();
+            }
+
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }

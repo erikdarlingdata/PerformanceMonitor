@@ -8092,9 +8092,15 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     /// can take.</summary>
     public static readonly TimeSpan RollupVacuumStepBudget = TimeSpan.FromSeconds(60);
 
-    /// <summary>The SQLSTATEs of the warnings <c>VACUUM (SKIP_LOCKED)</c> raises for a relation it skips and still reports success for (#9274):
-    /// lock not available, not the owner, not a table.</summary>
-    private static readonly string[] s_vacuumSkipSqlStates = ["55P03", "42501", "0A000"];
+    /// <summary>The SQLSTATEs of the notices <c>VACUUM (SKIP_LOCKED)</c> raises that this step names in its Debug line (#9274): lock not available
+    /// and relation gone. They only name a reason: whether a chunk counts is read from <c>relallvisible</c>, because the not-owner and not-a-table
+    /// skips arrive as plain <c>01000</c> warnings that carry no code of their own.</summary>
+    private const string VacuumLockedSqlState = "55P03";
+    private const string VacuumGoneSqlState = "42P01";
+
+    /// <summary>One chunk's visibility map counts, read from <c>pg_class</c> (#9274): <c>relallvisible</c> and <c>relpages</c>, which a VACUUM
+    /// updates before it returns. No row when the chunk no longer exists.</summary>
+    private const string RollupChunkVisibilityReadSql = "SELECT relallvisible, relpages FROM pg_class WHERE oid = to_regclass($1)";
 
     /// <summary>
     /// The uncompressed chunks of the <c>collect</c> rollups that lag on the visibility map (#9274): under
@@ -8104,7 +8110,8 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     /// window starts (<c>range_end</c> older than <c>$1</c>, the clock the caller binds as a timestamptz, minus the refresh policy's <c>start_offset</c>), so no refresh can write it again and the inserts it
     /// counts are the refresh's own, below the insert trigger. An aggregate with no refresh policy keeps the first test only, and a chunk inside the window is
     /// never listed for having inserts. Compressed chunks are never listed: their heap is empty and the compression policy has rewritten them. One catalog
-    /// read, no row on a settled store. Worst lag first, at most <see cref="RollupVacuumMaxChunksPerPass"/>.
+    /// read, no row on a settled store. Only chunks the login can vacuum (it owns them, is a member of the owner role, or is a superuser): VACUUM skips
+    /// any other with a warning and success. Worst lag first, at most <see cref="RollupVacuumMaxChunksPerPass"/>.
     /// </summary>
     public static string RollupChunkVisibilityLagSql =>
         $@"SELECT format('%I.%I', ch.chunk_schema, ch.chunk_name) AS chunk, c.relpages, c.relallvisible
@@ -8123,6 +8130,7 @@ LEFT JOIN LATERAL (
     LIMIT 1) AS rp ON true
 WHERE ca.view_schema = 'collect'
 AND   NOT ch.is_compressed
+AND   pg_has_role(c.relowner, 'USAGE')
 AND   c.relpages >= {RollupVacuumMinPages}
 AND   c.relallvisible::bigint * 100 < c.relpages::bigint * {RollupVacuumAllVisibleFloorPercent}
 AND   (st.n_ins_since_vacuum = 0 OR ch.range_end < $1::timestamptz - rp.start_offset)
@@ -8151,8 +8159,9 @@ SELECT set_config('vacuum_cost_delay',
     /// chunk it cannot lock for the next pass. Paced like autovacuum: the session's cost delay and limit are autovacuum's for the loop (a manual vacuum has
     /// none, and a first pass over a large store is a write burst), reset in a <c>finally</c> so a pooled connection never keeps them. It starts no vacuum
     /// once <see cref="RollupVacuumStepBudget"/> has passed since it began (<paramref name="stepElapsed"/> is the clock, for a test). A chunk the vacuum
-    /// skipped (SKIP_LOCKED warns and succeeds) is logged at Debug and not counted. Failure-isolated per chunk (a chunk compression dropped or compressed
-    /// meanwhile, a login that does not own it): logged, and the rest still run. A settled store pays one catalog read. Returns how many chunks it vacuumed.
+    /// skipped or could mark nothing in (SKIP_LOCKED warns and succeeds; an old snapshot can pin the horizon) is logged at Debug and not counted: a chunk
+    /// counts, and logs at Information, only when its <c>relallvisible</c> rose across the VACUUM. Failure-isolated per chunk (a chunk compression dropped or
+    /// compressed meanwhile): logged, and the rest still run. A settled store pays one catalog read. Returns how many chunks it vacuumed.
     /// </summary>
     public static async Task<int> EnsureRollupChunkVisibilityAsync(
         NpgsqlConnection connection, ILogger? logger, TimeSpan? minVacuumAge = null, Func<TimeSpan>? stepElapsed = null,
@@ -8215,17 +8224,28 @@ SELECT set_config('vacuum_cost_delay',
                     break;
                 }
 
-                var skipped = false;
+                string? reason = null;
                 void OnNotice(object? sender, NpgsqlNoticeEventArgs e)
                 {
-                    if (Array.IndexOf(s_vacuumSkipSqlStates, e.Notice.SqlState) >= 0)
+                    if (e.Notice.SqlState == VacuumLockedSqlState)
                     {
-                        skipped = true;
+                        reason = "it was locked";
+                    }
+                    else if (e.Notice.SqlState == VacuumGoneSqlState)
+                    {
+                        reason = "it no longer exists";
                     }
                 }
 
                 try
                 {
+                    var before = await ReadRollupChunkVisibilityAsync(connection, chunk, cancellationToken);
+                    if (before is null)
+                    {
+                        logger?.LogDebug("Rollup chunk visibility: {Chunk} no longer exists, so it was skipped.", chunk);
+                        continue;
+                    }
+
                     var clock = Stopwatch.StartNew();
                     connection.Notice += OnNotice;
                     try
@@ -8238,16 +8258,23 @@ SELECT set_config('vacuum_cost_delay',
                         connection.Notice -= OnNotice;
                     }
 
-                    if (skipped)
+                    var after = await ReadRollupChunkVisibilityAsync(connection, chunk, cancellationToken);
+                    if (after is null || after.Value.AllVisible <= before.Value.AllVisible)
                     {
-                        logger?.LogDebug("Rollup chunk visibility: {Chunk} was locked or not ours, so the vacuum skipped it; the next hourly pass looks again.", chunk);
+                        logger?.LogDebug(
+                            "Rollup chunk visibility: the vacuum of {Chunk} marked no page all-visible ({Reason}); the next hourly pass looks again.",
+                            chunk, reason ?? (after is null ? "the chunk is gone" : "an old snapshot may pin the horizon, or the login cannot vacuum it"));
                         continue;
                     }
 
                     vacuumed++;
                     logger?.LogInformation(
-                        "TimescaleDB: vacuumed rollup chunk {Chunk} in {Seconds:F1}s because {AllVisible} of its {Pages} pages were all-visible and autovacuum had no reason to come back; index-only scans of it read the heap until its pages are marked.",
-                        chunk, clock.Elapsed.TotalSeconds, allVisible, pages);
+                        "TimescaleDB: vacuumed rollup chunk {Chunk} in {Seconds:F1}s, all-visible {Before} -> {After} of {Pages} pages (it had {AllVisible} of {ListedPages} when listed), so index-only scans of it stop reading the heap for those pages.",
+                        chunk, clock.Elapsed.TotalSeconds, before.Value.AllVisible, after.Value.AllVisible, after.Value.Pages, allVisible, pages);
+                }
+                catch (PostgresException ex) when (ex.SqlState == VacuumGoneSqlState)
+                {
+                    logger?.LogDebug("Rollup chunk visibility: {Chunk} was dropped before its vacuum ran, so it was skipped.", chunk);
                 }
                 catch (OperationCanceledException)
                 {
@@ -8282,6 +8309,20 @@ SELECT set_config('vacuum_cost_delay',
         }
 
         return vacuumed;
+    }
+
+    private static async Task<(int AllVisible, int Pages)?> ReadRollupChunkVisibilityAsync(
+        NpgsqlConnection connection, string chunk, CancellationToken cancellationToken)
+    {
+        using var read = new NpgsqlCommand(RollupChunkVisibilityReadSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+        read.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Text, chunk);
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return (Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture));
     }
 
     /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — comfortably past the hourly CAGG's own
