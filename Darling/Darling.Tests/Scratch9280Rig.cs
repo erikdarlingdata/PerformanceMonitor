@@ -58,7 +58,7 @@ public sealed class Scratch9280Rig
             await Exec(connection, $"INSERT INTO public.m9280_anchor VALUES ('{qsEnd:yyyy-MM-dd HH:mm:ss}', '{procEnd:yyyy-MM-dd HH:mm:ss}')", ct);
 
             /* ---- procedures ---- */
-            var procStart = procEnd.AddHours(-24);
+            var procStart = procEnd.AddHours(-168);
             var from = procStart.AddHours(-2);
             var to = procEnd.AddHours(3);
             foreach (var (server, n) in new[] { (1, procs), (2, procs / 8), (3, procs / 40) })
@@ -69,12 +69,12 @@ INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_n
                              delta_logical_reads, delta_spills, min_worker_time, max_worker_time, sample_interval_seconds)
 SELECT {server}::bigint * 1000000000000 + row_number() OVER (), t, {server}, 's9280', 'db' || (n % 20),
        'dbo', 'P' || lpad(n::text, 6, '0'), 'P', 'sh' || n, 'ph' || n,
-       1 + (n * 7 + extract(epoch from t)::bigint / 120) % 50,
-       1000 + (n * 7919 + extract(epoch from t)::bigint / 120 * 31) % 90001,
-       2000 + (n * 104729 + extract(epoch from t)::bigint / 120 * 17) % 190001,
+       1 + (n * 7 + extract(epoch from t)::bigint / 1800) % 50,
+       1000 + (n * 7919 + extract(epoch from t)::bigint / 1800 * 31) % 90001,
+       2000 + (n * 104729 + extract(epoch from t)::bigint / 1800 * 17) % 190001,
        10 * (n % 500), n % 2, n % 97, 2 * (n % 97), 120
 FROM generate_series(0, {n - 1}) AS n
-CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '2 minutes') AS t", connection) { CommandTimeout = 1800 };
+CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '30 minutes') AS t", connection) { CommandTimeout = 1800 };
                 cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);
                 cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, to);
                 await cmd.ExecuteNonQueryAsync(ct);
@@ -210,21 +210,24 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
         {
             await using var availability = NpgsqlDataSource.Create(cs);
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(availability, ct);
-            var start = procEnd.AddHours(-24);
-            var mid = DarlingDataReader.PlanProceduresHourlyMid(rollups, coverage, TopRanking.Cpu, start, procEnd);
-            Assert.NotNull(mid);
-            for (var i = 0; i < runs; i++)
+            foreach (var hours in new[] { 24, 168 })
             {
-                await using var cmd = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS) " + ProcSql(variant, mid!), connection);
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Busy });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = procEnd });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 3 });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid!.MidStart });
-                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidEnd });
-                await Record($"{label} {variant} PROC_MID run{i}", cmd, ct);
+                var start = procEnd.AddHours(-hours);
+                var mid = DarlingDataReader.PlanProceduresHourlyMid(rollups, coverage, TopRanking.Cpu, start, procEnd);
+                Assert.NotNull(mid);
+                for (var i = 0; i < runs; i++)
+                {
+                    await using var cmd = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS) " + ProcSql(variant, mid!), connection);
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Busy });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = procEnd });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 3 });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid!.MidStart });
+                    cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidEnd });
+                    await Record($"{label} {variant} PROC_MID_{hours}h run{i}", cmd, ct);
+                }
             }
         }
     }
