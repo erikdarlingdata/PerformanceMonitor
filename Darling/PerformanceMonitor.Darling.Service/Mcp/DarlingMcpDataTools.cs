@@ -2153,6 +2153,7 @@ ORDER BY server_name";
                 DarlingMcpReadParameters.AddText(command, collector);
                 DarlingMcpReadParameters.AddTimestamp(command, windowStart);
                 DarlingMcpReadParameters.AddTimestamp(command, windowEnd);
+                DarlingMcpReadParameters.AddTimestamp(command, CollectorFleetLiveness.BandWindowStart(windowEnd));
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {

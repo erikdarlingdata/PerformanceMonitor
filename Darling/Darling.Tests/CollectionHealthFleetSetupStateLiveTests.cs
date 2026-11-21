@@ -133,6 +133,94 @@ public sealed class CollectionHealthFleetSetupStateLiveTests
     }
 
     [Fact]
+    public async Task AProductiveRunOlderThanHoursBackButInsideSevenDays_StillReadsAsARegression_OnTheFleetFormAndTheOneServerRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, dataSource) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var _d = dataSource;
+
+        const string skipText = "extension \"pg_wait_sampling\" is not installed";
+        var regressed = await RegisterAsync(connection, "su-win-regressed", ct);
+        var neverProduced = await RegisterAsync(connection, "su-win-never", ct);
+        var tooOld = await RegisterAsync(connection, "su-win-old", ct);
+
+        /* Rows 30 hours ago, then only the named skip: outside the default 24 hours, inside the 7 days the one-server read bands over. */
+        await RunAsync(connection, regressed, "su-win-regressed", "SUCCESS", TimeSpan.FromHours(30), 40, null, ct);
+        for (var i = 1; i <= 3; i++)
+        {
+            await RunAsync(connection, regressed, "su-win-regressed", "EXTENSION_MISSING", TimeSpan.FromMinutes(i * 10), 0, skipText, ct);
+        }
+
+        for (var i = 1; i <= 3; i++)
+        {
+            await RunAsync(connection, neverProduced, "su-win-never", "EXTENSION_MISSING", TimeSpan.FromMinutes(i * 10), 0, skipText, ct);
+        }
+
+        /* Rows 8 days ago are outside the one-server read's window too, so this one has never produced as far as either read can see. */
+        await RunAsync(connection, tooOld, "su-win-old", "SUCCESS", TimeSpan.FromDays(8), 40, null, ct);
+        for (var i = 1; i <= 3; i++)
+        {
+            await RunAsync(connection, tooOld, "su-win-old", "EXTENSION_MISSING", TimeSpan.FromMinutes(i * 10), 0, skipText, ct);
+        }
+
+        async Task<JsonElement> OneServerAsync(string name)
+        {
+            var one = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, name, cancellationToken: ct)).RootElement;
+            return one.GetProperty("collectors").EnumerateArray().Single(c => c.TryGetProperty("collector", out var n) && n.GetString() == Collector).Clone();
+        }
+
+        var oneRegressed = await OneServerAsync("su-win-regressed");
+        var oneNever = await OneServerAsync("su-win-never");
+        var oneOld = await OneServerAsync("su-win-old");
+        Assert.True(RegressedOn(oneRegressed));
+        Assert.NotEqual("EXTENSION_MISSING", oneRegressed.GetProperty("status").GetString());
+        Assert.Equal("EXTENSION_MISSING", oneNever.GetProperty("status").GetString());
+        Assert.Equal("EXTENSION_MISSING", oneOld.GetProperty("status").GetString());
+
+        /* The default window and a one-hour one: the fleet form answers as the one-server read does on both. */
+        foreach (int? hoursBack in new int?[] { null, 1 })
+        {
+            var root = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "*", collector_name: Collector, hours_back: hoursBack, cancellationToken: ct)).RootElement;
+            var rows = RowsByServer(root);
+            var label = $"hours_back {hoursBack?.ToString() ?? "default"}";
+
+            Assert.True(rows["su-win-regressed"].GetProperty("regressed_from_productive").GetBoolean(), label);
+            Assert.NotEqual("needs_setup", rows["su-win-regressed"].GetProperty("outcome").GetString());
+            Assert.Equal("needs_setup", rows["su-win-never"].GetProperty("outcome").GetString());
+            Assert.False(rows["su-win-never"].GetProperty("regressed_from_productive").GetBoolean(), label);
+            Assert.Equal("needs_setup", rows["su-win-old"].GetProperty("outcome").GetString());
+            Assert.False(rows["su-win-old"].GetProperty("regressed_from_productive").GetBoolean(), label);
+            Assert.Equal(2, root.GetProperty("servers_needing_setup").GetInt32());
+            Assert.Equal(1, root.GetProperty("servers_failing").GetInt32());
+        }
+    }
+
+    [Fact]
+    public async Task TheRunsAndFailuresOnARow_StayOnHoursBack_WhileTheBandReadsSevenDays()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, dataSource) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var _d = dataSource;
+
+        var id = await RegisterAsync(connection, "su-win-counts", ct);
+        await RunAsync(connection, id, "su-win-counts", "SUCCESS", TimeSpan.FromHours(30), 40, null, ct);
+        await RunAsync(connection, id, "su-win-counts", "EXTENSION_MISSING", TimeSpan.FromHours(2), 0, "extension \"pg_wait_sampling\" is not installed", ct);
+        await RunAsync(connection, id, "su-win-counts", "EXTENSION_MISSING", TimeSpan.FromHours(1), 0, "extension \"pg_wait_sampling\" is not installed", ct);
+
+        var root = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "*", collector_name: Collector, cancellationToken: ct)).RootElement;
+        var row = RowsByServer(root)["su-win-counts"];
+
+        Assert.Equal(2, row.GetProperty("runs").GetInt64());
+        Assert.Equal(2, row.GetProperty("failures").GetInt64());
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("last_success_at").ValueKind);
+        Assert.True(row.GetProperty("regressed_from_productive").GetBoolean());
+    }
+
+    [Fact]
     public async Task ALargeFleetWithALongMessage_StaysUnderTheResponseBudget_AndSaysItWasCut()
     {
         var ct = TestContext.Current.CancellationToken;

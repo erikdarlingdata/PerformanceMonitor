@@ -25,6 +25,7 @@ public partial class LocalDataService
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = windowStartUtc });
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = windowEndUtc });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = CollectorFleetLiveness.BandWindowStart(windowEndUtc) });
 
         var rows = new List<CollectorFleetLiveness.RunFacts>();
         using var reader = await command.ExecuteReaderAsync();
