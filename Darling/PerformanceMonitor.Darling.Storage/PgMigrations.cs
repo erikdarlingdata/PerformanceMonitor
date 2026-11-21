@@ -3818,11 +3818,15 @@ END $$;";
            Three new plain tables created empty and a nullable column: no data moves, so the upgrade stays fast. The next ticks build the closed hours
            inside raw's retention. An older build ignores them. */
         new Migration(QueryStoreClutterHourly.Version, "query-store-clutter-hourly", QueryStoreClutterHourly.CreateSql),
-        /* V290 (#8784 part 2): view usage. The object_dependencies collector's table, and the per-day summary of the names Query Store
+        /* V290 (#9193): the per-server floor of the query_stats summary (V286). One plain table created empty: no data moves, so the upgrade
+           stays fast, and a server with no floor row has no floor. The floor move writes one row here instead of deleting summary rows inside
+           the batch. An older build ignores the table, so after a rollback with a hole it can read the summary across the hole. */
+        new Migration(QueryStatsCollectionSummary.FloorRungVersion, "query-stats-collection-floor", QueryStatsCollectionSummary.FloorCreateSql),
+        /* V291 (#8784 part 2): view usage. The object_dependencies collector's table, and the per-day summary of the names Query Store
            statements referenced with its build record and per-database counts. Four new plain tables created empty: no data moves, so the
            upgrade stays fast and the housekeeping tick fills the summary from the days the daily Query Store summary still holds. An older
            build ignores them. */
-        new Migration(ObjectReferencesDaily.Version, "object-references", V290Sql),
+        new Migration(ObjectReferencesDaily.Version, "object-references", V291Sql),
     };
 
     /// <summary>
@@ -4083,7 +4087,7 @@ CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inven
 " + ObjectExecutionsDaily.CreateSql;
 
     /// <summary>
-    /// V290 (#8784 part 2): view usage from Query Store statement text.
+    /// V291 (#8784 part 2): view usage from Query Store statement text.
     ///
     /// <para><c>collect.object_dependencies</c> is <c>ObjectDependenciesCollector</c>'s table, the daily dependency list per database from
     /// <c>sys.sql_expression_dependencies</c> (Darling only). A PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE.
@@ -4095,7 +4099,7 @@ CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inven
     /// statement counts (<see cref="ObjectReferencesDaily"/>), created empty. New tables, no data moves, no grant. Every statement is
     /// idempotent.</para>
     /// </summary>
-    private const string V290Sql = @"
+    private const string V291Sql = @"
 CREATE TABLE IF NOT EXISTS collect.object_dependencies (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,

@@ -38,13 +38,19 @@ namespace PerformanceMonitor.Darling.Storage;
 /// database is one group, as GROUP BY makes it, and a database filter treats it here exactly as it treats the rows.</para>
 ///
 /// <para><b>Where the read may use it.</b> The table is empty when created and nothing backfills it. The read takes a server's
-/// summary only when its oldest row is at or before the window start (<c>covered</c> in the CTE), and reads raw otherwise. That is
-/// exact: every collection from the oldest summary row onward has a summary row, so the first collection after the window start
-/// finds its previous collection (the gap the rate divides by) in the summary, as raw would give it. A rollback that ran an older
-/// build writes raw rows with no summary row, which would be a hole after the oldest row, so <see cref="FloorMoveSql"/> moves the
-/// oldest row up to the batch that finds the hole. The read then goes to raw until the summary again covers a window. Until that next
-/// batch runs, the hole is raw collections newer than the summary's newest row, so the read also needs the other end: it takes the summary only
-/// when no raw collection of the server lies after the summary's newest row and at or before the window end.</para>
+/// summary only when its oldest row AND the server's floor (<see cref="FloorTable"/>) are at or before the window start
+/// (<c>covered</c> in the CTE), and reads raw otherwise. That is exact: every collection from the floor onward has a summary row, so
+/// the first collection after the window start finds its previous collection (the gap the rate divides by) in the summary, as raw
+/// would give it. A rollback that ran an older build writes raw rows with no summary row, which would be a hole after the oldest row,
+/// so <see cref="FloorMoveSql"/> moves the server's floor up to the batch that finds the hole. The read then goes to raw until a window
+/// starts at or after the floor. Summary rows below the floor stay until the retention sweep ages them out, and no covered read uses
+/// them. Until that next batch runs, the hole is raw collections newer than the summary's newest row, so the read also needs the other
+/// end: it takes the summary only when no raw collection of the server lies after the summary's newest row and at or before the window end.</para>
+///
+/// <para><b>The floor is one row per server, not a delete (#9193).</b> The floor move once deleted every summary row at or before the
+/// anchor, inside the batch's transaction. That delete grows with databases times collections times retention, so past the batch's
+/// command timeout it rolled the batch back, left the hole, and every later batch did the same. The floor table (V290) holds one
+/// <c>valid_from</c> per server, so the move is one upsert whatever the summary holds.</para>
 ///
 /// <para><b>A plain table, on both store kinds,</b> like the hour ledger (V164) and the procedure totals (V176): not a collector,
 /// not in <c>CollectorCatalog.All</c>, not a hypertable, about one row per database per collection. It sits in the
@@ -59,6 +65,15 @@ public static class QueryStatsCollectionSummary
 
     /// <summary>The summary table.</summary>
     public const string Table = "collect.query_stats_collection";
+
+    /// <summary>The store schema version of the rung that creates <see cref="FloorTable"/> (V290, #9193). A store below it has no floor table.</summary>
+    public const int FloorRungVersion = 290;
+
+    /// <summary>
+    /// The floor table (V290, #9193): one row per server, <c>valid_from</c> the <c>collection_time</c> of the batch that last found a hole.
+    /// Every summary row at or after it is whole. A server with no row has no floor.
+    /// </summary>
+    public const string FloorTable = "collect.query_stats_collection_floor";
 
     /// <summary>The unique key's index name.</summary>
     public const string KeyIndexName = "ux_query_stats_collection";
@@ -80,6 +95,18 @@ CREATE TABLE IF NOT EXISTS collect.query_stats_collection
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_query_stats_collection ON collect.query_stats_collection (server_id, collection_time, database_name) NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS ix_query_stats_collection_time ON collect.query_stats_collection (collection_time);
+""";
+
+    /// <summary>
+    /// The floor table as the V290 rung runs it. Idempotent, empty when created, and no data moves. Editing this text edits a shipped rung:
+    /// add a new rung instead.
+    /// </summary>
+    public const string FloorCreateSql = """
+CREATE TABLE IF NOT EXISTS collect.query_stats_collection_floor
+(
+    server_id integer PRIMARY KEY,
+    valid_from timestamp NOT NULL
+);
 """;
 
     /// <summary>
@@ -121,15 +148,22 @@ ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET
 """;
 
     /// <summary>
-    /// Moves the server's oldest summary row up to this batch when a collection exists that has no summary row, run on the COPY's
-    /// transaction before <see cref="UpsertSql"/>: <c>$1</c> is the server id and <c>$2</c> the batch's <c>collection_time</c>. The anchor
-    /// is the server's newest summary row at or before the batch. When a <c>query_stats</c> row of the server lies strictly after the
-    /// anchor and strictly before the batch, an older build wrote it (a rollback past V286 and forward again), so the summary is not
-    /// whole from its oldest row. The statement then deletes the summary rows at or before the anchor, which makes the batch's own row
-    /// the oldest, and the read stays on raw until the summary covers a window again. Normally no such row exists, the statement
-    /// deletes nothing, and it costs one probe of the <c>(server_id, collection_time)</c> index that stops at its first row. The anchor
-    /// takes rows AT the batch's time too, so the later batches of an Azure cycle (one <c>collection_time</c>, one batch per database)
-    /// find their own cycle's row as the anchor and never trigger it. Returns the rows deleted.
+    /// Moves the server's floor (<see cref="FloorTable"/>) up to this batch when a collection exists that has no summary row, run on the
+    /// COPY's transaction before <see cref="UpsertSql"/>: <c>$1</c> is the server id and <c>$2</c> the batch's <c>collection_time</c>.
+    /// The anchor is the server's newest summary row at or before the batch. When a <c>query_stats</c> row of the server lies strictly
+    /// after the anchor and strictly before the batch, an older build wrote it (a rollback past V286 and forward again), so the summary is
+    /// not whole across that stretch. The statement then upserts ONE floor row, <c>valid_from</c> = the batch's time (never moved
+    /// backwards: <c>GREATEST</c> of the stored value and the batch's), and the read stays on raw until a window starts at or after it.
+    /// It deletes nothing (#9193): the summary rows below the floor stay for the retention sweep, and no covered read uses them. Such a
+    /// raw row exists exactly when the newest raw row before the batch is after the anchor, so <c>prior</c> reads only that one row
+    /// (<c>ORDER BY collection_time DESC LIMIT 1</c> stops at the first chunk that holds a row of the server). The hole test is a
+    /// one-time filter over two scalar subselects, so the planner evaluates it once whatever plan it picks, and the insert never runs
+    /// when there is no hole. The anchor must not be a join column of a raw-table <c>EXISTS</c> (#9147): the planner then cannot use it
+    /// as an index bound or to exclude chunks, and the normal case, where no such row exists, read every chunk of the server's raw
+    /// history before it answered no. Normally the statement writes nothing and costs one probe of the <c>(server_id, collection_time)</c>
+    /// index in the newest chunk. The anchor takes rows AT the batch's time too, so the later batches of an Azure cycle (one
+    /// <c>collection_time</c>, one batch per database) find their own cycle's row as the anchor and never trigger it. A server with no
+    /// summary row (a NULL anchor) or no raw row before the batch writes nothing. Returns the floor rows written (0 or 1).
     /// </summary>
     public const string FloorMoveSql = """
 WITH anchor AS
@@ -138,19 +172,24 @@ WITH anchor AS
     FROM collect.query_stats_collection AS s
     WHERE s.server_id = $1::integer
     AND   s.collection_time <= $2::timestamp
+),
+prior AS
+(
+    SELECT q.collection_time AS at
+    FROM collect.query_stats AS q
+    WHERE q.server_id = $1::integer
+    AND   q.collection_time < $2::timestamp
+    ORDER BY q.collection_time DESC
+    LIMIT 1
 )
-DELETE FROM collect.query_stats_collection AS c
-USING anchor
-WHERE c.server_id = $1::integer
-AND   c.collection_time <= anchor.at
-AND   EXISTS
-      (
-          SELECT 1
-          FROM collect.query_stats AS q
-          WHERE q.server_id = $1::integer
-          AND   q.collection_time > anchor.at
-          AND   q.collection_time < $2::timestamp
-      );
+INSERT INTO collect.query_stats_collection_floor AS f
+    (server_id, valid_from)
+SELECT
+    $1::integer,
+    $2::timestamp
+WHERE (SELECT p.at FROM prior AS p) > (SELECT a.at FROM anchor AS a)
+ON CONFLICT (server_id) DO UPDATE SET
+    valid_from = GREATEST(f.valid_from, EXCLUDED.valid_from);
 """;
 
     /// <summary>

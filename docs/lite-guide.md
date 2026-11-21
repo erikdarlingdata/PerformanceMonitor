@@ -76,20 +76,40 @@ A headless Lite does these things as usual:
 - It collects from every server, and it checks alerts.
 - It sends alerts by email, Slack, Teams and webhook.
 - It runs retention and archiving.
-- It runs the MCP server, if you turned it on.
+- It runs the MCP server, if you turned it on. See [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite).
 - It checks for updates. It writes the result to the log. It cannot show a balloon.
 
-A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each time it skips one, it writes one line to the log, at Information level, that starts with `Headless: skipped`. A dialog that carries an error is skipped the same way. The log holds the same error. After the first headless start, read the log to see what Lite skipped.
+A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each headless start writes these two lines to the log, at Information level:
+
+- `Headless start: no window is shown and no tray icon is created.`
+- `Headless: no tray icon is created.`
+
+Lite writes no line for an alert balloon. With no tray icon, there is no balloon to skip. The other alert channels still send.
+
+Lite also writes a line that starts with `Headless: skipped` when it skips something that it would show on a screen. It writes this line at Information level, and only the first time that it skips each of these in a run:
+
+- The request from a second start to show the window.
+- The Entra device-code sign-in prompt. Lite cancels the sign-in.
+- The update balloon. Lite also writes a line that says a new version exists.
+- The notice that the store was rebuilt. Lite also writes the notice as a Warning.
+- The fatal-error dialog and the error dialog. The log holds the same error.
+- The dialogs about a `settings.json` file or setting values that Lite could not read. The log holds the same text.
+- The dialog about server settings that were not saved.
+- The two prompts for an old Lite that runs as an administrator, during an upgrade. See [Upgrade a headless Lite](#upgrade-a-headless-lite).
+
+A normal headless start can therefore write no `Headless: skipped` line. After a headless start, read the log to see what Lite skipped.
 
 Only one Lite runs in a Windows session. If you start Lite a second time in that session, the second start exits. A headless Lite does not show a window when the second start asks it to.
 
-If a headless Lite fails to start, it writes the error to the log and exits with code 3. Task Scheduler then sees a failed run, and its restart setting starts Lite again.
+If a headless Lite cannot open its database when it starts, for example because another process holds the file, it does not exit at once. It writes one line to the log for each failed attempt, with the error and the delay before the next attempt. The first delay is 10 seconds. Each delay is twice the one before, up to 5 minutes. Lite keeps trying for 30 minutes. During the wait, `--stop` still ends Lite, and a second start is refused as usual. While Lite is trying to open its database, `--stop` returns 1, so run it again. If the 30 minutes pass, Lite writes a line that says it is giving up after a number of attempts, and it exits with code 3.
+
+Task Scheduler's **If the task fails, restart every** setting did not restart a run that exited with code 3. In a test, the task went to Ready with Last Result 3 and no second run started. So a Lite that gives up stays down until someone starts it again. To see that this happened, look for a **Last Result** of `3` on the task, and for the giving up line in the Lite log.
 
 #### Set up a dedicated Windows user
 
-1. Make a Windows user for Lite. A standard user is enough.
+1. Make a Windows user for Lite. If the user has the "Log on as a batch job" right, a standard user is enough. The setting "Run whether the user is logged on or not" in the scheduled task logs the user on as a batch job. To give the right, open Local Security Policy. Go to Local Policies, then User Rights Assignment, then "Log on as a batch job", and add the user. You can also add the user to a group that has the right. On a stand-alone server, Windows gives the right to Administrators, Backup Operators and Performance Log Users by default. If a Group Policy sets this right, add the user there. Without the right, Windows refuses the logon. Task Scheduler says that the task is registered but may fail to start. It says that the batch logon privilege must be enabled for the task user. The logon then fails. Windows words this error as "Logon failure: the user has not been granted the requested logon type at this computer."
 2. Install Lite as that user. Run `Setup.exe` as that user, or unzip the portable ZIP into a folder that the user can write to. Lite keeps its data, its logs and its settings in that user's `%LOCALAPPDATA%`. See [Where Lite keeps its files](#where-lite-keeps-its-files).
-3. Sign in once as that user, and start Lite the normal way. The server list is shared by all users, but passwords are not. Lite keeps SQL and Entra passwords, the SMTP password and webhook URLs in the Windows Credential Manager of each user. This user has none yet. Open each server in **Edit Server**, enter the password again, and save. Settings are also kept for each user. Set up email, Slack, Teams and webhook alerts in **Settings** as this user.
+3. Sign in once as that user, and start Lite the normal way. The server list is shared by all users, but passwords are not. Lite keeps SQL and Entra passwords, the SMTP password and webhook URLs in the Windows Credential Manager of each user. This user has none yet. Open each server in **Edit Server**, enter the password again, and save. Settings are also kept for each user. Set up email, Slack, Teams and webhook alerts in **Settings** as this user. If nobody can sign in as this user, start Lite as this user from your own session instead. Run `runas /user:<name> "<path>\PerformanceMonitorLite.exe"`, and enter the password of the user when `runas` asks. Do the same steps in the Lite window that opens. Lite stores the passwords and the settings for the user that you named.
 4. Close Lite. Sign out.
 
 Do not use **Entra ID (MFA)** or **Device Code** sign-in for a headless Lite. Both need a person to answer a prompt each session. A headless Lite cancels a device-code sign-in and writes the reason to the log. Use a login that needs no prompt: Windows, SQL Server, Service Principal, Managed Identity or Existing Azure Sign-In. See [Authentication](authentication.md).
@@ -104,7 +124,7 @@ Make a task in Task Scheduler with these settings:
 | Run whether the user is logged on or not | On |
 | Trigger | At startup |
 | Action | `PerformanceMonitorLite.exe` with the argument `--headless` |
-| If the task fails, restart every | 1 minute, up to 3 times |
+| If the task fails, restart every | 1 minute, up to 3 times. This does not restart a Lite that gave up and exited with code 3. |
 | Long-running limit | Turn off "Stop the task if it runs longer than" |
 
 Task Scheduler runs this task in session 0. Session 0 has no taskbar. Without `--headless`, the first tray balloon that fails for that reason writes one Warning to the log. Lite then skips tray balloons for the rest of the run. It does not write an error for each alert, and the other alert channels still send.
@@ -133,6 +153,22 @@ The request goes to the Lite in the same Windows session as `--stop`, and `--sto
 schtasks /run /tn "Lite stop"
 ```
 
+`schtasks /run` starts the task and returns at once. It does not wait for `--stop` to finish, and it does not show the exit code. Task Scheduler keeps the exit code as the last result of the task. To wait for `--stop` and read the exit code:
+
+1. Run the task.
+2. Run `schtasks /query /tn "Lite stop" /v /fo list` again and again until `Status` is not `Running`.
+3. Read `Last Result` in the same output. Check that `Last Run Time` is later than the time that you ran the task. Then you do not read the result of an earlier run.
+
+In PowerShell, the same steps are:
+
+```
+Start-ScheduledTask -TaskName 'Lite stop'
+while ((Get-ScheduledTask -TaskName 'Lite stop').State -eq 'Running') { Start-Sleep -Seconds 2 }
+Get-ScheduledTaskInfo -TaskName 'Lite stop' | Select-Object LastRunTime, LastTaskResult
+```
+
+A `Last Result` of 0 means that Lite exited. The other values are the same as in the table.
+
 `--stop` writes what it did to the Lite log, in the same user's logs folder. Each line has `[Stop]` in it. The lines say whether `--stop` asked a running Lite to stop, found none, or timed out.
 
 A hard end does not break the store. DuckDB replays its write-ahead log at the next start. The next start can take a little longer than usual.
@@ -141,7 +177,7 @@ A hard end does not break the store. DuckDB replays its write-ahead log at the n
 
 The **About** button needs a window, so a headless Lite does not update itself. It logs when a new version exists. To upgrade:
 
-1. Run `--stop`, and wait for exit code 0.
+1. Run the stop task. Wait until it is no longer running, and check that its last result is 0. See [Stop it](#stop-it).
 2. Install the new version as the dedicated user. Run the new `Setup.exe` as that user, or unzip the new portable ZIP over the old folder.
 3. Run the scheduled task that starts Lite with `--headless`.
 
@@ -151,15 +187,59 @@ Suppose you start the new version with `--headless` while the old version still 
 
 A headless Lite writes the same files as a Lite with a window. The logs are in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs` of the dedicated user. The files are `lite_<date>.log`. Lite keeps each file for 7 days. The data folder is `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the same user.
 
+#### Use MCP on a headless Lite
+
+A headless Lite has no Settings window. You turn MCP on in `settings.json`, and you read the token with a command.
+
+To turn MCP on, add these keys to the `settings.json` of the dedicated user. The file is in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config`. Restart Lite after you change it.
+
+| Key | Value | What it does |
+|---|---|---|
+| `mcp_enabled` | `true` | Turns the MCP server on. The default is `false`. |
+| `mcp_port` | A port number | The port that the server listens on, on localhost. The default is `5151`. |
+| `mcp_allow_tokenless_loopback` | `true` | Optional. The server then accepts requests with no token. Leave it out to keep the token. |
+
+With `mcp_allow_tokenless_loopback` set to `true`, Lite does not read its stored token. Any program on the machine that can reach localhost can then call the read tools, whichever Windows user runs it. Lite does not serve the write tools or the investigation tools in this mode, because they need a token. We recommend that you leave the setting off.
+
+With the setting off, Lite makes a token at its first start with MCP on. Lite keeps the token in the Windows Credential Manager of the user that runs Lite. Each request must carry it in an `Authorization: Bearer <token>` header. The dedicated user never signs in, so you read the token with `--print-mcp-token`. Run the command as the dedicated user, after Lite starts once as that user with MCP on:
+
+```
+PerformanceMonitorLite.exe --print-mcp-token
+```
+
+The command prints the token and a new line to standard output, and then it exits. It only reads. It never makes or changes a token, it does not start Lite, and it does not disturb a Lite that runs. It writes the token nowhere except standard output. The token is a live secret, so do not leave it in a shared window or in a log.
+
+Lite has no console of its own. A command prompt or PowerShell can give the prompt back before Lite writes. To read the token as the dedicated user:
+
+1. Open a command prompt as that user: `runas /user:<name> cmd`
+2. In the new window, run `cmd /c "<path>\PerformanceMonitorLite.exe" --print-mcp-token`. The `cmd /c` makes the window wait for Lite. To keep the token in a file, add `> "%USERPROFILE%\mcp-token.txt"` at the end of the line. A file in the profile folder of the user can be read only by that user and by administrators. Do not write the token to a folder that other users can read, for example the folder that the window opens in. Delete the file after you copy the token.
+
+In PowerShell, pipe the output to get it: `& "<path>\PerformanceMonitorLite.exe" --print-mcp-token | Out-String`.
+
+If a policy turns on PowerShell module logging or transcription, PowerShell records the token in the event log or in the transcript folder. In that case, use the command prompt steps above.
+
+The exit code says what happened:
+
+| Code | Meaning | Standard output | Standard error |
+|---|---|---|---|
+| 0 | Lite printed the token. | The token | Nothing |
+| 1 | No token is stored for this user. Lite made none. | Nothing | One line |
+| 2 | The read of the Credential Manager entry failed, or the entry is empty. A token might exist. | Nothing | The reason |
+| 3 | The command has nowhere to write: no console and no redirect. Lite did not read the token. | Nothing | Nothing |
+
+For code 1, turn MCP on and start Lite as that user once. Lite then makes the token.
+
 ### Lite Data Storage
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints and free block reuse. The hot store holds the most recent data, about 7 days. Each hour, Lite moves older data to Parquet. The hot store has a size limit of 512 MB. When the file reaches 512 MB, Lite writes the collected data to Parquet and deletes the file. It then creates a new small file and puts back the settings, tags, mute rules and investigation records. Collection pauses for a short time while the reset runs. After the reset, Lite compacts the Parquet files into monthly archives, and collection continues during compaction.
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
-- Typical size: ~50–200 MB per server per week
+- Typical size: it depends on the number of servers, the number of collectors, and whether Query Store collection is on. The hot file does not grow past about 512 MB, because Lite resets it at that size. The Parquet archive grows with the 3 months of history that Lite keeps.
+
+Compaction merges the per-run Parquet files into one file for each month. `--stop` does not wait for it to finish. Lite checks for the stop before it starts each group of files, and it waits up to 5 seconds for a merge that is already running. If that merge is still running at the end of the 5 seconds, Lite exits and the merge ends with it. In both cases a group of files is either fully merged or left as it was, so a read returns each row once. A merge writes to a `.tmp` file first, and a read never opens that file. The first archive pass after the next start runs about an hour after the start. It deletes a leftover `.tmp` file and runs the compaction again. Lite logs one line when compaction ends: complete, cancelled by shutdown, or failed.
 
 For the full list of folders, see [Where Lite keeps its files](#where-lite-keeps-its-files). To remove a server or uninstall, see [Remove a server, uninstall, and delete the data](#remove-a-server-uninstall-and-delete-the-data). To back up Lite or move it to another PC, see [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc).
 
