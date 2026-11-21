@@ -97,12 +97,12 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
 
     /// <summary>A budget that reads as spent once <paramref name="spentAfter"/> statements have started, with a row cap small enough that the store's
     /// 600 samples are six newest spans.</summary>
-    private static DarlingMcpFindQueriesByTextTools.SourceBudget Budget(int? spentAfter, Action<int>? counted = null)
+    private static DarlingMcpFindQueriesByTextTools.SourceBudget Budget(int? spentAfter, Action<int>? counted = null, int spanRows = SpanRows)
     {
         var started = 0;
         return new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds)
         {
-            SpanRows = SpanRows,
+            SpanRows = spanRows,
             ElapsedClock = () => spentAfter is { } n && started >= n
                 ? TimeSpan.FromMilliseconds(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds + 1)
                 : TimeSpan.Zero,
@@ -125,7 +125,7 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
     private static string Hash(int sample) => "0xH" + sample.ToString("0000", CultureInfo.InvariantCulture);
 
     /// <summary>A common pattern answers from the newest digests: three rows, the three newest samples, in order, in one statement, and the search is
-    /// complete because the page filled. A page too big for the first span stops after it with the span's rows and the span it covered.</summary>
+    /// complete because the page filled. A page too big for a first span of 30 samples stops after it with the span's rows and the span it covered.</summary>
     [Fact]
     public async Task ACommonPattern_AnswersWithTheNewestRows_ThroughTheFirstSpanOnly()
     {
@@ -143,12 +143,13 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
         Assert.True(planCache.GetProperty("searched").GetProperty("complete").GetBoolean());
         Assert.Equal(1, statements);
 
-        /* A page the first span cannot fill, with the budget spent after that statement: the 100 digests of the span come back and the reply covers
-           the span (to the 100th sample), not the hour. */
-        var stopped = await PlanCacheAsync(scratch.ConnectionString, "dbo.Common", 150, Budget(1), ct);
+        /* A page the first span cannot fill (the most a page holds is 50 rows, so the span is cut at 30 sample rows here), with the budget spent
+           after that statement: the 30 digests of the span come back and the reply covers the span (to the 30th sample), not the hour. */
+        const int smallSpan = 30;
+        var stopped = await PlanCacheAsync(scratch.ConnectionString, "dbo.Common", DarlingMcpFindQueriesByTextTools.MaxLimit, Budget(1, spanRows: smallSpan), ct);
         Assert.Equal("stopped", stopped.GetProperty("status").GetString());
-        Assert.Equal(Enumerable.Range(0, SpanRows).Select(Hash).ToArray(), Hashes(stopped));
-        Assert.Equal(newest - TimeSpan.FromSeconds((SpanRows - 1) * 5), stopped.GetProperty("searched").GetProperty("searched_from").GetDateTime().ToUniversalTime());
+        Assert.Equal(Enumerable.Range(0, smallSpan).Select(Hash).ToArray(), Hashes(stopped));
+        Assert.Equal(newest - TimeSpan.FromSeconds((smallSpan - 1) * 5), stopped.GetProperty("searched").GetProperty("searched_from").GetDateTime().ToUniversalTime());
     }
 
     /// <summary>The early stop is in the plan: the statement for a span of 100 digests that all name the pattern, for a page of four, reads the text
