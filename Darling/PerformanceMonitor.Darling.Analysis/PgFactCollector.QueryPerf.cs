@@ -1134,10 +1134,14 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                     connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
                     ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
                 (blockStarts, leftoverDays) = PlanRegressionBlock.Select(builtDays, validBlocks);
-                TestOnlyBlockPlan.Value?.Invoke(blockStarts, leftoverDays);
             }
 
             var readsBlocks = blockStarts.Count > 0;
+            if (snapshot is not null && builtDays.Count > 0)
+            {
+                TestOnlyBlockPlan.Value?.Invoke(blockStarts, leftoverDays);
+            }
+
             var readsDays = builtDays.Count > 0;
             if (snapshot is null)
             {
