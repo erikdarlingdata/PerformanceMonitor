@@ -348,7 +348,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// <c>LIMIT 1</c> read by primary key that the planner cannot flatten into a join with the whole table, so <c>LIMIT $8</c> ends the probing in the
     /// plan, not in an estimate. A statement is one sighting (server, query_hash, database, digest), and a statement text can be found under several
     /// digests, so the matching ones are reduced to the newest per server, query_hash and database after the limit. The last column says the limit was
-    /// reached: when the reduced page is still short of $2, the caller runs the span again with no limit, for the keys not yet found. It is not used past the
+    /// reached: when the reduced page is still short of $2, the caller runs the span again with the same limit (sized to the rows still wanted), for the keys not yet found, until the page is full, the span is done or the budget ends. It is not used past the
     /// newest spans: a lookup costs more per text than the join's single pass over the table, so it stops paying once a span carries a large share of
     /// the texts.</summary>
     internal const string PlanCacheAllServersLookupSpanSql = @"
@@ -975,34 +975,25 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             var joinCeiling = now.AddDays(1);
             var joinIndex = 0;
             (DateTime Floor, DateTime Ceiling)? joinPending = null;
-            var joinRetried = false;
             var joinCapped = false;
             DateTime? joinCovered = null;
 
             /* #9219: the next statement of the window join. The span the last statement ran is done, except that a lookup span that hit its match
-               limit without filling the page runs once more with no limit, for the keys not yet found. Then the next span: its time width is the
+               limit without filling the page runs again with the same limit, for the keys not yet found (the keys it found are excluded, so each
+               rerun makes progress, and an unlimited rerun would probe every sighting of the span: a query_hash with many digests fills the first
+               limit alone). Then the next span: its time width is the
                fixed one (RawTierSpans), and a newest span ends no further back than the sample SpanRows rows from its edge, so its probes are
                bounded by a count. */
             async Task<SourceStatement?> NextJoinStatementAsync(
                 NpgsqlConnection joinConnection, NpgsqlTransaction joinTransaction, IReadOnlyList<AllServersHit> collected, CancellationToken joinToken)
             {
-                var retry = false;
-                if (joinPending is { } done)
+                if (joinPending is { } done && !(joinCapped && collected.Count <= limit))
                 {
-                    if (joinCapped && !joinRetried && collected.Count <= limit)
-                    {
-                        joinRetried = true;
-                        retry = true;
-                    }
-                    else
-                    {
-                        joinCovered = done.Floor;
-                        joinReached = done.Floor;
-                        joinCeiling = done.Floor;
-                        joinIndex++;
-                        joinPending = null;
-                        joinRetried = false;
-                    }
+                    joinCovered = done.Floor;
+                    joinReached = done.Floor;
+                    joinCeiling = done.Floor;
+                    joinIndex++;
+                    joinPending = null;
                 }
 
                 joinCapped = false;
@@ -1027,7 +1018,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
                 var span = joinPending!.Value;
                 var wanted = limit + 1 - collected.Count;
-                var matchLimit = retry ? int.MaxValue : (int)Math.Min((long)wanted * AllServersLookupMatchFactor, int.MaxValue);
+                var matchLimit = (int)Math.Min((long)wanted * AllServersLookupMatchFactor, int.MaxValue);
                 return new SourceStatement(lookup ? PlanCacheAllServersLookupSpanSql : PlanCacheAllServersSpanSql, p =>
                 {
                     BindAllServersSpan(p, new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped }, wanted, span, collected);
