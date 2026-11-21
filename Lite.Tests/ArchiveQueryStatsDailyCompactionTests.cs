@@ -455,6 +455,131 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
         Assert.Equal(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_stats", null));
     }
 
+    /// <summary>
+    /// #9258. The monthly merges sort by server too: a month of a monthly table (here wait_stats) merges into row
+    /// groups that each hold one server, except the few that straddle a boundary between two, and every server's rows
+    /// are the same as went in.
+    /// </summary>
+    [Fact]
+    public void AMonthsFilesOfAMonthlyTable_AreMergedIntoRowGroupsOfOneServer_WithEveryServersRowsUnchanged()
+    {
+        const string table = "wait_stats";
+        const int servers = 5;
+        const int hours = 10;
+        const int rowsPerHour = 5_000;
+
+        for (var h = 0; h < hours; h++)
+        {
+            Exec($"COPY (SELECT ({h * rowsPerHour} + i)::BIGINT AS id, TIMESTAMP '2026-09-28 {h:D2}:00:00' + to_seconds((i * 3600 / {rowsPerHour})::BIGINT) AS collection_time, " +
+                 $"(1 + i % {servers})::INTEGER AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({rowsPerHour}) t(i)) " +
+                 $"TO '{P($"20260928_{h:D2}00_{table}.parquet")}' ({ParquetCompaction.ArchiveCopyOptions})");
+        }
+
+        var before = RowsPerServer(P($"*_{table}.parquet"));
+        Assert.Equal(servers, before.Split(',').Length);
+
+        NewService().CompactParquetFiles();
+
+        Assert.Equal([$"202609_{table}.parquet"], ArchiveFileNames());
+        var merged = P($"202609_{table}.parquet");
+        Assert.Equal(before, RowsPerServer(merged));
+        Assert.Equal(hours * rowsPerHour, Scalar($"SELECT count(*) FROM read_parquet('{merged}')"));
+
+        var groups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id'");
+        var mixedGroups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id' AND stats_min_value <> stats_max_value");
+        Assert.True(groups >= 4 * servers, $"{groups} row groups: too few to tell sorted from unsorted");
+        Assert.True(mixedGroups <= servers - 1, $"{mixedGroups} of {groups} row groups hold more than one server");
+    }
+
+    /// <summary>
+    /// #9258. A sorted monthly table's batches use the smaller sorted budget, so a month over it splits into
+    /// <c>_ptNNN</c> parts (each sorted on its own) with every row kept, while a monthly table that keeps no order
+    /// still merges the same files into one file under the default 200 MB budget.
+    /// </summary>
+    [Fact]
+    public void ASortedMonthlyTablesBatches_UseTheSortedBudget_AndAnUnsortedTableKeepsTheDefaultOne()
+    {
+        const int files = 6;
+        for (var h = 0; h < files; h++)
+        {
+            MakeParquet($"20260928_{h:D2}00_wait_stats.parquet", h * 1000L, (h + 1) * 1000L, $"2026-09-28 {h:D2}:00:00");
+            MakeParquet($"20260928_{h:D2}00_some_unsorted_table.parquet", h * 1000L, (h + 1) * 1000L, $"2026-09-28 {h:D2}:00:00");
+        }
+
+        var perFile = SizeOf("20260928_0000_wait_stats.parquet");
+        var service = NewService();
+        service.SortedCompactionBatchInputBytes = perFile * 5 / 2;
+        service.CompactParquetFiles();
+
+        Assert.Equal(
+            ["202609_some_unsorted_table.parquet", "202609_wait_stats_pt001.parquet", "202609_wait_stats_pt002.parquet", "202609_wait_stats_pt003.parquet"],
+            ArchiveFileNames());
+        Assert.Equal((files * 1000L, files * 1000L), Visible("wait_stats"));
+        Assert.Equal((files * 1000L, files * 1000L), Visible("some_unsorted_table"));
+    }
+
+    /// <summary>
+    /// #9258. A sorted monthly merge that runs out of memory reruns unsorted at the default limit: one fallback
+    /// callback for the table, no throw, and every row in the output.
+    /// </summary>
+    [Fact]
+    public void ASortedMonthlyMergeThatRunsOutOfMemory_FallsBackOnce_AndWritesEveryRow()
+    {
+        var source = MakeWideDay();
+        var output = P("monthly_fallback_out.parquet");
+        var fallbacks = new List<(string Table, int Files, string Error)>();
+
+        ParquetCompaction.MergeBatchToFile("wait_stats", [source], output, P("spill"),
+            memoryLimit: "2MB", onSortFallback: (t, f, e) => fallbacks.Add((t, f, e)));
+
+        Assert.Equal(60_000, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
+        Assert.Equal(RowsPerServer(source), RowsPerServer(output));
+        var fallback = Assert.Single(fallbacks);
+        Assert.Equal("wait_stats", fallback.Table);
+        Assert.Equal(1, fallback.Files);
+    }
+
+    /// <summary>
+    /// #9258. Every archivable table that is merged per month sorts by server on its OWN time column (capture_time
+    /// for the config snapshots, alert_time for the alert log): a wrong or missing column would fail that table's
+    /// merge on every pass. Each table here merges two files that carry only its time column and server_id, with no
+    /// fallback, and comes out with one server per row group.
+    /// </summary>
+    [Fact]
+    public void EveryMonthlyArchivableTable_MergesSortedOnItsOwnTimeColumn_WithoutFallingBack()
+    {
+        var checkedTables = 0;
+        foreach (var (table, timeColumn) in ArchiveService.ArchivableTables)
+        {
+            if (ParquetCompaction.IsDailyTable(table) || table == "query_snapshots" || table == "query_stats")
+            {
+                continue;
+            }
+
+            var inputs = new List<string>();
+            for (var h = 0; h < 2; h++)
+            {
+                var path = P($"seed_{table}_{h}.parquet");
+                Exec($"COPY (SELECT TIMESTAMP '2026-09-28 {h:D2}:00:00' + to_seconds(i::BIGINT) AS {timeColumn}, (1 + i % 3)::INTEGER AS server_id " +
+                     $"FROM range(300) t(i)) TO '{path}' ({ParquetCompaction.ArchiveCopyOptions})");
+                inputs.Add(path);
+            }
+
+            var output = P($"merged_{table}.parquet");
+            var fallbacks = new List<string>();
+            ParquetCompaction.MergeBatchToFile(table, inputs, output, P("spill"), rowGroupSize: 100,
+                onSortFallback: (t, _, _) => fallbacks.Add(t));
+
+            Assert.Empty(fallbacks);
+            Assert.Equal(600, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
+            Assert.True(Scalar($"SELECT count(*) FROM parquet_metadata('{output}') WHERE path_in_schema = 'server_id' AND stats_min_value <> stats_max_value") <= 2,
+                $"{table}: a row group holds more than one server");
+            checkedTables++;
+        }
+
+        Assert.True(checkedTables >= 20, $"only {checkedTables} monthly tables were checked");
+    }
+
     private static async Task<long> ViewScalarAsync(string dbPath, string sql)
     {
         using var connection = new DuckDBConnection($"Data Source={dbPath}");

@@ -260,7 +260,7 @@ SELECT count(*) FROM g a JOIN g b ON a.row_group_id < b.row_group_id AND a.mn <=
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);
             using var write = connection.CreateCommand();
-            write.CommandText = $"COPY (SELECT i AS log_id, TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) SECOND AS collection_time FROM range(1, {SeededRows + 1}) t(i)) TO '{source}' (FORMAT PARQUET)";
+            write.CommandText = $"COPY (SELECT i AS log_id, 1 AS server_id, TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) SECOND AS collection_time FROM range(1, {SeededRows + 1}) t(i)) TO '{source}' (FORMAT PARQUET)";
             await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
