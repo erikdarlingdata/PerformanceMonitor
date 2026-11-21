@@ -126,10 +126,15 @@ ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET
     /// is the server's newest summary row at or before the batch. When a <c>query_stats</c> row of the server lies strictly after the
     /// anchor and strictly before the batch, an older build wrote it (a rollback past V286 and forward again), so the summary is not
     /// whole from its oldest row. The statement then deletes the summary rows at or before the anchor, which makes the batch's own row
-    /// the oldest, and the read stays on raw until the summary covers a window again. Normally no such row exists, the statement
-    /// deletes nothing, and it costs one probe of the <c>(server_id, collection_time)</c> index that stops at its first row. The anchor
+    /// the oldest, and the read stays on raw until the summary covers a window again. Such a row exists exactly when the newest raw
+    /// row before the batch is after the anchor, so <c>prior</c> reads only that one row (<c>ORDER BY collection_time DESC LIMIT 1</c>
+    /// stops at the first chunk that holds a row of the server) and the delete compares it to the anchor. The anchor must not be a
+    /// join column of a raw-table <c>EXISTS</c> (#9147): the planner then cannot use it as an index bound or to exclude chunks, and the
+    /// normal case, where no such row exists, read every chunk of the server's raw history before it answered no. Normally the
+    /// statement deletes nothing and costs one probe of the <c>(server_id, collection_time)</c> index in the newest chunk. The anchor
     /// takes rows AT the batch's time too, so the later batches of an Azure cycle (one <c>collection_time</c>, one batch per database)
-    /// find their own cycle's row as the anchor and never trigger it. Returns the rows deleted.
+    /// find their own cycle's row as the anchor and never trigger it. A server with no summary row (a NULL anchor) or no raw row before
+    /// the batch deletes nothing. Returns the rows deleted.
     /// </summary>
     public const string FloorMoveSql = """
 WITH anchor AS
@@ -138,19 +143,21 @@ WITH anchor AS
     FROM collect.query_stats_collection AS s
     WHERE s.server_id = $1::integer
     AND   s.collection_time <= $2::timestamp
+),
+prior AS
+(
+    SELECT q.collection_time AS at
+    FROM collect.query_stats AS q
+    WHERE q.server_id = $1::integer
+    AND   q.collection_time < $2::timestamp
+    ORDER BY q.collection_time DESC
+    LIMIT 1
 )
 DELETE FROM collect.query_stats_collection AS c
-USING anchor
+USING anchor, prior
 WHERE c.server_id = $1::integer
 AND   c.collection_time <= anchor.at
-AND   EXISTS
-      (
-          SELECT 1
-          FROM collect.query_stats AS q
-          WHERE q.server_id = $1::integer
-          AND   q.collection_time > anchor.at
-          AND   q.collection_time < $2::timestamp
-      );
+AND   prior.at > anchor.at;
 """;
 
     /// <summary>
