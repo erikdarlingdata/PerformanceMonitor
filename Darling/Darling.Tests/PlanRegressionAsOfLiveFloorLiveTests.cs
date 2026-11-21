@@ -54,7 +54,7 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
         Assert.Equal(rig.FirstUnbuilt.AddDays(-1), wholeDay);
 
         var resolved = await PgFactCollector.ResolvePlanRegressionLiveFloorAsync(
-            rig.Connection, null, ServerA, rig.WindowFloor, rig.BuiltDays, rig.End, 60, ct);
+            rig.Connection, null, ServerA, rig.WindowFloor, rig.BuiltDays, rig.End, rig.Now, 60, ct);
         Assert.Equal(rig.FirstUnbuilt.AddHours(-1), resolved);
 
         var narrow = await ReadAsync(rig, resolved, ct);
@@ -90,7 +90,7 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
 
         var wholeDay = PgFactCollector.PlanRegressionLiveFloorWithWatermarks(rig.WindowFloor, rig.BuiltDays);
         var resolved = await PgFactCollector.ResolvePlanRegressionLiveFloorAsync(
-            rig.Connection, null, ServerA, rig.WindowFloor, rig.BuiltDays, rig.End, 60, ct);
+            rig.Connection, null, ServerA, rig.WindowFloor, rig.BuiltDays, rig.End, rig.Now, 60, ct);
         Assert.Equal(wholeDay, resolved);
 
         var floor = await ReadAsync(rig, resolved, ct);
@@ -109,50 +109,86 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
         var partial = rig.BuiltDays.Select(b => b.Day == DateOnly.FromDateTime(rig.FirstUnbuilt.AddDays(-1))
             ? new PlanRegressionDaily.BuiltDay(b.Day, rig.FirstUnbuilt.AddDays(-1).AddHours(6)) : b).ToList();
         var resolved = await PgFactCollector.ResolvePlanRegressionLiveFloorAsync(
-            rig.Connection, null, ServerA, rig.WindowFloor, partial, rig.End, 60, ct);
+            rig.Connection, null, ServerA, rig.WindowFloor, partial, rig.End, rig.Now, 60, ct);
         Assert.Equal(rig.FirstUnbuilt.AddDays(-1).AddHours(6), resolved);
     }
 
     [Fact]
-    public async Task TheFact_OfAPassAnchoredBack_ReadsLessOfTheTableWithATrustedLength_AndReportsTheSameRegression()
+    public async Task TheFact_OfAPassAnchoredBack_BindsTheResolvedFloor_AndReportsTheSameRegression()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await RigAsync(BaseConnectionString!, intervalMinutes: [60], oldestHealthDaysBack: 25, ct);
         await using var postgres = NpgsqlDataSource.Create(rig.Scratch.ConnectionString);
 
-        async Task<(string Fact, long Blocks)> RunAsync()
+        /* The floor the collector binds, taken at the point it binds it (PgFactCollector.TestOnlyLiveFloorBound). */
+        async Task<(string Fact, DateTime Floor)> RunAsync()
         {
-            await Exec(rig.Connection, "SELECT pg_stat_statements_reset()", ct);
-            var pass = new AnalysisContext
+            var bound = new List<DateTime>();
+            PgFactCollector.TestOnlyLiveFloorBound.Value = bound.Add;
+            try
             {
-                ServerId = ServerA,
-                ServerName = "asof-floor",
-                TimeRangeStart = rig.End.AddHours(-4),
-                TimeRangeEnd = rig.End,
-                ServerUtcOffset = TimeSpan.Zero,
-                AsOfUtc = rig.End,
-            };
-            var fact = (await new PgFactCollector(postgres).CollectFactsAsync(pass)).SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
-            Assert.NotNull(fact);
-            Assert.NotNull(pass.PlanRegressionWindowStart);
-            await using var blocks = new NpgsqlCommand(
-                "SELECT COALESCE(sum(shared_blks_hit + shared_blks_read), 0) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query LIKE '%plan_regression_daily AS d%'",
-                rig.Connection);
-            Assert.Equal(1, fact!.Metadata["offender_count"]);
-            return (JsonSerializer.Serialize(fact.Metadata.OrderBy(m => m.Key)), Convert.ToInt64(await blocks.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+                var pass = new AnalysisContext
+                {
+                    ServerId = ServerA,
+                    ServerName = "asof-floor",
+                    TimeRangeStart = rig.End.AddHours(-4),
+                    TimeRangeEnd = rig.End,
+                    ServerUtcOffset = TimeSpan.Zero,
+                    AsOfUtc = rig.End,
+                };
+                var fact = (await new PgFactCollector(postgres).CollectFactsAsync(pass)).SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
+                Assert.NotNull(fact);
+                Assert.NotNull(pass.PlanRegressionWindowStart);
+                Assert.Equal(1, fact!.Metadata["offender_count"]);
+                return (JsonSerializer.Serialize(fact.Metadata.OrderBy(m => m.Key)), Assert.Single(bound));
+            }
+            finally
+            {
+                PgFactCollector.TestOnlyLiveFloorBound.Value = null;
+            }
         }
 
-        await Exec(rig.Connection, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
         var trusted = await RunAsync();
+        Assert.Equal(rig.FirstUnbuilt.AddHours(-1), trusted.Floor);
 
         /* The same store with no capture of the interval length: the whole-day floor. */
         await Exec(rig.Connection, "DELETE FROM collect.query_store_health", ct);
         var untrusted = await RunAsync();
+        Assert.Equal(rig.FirstUnbuilt.AddDays(-1), untrusted.Floor);
 
         Assert.Equal(untrusted.Fact, trusted.Fact);
-        Assert.True(trusted.Blocks < untrusted.Blocks,
-            $"the daily read touched {trusted.Blocks} blocks with a trusted interval length and {untrusted.Blocks} without one");
+    }
+
+    [Fact]
+    public async Task AFirstUnbuiltDayPastTheWideTablesHorizon_KeepsTheWholeDayFloor_AndTheSameRows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await RigAsync(BaseConnectionString!, intervalMinutes: [60], oldestHealthDaysBack: 25, ct);
+
+        /* Days built only before T-11, so the first unbuilt day is older than the ten days the wide table keeps. The trust test lists its
+           databases from the wide table and cannot see a database that only the 15-day latest table still holds. */
+        var older = rig.BuiltDays.Where(b => b.Day < DateOnly.FromDateTime(rig.Now.Date.AddDays(-11))).ToList();
+        Assert.NotEmpty(older);
+        var firstUnbuilt = older.Max(b => b.Day).AddDays(1).ToDateTime(TimeOnly.MinValue);
+        Assert.True(firstUnbuilt < rig.Now.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays));
+
+        var wholeDay = PgFactCollector.PlanRegressionLiveFloorWithWatermarks(rig.WindowFloor, older);
+        Assert.Equal(firstUnbuilt.AddDays(-1), wholeDay);
+        var resolved = await PgFactCollector.ResolvePlanRegressionLiveFloorAsync(
+            rig.Connection, null, ServerA, rig.WindowFloor, older, rig.End, rig.Now, 60, ct);
+        Assert.Equal(wholeDay, resolved);
+
+        /* The same store and the same length with the first unbuilt day inside the horizon: one interval below it. */
+        var inside = await PgFactCollector.ResolvePlanRegressionLiveFloorAsync(
+            rig.Connection, null, ServerA, rig.WindowFloor, rig.BuiltDays, rig.End, rig.Now, 60, ct);
+        Assert.Equal(rig.FirstUnbuilt.AddHours(-1), inside);
+
+        var kept = await ReadAsync(rig, older, resolved, ct);
+        var reference = await ReadAsync(rig, rig.BuiltDays, inside, ct);
+        Assert.NotEmpty(kept.Rows);
+        Assert.Equal(reference.Rows, kept.Rows);
     }
 
     /* ---------------------------------------------------------------------------------------------------------- */
@@ -162,6 +198,7 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
         public required ScratchPostgres Scratch { get; init; }
         public required NpgsqlConnection Connection { get; init; }
         public required DateTime End { get; init; }
+        public required DateTime Now { get; init; }
         public required DateTime WindowFloor { get; init; }
         public required List<PlanRegressionDaily.BuiltDay> BuiltDays { get; init; }
         public DateTime FirstUnbuilt => End.Date.AddDays(-1);
@@ -182,9 +219,10 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
 
-            var now = LiveClock.Now();
-            var today = now.Date;
+            /* One anchor owns both ends: the day after the pass's end day is "today", so no midnight between two clock reads can split them. */
             var end = LiveClock.AnchoredEndNotAfterNow();
+            var today = end.Date.AddDays(1);
+            var now = today;
             /* The pass's comparison window is 14 days back from its start, four hours before the end. */
             var windowFloor = PgFactCollector.PlanRegressionWindowFloor(end.AddHours(-4).AddDays(-PgFactCollector.PlanRegressionWindowDays));
 
@@ -257,7 +295,7 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
             var wholeBy = end.AddDays(-PgFactCollector.PlanRegressionSkewMarginDays);
             built = built.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
             Assert.Equal(13, built.Count);
-            return new Rig { Scratch = scratch, Connection = connection, End = end, WindowFloor = windowFloor, BuiltDays = built };
+            return new Rig { Scratch = scratch, Connection = connection, End = end, Now = now, WindowFloor = windowFloor, BuiltDays = built };
         }
         catch
         {
@@ -294,11 +332,14 @@ VALUES (@s, 'asofdb', @q, @p, NULL, @p, @first, @col, @h, @qh, 100, @cpu, @dur, 
     private readonly record struct Read(List<string> Rows, double LiveRowsRead, double LiveBlocks);
 
     /// <summary>The anchored daily statement bound the way the collector binds it with <paramref name="liveFloor"/>: the rows it returns, and the interval rows its live half read (those returned plus those a filter threw away).</summary>
-    private static async Task<Read> ReadAsync(Rig rig, DateTime liveFloor, CancellationToken ct)
+    private static Task<Read> ReadAsync(Rig rig, DateTime liveFloor, CancellationToken ct) =>
+        ReadAsync(rig, rig.BuiltDays, liveFloor, ct);
+
+    private static async Task<Read> ReadAsync(Rig rig, List<PlanRegressionDaily.BuiltDay> builtDays, DateTime liveFloor, CancellationToken ct)
     {
         await Exec(rig.Connection, "SET max_parallel_workers_per_gather = 0", ct);
         var rows = new List<string>();
-        await using (var run = Bind(rig, PgFactCollector.PlanRegressionDailyAsOfSql, liveFloor))
+        await using (var run = Bind(rig, PgFactCollector.PlanRegressionDailyAsOfSql, builtDays, liveFloor))
         await using (var reader = await run.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
@@ -308,20 +349,20 @@ VALUES (@s, 'asofdb', @q, @p, NULL, @p, @first, @col, @h, @qh, 100, @cpu, @dur, 
             }
         }
 
-        await using var explain = Bind(rig, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + PgFactCollector.PlanRegressionDailyAsOfSql, liveFloor);
+        await using var explain = Bind(rig, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + PgFactCollector.PlanRegressionDailyAsOfSql, builtDays, liveFloor);
         var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!).RootElement[0].GetProperty("Plan");
         return new Read(rows, RowsRead(plan), Blocks(plan));
     }
 
-    private static NpgsqlCommand Bind(Rig rig, string sql, DateTime liveFloor)
+    private static NpgsqlCommand Bind(Rig rig, string sql, List<PlanRegressionDaily.BuiltDay> builtDays, DateTime liveFloor)
     {
         var cmd = new NpgsqlCommand(sql, rig.Connection);
         cmd.Parameters.AddWithValue(ServerA);
         cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, rig.WindowFloor);
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = rig.BuiltDays.Select(b => b.Day).ToArray() });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = builtDays.Select(b => b.Day).ToArray() });
         cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, liveFloor);
         cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, rig.WindowFloor.AddDays(-1));
-        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = rig.BuiltDays.Select(b => b.ThroughOrDayEnd).ToArray() });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray() });
         cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, rig.End);
         return cmd;
     }

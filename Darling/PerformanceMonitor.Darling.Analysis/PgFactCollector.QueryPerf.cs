@@ -753,7 +753,7 @@ WITH plan_agg AS
     /// </summary>
     internal static async Task<DateTime> ResolvePlanRegressionLiveFloorAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime windowFloor,
-        IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, DateTime end, DateTime utcNow, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         var wholeDay = PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays);
         var days = builtDays.Select(b => b.Day).ToHashSet();
@@ -769,6 +769,14 @@ WITH plan_agg AS
             return wholeDay;
         }
 
+        /* The trust test lists the server's databases from the wide table, which keeps WideHorizonDays. A day at or below that horizon
+           (counting the day the floor reaches into) may have databases only the 15-day latest table still holds, so the test cannot
+           vouch for them: the whole day stays. */
+        if (firstUnbuilt - QueryStoreIntervalWide.IntervalSpanMargin < utcNow.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays))
+        {
+            return wholeDay;
+        }
+
         var reach = await QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync(
             connection, transaction, serverId, firstUnbuilt, end, commandTimeoutSeconds, cancellationToken);
         return PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays, reach);
@@ -777,6 +785,10 @@ WITH plan_agg AS
     /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
     /// store from another connection at exactly the point a snapshot has to hold. Null in production.</summary>
     internal static readonly System.Threading.AsyncLocal<Func<System.Threading.CancellationToken, System.Threading.Tasks.Task>?> TestOnlyAfterBuiltDaysRead = new();
+
+    /// <summary>Test seam (#9225): receives the live floor the daily read binds, so a test asserts the value the collector sends and not
+    /// a count taken through <c>pg_stat_statements</c>. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Action<DateTime>?> TestOnlyLiveFloorBound = new();
 
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
@@ -1093,8 +1105,10 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                     Value = builtDays.Select(b => b.Day).ToArray()
                 });
                 /* #9225: one interval length below the first unbuilt day, not a day, where the server's interval length can be trusted. */
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, await ResolvePlanRegressionLiveFloorAsync(
-                    connection, snapshot, context.ServerId, windowFloor, builtDays, AsNaive(context.TimeRangeEnd), FactCommandTimeoutSeconds, context.CancellationToken));
+                var liveFloor = await ResolvePlanRegressionLiveFloorAsync(
+                    connection, snapshot, context.ServerId, windowFloor, builtDays, AsNaive(context.TimeRangeEnd), DateTime.UtcNow, FactCommandTimeoutSeconds, context.CancellationToken);
+                TestOnlyLiveFloorBound.Value?.Invoke(liveFloor);
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, liveFloor);
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
                 cmd.Parameters.Add(new NpgsqlParameter
                 {

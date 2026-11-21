@@ -801,7 +801,9 @@ SELECT EXISTS
     /// longer than a day. It is the distance below a row's <c>last_execution_time</c> that its <c>first_execution_time</c> can sit, which
     /// is what the plan-regression read's live floor needs: both times fall inside one interval, so no interval of the server holds them
     /// further apart than its length. Where the length cannot be trusted (an interval-length change on the server that the captures did
-    /// not see, a database with no capture) the floor keeps a whole day, so a row of a longer interval is read, never dropped.
+    /// not see, a database with no capture) the floor keeps a whole day, so a row of a longer interval is read, never dropped. The
+    /// trust test lists databases from the wide table, so it vouches only for days that table still holds: the plan-regression caller
+    /// does not ask for a day older than <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>.
     /// <paramref name="transaction"/> is the read's own transaction, when it has one.
     /// </summary>
     public static async Task<TimeSpan> ResolveLongestIntervalSpanAsync(
