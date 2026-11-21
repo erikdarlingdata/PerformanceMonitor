@@ -307,6 +307,19 @@ public sealed class FrontDoorWebPagesTests
         Assert.Equal(new[] { "alpha" }, sections[1].GetProperty("titles").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 
+    /// <summary>#9203: with stores on different builds, each store's section on the Fleet page shows that store's own build next to its
+    /// name, and a store that said none shows none.</summary>
+    [Fact]
+    public void TheFleetPage_ShowsEachStoresOwnBuildNextToItsName_AndNothingForAStoreThatSaidNone()
+    {
+        var sections = Run("fleetStoreBuilds").GetProperty("sections").EnumerateArray().ToDictionary(
+            s => s.GetProperty("store").GetString()!,
+            s => s.GetProperty("builds").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "Version 3.12.0 (commit 111111111)" }, sections["use1"]);
+        Assert.Equal(new[] { "Version 3.13.0 (commit 222222222)" }, sections["use2"]);
+        Assert.Empty(sections["use3"]);
+    }
+
     [Fact]
     public void TheSidebar_ListsThePickedStoreFirst_MarkedCurrent_AndTheOtherStoreStillDraws()
     {
