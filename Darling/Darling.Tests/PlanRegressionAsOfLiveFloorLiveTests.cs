@@ -79,13 +79,14 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
         var ct = TestContext.Current.CancellationToken;
-        await using var rig = situation switch
+        /* "Captures start too late": the oldest capture is inside the day before the first unbuilt day, so a setting from before it may have gone unseen. */
+        var (lengths, daysBack) = situation switch
         {
-            "no capture at all" => await RigAsync(BaseConnectionString!, intervalMinutes: [], oldestHealthDaysBack: 0, ct),
-            /* The oldest capture is inside the day before the first unbuilt day, so a setting from before it may have gone unseen. */
-            "captures start too late" => await RigAsync(BaseConnectionString!, intervalMinutes: [60], oldestHealthDaysBack: 2, ct),
-            _ => await RigAsync(BaseConnectionString!, intervalMinutes: [60, 1440], oldestHealthDaysBack: 25, ct),
+            "no capture at all" => (Array.Empty<int>(), 0),
+            "captures start too late" => (new[] { 60 }, 2),
+            _ => (new[] { 60, 1440 }, 25),
         };
+        await using var rig = await RigAsync(BaseConnectionString!, lengths, daysBack, ct);
 
         var wholeDay = PgFactCollector.PlanRegressionLiveFloorWithWatermarks(rig.WindowFloor, rig.BuiltDays);
         var resolved = await PgFactCollector.ResolvePlanRegressionLiveFloorAsync(
@@ -176,85 +177,95 @@ public sealed class PlanRegressionAsOfLiveFloorLiveTests
     {
         var scratch = await ScratchPostgres.CreateAsync(baseCs, ct, emptyStore: true);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-
-        var now = LiveClock.Now();
-        var today = now.Date;
-        var end = LiveClock.AnchoredEndNotAfterNow();
-        /* The pass's comparison window is 14 days back from its start, four hours before the end. */
-        var windowFloor = PgFactCollector.PlanRegressionWindowFloor(end.AddHours(-4).AddDays(-PgFactCollector.PlanRegressionWindowDays));
-
-        await Exec(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
-        foreach (var server in Servers)
+        try
         {
-            await using var seed = new NpgsqlCommand(@"
-INSERT INTO collect.query_store_interval_latest
-(
-    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
-    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
-    last_execution_time, is_forced_plan, force_failure_count
-)
-SELECT
-    @s, 'asofdb', q, q * 10 + p, NULL, (q % 22) + 1,
-    d.d + (q % 22) * interval '1 hour',
-    d.d + (q % 22) * interval '1 hour' + interval '35 minutes',
-    'hash' || (q * 10 + p), 'qh' || q, 100, 1000, 3000,
-    d.d + (q % 22) * interval '1 hour' + interval '30 minutes', false, 0
-FROM generate_series((@t::date - 16)::timestamp, @t::timestamp, interval '1 day') AS d (d)
-CROSS JOIN generate_series(1, @q) AS q
-CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 };
-            seed.Parameters.AddWithValue("s", server);
-            seed.Parameters.AddWithValue("t", NpgsqlDbType.Timestamp, today);
-            seed.Parameters.AddWithValue("q", QueriesPerDay);
-            await seed.ExecuteNonQueryAsync(ct);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
 
-            await using var coverage = new NpgsqlCommand(
-                "INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through) VALUES (@s, @f, @f) ON CONFLICT (server_id) DO UPDATE SET filled_since = EXCLUDED.filled_since",
-                connection);
-            coverage.Parameters.AddWithValue("s", server);
-            coverage.Parameters.AddWithValue("f", NpgsqlDbType.Timestamp, today.AddDays(-20));
-            await coverage.ExecuteNonQueryAsync(ct);
-        }
+            var now = LiveClock.Now();
+            var today = now.Date;
+            var end = LiveClock.AnchoredEndNotAfterNow();
+            /* The pass's comparison window is 14 days back from its start, four hours before the end. */
+            var windowFloor = PgFactCollector.PlanRegressionWindowFloor(end.AddHours(-4).AddDays(-PgFactCollector.PlanRegressionWindowDays));
 
-        /* One query on the first server: a cheap plan ten days back (a built day), and a costly one whose interval crosses T-2's
-           midnight. Its first execution sits between the resolved floor (23:00) and midnight, and its last one is on T-2. */
-        var firstUnbuilt = end.Date.AddDays(-1);
-        await InsertAsync(connection, 900001, 9000011, "0xCHEAP", 10_000, end.Date.AddDays(-10).AddHours(10), ct);
-        await InsertAsync(connection, 900001, 9000012, "0xCOSTLY", 500_000, firstUnbuilt.AddMinutes(-20), ct);
-        await Exec(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
-
-        foreach (var length in intervalMinutes)
-        {
-            await using var health = new NpgsqlCommand(@"
-INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
-SELECT row_number() OVER (), c.c, @s, 'asof-floor', 'asofdb', @len
-FROM generate_series(@from::timestamp, @to::timestamp, interval '6 hours') AS c(c)", connection);
-            health.Parameters.AddWithValue("s", ServerA);
-            health.Parameters.AddWithValue("len", length);
-            health.Parameters.AddWithValue("from", NpgsqlDbType.Timestamp, today.AddDays(-oldestHealthDaysBack));
-            health.Parameters.AddWithValue("to", NpgsqlDbType.Timestamp, today.AddHours(1));
-            await health.ExecuteNonQueryAsync(ct);
-        }
-
-        /* The window's first day through T-3 built whole for every server; the pass anchored at T-1 22:00 takes them all as whole by then. */
-        for (var day = windowFloor; day <= today.AddDays(-3); day = day.AddDays(1))
-        {
+            await Exec(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
             foreach (var server in Servers)
             {
-                await PlanRegressionDaily.BuildDayAsync(connection, server, DateOnly.FromDateTime(day), now, ct);
+                await using var seed = new NpgsqlCommand(@"
+    INSERT INTO collect.query_store_interval_latest
+    (
+        server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+        collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+        last_execution_time, is_forced_plan, force_failure_count
+    )
+    SELECT
+        @s, 'asofdb', q, q * 10 + p, NULL, (q % 22) + 1,
+        d.d + (q % 22) * interval '1 hour',
+        d.d + (q % 22) * interval '1 hour' + interval '35 minutes',
+        'hash' || (q * 10 + p), 'qh' || q, 100, 1000, 3000,
+        d.d + (q % 22) * interval '1 hour' + interval '30 minutes', false, 0
+    FROM generate_series((@t::date - 16)::timestamp, @t::timestamp, interval '1 day') AS d (d)
+    CROSS JOIN generate_series(1, @q) AS q
+    CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 };
+                seed.Parameters.AddWithValue("s", server);
+                seed.Parameters.AddWithValue("t", NpgsqlDbType.Timestamp, today);
+                seed.Parameters.AddWithValue("q", QueriesPerDay);
+                await seed.ExecuteNonQueryAsync(ct);
+
+                await using var coverage = new NpgsqlCommand(
+                    "INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through) VALUES (@s, @f, @f) ON CONFLICT (server_id) DO UPDATE SET filled_since = EXCLUDED.filled_since",
+                    connection);
+                coverage.Parameters.AddWithValue("s", server);
+                coverage.Parameters.AddWithValue("f", NpgsqlDbType.Timestamp, today.AddDays(-20));
+                await coverage.ExecuteNonQueryAsync(ct);
             }
+
+            /* One query on the first server: a cheap plan ten days back (a built day), and a costly one whose interval crosses T-2's
+               midnight. Its first execution sits between the resolved floor (23:00) and midnight, and its last one is on T-2. */
+            var firstUnbuilt = end.Date.AddDays(-1);
+            await InsertAsync(connection, 900001, 9000011, "0xCHEAP", 10_000, end.Date.AddDays(-10).AddHours(10), ct);
+            await InsertAsync(connection, 900001, 9000012, "0xCOSTLY", 500_000, firstUnbuilt.AddMinutes(-20), ct);
+            await Exec(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
+
+            foreach (var length in intervalMinutes)
+            {
+                await using var health = new NpgsqlCommand(@"
+    INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
+    SELECT row_number() OVER (), c.c, @s, 'asof-floor', 'asofdb', @len
+    FROM generate_series(@from::timestamp, @to::timestamp, interval '6 hours') AS c(c)", connection);
+                health.Parameters.AddWithValue("s", ServerA);
+                health.Parameters.AddWithValue("len", length);
+                health.Parameters.AddWithValue("from", NpgsqlDbType.Timestamp, today.AddDays(-oldestHealthDaysBack));
+                health.Parameters.AddWithValue("to", NpgsqlDbType.Timestamp, today.AddHours(1));
+                await health.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The window's first day through T-3 built whole for every server; the pass anchored at T-1 22:00 takes them all as whole by then. */
+            for (var day = windowFloor; day <= today.AddDays(-3); day = day.AddDays(1))
+            {
+                foreach (var server in Servers)
+                {
+                    await PlanRegressionDaily.BuildDayAsync(connection, server, DateOnly.FromDateTime(day), now, ct);
+                }
+            }
+
+            await Exec(connection, "ANALYZE collect.query_store_interval_latest", ct);
+            await Exec(connection, "ANALYZE collect.plan_regression_daily", ct);
+            await Exec(connection, "ANALYZE collect.plan_regression_daily_built", ct);
+
+            var built = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(connection, null, ServerA, windowFloor, 60, null, _ => false, ct);
+            var wholeBy = end.AddDays(-PgFactCollector.PlanRegressionSkewMarginDays);
+            built = built.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
+            Assert.Equal(13, built.Count);
+            return new Rig { Scratch = scratch, Connection = connection, End = end, WindowFloor = windowFloor, BuiltDays = built };
         }
-
-        await Exec(connection, "ANALYZE collect.query_store_interval_latest", ct);
-        await Exec(connection, "ANALYZE collect.plan_regression_daily", ct);
-        await Exec(connection, "ANALYZE collect.plan_regression_daily_built", ct);
-
-        var built = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(connection, null, ServerA, windowFloor, 60, null, _ => false, ct);
-        var wholeBy = end.AddDays(-PgFactCollector.PlanRegressionSkewMarginDays);
-        built = built.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
-        Assert.Equal(13, built.Count);
-        return new Rig { Scratch = scratch, Connection = connection, End = end, WindowFloor = windowFloor, BuiltDays = built };
+        catch
+        {
+            /* The helper never returns a store it failed to finish, so the caller never owns one to drop. */
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
     private static async Task InsertAsync(NpgsqlConnection connection, long queryId, long planId, string hash, long cpuUs, DateTime firstExec, CancellationToken ct)
