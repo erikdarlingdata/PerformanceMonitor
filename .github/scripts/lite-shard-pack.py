@@ -16,7 +16,7 @@ Serial classes are the ones whose xUnit collection is declared `DisableParalleli
 class's collection, and the declarations are read from the test sources (`--tests-dir`, default Lite.Tests at
 the repo root), so there is no hand-kept list to rot. Every class weighs at least MIN_WEIGHT, so a class whose tests were all skipped still moves a
 shard's load and no shard is left empty. A class with no timing history gets the MEAN weight of the known
-classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
+classes of its own kind (a LiveTests name or any other). When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
 discovered classes, the assignment falls back to the class-name hash (SHA-256 first byte modulo N), the cut
 the workflow used before this script existed. A timed class the test sources no longer declare is left out, with
 one warning line each (#5833).
@@ -216,25 +216,25 @@ LIVE_CLASS_SUFFIX = "LiveTests"
 def class_kind(name):
     """The kind of a class, from its name alone: "live" when the simple name ends in LiveTests (a class that stands up a
     PostgreSQL store, or a Lite class that reads a real one), else "other". #9262: the two kinds cost very different seconds,
-    so a class the weight tables do not know weighs the median of its own kind, not one number for every class."""
+    so a class the weight tables do not know weighs the mean of its own kind, not one number for every class."""
     return "live" if re.split(r"[.+/]", name)[-1].split("`")[0].endswith(LIVE_CLASS_SUFFIX) else "other"
 
 
-def _median(values):
-    v = sorted(values)
-    mid = len(v) // 2
-    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
+def _mean(values):
+    return sum(values) / len(values)
 
 
 def missing_class_weight(known):
-    """A function name -> weight for a class the table does not know (#9262): the median of the known weights of that
-    class's kind. A kind with no known class takes the median of all known weights. With nothing known it weighs 0."""
+    """A function name -> weight for a class the table does not know (#9262): the MEAN of the known weights of that
+    class's kind. A kind with no known class takes the mean of all known weights. With nothing known it weighs 0. The mean,
+    not the median: packing adds weights, so the expected cost of an unknown class is the mean, and a few very heavy live
+    classes make the median of its kind far too low (Darling table: live median 1.38 s, mean 3.96 s)."""
     by_kind = {}
     for name, w in known.items():
         by_kind.setdefault(class_kind(name), []).append(w)
-    overall = _median(list(known.values())) if known else 0.0
-    medians = {k: _median(v) for k, v in by_kind.items()}
-    return lambda name: medians.get(class_kind(name), overall)
+    overall = _mean(list(known.values())) if known else 0.0
+    means = {k: _mean(v) for k, v in by_kind.items()}
+    return lambda name: means.get(class_kind(name), overall)
 
 
 def class_weight(raw, is_serial):
@@ -244,7 +244,7 @@ def class_weight(raw, is_serial):
 
 def predicted_walls(assignment, weights, serial):
     """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds. A class with no
-    timing counts at the median of the timed classes of its kind, as `pack` places it (#5208, #9262)."""
+    timing counts at the mean of the timed classes of its kind, as `pack` places it (#5208, #9262)."""
     assigned = {c for shard in assignment for c in shard}
     fill = missing_class_weight({c: weights[c] for c in assigned if c in weights})
     return [sum(class_weight(weights[c] if c in weights else fill(c), c in serial) for c in shard) for shard in assignment]

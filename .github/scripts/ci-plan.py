@@ -122,7 +122,7 @@ DEV_PUSH_MAX_LEGS = 10
 # The GitHub pull request files API returns at most 3000 files; a list that long may have been cut short.
 FILES_API_CAP = 3000
 
-# Weights are wall-seconds per class (darling-shard-weights.json). A class a table does not know weighs the median of its kind.
+# Weights are wall-seconds per class (darling-shard-weights.json). A class a table does not know weighs the mean of its kind.
 DARLING_WEIGHTS = os.path.join(HERE, "darling-shard-weights.json")
 LITE_WEIGHTS = os.path.join(HERE, "lite-shard-weights.json")
 # Lite's estimate when lite-shard-weights.json is missing (it is new in #6656): the full suite, and the reads subset.
@@ -546,7 +546,7 @@ def suite_minutes(names: "list[str]", weights: "dict[str, float]", fallback: flo
         return 0.0
     if not weights:
         return fallback
-    # #9262: a class the table does not know weighs the median of its own kind (lite-shard-pack.py's rule, the one the packers use).
+    # #9262: a class the table does not know weighs the mean of its own kind (lite-shard-pack.py's rule, the one the packers use).
     fill = _load_shard_pack().missing_class_weight(weights)
     return sum(weights[n] if n in weights else fill(n) for n in names) / 60.0
 
