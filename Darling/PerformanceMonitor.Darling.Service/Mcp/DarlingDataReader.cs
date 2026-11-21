@@ -2370,7 +2370,7 @@ internal static partial class DarlingDataReader
     public const string TopProceduresSql = TopProceduresRawWinnersSql + "\n" + TopProceduresWideSql;
 
     /// <summary>Pass 1 of <see cref="TopProceduresSql"/>: the winners ranked over raw <c>procedure_stats</c>.</summary>
-    private const string TopProceduresRawWinnersSql = $"""
+    internal const string TopProceduresRawWinnersSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
