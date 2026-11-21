@@ -198,6 +198,67 @@ public sealed class CollectionHealthFleetSetupStateLiveTests
     }
 
     [Fact]
+    public async Task EmptySuccessesOlderThanHoursBack_ThenOnlyExtensionMissing_ReadNeedsSetup_AsTheOneServerReadDoes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, dataSource) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var _d = dataSource;
+
+        const string skipText = "extension \"pg_wait_sampling\" is not installed";
+        var id = await RegisterAsync(connection, "su-win-empty", ct);
+
+        /* Two successes that stored nothing 30 hours ago (outside the default 24 hours, inside the 7 days), then a skip every hour since (#9213). */
+        await RunAsync(connection, id, "su-win-empty", "SUCCESS", TimeSpan.FromHours(30), 0, null, ct);
+        await RunAsync(connection, id, "su-win-empty", "SUCCESS", TimeSpan.FromHours(29.5), 0, null, ct);
+        for (var i = 1; i <= 28; i++)
+        {
+            await RunAsync(connection, id, "su-win-empty", "EXTENSION_MISSING", TimeSpan.FromHours(i), 0, skipText, ct);
+        }
+
+        var one = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "su-win-empty", cancellationToken: ct)).RootElement;
+        var oneServer = one.GetProperty("collectors").EnumerateArray().Single(c => c.TryGetProperty("collector", out var n) && n.GetString() == Collector);
+        Assert.Equal("EXTENSION_MISSING", oneServer.GetProperty("status").GetString());
+
+        var root = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "*", collector_name: Collector, cancellationToken: ct)).RootElement;
+        var row = RowsByServer(root)["su-win-empty"];
+        Assert.Equal("needs_setup", row.GetProperty("outcome").GetString());
+        Assert.Equal(1, root.GetProperty("servers_needing_setup").GetInt32());
+        Assert.Equal(0, root.GetProperty("servers_failing").GetInt32());
+    }
+
+    [Fact]
+    public async Task AWindowOfOnlyNonSuccessSkips_WithExtensionMissingEarlierInTheSevenDays_ReadsNeedsSetup_AsTheOneServerReadDoes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, dataSource) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var _d = dataSource;
+
+        const string skipText = "extension \"pg_wait_sampling\" is not installed";
+        var id = await RegisterAsync(connection, "su-win-skipped", ct);
+
+        /* Inside 24 hours only SKIPPED and ABANDONED runs, so no error, no skip that names the extension and no success. The skip came earlier in the 7 days (#9213). */
+        await RunAsync(connection, id, "su-win-skipped", "EXTENSION_MISSING", TimeSpan.FromHours(31), 0, skipText, ct);
+        await RunAsync(connection, id, "su-win-skipped", "EXTENSION_MISSING", TimeSpan.FromHours(30), 0, skipText, ct);
+        await RunAsync(connection, id, "su-win-skipped", "ABANDONED", TimeSpan.FromHours(2), 0, "abandoned", ct);
+        await RunAsync(connection, id, "su-win-skipped", "SKIPPED", TimeSpan.FromMinutes(20), 0, null, ct);
+
+        var one = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "su-win-skipped", cancellationToken: ct)).RootElement;
+        var oneServer = one.GetProperty("collectors").EnumerateArray().Single(c => c.TryGetProperty("collector", out var n) && n.GetString() == Collector);
+        var oneStatus = oneServer.GetProperty("status").GetString();
+
+        var root = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "*", collector_name: Collector, cancellationToken: ct)).RootElement;
+        var row = RowsByServer(root)["su-win-skipped"];
+        Assert.Equal("EXTENSION_MISSING", oneStatus);
+        Assert.Equal("needs_setup", row.GetProperty("outcome").GetString());
+        Assert.Equal(1, root.GetProperty("servers_needing_setup").GetInt32());
+        Assert.Equal(0, root.GetProperty("servers_failing").GetInt32());
+    }
+
+    [Fact]
     public async Task TheRunsAndFailuresOnARow_StayOnHoursBack_WhileTheBandReadsSevenDays()
     {
         var ct = TestContext.Current.CancellationToken;
