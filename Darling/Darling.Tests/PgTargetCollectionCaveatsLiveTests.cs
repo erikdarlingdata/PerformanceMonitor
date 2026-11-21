@@ -161,7 +161,8 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 Assert.True(root.TryGetProperty("total_facts", out _), $"the facts read must return data over an observed window: {facts}");
                 Assert.Contains("1 of 20 fact families could not be read (vacuum (missing_schema))", root.GetProperty("caveat").GetString(), StringComparison.Ordinal);
                 Assert.All(root.GetProperty("collection_caveats").GetProperty("entries").EnumerateArray(), entry => Assert.Equal("vacuum", entry.GetProperty("family").GetString()));
-                Assert.Equal("collection_caveats", root.EnumerateObject().Last().Name);
+                /* #9195: the budget keys (budget_truncated, budget_note) close every facts answer; the caveat block is still the last thing the pass itself adds. */
+                Assert.Equal("collection_caveats", root.EnumerateObject().Select(p => p.Name).Last(n => n is not ("budget_truncated" or "budget_note")));
             }
 
             bodySucceeded = true;

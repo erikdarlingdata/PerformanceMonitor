@@ -231,4 +231,28 @@ public static class McpResponseBudget
         var fit = RowsThatFit(inScope, n => System.Text.Encoding.UTF8.GetByteCount(Measure(n)), budgetBytes);
         return Measure(fit);
     }
+
+    /// <summary>
+    /// <see cref="CapArray"/> for a reply that is already text and may be a status answer with no array (#9195): the analysis facts read
+    /// is finished (window notice attached) before it is cut, so the notice's own keys count against the budget. An answer that is not a
+    /// JSON object holding <paramref name="arrayKey"/> as an array is returned as it came.
+    /// </summary>
+    public static string CapArrayInReply(
+        string reply, string arrayKey, string order, string noun, Func<int, string?>? remedyForKept, string truncatedKey, string noteKey,
+        int budgetBytes = DefaultBytes)
+    {
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(reply);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return reply;
+        }
+
+        return root is System.Text.Json.Nodes.JsonObject payload && payload[arrayKey] is System.Text.Json.Nodes.JsonArray
+            ? CapArray(payload, arrayKey, order, noun, remedyForKept, budgetBytes, truncatedKey, noteKey, null)
+            : reply;
+    }
 }

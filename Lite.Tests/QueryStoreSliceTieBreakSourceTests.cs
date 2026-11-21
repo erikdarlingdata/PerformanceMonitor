@@ -50,7 +50,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     /// </summary>
     private static readonly (string Path, int Sites)[] DedupSites =
     [
-        (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 6),
+        (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 5), // one site is now the arg_max pick (#9195)
         (Path.Combine("Lite", "Analysis", "DrillDownCollector.Queries.cs"), 1),
         (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.QueryPerf.cs"), 1),
         /* #8784: get_object_usage sums module executions over the stored Query Store rows, newest snapshot per interval. */
@@ -97,7 +97,8 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         /* The count is asserted as a whole too: a file dropping to zero sites would otherwise be caught only
            by its own per-file assertion, and this states the total the fix actually swept. */
         /* 8 -> 9 with #8784 (get_object_usage's module executions). */
-        Assert.Equal(9, total);
+        /* 9 -> 8 with #9195: one site is now the arg_max pick. */
+        Assert.Equal(8, total);
     }
 
     /// <summary>
