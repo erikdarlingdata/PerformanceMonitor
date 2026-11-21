@@ -1476,9 +1476,8 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     {
         /* The cut-off read runs before the source arms the statement timeout for the statement that follows, so it is armed here to what
            is left of the budget (the caller passes it only when something is left). */
-        await using (var arm = new NpgsqlCommand(
-            "SET LOCAL statement_timeout = " + statementTimeoutMs.ToString(CultureInfo.InvariantCulture), connection, transaction)
-            { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        var armSql = "SET LOCAL statement_timeout = " + statementTimeoutMs.ToString(CultureInfo.InvariantCulture);
+        await using (var arm = new NpgsqlCommand(armSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
         {
             await arm.ExecuteNonQueryAsync(cancellationToken);
         }
