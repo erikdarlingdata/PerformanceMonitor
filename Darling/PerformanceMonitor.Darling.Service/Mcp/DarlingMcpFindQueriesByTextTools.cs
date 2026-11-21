@@ -1017,14 +1017,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                         var left = planCacheBudget.Milliseconds - (long)(planCacheBudget.ElapsedClock?.Invoke() ?? joinClock.Elapsed).TotalMilliseconds;
                         if (left > 0)
                         {
-                            await using (var arm = new NpgsqlCommand(
-                                "SET LOCAL statement_timeout = " + left.ToString(CultureInfo.InvariantCulture), joinConnection, joinTransaction)
-                                { CommandTimeout = McpCommandDeadlines.ReadSeconds })
-                            {
-                                await arm.ExecuteNonQueryAsync(joinToken);
-                            }
-
-                            spanFloor = await ReadRowFloorAsync(joinConnection, joinTransaction, spanFloor, joinCeiling, planCacheBudget.SpanRows * width, joinToken);
+                            spanFloor = await ReadRowFloorAsync(joinConnection, joinTransaction, spanFloor, joinCeiling, planCacheBudget.SpanRows * width, left, joinToken);
                         }
                     }
 
@@ -1476,10 +1469,20 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     /// <summary>#9219: the time the newest span of a window join ends at when it is cut by a row count: the collection time of the sample
     /// <paramref name="rows"/> rows back from <paramref name="ceiling"/>, no earlier than <paramref name="floor"/>, or <paramref name="floor"/> when
     /// fewer samples than that are in the span. A read of the newest samples in time order, so it touches the newest chunk only. The span keeps every
-    /// sample at that time, so it holds at least <paramref name="rows"/> rows and its floor is strictly below its ceiling.</summary>
+    /// sample at that time, so it holds at least <paramref name="rows"/> rows and its floor is strictly below its ceiling. <paramref name="statementTimeoutMs"/> is armed first as the statement timeout.</summary>
     private static async Task<DateTime> ReadRowFloorAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime floor, DateTime ceiling, int rows, CancellationToken cancellationToken)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime floor, DateTime ceiling, int rows, long statementTimeoutMs,
+        CancellationToken cancellationToken)
     {
+        /* The cut-off read runs before the source arms the statement timeout for the statement that follows, so it is armed here to what
+           is left of the budget (the caller passes it only when something is left). */
+        await using (var arm = new NpgsqlCommand(
+            "SET LOCAL statement_timeout = " + statementTimeoutMs.ToString(CultureInfo.InvariantCulture), connection, transaction)
+            { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            await arm.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var command = new NpgsqlCommand(RowFloorSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = ceiling });
