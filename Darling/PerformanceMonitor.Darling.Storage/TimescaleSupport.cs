@@ -13664,6 +13664,23 @@ LEFT JOIN LATERAL (
         }
     }
 
+    /// <summary>
+    /// The statement V293 (#9277) and the runtime swap both run: <c>idx_attention_events_count_time</c>, the partial index the Client Timeouts counter
+    /// rows are read through. A catalog read when the index exists. Shared so the table the runtime swap puts in place gets the same index V293 gave the
+    /// table it replaced (<see cref="PgMigrations.AttentionSwapSql"/> builds only the time index, and its text is V277's).
+    /// </summary>
+    internal const string CreateAttentionCountIndexSql =
+        "CREATE INDEX IF NOT EXISTS " + PgMigrations.AttentionCountIndexName
+        + " ON collect.attention_events (server_id, collection_time) INCLUDE (attention_count) WHERE event_kind = 'count';";
+
+    /// <summary>
+    /// Run by the runtime swap just before <see cref="CreateAttentionCountIndexSql"/>: the swap renames the table it moves and the time index with it,
+    /// but not the counter-row index, and index names are unique in a schema, so the old table's index would make the build a no-op by name and leave
+    /// the new table without one. A no-op when the old table has no such index (a store that never ran V293).
+    /// </summary>
+    internal const string RenameLegacyAttentionCountIndexSql =
+        "ALTER INDEX IF EXISTS collect." + PgMigrations.AttentionCountIndexName + " RENAME TO " + PgMigrations.AttentionCountIndexName + "_legacy;";
+
     /// <summary>How long the runtime swap waits for its lock before it gives up (#8967). The rung waits longer, with the ladder's own budget.</summary>
     internal const string AttentionSwapLockTimeout = "5s";
 
@@ -13678,9 +13695,23 @@ LEFT JOIN LATERAL (
     {
         try
         {
+            var legacyExisted = await LegacyAttentionTableExistsAsync(connection, null, cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             using var command = new NpgsqlCommand(PgMigrations.AttentionSwapSql(AttentionSwapLockTimeout), connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            /* #9277: the swap builds only the time index, so a swap that runs after V293 would leave the counter-row index on _legacy and none on
+               the new table. Only a pass whose swap did something needs it (the statement takes a SHARE lock even when the index exists, so a
+               pass that did nothing skips it), and it runs in the swap's own transaction, still under its lock timeout: the swap and the index
+               land together or neither does. The new table is empty, so the build is instant. A swap renames the table it moves to _legacy,
+               so a _legacy that was not there before is the sign. */
+            if (!legacyExisted
+                && await LegacyAttentionTableExistsAsync(connection, transaction, cancellationToken))
+            {
+                using var index = new NpgsqlCommand(RenameLegacyAttentionCountIndexSql + " " + CreateAttentionCountIndexSql, connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
+                await index.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await transaction.CommitAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -13689,6 +13720,12 @@ LEFT JOIN LATERAL (
                 "The attention_events swap did not run (#8967). The table stays as it was and the next hourly pass tries again: {Message}",
                 ex.Message);
         }
+    }
+
+    private static async Task<bool> LegacyAttentionTableExistsAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        using var command = new NpgsqlCommand("SELECT to_regclass('collect.attention_events_legacy') IS NOT NULL", connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
     /// <summary>
