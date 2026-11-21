@@ -332,7 +332,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sessionId });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = requestId });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is string s ? s : null;
     }
 
@@ -392,7 +392,7 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<ViewerQuerySnapshotRow>();
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(ReadQuerySnapshotRow(reader));
@@ -410,7 +410,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQuerySnapshotRow>();
         var totalCount = 0;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(ReadQuerySnapshotRow(reader));
@@ -473,7 +473,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeMonitor });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var sessions = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1));

@@ -753,7 +753,7 @@ public sealed partial class ViewerDataService
                 command.Parameters.Add(DatabaseFilterParameter(databaseNames));
                 command.Parameters.Add(databases.ExcludeParameter());
                 AddHourlyCeilingParameter(command, ceiling);
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                 while (await reader.ReadAsync(cancellationToken))
                 {
                     ranked.Add((
@@ -842,7 +842,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = databases });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = hashes });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!reader.IsDBNull(1))
@@ -930,7 +930,7 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags,
         DateTime midStart, DateTime midEnd, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
         if (await QueryStatsHostHourly.UsableMidEndAsync(connection, transaction, serverId, midStart, midEnd, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is not DateTime usableEnd)
         {
@@ -957,7 +957,7 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<ViewerQueryStatsRow>();
         var candidateCount = 0;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* #5313: the count rides on a row of its own too; page_ord (46) is NULL on that one, so it is not a page row. */
@@ -1172,7 +1172,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new QueryStatsComparisonItem
@@ -1335,7 +1335,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerHourlyMinutes });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(whole.Start, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(whole.End, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await ReadSlicerBucketsAsync(reader, cancellationToken);
     }
 
@@ -1353,7 +1353,7 @@ public sealed partial class ViewerDataService
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await ReadSlicerBucketsAsync(reader, cancellationToken);
     }
 

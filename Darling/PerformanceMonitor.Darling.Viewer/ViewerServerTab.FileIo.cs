@@ -70,7 +70,7 @@ public partial class ViewerServerTab
             return;
         }
 
-        await RefreshActiveInnerTabAsync();
+        await RefreshAfterSubTabPickAsync();
     }
 
     /// <summary>

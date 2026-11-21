@@ -101,7 +101,7 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<PvsTrendPoint>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* #3653: a NULL size is an UNMEASURED point (the collector could not read the version store that
@@ -171,7 +171,7 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<PvsStatsRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new PvsStatsRow

@@ -127,7 +127,7 @@ WHERE command_id = $1
         await using var command = _dataSource.CreateCommand(CommandPollSql);
         command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;

@@ -297,7 +297,7 @@ public partial class DuckDbInitializer : IDisposable
                proceeds normally. */
             return NoOpDisposable.Instance;
         }
-        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
+        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false), readOwner: this);
     }
 
     /// <summary>
@@ -340,7 +340,7 @@ public partial class DuckDbInitializer : IDisposable
             return NoOpDisposable.Instance;
         }
 
-        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
+        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false), readOwner: this);
     }
 
     /// <summary>
@@ -393,7 +393,7 @@ public partial class DuckDbInitializer : IDisposable
     /// switch of over a second at the median against a few milliseconds alone. A polling writer is not waiting as far
     /// as the lock knows, so readers keep flowing around it.</para>
     ///
-    /// <para>The tail is the bound on starvation. A writer polling against readers that never leave a gap never finds
+    /// <para>The tail is the bound on starvation (its length is <see cref="EffectiveWriteLockParkTail"/>). A writer polling against readers that never leave a gap never finds
     /// the lock free; once parked, no new reader gets in ahead of it, and it has the lock as soon as the readers in
     /// flight finish. So a reader is held behind a budgeted writer for at most the tail, plus the writer's own hold,
     /// and the writer keeps the whole budget it was given: the deadline is the same, and a budget no longer than the
@@ -407,7 +407,6 @@ public partial class DuckDbInitializer : IDisposable
     private LockReleaser? TryEnterWriteLockPollingFirst(TimeSpan timeout, long waitStarted, string? holderMember, string? holderFile)
     {
         var deadline = waitStarted + ToTimestampTicks(timeout);
-        var parkAt = deadline - ToTimestampTicks(WriteLockParkTail < timeout ? WriteLockParkTail : timeout);
         Interlocked.Increment(ref s_pollingWriters);
         Interlocked.Increment(ref _pollingWriters);
         try
@@ -419,6 +418,8 @@ public partial class DuckDbInitializer : IDisposable
                     return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
                 }
 
+                /* Asked again each pass: a read that finishes while the writer polls can lengthen the tail (#9196). */
+                var parkAt = deadline - ToTimestampTicks(EffectiveWriteLockParkTail(timeout));
                 var now = Stopwatch.GetTimestamp();
                 if (now >= parkAt)
                 {
@@ -468,14 +469,105 @@ public partial class DuckDbInitializer : IDisposable
 
     /// <summary>
     /// The last part of a budgeted writer's wait, spent parked as a waiting writer that holds new readers back
-    /// (#7256). One second: the longest any reader waits behind a budgeted writer, and long enough for the ordinary
-    /// store reads in flight at the park, which take milliseconds, to finish inside it so the writer gets its turn.
+    /// (#7256). One second: long enough for the ordinary store reads in flight at the park, which take milliseconds,
+    /// to finish inside it so the writer gets its turn. It is the floor: <see cref="EffectiveWriteLockParkTail"/> lengthens
+    /// it when reads have been holding the lock longer than that (#9196).
     /// An instance value rather than a static so a test can set it on its own initializer; a tail no shorter than the
     /// writer's budget makes it park at once.
     /// </summary>
     internal TimeSpan WriteLockParkTail { get; set; } = InitialWriteLockParkTail;
 
     internal static readonly TimeSpan DefaultWriteLockParkTail = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// #9196: the tail a budgeted writer really parks for. A parked writer gets the lock when the reads already in flight
+    /// finish, so a tail shorter than a read that is in flight at the park times the writer out: one MCP client reading tool
+    /// after tool, each read holding the lock for 1.3 to 2.6 s, left a writer with a 5 s budget and a 1 s tail parked behind
+    /// a read that outlasted its budget. The tail is therefore the longer of <see cref="WriteLockParkTail"/> and
+    /// <see cref="ReadHoldTailFactor"/> times the longest counted read hold seen within <see cref="ReadHoldMemory"/>, but
+    /// never more than <see cref="MaxAdaptiveTailShare"/> of the budget, so a writer always polls for the first part of
+    /// its budget and a tab read still flows around it then (#7256).
+    /// <para>A hold counts only when it is no longer than that cap (<see cref="MaxAdaptiveTailShare"/> times the writer's budget).
+    /// A longer read, such as an archive read of minutes, cannot be outwaited by any park inside the budget, so letting it
+    /// move the tail would only make each writer park at the cap, hold new tab reads there for the rest of its budget and
+    /// still time out. The budget is the writer's, so the holds are kept and each call filters them against its own budget.
+    /// With no counted hold the tail is the configured one, so the ordinary store reads, which take milliseconds, still see
+    /// a writer park for one second at most.</para>
+    /// </summary>
+    internal TimeSpan EffectiveWriteLockParkTail(TimeSpan timeout)
+    {
+        var configured = WriteLockParkTail < timeout ? WriteLockParkTail : timeout;
+        var cap = timeout * MaxAdaptiveTailShare;
+        var longest = LongestRecentReadHoldWithin(cap);
+        if (longest <= TimeSpan.Zero)
+        {
+            return configured;
+        }
+
+        var wanted = longest * ReadHoldTailFactor;
+        var adaptive = wanted < cap ? wanted : cap;
+        return adaptive > configured ? adaptive : configured;
+    }
+
+    /// <summary>The margin on the longest read: a read in flight at the park may be a little longer than the longest one seen.</summary>
+    private const double ReadHoldTailFactor = 1.25;
+
+    /// <summary>The most of a writer's budget the longest-read tail may take, so the writer always polls for the first part of it.</summary>
+    private const double MaxAdaptiveTailShare = 0.8;
+
+    /// <summary>How long a read hold is remembered. A test sets it on its own initializer.</summary>
+    internal TimeSpan ReadHoldMemory { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How many recent read holds are kept. Reads past this many displace the oldest, and they are the current load.</summary>
+    private const int ReadHoldRingSize = 64;
+
+    private readonly object _readHoldLock = new();
+    private readonly long[] _readHoldTicks = new long[ReadHoldRingSize];
+    private readonly long[] _readHoldSeenAt = new long[ReadHoldRingSize];
+    private int _readHoldNext;
+
+    /// <summary>
+    /// Notes how long a read lock was held, in a ring of the last <see cref="ReadHoldRingSize"/> holds. Called when a read
+    /// lock is released: one lock and one slot write, no allocation.
+    /// </summary>
+    internal void RecordReadHold(TimeSpan held)
+    {
+        var ticks = ToTimestampTicks(held);
+        if (ticks <= 0)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        lock (_readHoldLock)
+        {
+            _readHoldTicks[_readHoldNext] = ticks;
+            _readHoldSeenAt[_readHoldNext] = now;
+            _readHoldNext = (_readHoldNext + 1) % ReadHoldRingSize;
+        }
+    }
+
+    /// <summary>The longest hold within <see cref="ReadHoldMemory"/> that is no longer than <paramref name="cap"/>, or zero.</summary>
+    private TimeSpan LongestRecentReadHoldWithin(TimeSpan cap)
+    {
+        var capTicks = ToTimestampTicks(cap);
+        var memoryTicks = ToTimestampTicks(ReadHoldMemory);
+        var now = Stopwatch.GetTimestamp();
+        long longest = 0;
+        lock (_readHoldLock)
+        {
+            for (var i = 0; i < ReadHoldRingSize; i++)
+            {
+                var ticks = _readHoldTicks[i];
+                if (ticks > longest && ticks <= capTicks && now - _readHoldSeenAt[i] < memoryTicks)
+                {
+                    longest = ticks;
+                }
+            }
+        }
+
+        return longest == 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(0, longest);
+    }
 
     /// <summary>
     /// The tail every new initializer starts with: <see cref="DefaultWriteLockParkTail"/> in the product, where nothing sets it.
@@ -536,14 +628,16 @@ public partial class DuckDbInitializer : IDisposable
         private readonly long _holdId;
         private readonly long _acquiredAt = Stopwatch.GetTimestamp();
         private readonly TimeSpan _warnAfter;
+        private readonly DuckDbInitializer? _readOwner;
         private bool _disposed;
 
-        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId, TimeSpan warnAfter = default)
+        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId, TimeSpan warnAfter = default, DuckDbInitializer? readOwner = null)
         {
             _lock = rwLock;
             _write = write;
             _holdId = holdId;
             _warnAfter = warnAfter;
+            _readOwner = readOwner;
         }
 
         public void Dispose()
@@ -568,6 +662,8 @@ public partial class DuckDbInitializer : IDisposable
                     /* The warning is measurement only. */
                 }
             }
+            /* #9196: how long reads hold the lock sets how long a budgeted writer must park to get past one in flight. */
+            _readOwner?.RecordReadHold(Stopwatch.GetElapsedTime(_acquiredAt));
             StoreLockHolders.Unregister(_holdId);
             if (_write) _lock.ExitWriteLock();
             else _lock.ExitReadLock();

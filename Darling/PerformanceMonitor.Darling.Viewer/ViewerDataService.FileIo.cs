@@ -348,7 +348,7 @@ public sealed partial class ViewerDataService
             double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite, long Reads, long Writes, bool InReadTen, bool InWriteTen)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(8) != 1)
@@ -420,7 +420,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Stall, long Reads)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -474,7 +474,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string FileLabel, DateTime BucketStart, DateTime FirstCollectionTime, double Read, double Write)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(5) != 1)

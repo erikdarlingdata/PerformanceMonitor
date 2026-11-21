@@ -112,13 +112,13 @@ ON CONFLICT (id) DO UPDATE SET
         {
             await using var noSecretCommand = _dataSource.CreateCommand(NotificationSelectNoSecretSql);
             noSecretCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var noSecretReader = await noSecretCommand.ExecuteReaderAsync(cancellationToken);
+            await using var noSecretReader = await noSecretCommand.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             return await noSecretReader.ReadAsync(cancellationToken) ? ReadNotificationRowNoSecret(noSecretReader) : null;
         }
 
         await using var command = _dataSource.CreateCommand(NotificationSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await reader.ReadAsync(cancellationToken) ? ReadNotificationRow(reader) : null;
     }
 
@@ -153,7 +153,7 @@ ON CONFLICT (id) DO UPDATE SET
             return;
         }
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
         {
@@ -169,7 +169,7 @@ ON CONFLICT (id) DO UPDATE SET
                 "SELECT route_id FROM config_notification_routes WHERE signing_key <> '' ORDER BY route_id FOR UPDATE", connection, transaction))
             {
                 idsRead.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                await using var reader = await idsRead.ExecuteReaderAsync(cancellationToken);
+                await using var reader = await idsRead.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                 while (await reader.ReadAsync(cancellationToken))
                 {
                     ids.Add(reader.GetInt32(0));

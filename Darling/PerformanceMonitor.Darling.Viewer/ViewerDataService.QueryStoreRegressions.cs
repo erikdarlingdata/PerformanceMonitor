@@ -288,7 +288,7 @@ public sealed partial class ViewerDataService
 
         /* #5506: raw too reads the baseline's closed days from the daily totals, so it runs in the same kind of snapshot
            transaction as the table form: the built days it names and the live rows it reads are one view of the store. */
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
         await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
         {
@@ -304,7 +304,7 @@ public sealed partial class ViewerDataService
 
         await using var command = new NpgsqlCommand(rawSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
         AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
     }
 
@@ -328,7 +328,7 @@ public sealed partial class ViewerDataService
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
@@ -375,7 +375,7 @@ public sealed partial class ViewerDataService
 
             await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, spans.RegularStart, baselinePlan, excludedDatabases, spans.FailureStart);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             var rows = await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
             var clamp = DateTime.SpecifyKind(plan.ClampedStart, DateTimeKind.Unspecified);
             return (rows, baselinePlan.HoursHeldStart ?? spans.RegularStart, baselinePlan.FailureHoursHeldStart ?? spans.FailureStart,

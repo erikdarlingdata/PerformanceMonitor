@@ -213,7 +213,7 @@ public sealed partial class ViewerDataService
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var points = new List<ItemTimelinePoint>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             points.Add(new ItemTimelinePoint(
