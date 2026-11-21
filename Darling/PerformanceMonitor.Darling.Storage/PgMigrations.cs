@@ -3368,6 +3368,22 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         TimescaleSupport.CreateQueryStoreCorrectedHourlyHashCoveringIndexSql + "\n" + TimescaleSupport.CreateQueryStatsHourlyHashCoveringIndexesSql;
 
     /// <summary>
+    /// V291 (#9223): <c>ix_qs_corrected_daily_hash_bucket</c>, <c>(query_hash, bucket DESC) INCLUDE (server_id, database_name, execution_count_sum,
+    /// cpu_us_weighted_sum, duration_us_weighted_sum)</c> on the corrected daily Query Store rollup's materialization. The <c>mid</c> arm of
+    /// <c>get_query_fleet_summary</c>'s Query Store statement filters that rollup on the hash alone, and its newest chunks are still uncompressed
+    /// (inside the rollup's compress-after window) with a bucket index and the kept <c>server_id</c> index only, so the plan scanned every row of each
+    /// one. The hourly rollup got the same index in V246 and V284, and both of the statement's edges read it.
+    ///
+    /// <para><b>Cost.</b> One build per materialization chunk, under a SHARE lock that blocks the refresh's writes and not reads, with the lock
+    /// timeout of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
+    /// the uncompressed chunks (the newest days, one row per query per server per day). No narrow index of this name exists, so unlike V284 nothing is
+    /// dropped and readers are never blocked. The statement is a catalog read on a store that already has the index, and a store without TimescaleDB or
+    /// without the view returns before touching anything. A fresh store gets the same index right after the view is created. Additive for an older
+    /// build: it ignores the index, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private static readonly string V291Sql = TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql;
+
+    /// <summary>
     /// V281 (#9043): <c>collect.query_store_text_seen</c>, the narrow table that holds the Query Store text liveness stamp
     /// (<see cref="QueryStoreTextSeen"/>), so the touch that runs every collection writes a 60-byte row instead of a new copy
     /// of a text row and its trigrams.
@@ -3822,6 +3838,10 @@ END $$;";
            stays fast, and a server with no floor row has no floor. The floor move writes one row here instead of deleting summary rows inside
            the batch. An older build ignores the table, so after a rollback with a hole it can read the summary across the hole. */
         new Migration(QueryStatsCollectionSummary.FloorRungVersion, "query-stats-collection-floor", QueryStatsCollectionSummary.FloorCreateSql),
+        /* V291 (#9223): a covering (query_hash, bucket DESC) index on the corrected daily Query Store rollup's materialization, so the mid arm of
+           get_query_fleet_summary's Query Store statement reads the newest uncompressed daily chunks through it instead of scanning them whole.
+           Catalog-only for the data: no row moves. An older build ignores the index. */
+        new Migration(291, "query-store-corrected-daily-hash-index", V291Sql),
     };
 
     /// <summary>
