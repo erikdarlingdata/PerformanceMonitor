@@ -649,7 +649,15 @@ ORDER BY b.day_utc;";
     /// and any day that is not built) from the interval table. Run it on the read's own connection and transaction, on a store at
     /// <see cref="Version"/> or above.
     /// </summary>
-    public static Task<ServedDays?> ResolveServedDaysAsync(
+    public static async Task<ServedDays?> ResolveServedDaysAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        (await ResolveAsync(ServedDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken)).Served;
+
+    /// <summary>
+    /// #9287: <see cref="ResolveServedDaysAsync"/> plus the reason no run was taken, so a slow read can say whether it read rollups. The
+    /// run is the same one, and the reason is <see cref="SourceReason.Served"/> when there is one.
+    /// </summary>
+    public static Task<(ServedDays? Served, SourceReason Reason)> ResolveServedDaysWithReasonAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
         ResolveAsync(ServedDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
 
@@ -657,11 +665,11 @@ ORDER BY b.day_utc;";
     /// #9148: <see cref="ResolveServedDaysAsync"/> for the clutter rollups (<see cref="ServedClutterDaysSql"/>), on a store at
     /// <see cref="ClutterVersion"/> or above. The run is of whole days inside <c>[readStart, end)</c>.
     /// </summary>
-    public static Task<ServedDays?> ResolveServedClutterDaysAsync(
+    public static async Task<ServedDays?> ResolveServedClutterDaysAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
-        ResolveAsync(ServedClutterDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+        (await ResolveAsync(ServedClutterDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken)).Served;
 
-    private static async Task<ServedDays?> ResolveAsync(
+    private static async Task<(ServedDays? Served, SourceReason Reason)> ResolveAsync(
         string servedSql, NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -675,7 +683,7 @@ ORDER BY b.day_utc;";
         var afterLast = DateOnly.FromDateTime(end);
         if (afterLast <= first)
         {
-            return null;
+            return (null, SourceReason.NoWholeDay);
         }
 
         var days = new List<DateOnly>();
@@ -695,14 +703,88 @@ ORDER BY b.day_utc;";
         var run = LongestRun(days);
         if (run is not { } served)
         {
-            return null;
+            return (null, SourceReason.NoBuiltDays);
         }
 
         /* A server whose tick has not run lately is not known to be current: an older service marks nothing, so its late rows are not marked. */
         await using var stale = new NpgsqlCommand(StaleHeartbeatSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         stale.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         stale.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = HeartbeatFreshFor });
-        return (bool)(await stale.ExecuteScalarAsync(cancellationToken))! ? null : served;
+        return (bool)(await stale.ExecuteScalarAsync(cancellationToken))! ? (null, SourceReason.HeartbeatStale) : (served, SourceReason.Served);
+    }
+
+    /// <summary>#9287: why a read took no day from the rollups, or <see cref="Served"/> when it took a run.</summary>
+    public enum SourceReason
+    {
+        /// <summary>A run of built days came from the rollups.</summary>
+        Served,
+        /// <summary>The window holds no whole UTC day, so there was nothing to take.</summary>
+        NoWholeDay,
+        /// <summary>No run of current built days, or the newest build is older than <see cref="FreshFor"/>.</summary>
+        NoBuiltDays,
+        /// <summary>Days are built, but the server's heartbeat is older than <see cref="HeartbeatFreshFor"/>.</summary>
+        HeartbeatStale,
+        /// <summary>The store is below the rollups' version, or the read's bin is not a whole number of hours.</summary>
+        Unavailable,
+        /// <summary>A read that took rollup days faulted and was run again on the interval table alone.</summary>
+        FellBack,
+    }
+
+    /// <summary>
+    /// #9287: where one read's days came from. <see cref="RollupDays"/> are the UTC days taken from the rollups and
+    /// <see cref="IntervalDays"/> every other UTC day the window touches, read from the interval table (a partial first or last day and
+    /// the open day count as days). A caller reads the day lists, not the clock, to see whether closed days were read as intervals.
+    /// </summary>
+    public sealed record ReadSource(IReadOnlyList<DateOnly> RollupDays, IReadOnlyList<DateOnly> IntervalDays, SourceReason Reason)
+    {
+        /// <summary>The slow-load line's words, for example <c>3 days from rollups, 7 days from the interval table</c>.</summary>
+        public string Describe()
+        {
+            static string Days(int n) => n == 1 ? "1 day" : $"{n} days";
+            return RollupDays.Count == 0
+                ? $"{Days(IntervalDays.Count)} from the interval table, no rollup days: {Why()}"
+                : $"{Days(RollupDays.Count)} from rollups, {Days(IntervalDays.Count)} from the interval table";
+        }
+
+        /// <summary>The grid banner's note, or null when nothing is worth saying: rollups served, or there was no whole day to take.</summary>
+        public string? BannerNote() => Reason switch
+        {
+            SourceReason.HeartbeatStale or SourceReason.NoBuiltDays or SourceReason.FellBack => $"closed-day rollups not used: {Why()}",
+            _ => null,
+        };
+
+        private string Why() => Reason switch
+        {
+            SourceReason.HeartbeatStale => "the server's heartbeat is older than 2 hours",
+            SourceReason.NoBuiltDays => "its closed days are not built yet",
+            SourceReason.FellBack => "the rollup read failed",
+            SourceReason.NoWholeDay => "no whole day in the window",
+            SourceReason.Unavailable => "rollups not available for this read",
+            _ => "rollups used",
+        };
+    }
+
+    /// <summary>
+    /// #9287: the source of a read over <c>[readStart, end]</c> that took <paramref name="served"/> (null for none) from the rollups, for
+    /// <paramref name="reason"/> when it took none. A window that ends exactly at midnight does not touch the day that starts there.
+    /// </summary>
+    public static ReadSource DescribeSource(DateTime readStart, DateTime end, ServedDays? served, SourceReason reason)
+    {
+        var rollup = new List<DateOnly>();
+        var interval = new List<DateOnly>();
+        var last = DateOnly.FromDateTime(end);
+        if (end.TimeOfDay == TimeSpan.Zero && end > readStart)
+        {
+            last = last.AddDays(-1);
+        }
+
+        for (var day = DateOnly.FromDateTime(readStart); day <= last; day = day.AddDays(1))
+        {
+            var midnight = day.ToDateTime(TimeOnly.MinValue);
+            (served is { } run && midnight >= run.Start && midnight < run.End ? rollup : interval).Add(day);
+        }
+
+        return new ReadSource(rollup, interval, served is null && reason == SourceReason.Served ? SourceReason.NoBuiltDays : reason);
     }
 
     /// <summary>The longest run of consecutive days in <paramref name="days"/> (sorted, oldest first); the newest such run on a tie.</summary>
