@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -422,6 +423,113 @@ public sealed class AnalyzeWindowEmptyLivePostgresTests
             var stalled = await FactsAsync(retentionDays + 20, 48);
             Assert.Contains("collection may have stopped; get_collection_health shows which.", stalled.Note, StringComparison.Ordinal);
             Assert.DoesNotContain("Retention removed it", stalled.Note, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #9218: a replay whose whole window ends before the oldest row the store keeps is answered from one lookup of that row, and
+    /// no fact statement runs, in <c>analyze_server</c> and in <c>get_analysis_facts</c>. A window that straddles the oldest
+    /// row, and one inside retention, still run them (the same statements, counted through the Npgsql command log) and answer
+    /// with facts, in the order the service scores them.
+    /// </summary>
+    [Fact]
+    public async Task AWindowWhollyBeforeRetention_RunsNoFactStatement_AndAWindowThatReachesTheFloorOrSitsInsideStillReadsFacts()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live window-empty analysis test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var counter = new CommandCountingLoggerFactory();
+        await using var postgres = new NpgsqlDataSourceBuilder(cs!).UseLoggerFactory(counter).Build();
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            var service = new DarlingAnalysisService(postgres);
+
+            int retentionDays;
+            using (var days = new NpgsqlCommand("SELECT " + DarlingRetentionHorizons.FleetRetentionDaysSql("wait_stats"), connection))
+                retentionDays = Convert.ToInt32(await days.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+
+            var now = DateTime.UtcNow;
+            string Iso(DateTime at) => at.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+            /* The store as retention leaves it: its oldest row a day past the horizon, an hourly reading for thirty hours from there
+               (so a window ending a day later has a day of history behind it and a collector that was up), and a quarter-hourly
+               stretch ending now for the window inside retention. */
+            var oldest = now.AddDays(-(retentionDays + 1));
+            for (var hours = 0; hours <= 30; hours++)
+                await PlantWaitAsync(connection, Naive(oldest.AddHours(hours)), BenignWait, 100L, ct);
+            for (var minutesAgo = 600; minutesAgo >= 0; minutesAgo -= 15)
+                await PlantWaitAsync(connection, Naive(now.AddMinutes(-minutesAgo)), BenignWait, 100L, ct);
+
+            /* What a fact statement is: a read of one of the tables the facts are built from (config, trace flags, memory, file I/O,
+               perfmon, query stats). The history gate, the retention lookup and the server lookup read none of them, and the same
+               marker finds them on the windows below that do run the facts. */
+            int FactReads() => new[] { "FROM server_config", "FROM trace_flags", "FROM memory_stats", "file_io_stats", "FROM perfmon_stats", "FROM query_stats" }
+                .Sum(table => counter.Provider.CountContaining(table));
+
+            /* ── wholly before retention: both tools answer from the lookup, and no fact statement runs. */
+            var farBefore = Iso(now.AddDays(-(retentionDays + 10)));
+            counter.Provider.Reset();
+            var removed = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 4, as_of: farBefore);
+            var removedFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, as_of: farBefore);
+            Assert.Equal(0, FactReads());
+            foreach (var answer in new[] { removed, removedFacts })
+            {
+                using var doc = JsonDocument.Parse(answer);
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains($"{retentionDays} days of retention for wait_stats", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+            }
+            Assert.True(service.WindowEmptyRemovedByRetention);
+
+            /* ── a window that reaches the floor: it starts before the oldest row and ends a day after it, so it keeps its path. */
+            var straddleEnd = Iso(oldest.AddHours(26));
+            counter.Provider.Reset();
+            var straddle = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, hours_back: 48, as_of: straddleEnd);
+            Assert.True(FactReads() > 0);
+            Assert.False(service.WindowEmptyRemovedByRetention);
+            using (var doc = JsonDocument.Parse(straddle))
+                Assert.NotEqual("unavailable", doc.RootElement.GetProperty("status").GetString());
+
+            counter.Provider.Reset();
+            var straddleFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 48, as_of: straddleEnd);
+            Assert.True(FactReads() > 0);
+            using (var doc = JsonDocument.Parse(straddleFacts))
+                Assert.True(doc.RootElement.TryGetProperty("facts", out _));
+
+            /* ── a window inside retention: the facts the tool returns are the ones the service scores, in severity order. */
+            var insideEnd = now.AddMinutes(-30);
+            counter.Provider.Reset();
+            var insideJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, as_of: Iso(insideEnd));
+            Assert.True(FactReads() > 0);
+            var (scored, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, DateTime.SpecifyKind(insideEnd, DateTimeKind.Utc), ct);
+            Assert.NotEmpty(scored);
+            using (var doc = JsonDocument.Parse(insideJson))
+            {
+                Assert.True(doc.RootElement.TryGetProperty("facts", out _));
+                var returned = doc.RootElement.GetProperty("facts").EnumerateArray()
+                    .Select(f => f.GetProperty("key").GetString()!).ToList();
+                var expected = scored.OrderByDescending(f => f.Severity).Select(f => f.Key).ToList();
+                Assert.Equal(expected, returned);
+            }
 
             bodySucceeded = true;
         }

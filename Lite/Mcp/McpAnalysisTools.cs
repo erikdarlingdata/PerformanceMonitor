@@ -376,6 +376,25 @@ public sealed class McpAnalysisTools
 
         try
         {
+            /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
+               must not blame collection. Read only for the two unavailable answers below; null when the window sits inside the span. */
+            async Task<RetentionBoundary?> RetentionRemovedAsync()
+            {
+                var boundary = await analysisService.ReadRetentionBoundaryAsync(resolved.ServerId, cancellationToken);
+                return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention, and no fact
+               statement can find anything in it (the table the facts are windowed on starts there). Say so from the one MIN and read
+               no fact. A window that straddles the oldest row reads the facts as before. */
+            if (anchor is not null && await RetentionRemovedAsync() is { } removedBeforeRead)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    WindowEmptyText.RemovedFactsMessage(resolved.DisplayName, removedBeforeRead),
+                    new CollectionCaveatState([], 0).Attach(new { secondary_replica_note = (string?)null, coverage = (object?)null }, McpHelpers.JsonOptions));
+            }
+
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken);
 
@@ -388,14 +407,6 @@ public sealed class McpAnalysisTools
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
-
-            /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
-               must not blame collection. Read only for the two unavailable answers below; null when the window sits inside the span. */
-            async Task<RetentionBoundary?> RetentionRemovedAsync()
-            {
-                var boundary = await analysisService.ReadRetentionBoundaryAsync(resolved.ServerId, cancellationToken);
-                return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
-            }
 
             if (facts.Count == 0)
             {
