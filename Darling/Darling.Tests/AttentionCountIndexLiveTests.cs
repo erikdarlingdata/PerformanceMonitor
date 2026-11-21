@@ -146,7 +146,7 @@ INSERT INTO collect.attention_events
     (attention_event_id, collection_time, server_id, server_name, event_time, event_kind, attention_count,
      database_name, client_app_name, client_hostname, session_id, request_id, interrupt_duration_us, statement_fingerprint, statement_text)
 SELECT
-    -927700000000 - s.srv * 1000000 - r.n * 1000 - k.n,
+    -927700000000 - s.srv::bigint * 1000000 - r.n * 1000 - k.n,
     date_trunc('minute', $1::timestamp) - make_interval(mins => r.n * 12) - make_interval(secs => 5),
     -s.srv,
     'COUNT-INDEX-SRV',

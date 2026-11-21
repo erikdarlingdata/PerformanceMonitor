@@ -134,7 +134,7 @@ public sealed class AttentionHypertableSwapLiveTests
             await ExecAsync(c, SeedSql.Replace("generate_series(1, 5)", "generate_series(101, 102)", StringComparison.Ordinal), ct);
             var chunks = await ScalarAsync(c, "SELECT count(*) FROM show_chunks('collect.attention_events')", ct);
             Assert.True(chunks is long chunkCount && chunkCount >= 1L);
-            Assert.Equal(chunks, await ScalarAsync(c, "SELECT count(*) FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '_timescaledb_internal' AND i.indpred IS NOT NULL AND i.indnkeyatts = 2 AND i.indnatts = 3", ct));
+            Assert.Equal(chunks, await ScalarAsync(c, "SELECT count(*) FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '_timescaledb_internal' AND i.indrelid IN (SELECT c::oid FROM show_chunks('collect.attention_events') c) AND i.indpred IS NOT NULL AND i.indnkeyatts = 2 AND i.indnatts = 3", ct));
 
             /* A second pass swaps nothing and leaves the one index. */
             await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
