@@ -79,7 +79,25 @@ A headless Lite does these things as usual:
 - It runs the MCP server, if you turned it on.
 - It checks for updates. It writes the result to the log. It cannot show a balloon.
 
-A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each time it skips one, it writes one line to the log, at Information level, that starts with `Headless: skipped`. A dialog that carries an error is skipped the same way. The log holds the same error. After the first headless start, read the log to see what Lite skipped.
+A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each headless start writes these two lines to the log, at Information level:
+
+- `Headless start: no window is shown and no tray icon is created.`
+- `Headless: no tray icon is created.`
+
+Lite writes no line for an alert balloon. With no tray icon, there is no balloon to skip. The other alert channels still send.
+
+Lite also writes a line that starts with `Headless: skipped` when it skips something that it would show on a screen. It writes this line at Information level, and only the first time that it skips each of these in a run:
+
+- The request from a second start to show the window.
+- The Entra device-code sign-in prompt. Lite cancels the sign-in.
+- The update balloon. Lite also writes a line that says a new version exists.
+- The notice that the store was rebuilt. Lite also writes the notice as a Warning.
+- The fatal-error dialog and the error dialog. The log holds the same error.
+- The dialogs about a `settings.json` file or setting values that Lite could not read. The log holds the same text.
+- The dialog about server settings that were not saved.
+- The two prompts for an old Lite that runs as an administrator, during an upgrade. See [Upgrade a headless Lite](#upgrade-a-headless-lite).
+
+A normal headless start can therefore write no `Headless: skipped` line. After a headless start, read the log to see what Lite skipped.
 
 Only one Lite runs in a Windows session. If you start Lite a second time in that session, the second start exits. A headless Lite does not show a window when the second start asks it to.
 
@@ -87,9 +105,9 @@ If a headless Lite fails to start, it writes the error to the log and exits with
 
 #### Set up a dedicated Windows user
 
-1. Make a Windows user for Lite. A standard user is enough.
+1. Make a Windows user for Lite. If the user has the "Log on as a batch job" right, a standard user is enough. The setting "Run whether the user is logged on or not" in the scheduled task logs the user on as a batch job. To give the right, open Local Security Policy. Go to Local Policies, then User Rights Assignment, then "Log on as a batch job", and add the user. You can also add the user to a group that has the right. On a stand-alone server, Windows gives the right to Administrators, Backup Operators and Performance Log Users by default. If a Group Policy sets this right, add the user there. Without the right, Windows refuses the logon. Task Scheduler says that the task is registered but may fail to start. It says that the batch logon privilege must be enabled for the task user. The logon then fails. Windows words this error as "Logon failure: the user has not been granted the requested logon type at this computer."
 2. Install Lite as that user. Run `Setup.exe` as that user, or unzip the portable ZIP into a folder that the user can write to. Lite keeps its data, its logs and its settings in that user's `%LOCALAPPDATA%`. See [Where Lite keeps its files](#where-lite-keeps-its-files).
-3. Sign in once as that user, and start Lite the normal way. The server list is shared by all users, but passwords are not. Lite keeps SQL and Entra passwords, the SMTP password and webhook URLs in the Windows Credential Manager of each user. This user has none yet. Open each server in **Edit Server**, enter the password again, and save. Settings are also kept for each user. Set up email, Slack, Teams and webhook alerts in **Settings** as this user.
+3. Sign in once as that user, and start Lite the normal way. The server list is shared by all users, but passwords are not. Lite keeps SQL and Entra passwords, the SMTP password and webhook URLs in the Windows Credential Manager of each user. This user has none yet. Open each server in **Edit Server**, enter the password again, and save. Settings are also kept for each user. Set up email, Slack, Teams and webhook alerts in **Settings** as this user. If nobody can sign in as this user, start Lite as this user from your own session instead. Run `runas /user:<name> "<path>\PerformanceMonitorLite.exe"`, and enter the password of the user when `runas` asks. Do the same steps in the Lite window that opens. Lite stores the passwords and the settings for the user that you named.
 4. Close Lite. Sign out.
 
 Do not use **Entra ID (MFA)** or **Device Code** sign-in for a headless Lite. Both need a person to answer a prompt each session. A headless Lite cancels a device-code sign-in and writes the reason to the log. Use a login that needs no prompt: Windows, SQL Server, Service Principal, Managed Identity or Existing Azure Sign-In. See [Authentication](authentication.md).
@@ -133,6 +151,22 @@ The request goes to the Lite in the same Windows session as `--stop`, and `--sto
 schtasks /run /tn "Lite stop"
 ```
 
+`schtasks /run` starts the task and returns at once. It does not wait for `--stop` to finish, and it does not show the exit code. Task Scheduler keeps the exit code as the last result of the task. To wait for `--stop` and read the exit code:
+
+1. Run the task.
+2. Run `schtasks /query /tn "Lite stop" /v /fo list` again and again until `Status` is not `Running`.
+3. Read `Last Result` in the same output. Check that `Last Run Time` is later than the time that you ran the task. Then you do not read the result of an earlier run.
+
+In PowerShell, the same steps are:
+
+```
+Start-ScheduledTask -TaskName 'Lite stop'
+while ((Get-ScheduledTask -TaskName 'Lite stop').State -eq 'Running') { Start-Sleep -Seconds 2 }
+Get-ScheduledTaskInfo -TaskName 'Lite stop' | Select-Object LastRunTime, LastTaskResult
+```
+
+A `Last Result` of 0 means that Lite exited. The other values are the same as in the table.
+
 `--stop` writes what it did to the Lite log, in the same user's logs folder. Each line has `[Stop]` in it. The lines say whether `--stop` asked a running Lite to stop, found none, or timed out.
 
 A hard end does not break the store. DuckDB replays its write-ahead log at the next start. The next start can take a little longer than usual.
@@ -141,7 +175,7 @@ A hard end does not break the store. DuckDB replays its write-ahead log at the n
 
 The **About** button needs a window, so a headless Lite does not update itself. It logs when a new version exists. To upgrade:
 
-1. Run `--stop`, and wait for exit code 0.
+1. Run the stop task. Wait until it is no longer running, and check that its last result is 0. See [Stop it](#stop-it).
 2. Install the new version as the dedicated user. Run the new `Setup.exe` as that user, or unzip the new portable ZIP over the old folder.
 3. Run the scheduled task that starts Lite with `--headless`.
 
