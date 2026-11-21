@@ -903,10 +903,15 @@ public sealed partial class DarlingWorker
                 server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs,
                 server.LastAnalysisMs, server.LastGateWaitAnalysisHolders,
                 _dailyRunPermits.Waiting,
-                _dailyRunPermits.OldestWaitUtc is { } oldestDailyWait ? (long)Math.Max(0, (now - oldestDailyWait).TotalMilliseconds) : 0);
+                _dailyRunPermits.OldestWaitUtc is { } oldestDailyWait ? (long)Math.Max(0, (now - oldestDailyWait).TotalMilliseconds) : 0,
+                server.LastGateWaitHolder);
             var bodyStarted = Stopwatch.GetTimestamp();
             var bodySlowestName = (string?)null;
             var bodySlowestMs = 0L;
+
+            /* #9192: this body's longest collector run as the collection log measures it, kept for the bodies that wait for the
+               slot it holds (FleetSlotHolds). Its own tally, apart from the wall-clock one above. */
+            SlotHold? heldLongest = null;
 
             /* #2864: the peer high-water mark describes ONE body. Reset here rather than decayed, because
                the comparison it feeds is 'were this sweep's other collectors slow', and a mark carried
@@ -1166,8 +1171,15 @@ public sealed partial class DarlingWorker
                 if (!RunsDetached(name, interval))
                 {
                     var collectorStarted = Stopwatch.GetTimestamp();
-                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff);
+                    var collectorOutcome = new RunOutcome();
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff, runOutcome: collectorOutcome);
                     var collectorMs = (long)Stopwatch.GetElapsedTime(collectorStarted).TotalMilliseconds;
+                    var measuredMs = collectorOutcome.SqlMs is { } readMs && collectorOutcome.StorageMs is { } writeMs ? readMs + writeMs : collectorMs;
+                    if (heldLongest is null || measuredMs > heldLongest.Value.TotalMs)
+                    {
+                        heldLongest = new SlotHold(name, measuredMs, collectorOutcome.SqlMs, collectorOutcome.StorageMs);
+                    }
+
                     if (collectorMs > bodySlowestMs)
                     {
                         bodySlowestMs = collectorMs;
@@ -1197,6 +1209,13 @@ public sealed partial class DarlingWorker
                 {
                     TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff, dueUtc: due));
                 }
+            }
+
+            /* #9192: this body held a fleet slot for its collectors, and a body still waiting for a slot names it when its wait
+               was long. Recorded before the body ends, so it is in the ledger when the slot passes on. */
+            if (heldLongest is { } held)
+            {
+                SlotHolds.Record(held);
             }
 
             /* #5735: the slots this server lost since its last row, written as one row by the body that noticed (at most one in
@@ -3334,6 +3353,8 @@ LIMIT 1";
             if (runOutcome is not null)
             {
                 runOutcome.Succeeded = true;
+                runOutcome.SqlMs = result.SqlMs;
+                runOutcome.StorageMs = result.StorageMs;
             }
 
             /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once.
