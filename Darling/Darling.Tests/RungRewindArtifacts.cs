@@ -932,9 +932,9 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // V293 (#9277): the partial counter-row index on collect.attention_events. It is the probe's newest sentinel, found by the index's name. The rewind drops it by name, so a re-run of V293
         // builds it again. Safe on a store that never had it.
         new(293, "hasAttentionCountIndex", @"DROP INDEX IF EXISTS collect.idx_attention_events_count_time;"),
-        // V294 (#9225): the plan regression block tables, the probe's newest sentinel. The rewind drops both, so a re-run of V294 creates them empty and the builder
+        // V295 (#9225): the plan regression block tables, the probe's newest sentinel. The rewind drops both, so a re-run of V295 creates them empty and the builder
         // sums the blocks again from the daily rows. Safe on a store that never had them.
-        new(294, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
+        new(295, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
     ];
 
     /// <summary>

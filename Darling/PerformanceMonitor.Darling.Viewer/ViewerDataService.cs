@@ -1628,7 +1628,7 @@ SELECT
     /* V293 (#9277) adds the partial counter-row index on collect.attention_events, on every store (a plain table or a hypertable). Found by catalog, so the answer does
        not depend on the connecting role's privileges. */
     EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'idx_attention_events_count_time'),
-    /* V294 (#9225) adds the plan regression block tables. Found by relation, created on every store and never dropped. */
+    /* V295 (#9225) adds the plan regression block tables. Found by relation, created on every store and never dropped. */
     (to_regclass('collect.plan_regression_block_built') IS NOT NULL)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
@@ -1906,12 +1906,12 @@ SELECT
         /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
-        /* V294 (#9225): the plan regression block tables, created on every store and never dropped. Relation-existence sentinel, newest-first, and the
+        /* V295 (#9225): the plan regression block tables, created on every store and never dropped. Relation-existence sentinel, newest-first, and the
            TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 293 and showing a spurious
            upgrade banner on a store that is current. */
         if (hasPlanRegressionBlock)
         {
-            return 294;
+            return 295;
         }
         /* V293 (#9277): the partial counter-row index on collect.attention_events. Index-name sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 292 and showing a spurious upgrade banner on

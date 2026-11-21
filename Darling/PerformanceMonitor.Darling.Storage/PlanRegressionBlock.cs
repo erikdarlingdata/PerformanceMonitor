@@ -49,8 +49,8 @@ public static class PlanRegressionBlock
     /// <summary>The per-block stamp table.</summary>
     public const string BuiltTableName = "collect.plan_regression_block_built";
 
-    /// <summary>The store schema version of the rung that creates the two tables (V294, #9225).</summary>
-    public const int Version = 294;
+    /// <summary>The store schema version of the rung that creates the two tables (V295, #9225).</summary>
+    public const int Version = 295;
 
     /// <summary>The days in one block. Why 4 is in the type's summary.</summary>
     public const int BlockDays = 4;
@@ -61,12 +61,12 @@ public static class PlanRegressionBlock
     public const int MaxBuildsPerTick = 24;
 
     /// <summary>
-    /// The two tables as the V294 rung runs them. Idempotent and empty when created: no data moves, the builder fills the blocks as it
+    /// The two tables as the V295 rung runs them. Idempotent and empty when created: no data moves, the builder fills the blocks as it
     /// runs. Editing this text edits a shipped rung: add a new rung instead. The column types follow <c>plan_regression_daily</c>, whose
     /// sums are numeric.
     /// </summary>
     public const string CreateSql = @"
-/* V294 (#9225): the rolling pre-aggregate of collect.plan_regression_daily, blocks of whole days at the grain the PLAN_REGRESSION read
+/* V295 (#9225): the rolling pre-aggregate of collect.plan_regression_daily, blocks of whole days at the grain the PLAN_REGRESSION read
    groups by, and the stamp that says which daily builds each block was summed from. Naive UTC. The builder owns every write. */
 CREATE TABLE IF NOT EXISTS collect.plan_regression_block
 (

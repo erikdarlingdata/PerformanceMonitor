@@ -3877,7 +3877,7 @@ END $$;";
         /* V293 (#9277): a partial covering index on the Client Timeouts counter rows, so get_client_timeouts' per-run counts read the newest uncompressed chunks
            through an index-only scan instead of fetching every sampled event of the range and dropping it. No row moves. An older build ignores the index. */
         new Migration(293, "attention-events-count-index", V293Sql),
-        /* V294 (#9225): the plan regression block tables, the pre-aggregate of collect.plan_regression_daily the PLAN_REGRESSION read will take whole blocks of days
+        /* V295 (#9225): the plan regression block tables, the pre-aggregate of collect.plan_regression_daily the PLAN_REGRESSION read will take whole blocks of days
            from. Two plain tables and one unique index, created empty: no data moves, and the builder fills the blocks from the daily rows as it runs. An older
            build ignores them. */
         new Migration(PlanRegressionBlock.Version, "plan-regression-block", PlanRegressionBlock.CreateSql),

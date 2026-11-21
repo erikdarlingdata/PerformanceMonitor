@@ -750,12 +750,12 @@ public sealed class ViewerSchemaVersionGateTests
            that one and V290's is a V288 store and maps to 288, not 289. Each sentinel below shifts one place from the end. */
         /* #9223: the V292 sentinel (the covering hash index on the corrected daily Query Store rollup) is the one before the last, so a store that has every
            sentinel but that one and V293's is a V291 store and maps to 291, not 292. Each sentinel below shifts one place from the end. */
-        /* #9225: the V294 sentinel (the plan regression block tables) is the last parameter, so a store that has every sentinel but that one is a
-           V293 store and maps to 293, not 294. Each sentinel below shifts one place from the end. */
-        var allButV294 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
-        allButV294[^1] = false;
+        /* #9225: the V295 sentinel (the plan regression block tables) is the last parameter, so a store that has every sentinel but that one is a
+           V293 store and maps to 293, not 295. Each sentinel below shifts one place from the end. */
+        var allButV295 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV295[^1] = false;
         Assert.Equal("hasPlanRegressionBlock", map.GetParameters()[^1].Name);
-        Assert.Equal(293, (int)map.Invoke(null, allButV294)!);
+        Assert.Equal(293, (int)map.Invoke(null, allButV295)!);
 
         /* #9277: the V293 sentinel (the partial counter-row index on attention_events) is the one before the last, so a store that has every
            sentinel but that one is a V292 store and maps to 292, not 293. Each sentinel below shifts one place from the end. */
