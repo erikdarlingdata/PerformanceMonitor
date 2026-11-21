@@ -189,6 +189,9 @@ public sealed class UsedDataReadRunLogTests : IDisposable
     /// <summary>Holds the store's write lock on its own thread, which makes the status-size read's 100 ms wait run out.</summary>
     private sealed class HeldWrite : IDisposable
     {
+        /* A backstop only: Dispose releases the hold. Named so the suite-wide scan of lock holds can read it. */
+        private static readonly TimeSpan HoldCeiling = TimeSpan.FromSeconds(10);
+
         private readonly ManualResetEventSlim _release = new(false);
         private readonly Thread _thread;
 
@@ -200,11 +203,11 @@ public sealed class UsedDataReadRunLogTests : IDisposable
                 using (initializer.AcquireWriteLock())
                 {
                     taken.Set();
-                    _release.Wait();
+                    _release.Wait(HoldCeiling);
                 }
             }) { IsBackground = true, Name = "UsedDataReadRunLogTests.HeldWrite" };
             _thread.Start();
-            Assert.True(taken.Wait(TimeSpan.FromSeconds(30)), "the write lock was not taken");
+            Assert.True(taken.Wait(HoldCeiling), "the write lock was not taken");
         }
 
         public void Dispose()
