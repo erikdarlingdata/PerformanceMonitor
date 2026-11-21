@@ -1550,14 +1550,15 @@ COPY (
                     .ToList();
 
                 /* Bucket files into size-budgeted batches so a single COPY never
-                   merges an unbounded amount of data. Most tables compress mildly, so
-                   the on-disk budget is a fine proxy and they fit one batch with many
-                   files (#933). query_snapshots, whose query-plan XML expands about 30x
-                   on read, gets a much smaller budget (#5393). */
+                   merges an unbounded amount of data. The budget is ParquetCompaction.BatchInputBytesFor
+                   with this service's three settings: a daily table (query_snapshots, query_stats and
+                   query_store_stats) takes the daily budget, which is much smaller because query-plan
+                   XML expands about 30x on read (#5393, #5410), a monthly table whose merge sorts by
+                   server takes the sorted budget (#9258), and every other monthly table takes the
+                   default, a fine proxy because they compress mildly (#933). */
                 var isDaily = ParquetCompaction.IsDailyTable(table);
-                var batchBudget = isDaily ? DailyCompactionBatchInputBytes
-                    : ParquetCompaction.ServerOrderByFor(table) is null ? CompactionBatchInputBytes
-                    : SortedCompactionBatchInputBytes;
+                var batchBudget = ParquetCompaction.BatchInputBytesFor(
+                    table, CompactionBatchInputBytes, DailyCompactionBatchInputBytes, SortedCompactionBatchInputBytes);
                 var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBudget);
 
                 /* Merge only what changes, and only what fits (#5377).

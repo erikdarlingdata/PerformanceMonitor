@@ -163,13 +163,19 @@ public static class ParquetCompaction
        The mixed groups left are the seams where a server's rows continue across two parts. */
     public const long SortedBatchInputBytes = 32L * 1024 * 1024; /* 32 MiB */
 
-    /* The per-batch input budget of a table's compaction merge when the caller has no override: the daily budget for
-       a table merged per day (query_store_stats is both daily and sorted, and its day budget stays as measured in
-       #9255), the sorted monthly budget for another server-ordered table, else the default. */
-    public static long BatchInputBytesFor(string table) =>
-        IsDailyTable(table) ? DailyBatchInputBytes
-        : ServerOrderByFor(table) is null ? DefaultBatchInputBytes
-        : SortedBatchInputBytes;
+    /* The per-batch input budget of a table's compaction merge. The one rule, so the production merge and
+       tools/CompactionRepro cannot drift apart: the daily budget for a table merged per day (query_snapshots,
+       query_stats and query_store_stats, the last of which is also sorted and keeps its day budget as measured in
+       #9255), the sorted monthly budget for any other server-ordered table, else the default. The three budgets
+       are parameters so a caller with its own settings (ArchiveService's test-settable properties) passes them in. */
+    public static long BatchInputBytesFor(
+        string table,
+        long defaultBytes = DefaultBatchInputBytes,
+        long dailyBytes = DailyBatchInputBytes,
+        long sortedBytes = SortedBatchInputBytes) =>
+        IsDailyTable(table) ? dailyBytes
+        : ServerOrderByFor(table) is null ? defaultBytes
+        : sortedBytes;
 
     /* Tables whose compaction merge sorts by server, then by the table's time column (#9255): table -> time column.
 
@@ -201,12 +207,15 @@ public static class ParquetCompaction
        DuckDB's out-of-memory error fires quickly, before anything is spilled. Field compressibility does not reach
        this case, so the fallback guards against unusually long, repetitive statement texts or a DuckDB change.
 
-       Only query_store_stats. Its merge reads no plan text (CompactionExcludeColumns drops query_plan_text), so the
-       #5410 peak does not apply. query_snapshots and query_stats carry plan XML and stay unsorted. The monthly tables
-       are not sorted either: a numeric month batch of 100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a
-       200 MB batch would reach about 2.4 GB and would need its own budget first. The archiver's hourly COPY is not
-       sorted: at the field's cadence an hourly file is one row group, so the sort clusters nothing, and compaction
-       rewrites the day's files in the same pass. */
+       Which tables are sorted. At the daily level only query_store_stats: its merge reads no plan text
+       (CompactionExcludeColumns drops query_plan_text), so the #5410 peak does not apply, and its day budget
+       stays DailyBatchInputBytes. query_snapshots and query_stats carry plan XML, are merged per day and stay
+       unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
+       (32 MiB) per batch, not the 200 MB default the unsorted monthly tables keep: a numeric month batch of
+       100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a sorted batch needs its own smaller budget
+       (see there for the measurements). A table not listed keeps its merge unsorted at the default budget. The
+       archiver's hourly COPY is not sorted: at the field's cadence an hourly file is one row group, so the sort
+       clusters nothing, and compaction rewrites the day's files in the same pass. */
     private static readonly Dictionary<string, string> ServerOrderedTables = BuildServerOrderedTables();
 
     private static Dictionary<string, string> BuildServerOrderedTables()
@@ -306,7 +315,8 @@ public static class ParquetCompaction
        numeric tables this runs on. (query_snapshots, with its query-plan XML,
        is merged one day at a time on a much smaller batch budget, and
        query_stats and query_store_stats are merged one day at a time so a
-       one-hour read prunes — see DailyCompactionTables.)
+       one-hour read prunes, see DailyCompactionTables. The monthly tables
+       that sort by server take the sorted budget, see BatchInputBytesFor.)
 
        Pragma tuning:
          - memory_limit = 4GB: parquet COPY makes allocations that bypass the
