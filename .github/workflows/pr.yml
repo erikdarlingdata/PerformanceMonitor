@@ -99,6 +99,7 @@ jobs:
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
       exporter: ${{ steps.exporter.outputs.exporter }}
+      compaction_repro: ${{ steps.compaction_repro.outputs.compaction_repro }}
       harness_restore: ${{ steps.harness_restore.outputs.harness_restore }}
     steps:
       # Depth 2: a pull request run checks out the merge commit, and the plan reads the pull request's own change as
@@ -291,6 +292,43 @@ jobs:
               or "Directory.Packages.props" in files
           )
           print("exporter=" + ("true" if run else "false"))
+          PY
+
+      # #9264: tools/CompactionRepro compiles Lite/Services/ParquetCompaction.cs as a linked file, and no other job builds it, so a
+      # change to that file could break the repro while CI stayed green (#9257's first head did). The repro job runs only when
+      # a file of the repro, a file its project links, or a restore input changed. The linked files are read from the repro's own
+      # project file, so a file linked later is covered without a second list here. A change to this workflow runs it too, so an
+      # edit to the job is exercised by its own run. A run that is not a pull request or dev push (the hourly dispatch), a pull
+      # request not against dev, an empty file list and a file list that cannot be trusted run it, as the exporter rule does.
+      # A run that plans every area because one file is unknown to the plan does not build it on that account.
+      - name: Decide whether the compaction repro job runs
+        id: compaction_repro
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          python -I - <<'PY' >> "${GITHUB_OUTPUT}"
+          import os, posixpath, re
+          repro = "tools/CompactionRepro"
+          project = open(repro + "/CompactionRepro.csproj", encoding="utf-8").read()
+          linked = {
+              posixpath.normpath(posixpath.join(repro, m.replace("\\", "/")))
+              for m in re.findall(r'<Compile\s+Include="([^"]+)"', project)
+          }
+          files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
+          inputs = {"Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "global.json", "nuget.config", "NuGet.config", ".github/workflows/pr.yml"}
+          run = (
+              os.environ["EVENT_NAME"] not in ("pull_request", "push")
+              or os.environ["BASE_REF"] != "dev"
+              or not files
+              or any(f.startswith("unknown/") for f in files)
+              or any(f.startswith(repro + "/") or f in linked or f in inputs for f in files)
+          )
+          print("compaction_repro=" + ("true" if run else "false"))
           PY
 
       # The WPF smoke harness (tools/ui-smoke-wpf) is outside the solution and referenced by no test project, so the build
@@ -754,6 +792,47 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
+  # #9264: a build of the compaction reproducer, so a change to the production file it links cannot break it unseen. It needs
+  # only the plan, builds one small project, and its result is folded into `CI result` by the verdict job like the exporter's.
+  compaction-repro:
+    name: Compaction repro build
+    needs: plan
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.compaction_repro == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # The exact SDK version from global.json, for the reason the build job gives.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(python3 -c "import json; print(json.load(open('global.json'))['sdk']['version'])")
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      - name: Restore the compaction repro
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore tools/CompactionRepro/CompactionRepro.csproj --locked-mode
+
+      # Release builds with warnings as errors (Directory.Build.props), as the product builds do.
+      - name: Build the compaction repro
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build tools/CompactionRepro/CompactionRepro.csproj -c Release --no-restore
+
   # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17, so a NULL an old server sends or a
   # column a supported version lacks (#6206, #6836) turns the pull request red. Runs only when the plan says a file it covers
   # changed (ci-plan.py's PG_OLD_TARGET_PATHS); the nightly runs it every night. Reuses the build job's artifact.
@@ -1026,7 +1105,7 @@ jobs:
   # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
   verdict:
     name: CI verdict
-    needs: [plan, build, test, pg-old-targets, pinned-hours, exporter]
+    needs: [plan, build, test, pg-old-targets, pinned-hours, exporter, compaction-repro]
     # A run that does not go and is not train-blocked has nothing to say, so skip the runner; a failed plan job still reports.
     # The scheduled re-dispatch and an hourly run that found its commit already covered plan nothing and say nothing (#7819).
     if: ${{ always() && github.event_name != 'schedule' && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
@@ -1063,6 +1142,8 @@ jobs:
           PLAN_RUN: ${{ needs.plan.outputs.run }}
           PLAN_EXPORTER: ${{ needs.plan.outputs.exporter }}
           EXPORTER_RESULT: ${{ needs.exporter.result }}
+          PLAN_COMPACTION_REPRO: ${{ needs.plan.outputs.compaction_repro }}
+          COMPACTION_REPRO_RESULT: ${{ needs.compaction-repro.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
@@ -1091,6 +1172,8 @@ jobs:
             [ "${PINNED_RESULT}" = "${want_pinned}" ] || { state=failure; failed="${failed} pinned-hours (${PINNED_RESULT})"; }
             want_exporter=skipped; [ "${PLAN_RUN}" = "true" ] && [ "${PLAN_EXPORTER}" = "true" ] && want_exporter=success
             [ "${EXPORTER_RESULT}" = "${want_exporter}" ] || { state=failure; failed="${failed} exporter (${EXPORTER_RESULT})"; }
+            want_repro=skipped; [ "${PLAN_RUN}" = "true" ] && [ "${PLAN_COMPACTION_REPRO}" = "true" ] && want_repro=success
+            [ "${COMPACTION_REPRO_RESULT}" = "${want_repro}" ] || { state=failure; failed="${failed} compaction-repro (${COMPACTION_REPRO_RESULT})"; }
           fi
           # #6656: a run that a newer push or ready-for-review replaced is cancelled, but cancelled() inside this job reports the
           # job's own state, so the step cannot tell. Ask the API instead: when a newer run of this workflow exists for this pull
