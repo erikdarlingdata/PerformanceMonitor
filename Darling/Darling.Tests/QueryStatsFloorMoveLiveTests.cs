@@ -26,6 +26,8 @@ namespace Darling.Tests;
 /// #9147: <see cref="QueryStatsCollectionSummary.FloorMoveSql"/> runs inside every query_stats batch's transaction. In the normal case (no raw
 /// collection lacks a summary row) it must cost one probe of the newest chunk, not a read of the server's whole raw history, because the batch's
 /// command timeout cancels it and the batch's raw rows roll back with it. The plan test runs the generic plan the service's prepared command gets.
+/// #9193: when it does find a hole it writes ONE floor row (<see cref="QueryStatsCollectionSummary.FloorTable"/>) and deletes nothing, so a
+/// server whose summary holds hundreds of thousands of rows is no slower than one whose summary holds a few.
 /// </summary>
 public sealed class QueryStatsFloorMoveLiveTests
 {
@@ -62,9 +64,16 @@ public sealed class QueryStatsFloorMoveLiveTests
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    private static async Task<long> RunFloorMoveAsync(NpgsqlConnection connection, DateTime batch, CancellationToken ct)
+    private static async Task<DateTime?> FloorAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(QueryStatsCollectionSummary.FloorMoveSql, connection);
+        await using var command = new NpgsqlCommand("SELECT valid_from FROM collect.query_stats_collection_floor WHERE server_id = $1", connection);
+        command.Parameters.AddWithValue(ServerId);
+        return await command.ExecuteScalarAsync(ct) as DateTime?;
+    }
+
+    private static async Task<long> RunFloorMoveAsync(NpgsqlConnection connection, DateTime batch, CancellationToken ct, int timeoutSeconds = 30)
+    {
+        await using var command = new NpgsqlCommand(QueryStatsCollectionSummary.FloorMoveSql, connection) { CommandTimeout = timeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
         command.Parameters.Add(Naive(batch));
         return await command.ExecuteNonQueryAsync(ct);
@@ -171,7 +180,7 @@ public sealed class QueryStatsFloorMoveLiveTests
     }
 
     [Fact]
-    public async Task ARawCollectionWithNoSummaryRow_MovesTheFloor_AndTheNormalCaseDeletesNothing()
+    public async Task ARawCollectionWithNoSummaryRow_WritesOneFloorRow_AndNeverDeletes_AndTheNormalCaseWritesNothing()
     {
         var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), Skip);
@@ -190,15 +199,29 @@ public sealed class QueryStatsFloorMoveLiveTests
             /* Normal case: the newest raw row is the newest summary row, so a batch one step later finds nothing to move. */
             Assert.Equal(0, await RunFloorMoveAsync(connection, last.AddMinutes(30), ct));
             Assert.Equal(summaryRows, await CountSummaryAsync(connection, ct));
+            Assert.Null(await FloorAsync(connection, ct));
 
             /* A batch at the newest collection's own time takes that row as the anchor, and the raw rows before it all have summary rows. */
             Assert.Equal(0, await RunFloorMoveAsync(connection, last, ct));
             Assert.Equal(summaryRows, await CountSummaryAsync(connection, ct));
+            Assert.Null(await FloorAsync(connection, ct));
 
-            /* Hole: a raw collection an older build wrote with no summary row, between the anchor and the next batch. */
+            /* Hole: a raw collection an older build wrote with no summary row, between the anchor and the next batch. One floor row, at the
+               batch's time, and every summary row stays. */
             await ExecAsync(connection, PlantRaw, ct, 91470999000001L, last.AddMinutes(10), ServerId);
-            Assert.Equal(summaryRows, await RunFloorMoveAsync(connection, last.AddMinutes(30), ct));
-            Assert.Equal(0, await CountSummaryAsync(connection, ct));
+            Assert.Equal(1, await RunFloorMoveAsync(connection, last.AddMinutes(30), ct));
+            Assert.Equal(summaryRows, await CountSummaryAsync(connection, ct));
+            Assert.Equal(last.AddMinutes(30), await FloorAsync(connection, ct));
+
+            /* The floor never moves back: a batch at an earlier time that also finds the hole leaves the later floor where it is. */
+            Assert.Equal(1, await RunFloorMoveAsync(connection, last.AddMinutes(20), ct));
+            Assert.Equal(last.AddMinutes(30), await FloorAsync(connection, ct));
+
+            /* A later hole moves it up, and there is still one row for the server. */
+            await ExecAsync(connection, PlantRaw, ct, 91470999000003L, last.AddMinutes(40), ServerId);
+            Assert.Equal(1, await RunFloorMoveAsync(connection, last.AddMinutes(50), ct));
+            Assert.Equal(last.AddMinutes(50), await FloorAsync(connection, ct));
+            Assert.Equal(summaryRows, await CountSummaryAsync(connection, ct));
             bodySucceeded = true;
         }
         finally
@@ -234,6 +257,95 @@ public sealed class QueryStatsFloorMoveLiveTests
                   VALUES ($1, $2, 'Db0', 1, 5, 10, 1800)", ct, ServerId, at.AddMinutes(-40));
             Assert.Equal(0, await RunFloorMoveAsync(connection, at.AddMinutes(-30), ct));
             Assert.Equal(1, await CountSummaryAsync(connection, ct));
+            Assert.Null(await FloorAsync(connection, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>
+    /// A summary of 210,000 rows for the server: 70,000 one-minute collections of three databases, about 48 days. The server's raw rows are the ones
+    /// a hole needs, planted by the caller. Written straight into the table: the shape is what the delete used to scale with.
+    /// </summary>
+    private static Task SeedLargeSummaryAsync(NpgsqlConnection connection, DateTime lastCollection, CancellationToken ct) =>
+        ExecAsync(connection,
+            @"INSERT INTO collect.query_stats_collection (server_id, collection_time, database_name, n, sum_elapsed, sum_exec, max_interval)
+              SELECT $1, $2::timestamp - s.k * interval '1 minute', 'Db' || d.n, 20, 100, 200, 60
+              FROM generate_series(0, 69999) AS s (k)
+              CROSS JOIN generate_series(0, 2) AS d (n)", ct, ServerId, lastCollection);
+
+    [Fact]
+    public async Task AHoleOnAServerWithAHugeSummary_WritesTheFloorInsideATwoSecondTimeout_AndDeletesNothing()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = await OpenAsync(scratch, ct);
+            var last = LiveClock.AnchoredEnd().AddMinutes(-30);
+            await SeedLargeSummaryAsync(connection, last, ct);
+            await ExecAsync(connection, "ANALYZE collect.query_stats_collection", ct);
+            var summaryRows = await CountSummaryAsync(connection, ct);
+            Assert.Equal(210_000, summaryRows);
+
+            /* Raw rows an older build wrote after the summary's newest row: the hole. The batch lands 30 minutes after the summary ends. */
+            await ExecAsync(connection, PlantRaw, ct, 91470999000011L, last.AddMinutes(10), ServerId);
+
+            /* The old statement deleted every summary row at or before the anchor, here 210,000 of them, and a batch that ran past its command
+               timeout rolled back. The floor step must finish inside two seconds, write the one row and keep every summary row. */
+            Assert.Equal(1, await RunFloorMoveAsync(connection, last.AddMinutes(30), ct, timeoutSeconds: 2));
+            Assert.Equal(summaryRows, await CountSummaryAsync(connection, ct));
+            Assert.Equal(last.AddMinutes(30), await FloorAsync(connection, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    [Fact]
+    public async Task TheNormalCase_OnAHugeSummary_InsertsNoFloorRow_AndTouchesAFewBuffers()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = await OpenAsync(scratch, ct);
+            var last = LiveClock.AnchoredEnd().AddMinutes(-30);
+            await SeedLargeSummaryAsync(connection, last, ct);
+            /* The newest raw row is the newest summary row: no hole. */
+            await ExecAsync(connection, PlantRaw, ct, 91470999000012L, last, ServerId);
+            await ExecAsync(connection, "ANALYZE collect.query_stats_collection; ANALYZE collect.query_stats", ct);
+
+            await using var transaction = await connection.BeginTransactionAsync(ct);
+            await ExecAsync(connection, "SET LOCAL plan_cache_mode = force_generic_plan", ct);
+            await ExecAsync(connection, "PREPARE floor_move_big (integer, timestamp) AS " + QueryStatsCollectionSummary.FloorMoveSql, ct);
+            await using var explain = new NpgsqlCommand(
+                string.Create(CultureInfo.InvariantCulture, $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE floor_move_big ({ServerId}, '{last.AddMinutes(30):yyyy-MM-dd HH:mm:ss}')"), connection);
+            using var document = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
+            await transaction.RollbackAsync(ct);
+
+            var plan = document.RootElement[0].GetProperty("Plan");
+            Assert.Equal("ModifyTable", plan.GetProperty("Node Type").GetString());
+            Assert.Equal(0, plan.GetProperty("Actual Rows").GetDouble());
+            /* The insert's own source is the plan's last child (the others are the two probes, run as initplans) and the one-time filter gave it no row. */
+            var children = plan.GetProperty("Plans");
+            Assert.Equal(0, children[children.GetArrayLength() - 1].GetProperty("Actual Rows").GetDouble());
+            var buffers = plan.GetProperty("Shared Hit Blocks").GetInt64() + plan.GetProperty("Shared Read Blocks").GetInt64();
+            Assert.True(buffers < 200, $"the normal case touched {buffers} buffers of a 210,000 row summary");
+            Assert.Null(await FloorAsync(connection, ct));
             bodySucceeded = true;
         }
         finally
