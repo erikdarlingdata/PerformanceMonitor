@@ -140,6 +140,76 @@ public sealed class StoreLockTimeoutLogTests : IClassFixture<SharedDuckDbFixture
         Assert.DoesNotContain("'Display One'", later, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #9233: a stuck lock keeps skipping servers, each one less than a quiet period after the last. The window opens at the first
+    /// skip and is not pushed back by the later ones, so the line still logs and each window's line names its own servers.
+    /// </summary>
+    [Fact]
+    public async Task SkipsThatKeepArriving_StillLogWithinOneWindowOfTheFirst_EachLineNamingItsOwnServers()
+    {
+        var quiet = TimeSpan.FromSeconds(1);
+        var serverIds = Enumerable.Range(0, 9).Select(i => ServerId - i).ToArray();
+        var names = serverIds.ToDictionary(id => id, id => $"Display {ServerId - id}");
+        var service = new LocalDataService(_duckDb, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100))
+        {
+            MaintenanceSkipLogQuietPeriodOverride = quiet,
+            DisplayNames = () => names,
+        };
+
+        var held = new ManualResetEventSlim(false);
+        var release = new ManualResetEventSlim(false);
+        var holder = new Thread(() =>
+        {
+            using (_duckDb.AcquireReadLock())
+            {
+                held.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            }
+        })
+        { IsBackground = true };
+        holder.Start();
+
+        var lines = new List<string>();
+        TimeSpan? firstLineAfter = null;
+        try
+        {
+            Assert.True(held.Wait(TimeSpan.FromSeconds(10)), "the read never took the lock");
+            AppLogger.DrainBufferedLines();
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            foreach (var serverId in serverIds)
+            {
+                /* Each skip waits the 100 ms budget, then the pause puts the skips half a quiet period apart: four and a
+                   half quiet periods in all, and no gap between skips as long as one quiet period. */
+                await service.GetDatabaseStateDeviationsAsync(serverId);
+                var seen = AppLogger.DrainBufferedLines().Where(l => l.Contains("skipped this cycle's database-state maintenance", StringComparison.Ordinal)).ToList();
+                if (seen.Count > 0 && firstLineAfter is null)
+                {
+                    firstLineAfter = started.Elapsed;
+                }
+
+                lines.AddRange(seen);
+                await Task.Delay(quiet / 2 - TimeSpan.FromMilliseconds(100));
+            }
+
+            service.FlushMaintenanceSkipLog();
+            lines.AddRange(AppLogger.DrainBufferedLines().Where(l => l.Contains("skipped this cycle's database-state maintenance", StringComparison.Ordinal)));
+        }
+        finally
+        {
+            release.Set();
+            holder.Join(TimeSpan.FromSeconds(10));
+        }
+
+        /* With a window that slid, nothing logged until the final flush and the one line held all nine servers. */
+        Assert.NotNull(firstLineAfter);
+        Assert.True(firstLineAfter < quiet * 2.5, $"the first line came {firstLineAfter} after the first skip");
+        Assert.True(lines.Count >= 3, $"{lines.Count} lines for a burst that ran several windows");
+        foreach (var id in serverIds)
+        {
+            Assert.Single(lines, l => l.Contains($"'{names[id]}'", StringComparison.Ordinal));
+        }
+    }
+
     private async Task<List<string>> SkipMaintenanceForAsync(Dictionary<int, string>? displayNames, params int[] serverIds)
     {
         var service = new LocalDataService(_duckDb, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100))

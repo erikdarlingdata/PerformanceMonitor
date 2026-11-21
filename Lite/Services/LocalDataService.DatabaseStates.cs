@@ -39,16 +39,17 @@ public partial class LocalDataService
     /// <summary>
     /// #9233: the servers whose maintenance skipped in the current burst, with the holder each named, waiting for ONE line. The alert
     /// engine sweeps the servers one at a time and a held lock skips every one of them, so a line per server read as six identical
-    /// lines about one event. A skip joins this list and (re)starts <see cref="_skipLogTimer"/>. The line is written once the burst
-    /// has been quiet for <see cref="MaintenanceSkipLogQuietPeriod"/>, naming every server in it.
+    /// lines about one event. The first skip of a burst joins this list and starts <see cref="_skipLogTimer"/>, a fixed window. A later
+    /// skip only joins the list. The line is written when the window ends, naming every server in it, and the next skip starts a
+    /// new window. The window is not reset by later skips: a stuck lock keeps skipping, and a window that slid would never log.
     /// </summary>
     private readonly List<(string Server, string Holder)> _skipsThisCycle = new();
     private readonly object _skipLogGate = new();
     private System.Threading.Timer? _skipLogTimer;
 
     /// <summary>
-    /// How long no further server may skip before the burst's line is written. One sweep waits up to the write-lock budget before it
-    /// skips, so the default is that budget plus five seconds. A test sets a long time and calls <see cref="FlushMaintenanceSkipLog"/>.
+    /// How long after the first skip of a burst the line is written. One sweep waits up to the write-lock budget before it skips,
+    /// so the default is that budget plus five seconds, long enough for every server of the sweep to join. A test sets a long time and calls <see cref="FlushMaintenanceSkipLog"/>.
     /// </summary>
     internal TimeSpan? MaintenanceSkipLogQuietPeriodOverride { get; set; }
 
@@ -60,8 +61,7 @@ public partial class LocalDataService
         lock (_skipLogGate)
         {
             _skipsThisCycle.Add((server, holder));
-            _skipLogTimer?.Dispose();
-            _skipLogTimer = new System.Threading.Timer(_ => FlushMaintenanceSkipLog(), null, MaintenanceSkipLogQuietPeriod, System.Threading.Timeout.InfiniteTimeSpan);
+            _skipLogTimer ??= new System.Threading.Timer(_ => FlushMaintenanceSkipLog(), null, MaintenanceSkipLogQuietPeriod, System.Threading.Timeout.InfiniteTimeSpan);
         }
     }
 
