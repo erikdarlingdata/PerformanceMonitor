@@ -35,8 +35,11 @@ public sealed class ViewerLoadTimer
     private readonly List<(string Step, long Ms)> _clientSteps = new();
     /* #8549: reads handed to Track that have not ended (the key is a running number), and reads that ended cancelled. A load that is
        finished before such a read's watcher has run must still name it: with only the ended reads booked, the stretch the read ran
-       was left to "client work". */
-    private readonly Dictionary<int, (string Phase, long StartedMs)> _inFlight = new();
+       was left to "client work".
+       #9249: the entry keeps the read's task. The loader awaits the same task on the UI thread and then calls Finish, and nothing orders
+       that continuation against the watcher's, so Finish can run while a read that has already completed is still here. Finish reads the
+       task's state to tell that read from one still running. */
+    private readonly Dictionary<int, (string Phase, long StartedMs, Task Task)> _inFlight = new();
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _cancelled = new();
     private int _nextReadId;
     private bool _superseded;
@@ -55,6 +58,10 @@ public sealed class ViewerLoadTimer
     /// ran before the clock could exist. The line's total and every phase's time count from the load's true start.</summary>
     internal ViewerLoadTimer(int slowThresholdMs, long alreadyElapsedMs) : this(slowThresholdMs) => _alreadyElapsedMs = alreadyElapsedMs;
 
+    /// <summary>#9249: test-only. When set, a watcher waits on it after its read ends and before it books the read, so a test holds the
+    /// watcher back and runs <see cref="Finish"/> in the gap the loader's own continuation can hit. Null in the product.</summary>
+    internal Task? BookingGate { get; set; }
+
     /// <summary>Milliseconds on the load's clock, counting any stretch the load ran before this clock started.</summary>
     internal long ElapsedMs => _alreadyElapsedMs + _total.ElapsedMilliseconds;
 
@@ -66,17 +73,19 @@ public sealed class ViewerLoadTimer
     internal string Surface { get; set; } = "";
 
     /// <summary>Times <paramref name="task"/> (already started) as <paramref name="phase"/> and hands it back unchanged, so a
-    /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error.</summary>
+    /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error. #9249: the
+    /// task handed back is the caller's own, not a wrapper, so the watcher and the caller's await are two unordered continuations. <see cref="Finish"/> covers
+    /// the gap by treating a read whose task has ended as booked.</summary>
     internal Task<T> Track<T>(string phase, Task<T> task)
     {
-        _ = Watch(phase, StartRead(phase), task);
+        _ = Watch(phase, StartRead(phase, task), task);
         return task;
     }
 
     /// <summary><see cref="Track{T}"/> for a task with no result.</summary>
     internal Task Track(string phase, Task task)
     {
-        _ = Watch(phase, StartRead(phase), task);
+        _ = Watch(phase, StartRead(phase, task), task);
         return task;
     }
 
@@ -91,13 +100,13 @@ public sealed class ViewerLoadTimer
         }
     }
 
-    private (int Id, long StartedMs) StartRead(string phase)
+    private (int Id, long StartedMs) StartRead(string phase, Task task)
     {
         var started = ElapsedMs;
         lock (_gate)
         {
             var id = ++_nextReadId;
-            _inFlight[id] = (phase, started);
+            _inFlight[id] = (phase, started, task);
             return (id, started);
         }
     }
@@ -179,9 +188,16 @@ public sealed class ViewerLoadTimer
             /* The awaiter of the task sees the failure; this watcher only needs to know when it ended. */
         }
 
+        if (BookingGate is { } gate)
+        {
+            await gate.ConfigureAwait(false);
+        }
+
         var ended = ElapsedMs;
         lock (_gate)
         {
+            /* #9249: booking and leaving _inFlight happen together under the gate, so Finish sees a read in one list or the other, never
+               both. Finish only copies the lists, so a line it already built cannot gain this read afterwards. */
             _inFlight.Remove(read.Id);
             (task.IsCanceled ? _cancelled : _phases).Add((phase, read.StartedMs, ended));
         }
@@ -279,7 +295,7 @@ public sealed class ViewerLoadTimer
         _total.Stop();
         lock (_gate)
         {
-            /* A load nothing stopped lists only the reads it saw end: a side read still out when the load finished is not part of its time.
+            /* A load nothing stopped lists only the reads that ended (see below for the ones not yet booked): a side read still out when the load finished is not part of its time.
                A load a newer one stopped lists the reads that were in flight or cancelled too, marked, and counts them as ended where
                they stopped, so their time is not booked as client work. */
             var now = ElapsedMs;
@@ -295,6 +311,11 @@ public sealed class ViewerLoadTimer
             else
             {
                 phases.AddRange(_cancelled);
+
+                /* #9249: a read whose task has ended but whose watcher has not run yet is part of the load's time. The loader's own await of
+                   the task can resume first and call Finish, and without this the read's whole run was booked as client work. It is booked as
+                   ended now (the watcher's own timestamp is not in yet). A read still running stays off the line, as above. */
+                phases.AddRange(_inFlight.Values.Where(f => f.Task.IsCompleted).Select(f => (f.Phase, f.StartedMs, now)));
             }
 
             return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), now, phases, _clientSteps.ToList(), _slowThresholdMs, stopped);
