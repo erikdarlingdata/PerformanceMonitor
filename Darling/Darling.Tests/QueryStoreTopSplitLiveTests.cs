@@ -38,6 +38,10 @@ public sealed class QueryStoreTopSplitLiveTests
     private const string Wide = "collect.query_store_interval_wide";
     private const int ServerId = 9276;
 
+    /// <summary>Rows with an interval start inside the window (query_id 1..WindowRows) and rows with none (query_id 10001..10000+NullStartRows); the seed and the asserts share them.</summary>
+    private const int WindowRows = 300;
+    private const int NullStartRows = 20;
+
     /// <summary>The window is the 24 hours before this instant, on the pinned live clock (#5608).</summary>
     private static DateTime End => LiveClock.AnchoredEnd();
 
@@ -50,7 +54,7 @@ public sealed class QueryStoreTopSplitLiveTests
 
     /* Three groups of rows for one server, all inside the days the migrated store accepts:
          window rows      query_id 1..300: an interval start inside the window, first execution ten minutes after it;
-         NULL-start rows  query_id 10001..10020: no interval start, collected inside the window, first execution FIVE HOURS before the
+         NULL-start rows  query_id 10001..10000+NullStartRows: no interval start, collected inside the window, first execution FIVE HOURS before the
                           window starts, so only the 26 hour floor keeps them (the one-hour floor of an interval-start row would drop them);
          older rows       query_id 20001..23000: an interval start BEFORE the window and a first execution two to twenty hours before it.
                           The window drops all of them, and the one-floor read fetches every one of them first. */
@@ -63,14 +67,14 @@ INSERT INTO {Wide}
      last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
 SELECT s + interval '1 hour', {ServerId}, 'db', g, g, 'Regular', s + interval '10 minutes', s + interval '50 minutes',
        'select 1', 10 + g, 1000 + g, g, s
-FROM (SELECT g, timestamp '{Ts(start)}' + make_interval(mins => (g % 1380)) AS s FROM generate_series(1, 300) g) AS w;
+FROM (SELECT g, timestamp '{Ts(start)}' + make_interval(mins => (g % 1380)) AS s FROM generate_series(1, {WindowRows}) g) AS w;
 
 INSERT INTO {Wide}
     (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
      last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
-SELECT timestamp '{Ts(start)}' + make_interval(mins => 30 + g), {ServerId}, 'db', g, g, 'Regular', timestamp '{Ts(start)}' - interval '5 hours',
+SELECT timestamp '{Ts(start)}' + make_interval(mins => 30 + (g - 10000)), {ServerId}, 'db', g, g, 'Regular', timestamp '{Ts(start)}' - interval '5 hours',
        timestamp '{Ts(start)}' - interval '4 hours', 'select 1', 10 + g, 1000 + g, -1, NULL
-FROM generate_series(10001, 10020) g;
+FROM generate_series(10001, {10000 + NullStartRows}) g;
 
 INSERT INTO {Wide}
     (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
@@ -202,9 +206,9 @@ ANALYZE {Wide};"), ct);
 
         /* Non-vacuous: the window rows and all 20 NULL-start rows, whose first execution is five hours before the window, come back
            in both shapes, and not one of the 3,000 older rows does. */
-        Assert.Equal(320, oneFloor.Count);
+        Assert.Equal(WindowRows + NullStartRows, oneFloor.Count);
         Assert.Equal(oneFloor, split);
-        Assert.Equal(20, split.Count(row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture) is >= 10001 and <= 10020));
+        Assert.Equal(NullStartRows, split.Count(row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture) > 10000));
 
         var oneFloorRemoved = await RowsRemovedByFilterAsync(connection, DarlingDataReader.QueryStoreTopTableSql, ct);
         var splitRemoved = await RowsRemovedByFilterAsync(connection, DarlingDataReader.QueryStoreTopTableSplitSql, ct);
@@ -228,23 +232,23 @@ ANALYZE {Wide};"), ct);
 
         /* Counters change, the start is written back with the value it has: value to the same value on the window rows, NULL to NULL on
            the NULL-start rows. Both kinds are in the update. */
-        var where = $"server_id = {ServerId} AND (query_id <= 50 OR query_id BETWEEN 10001 AND 10020)";
+        var where = $"server_id = {ServerId} AND (query_id <= 50 OR query_id BETWEEN 10001 AND {10000 + NullStartRows})";
         var sameStart = QueryStoreIntervalWideBrinIndexLiveTests.UpsertShapedSet + ", interval_start_time_utc = interval_start_time_utc";
         var (updated, hot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, sameStart, where, ct);
-        Assert.Equal(70, updated);
+        Assert.Equal(50 + NullStartRows, updated);
         Assert.Equal(updated, hot);
 
         /* The cost the index does have: filling a NULL start changes a column its predicate names, so those updates are not HOT. */
         var (fillUpdated, fillHot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(
-            connection, "interval_start_time_utc = collection_time", $"server_id = {ServerId} AND query_id BETWEEN 10001 AND 10020", ct);
-        Assert.Equal(20, fillUpdated);
+            connection, "interval_start_time_utc = collection_time", $"server_id = {ServerId} AND query_id BETWEEN 10001 AND {10000 + NullStartRows}", ct);
+        Assert.Equal(NullStartRows, fillUpdated);
         Assert.Equal(0, fillHot);
 
         /* The control the HOT claim can fail on: the same partial index over a column the counters change makes the same update non-HOT. */
         await ExecAsync(connection, $"DROP INDEX {QueryStoreBackgroundIndexes.WideNullStartFirstExecIndexName}", ct);
         await ExecAsync(connection, $"CREATE INDEX ix_counter_probe ON {Wide} (server_id, first_execution_time) WHERE execution_count IS NULL", ct);
         var (controlUpdated, controlHot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, sameStart, where, ct);
-        Assert.Equal(70, controlUpdated);
+        Assert.Equal(50 + NullStartRows, controlUpdated);
         Assert.Equal(0, controlHot);
     }
 
@@ -265,7 +269,7 @@ ANALYZE {Wide};"), ct);
         var oneFloor = await RunAbortsAsync(connection, DarlingQueryStoreAbortsReader.TableSql, ct);
         var split = await RunAbortsAsync(connection, DarlingQueryStoreAbortsReader.TableSplitSql, ct);
         Assert.True(oneFloor.Count >= 100, $"the aborted rows must come back; {oneFloor.Count} did");
-        Assert.Contains(oneFloor, row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture) is >= 10001 and <= 10020);
+        Assert.Contains(oneFloor, row => long.Parse(row.Split('|')[1], CultureInfo.InvariantCulture) > 10000);
         Assert.Equal(oneFloor, split);
     }
 

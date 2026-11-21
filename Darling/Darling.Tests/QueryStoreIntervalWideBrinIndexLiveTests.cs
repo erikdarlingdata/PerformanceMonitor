@@ -191,7 +191,7 @@ ORDER BY g;"), ct);
         return names;
     }
 
-    /* #9276: the one exemption, a (spec, column) pair and not a rule change. QueryStoreBackgroundIndexes.WideNullStartFirstExec names
+    /* #9276: the one exemption, a (spec, column) pair and not a rule change, matched on the parent index and the leaf indexes attached to it (a leaf made by ATTACH is auto-named, so a name prefix would miss it). QueryStoreBackgroundIndexes.WideNullStartFirstExec names
        interval_start_time_utc in its predicate only. PostgreSQL decides HOT by whether an indexed column's VALUE changes (equal values
        and NULL to NULL count as unchanged), and an interval's start does not change between fetches of the same interval except when a
        NULL left by a catalog join miss is filled, which is rare. The upsert names the column in its SET list, so the name-based rule
@@ -210,7 +210,10 @@ JOIN pg_am am ON am.oid = ic.relam
 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum > 0 AND NOT a.attisdropped
 WHERE i.indrelid IN (SELECT p.relid FROM pg_partition_tree('collect.query_store_interval_wide'::regclass) AS p WHERE p.relid <> ALL (@closed::regclass[]))
   AND am.amname <> 'brin'
-  AND NOT (starts_with(ic.relname, @exemptIndex) AND a.attname = @exemptColumn AND a.attnum <> ALL (i.indkey::int2[]))
+  AND NOT ((ic.relname = @exemptIndex
+            OR EXISTS (SELECT 1 FROM pg_inherits inh JOIN pg_class parent ON parent.oid = inh.inhparent
+                       WHERE inh.inhrelid = ic.oid AND parent.relname = @exemptIndex))
+           AND a.attname = @exemptColumn AND a.attnum <> ALL (i.indkey::int2[]))
   AND (a.attnum = ANY (i.indkey::int2[])
        OR EXISTS (SELECT 1 FROM pg_depend d
                   WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
