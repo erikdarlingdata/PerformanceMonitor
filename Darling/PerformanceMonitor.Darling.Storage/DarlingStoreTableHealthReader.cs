@@ -556,12 +556,16 @@ chunk_rels AS (
     SELECT t.obj_schema, t.obj_name, t.kind, pc.oid AS rel_oid,
            EXISTS (SELECT 1 FROM _timescaledb_catalog.compression_settings AS cs
                    WHERE cs.relid::oid = pc.oid AND cs.compress_relid IS NOT NULL) AS is_compressed
-    FROM targets AS t
-    JOIN timescaledb_information.chunks AS ch
-        ON  ch.hypertable_schema = t.root_schema
-        AND ch.hypertable_name = t.root_name
-    JOIN pg_catalog.pg_namespace AS pn ON pn.nspname = ch.chunk_schema
-    JOIN pg_catalog.pg_class AS pc ON pc.relnamespace = pn.oid AND pc.relname = ch.chunk_name
+    /* Chunk membership from core inheritance, not timescaledb_information.chunks: that view joins every chunk to its dimension
+       slices and to all of pg_class, and its row count is estimated far too low, which let the planner pick the wrong join order
+       (#9224). No column of _timescaledb_catalog.chunk is named: TimescaleDB 2.29 rebuilt that catalog, so a column of it exists on
+       one side of that version only. The compression_settings reads (relid, compress_relid), here and in TimescaleMemberArms, are
+       the catalog columns still named, and both exist on 2.28.1 and on 2.29 and later. A chunk dropped by retention has no relation
+       and no pg_inherits row, as in the view. The
+       tiered-storage (OSM) chunk is a foreign table, which the view skipped.*/
+    FROM root_rels AS t
+    JOIN pg_catalog.pg_inherits AS inh ON inh.inhparent = t.rel_oid
+    JOIN pg_catalog.pg_class AS pc ON pc.oid = inh.inhrelid AND pc.relkind <> 'f'
 ),
 ";
 
@@ -612,13 +616,16 @@ chunk_rels AS (
     AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}{(timescale ? "\n    AND   " + StoreSelfMetrics.TimescaleInventoriedPredicateSql : string.Empty)}
 ),
 members AS (
-{(timescale ? TimescaleMemberArms : string.Empty)}    SELECT pr.nspname AS obj_schema, pr.relname AS obj_name, CASE WHEN pr.relkind = 'p' THEN 'partitioned' ELSE 'table' END AS kind, x.rel_oid AS rel_oid, 'heap'::text AS member_role, (pr.relkind = 'p') AS grouped, false AS is_compressed
+{(timescale ? TimescaleMemberArms : string.Empty)}    SELECT pr.nspname AS obj_schema, pr.relname AS obj_name, 'table'::text AS kind, pr.oid AS rel_oid, 'heap'::text AS member_role, false AS grouped, false AS is_compressed
     FROM plain_roots AS pr
-    CROSS JOIN LATERAL (
-        SELECT pr.oid AS rel_oid WHERE pr.relkind <> 'p'
-        UNION ALL
-        SELECT t.relid FROM pg_catalog.pg_partition_tree(pr.oid::regclass) AS t WHERE pr.relkind = 'p' AND t.isleaf
-    ) AS x
+    WHERE pr.relkind <> 'p'
+    UNION ALL
+    /* Only the partitioned roots are walked: a set-returning function in a lateral join over every root is estimated at 1000
+       rows per root, which made this CTE millions of estimated rows on a store with thousands of tables (#9224). */
+    SELECT pr.nspname, pr.relname, 'partitioned'::text, t.relid, 'heap'::text, true, false
+    FROM plain_roots AS pr
+    CROSS JOIN LATERAL pg_catalog.pg_partition_tree(pr.oid::regclass) AS t
+    WHERE pr.relkind = 'p' AND t.isleaf
 )";
 
     /// <summary>
@@ -701,7 +708,7 @@ relsz AS MATERIALIZED (
     FROM members AS m
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid{(presized ? @"
     LEFT JOIN unnest($1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[]) AS z(rel_oid, heap_bytes, index_bytes, toast_bytes)
-        ON z.rel_oid = m.rel_oid::bigint" : string.Empty)}
+        ON m.rel_oid = z.rel_oid::oid" : string.Empty)}
 ),
 est AS MATERIALIZED (
 {PgTableBloatStatsCollector.BuildQueryText(EstimateRelationFilterSql)}
@@ -941,10 +948,17 @@ ptree AS (
     WHERE t.isleaf
 )";
 
+    /// <summary>
+    /// The condition that keeps the estimate in the presized per-index read to the indexes it sized (#9224), in place of every
+    /// btree index in the database. The size column the estimate carries is not read there: the read takes it from its own list.
+    /// </summary>
+    private const string EstimateIndexFilterSql = @"
+    AND   c.oid::bigint = ANY($1::bigint[])";
+
     /// <summary>The statement for the per-index read: see <see cref="StoreIndexHealthRow"/>.</summary>
     public static string BuildIndexSql(bool timescale, bool presized = false) => $@"
 WITH est AS MATERIALIZED (
-{PgIndexBloatCollector.QueryText}
+{(presized ? PgIndexBloatCollector.BuildQueryText("0::bigint", EstimateIndexFilterSql) : PgIndexBloatCollector.QueryText)}
 ),
 {BuildMembersCtes(timescale)},
 {PartitionIndexCtes()},
@@ -970,7 +984,7 @@ ix AS (
         {(presized ? "COALESCE(zh.bytes, 0)" : "pg_catalog.pg_relation_size(c.oid)")} AS heap_bytes,
         COALESCE(s.idx_scan, 0) AS idx_scan,
         e.est_reclaimable_bytes,
-        e.index_bytes AS est_index_bytes,
+        {(presized ? "CASE WHEN e.index_oid IS NOT NULL THEN COALESCE(zi.bytes, 0) END" : "e.index_bytes")} AS est_index_bytes,
         e.skipped_reason
     FROM members AS m
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
@@ -980,8 +994,8 @@ ix AS (
     LEFT JOIN pg_catalog.pg_stat_all_indexes AS s ON s.indexrelid = x.indexrelid
     LEFT JOIN ptree AS pt ON pt.leaf_index_oid = x.indexrelid
     LEFT JOIN est AS e ON e.index_oid = x.indexrelid{(presized ? @"
-    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zi(rel_oid, bytes) ON zi.rel_oid = x.indexrelid::bigint
-    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zh(rel_oid, bytes) ON zh.rel_oid = c.oid::bigint" : string.Empty)}
+    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zi(rel_oid, bytes) ON x.indexrelid = zi.rel_oid::oid
+    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zh(rel_oid, bytes) ON c.oid = zh.rel_oid::oid" : string.Empty)}
 ),
 grp AS (
     SELECT
@@ -1474,14 +1488,14 @@ WHERE s.name IN ('autovacuum', 'autovacuum_max_workers', 'autovacuum_naptime', '
     /// The relations the per-table read sizes (#9170): every member relation, once each. The same <c>members</c> the read
     /// itself groups, so the sizes cover exactly the relations it sums.
     /// </summary>
-    private static string MemberRelationsSql(bool timescale) => $@"
+    internal static string MemberRelationsSql(bool timescale) => $@"
 WITH {BuildMembersCtes(timescale)}
 SELECT DISTINCT m.rel_oid::bigint
 FROM members AS m
 JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid";
 
     /// <summary>The relations the per-index read sizes (#9170): every member relation (the heap each index hangs under) and every index on one.</summary>
-    private static string IndexRelationsSql(bool timescale) => $@"
+    internal static string IndexRelationsSql(bool timescale) => $@"
 WITH {BuildMembersCtes(timescale)}
 SELECT m.rel_oid::bigint
 FROM members AS m
