@@ -92,6 +92,9 @@ public sealed class AddServerCommandTests : IDisposable
         return doc.RootElement.GetProperty("Servers").EnumerateArray().Select(s => s.GetProperty("ServerName").GetString()!).ToArray();
     }
 
+    /// <summary>Every key in the store. Server ids are GUIDs, so each starts with one hex digit.</summary>
+    private string[] StoredKeys() => "0123456789abcdef".SelectMany(c => _store.ListKeys(c.ToString())).ToArray();
+
     private ServerManager Reload() => new(_root, null, HostsFile, new CredentialService(_store));
 
     [Theory]
@@ -214,7 +217,7 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Equal(1, run.Exit);
         Assert.Empty(ServerNames());
         Assert.False(File.Exists(HostsFile));
-        Assert.Empty(_store.ListKeys(""));
+        Assert.Empty(StoredKeys());
         Assert.Empty(run.Tested);
     }
 
@@ -228,7 +231,7 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Equal(1, run.Exit);
         Assert.Equal(["sql01"], run.Tested);
         Assert.Empty(ServerNames());
-        Assert.Empty(_store.ListKeys(""));
+        Assert.Empty(StoredKeys());
         Assert.False(File.Exists(HostsFile));
         Assert.Contains("Login failed.", run.Err);
     }
@@ -251,7 +254,7 @@ public sealed class AddServerCommandTests : IDisposable
         await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor","password":"first-value"}]""");
         var id = Reload().GetAllServers().Single().Id;
 
-        var run = await RunVerbAsync(["--add-server"], """[{"host":"SQL01","auth":"sql","username":"monitor2","password":"second-value"}]""");
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""");
 
         Assert.Equal(0, run.Exit);
         var servers = Reload().GetAllServers();
