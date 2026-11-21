@@ -301,4 +301,60 @@ public sealed class UsedDataReadRunLogTests : IDisposable
 
         Assert.Single(_log);
     }
+
+    /// <summary>A reset point at 40% of the file, so the file is over its ceiling (twice the reset point) and the tick attempts the reset.</summary>
+    private static HotStoreResetLimit OverTheCeiling(DuckDbInitializer duckDb) =>
+        new(duckDb.GetDatabaseSizeMb() * 0.4, HotStoreResetSetting.SourceSetting);
+
+    private int Warnings => _log.Count(l => l.Level == LogLevel.Warning);
+
+    [Fact]
+    public async Task TicksWhoseResetDefers_KeepTheRun_SoTheFailedReadsLogOneWarning_NotOnePerTick()
+    {
+        var host = await OpenHostAsync();
+        host.Service.HotStoreReset = OverTheCeiling(host.DuckDb);
+
+        /* An earlier reset's restore is still pending: the reset returns without touching the store, every tick. */
+        var marker = Path.Combine(_dir, "archive", PreservedTableRestore.RestoreMarkerFileName);
+        File.WriteAllText(marker, "pending");
+
+        using (new HeldWrite(host.DuckDb))
+        {
+            for (var i = 0; i < 4; i++)
+            {
+                await host.Tick();
+            }
+        }
+
+        Assert.True(File.Exists(marker), "the deferred reset must not have touched the pending restore");
+        Assert.Equal(1, Warnings);
+    }
+
+    [Fact]
+    public async Task AResetThatReallyHappens_EndsTheRun_SoTheNextFailureLogsItsOwnFirstLine()
+    {
+        var host = await OpenHostAsync();
+        host.Service.HotStoreReset = OverTheCeiling(host.DuckDb);
+
+        /* The data read fails under the held lock, which logs the run's first line. The reset waits for that lock, so the
+           hold is released once the line is out, and the reset then runs for real. */
+        Task tick;
+        using (new HeldWrite(host.DuckDb))
+        {
+            tick = host.Tick();
+            Assert.True(SpinWait.SpinUntil(() => Warnings >= 1, TimeSpan.FromSeconds(30)), "the failed read was not logged");
+        }
+
+        await tick;
+        Assert.Contains(_log, l => l.Message.Contains("Archiving all data and resetting the database", StringComparison.Ordinal));
+
+        /* The reset left a fresh, smaller file. Under a held lock a read fails again, and it is a new run. */
+        host.Service.HotStoreReset = JustUnder(host.DuckDb);
+        using (new HeldWrite(host.DuckDb))
+        {
+            await host.Tick();
+        }
+
+        Assert.Equal(2, Warnings);
+    }
 }

@@ -2143,8 +2143,10 @@ COPY (
     /// Called when the database exceeds the size threshold. Data remains queryable through archive views.
     /// <para>#9188: <paramref name="cancellationToken"/> is the shutdown, and reaches only the compaction after the reset.
     /// The reset itself is not interrupted.</para>
+    /// <para>#9250: returns true only when the store was really reset. A deferral (a restore pending, the archive lock busy,
+    /// the retry backoff, a collection in flight) and a failure that returns normally answer false.</para>
     /// </summary>
-    public async Task ArchiveAllAndResetAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> ArchiveAllAndResetAsync(CancellationToken cancellationToken = default)
     {
         if (File.Exists(RestoreMarkerPath))
         {
@@ -2154,13 +2156,13 @@ COPY (
             _logger?.LogError(
                 "Database reset deferred: an earlier reset's restore is pending ({Marker}); restart Lite to finish it before another reset",
                 RestoreMarkerPath);
-            return;
+            return false;
         }
 
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero, CancellationToken.None))
         {
             _logger?.LogDebug("Archive operation already in progress, skipping");
-            return;
+            return false;
         }
 
         /* #4732: a retry time more than one backoff ahead of the clock can only come from a wall clock that stepped
@@ -2172,7 +2174,7 @@ COPY (
         {
             _logger?.LogDebug("Database reset skipped: the previous attempt failed and its retry is due at {RetryAt:u}", ResetRetryNotBeforeUtc);
             s_archiveLock.Release();
-            return;
+            return false;
         }
 
         /* Wait for in-flight collections before deleting the database (#2594). The write lock below does NOT
@@ -2193,7 +2195,7 @@ COPY (
                 "next archival check.",
                 CollectionResetGate.CollectionsInFlight);
             s_archiveLock.Release();
-            return;
+            return false;
         }
 
         IsArchiving = true;
@@ -2209,6 +2211,9 @@ COPY (
         var exports = new List<(string TempPath, string FinalPath)>();
         var promoted = new List<string>();
         var resetStarted = false;
+        /* #9250: true once the store file was really deleted and reinitialized, so the caller can tell a reset from a
+           deferral or a failure that also return normally. */
+        var storeWasReset = false;
         string? preId = null;
         long exportedRows = 0;
 
@@ -2317,7 +2322,7 @@ COPY (
                     ResetRetryNotBeforeUtc);
                 RecordReset(StoreHousekeepingHistory.OutcomeFailed, null, null, usedMbAtStart,
                     $"The export failed, so no data was moved and the store was not reset. {exportError}");
-                return;
+                return false;
             }
 
             /* Everything is on disk. Name the files about to be promoted before promoting them: if the
@@ -2411,6 +2416,7 @@ COPY (
                     BeforeDatabaseFileResetForTests?.Invoke();
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
+                    storeWasReset = true;
 
                     /* Every live table just lost its rows, so cached archive answers are invalid until re-read. */
                     _duckDb.BumpArchiveViewGeneration();
@@ -2544,6 +2550,8 @@ COPY (
             ReleaseCollectionGate();
             s_archiveLock.Release();
         }
+
+        return storeWasReset;
     }
 
 }

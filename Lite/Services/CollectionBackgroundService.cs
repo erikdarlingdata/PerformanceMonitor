@@ -822,8 +822,12 @@ public class CollectionBackgroundService : BackgroundService
                     _logger?.LogInformation("Store file ({FileMb:F0} MB) reached twice the {Threshold:F0} MB reset point ({Source}), data {UsedMb} MB or not read. Archiving all data and resetting the database",
                         fileMb, HotStoreReset.Mb, HotStoreReset.Source, usedMb is { } u ? u.ToString("F0", CultureInfo.InvariantCulture) : "not read");
                 }
-                await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
-                _usedDataReadRun.EndRunAfterReset();
+                /* #9250: the run ends only when the store was really reset. A deferred or failed reset leaves the
+                   same failing reads in place, so their run (and its count) continues on the next tick. */
+                if (await _archiveService.ArchiveAllAndResetAsync(cancellationToken))
+                {
+                    _usedDataReadRun.EndRunAfterReset();
+                }
             }
             else
             {
