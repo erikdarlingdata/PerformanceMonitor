@@ -97,7 +97,8 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         /* The count is asserted as a whole too: a file dropping to zero sites would otherwise be caught only
            by its own per-file assertion, and this states the total the fix actually swept. */
         /* 8 -> 9 with #8784 (get_object_usage's module executions). */
-        Assert.Equal(9, total);
+        /* 9 -> 8 with #9195: one site is now the arg_max pick. */
+        Assert.Equal(8, total);
     }
 
     /// <summary>
