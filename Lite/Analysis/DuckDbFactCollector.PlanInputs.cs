@@ -54,6 +54,49 @@ public partial class DuckDbFactCollector
         bool Unverified = false,
         int InputBasis = 0);
 
+    /// <summary>
+    /// #9195: why a candidate stays unverified. Every unverified candidate has exactly one, so the counts on the slow-check
+    /// line add up to its unverified total. A candidate whose outcome is unverified takes the cause of that outcome. One
+    /// whose plans compared conclusively and whose statement text is missing or withheld is <see cref="TextUnknown"/>.
+    /// </summary>
+    internal enum PlanUnverifiedCause
+    {
+        /// <summary>Not unverified.</summary>
+        None = 0,
+
+        /// <summary>The pass's fetch budget or its total fetch time ran out before the plan was tried.</summary>
+        Unreached,
+
+        /// <summary>Answered from a skip entry: an earlier failure or withheld compare, under an hour ago.</summary>
+        Skipped,
+
+        /// <summary>No plan source, or the detector's row has no plan id, so there was nothing to fetch.</summary>
+        NoPlanToFetch,
+
+        /// <summary>A plan fetch ended with no plan, a timeout or a fault, on either plan.</summary>
+        FetchFailed,
+
+        /// <summary>Both plans were fetched (or answered from an earlier pass) and the rule cannot judge them, with nothing withheld in either.</summary>
+        Uncomparable,
+
+        /// <summary>Both plans were fetched and the rule cannot judge them, and a plan carries text the statement filter withheld. The filter withholds on a time budget as well as on content, and the output cannot tell which.</summary>
+        Withheld,
+
+        /// <summary>The compare threw.</summary>
+        CompareThrew,
+
+        /// <summary>The plans compared conclusively, and the statement text is missing or withheld.</summary>
+        TextUnknown,
+    }
+
+    private const int PlanUnverifiedCauseCount = 9;
+
+    /// <summary>One pair's plan-based result: the outcome, and the cause when that outcome is unverified.</summary>
+    private readonly record struct PairJudgement(PlanInputOutcome Outcome, PlanUnverifiedCause Cause);
+
+    /// <summary>One bounded fetch's result: the plan (null when none), and whether the fetch was tried at all.</summary>
+    private readonly record struct PlanFetch(string? Xml, bool Tried);
+
     /// <summary>The candidates that stay, in the detector's order, and the two counts the fact reports.</summary>
     private sealed record PlanRegressionVerification(
         List<PlanRegressionCandidate> Kept, int CrossInputExcluded, int InputsUnverified);
@@ -74,9 +117,13 @@ public partial class DuckDbFactCollector
         public int Faults;
         public int CacheHits;
 
-        /// <summary>#9195: pairs not judged because a plan fetch or the pair's compare failed within the last hour.</summary>
+        /// <summary>#9195: pairs not judged because a plan fetch failed, or a compare was cut short by withheld text or threw, within the last hour.</summary>
         public int Skipped;
         public long FetchTicks;
+
+        /// <summary>#9195: the longest fetch that returned a plan, in stopwatch ticks, and the longest plan fetched, in characters.</summary>
+        public long SlowestPlanTicks;
+        public int LargestPlanChars;
     }
 
     /// <summary>
@@ -104,7 +151,8 @@ public partial class DuckDbFactCollector
         var excludedKeys = new HashSet<(string Database, long QueryId)>();
         var judgedKeys = new HashSet<(string Database, long QueryId)>();
         var judgements = new Dictionary<int, PlanInputJudgement>();
-        var outcomes = new Dictionary<(string Database, long Latest, long Best), PlanInputOutcome>();
+        var outcomes = new Dictionary<(string Database, long Latest, long Best), PairJudgement>();
+        var causes = new int[PlanUnverifiedCauseCount];
         var budget = new PlanFetchBudget();
         var started = Stopwatch.GetTimestamp();
 
@@ -137,20 +185,22 @@ public partial class DuckDbFactCollector
 
             if (excludedKeys.Contains(queryKey)) continue;
             kept.Add(candidate with { Unverified = judgements[i].Unverified, InputBasis = judgements[i].Basis });
+            if (judgements[i].Unverified) causes[(int)judgements[i].Cause]++;
         }
 
         var unverified = kept.Count(k => k.Unverified);
-        ReportSlowPlanCheck(context, candidates.Count, budget, unverified, Stopwatch.GetElapsedTime(started));
+        ReportSlowPlanCheck(context, candidates.Count, budget, causes, unverified, Stopwatch.GetElapsedTime(started));
         return new PlanRegressionVerification(kept, excludedKeys.Count, unverified);
     }
 
     /// <summary>
     /// #9195: one Information line when the plan check took over <see cref="PlanInputSlowThreshold"/>, naming where the time
-    /// went: the live fetches (and how each ended) or the plan pairs answered from an earlier pass. A fast check logs
-    /// nothing. Counts and times only, never a plan or a statement.
+    /// went: the live fetches (how each ended, the slowest that returned a plan and the largest plan) or the plan pairs
+    /// answered from an earlier pass, and why each unverified candidate stays unverified. A fast check logs nothing.
+    /// Counts and times only, never a plan or a statement.
     /// </summary>
     private static void ReportSlowPlanCheck(
-        AnalysisContext context, int candidateCount, PlanFetchBudget budget, int unverified, TimeSpan elapsed)
+        AnalysisContext context, int candidateCount, PlanFetchBudget budget, int[] causes, int unverified, TimeSpan elapsed)
     {
         if (elapsed <= PlanInputSlowThreshold) return;
 
@@ -158,46 +208,61 @@ public partial class DuckDbFactCollector
             string.Create(CultureInfo.InvariantCulture,
                 $"Plan regression input check took {(long)elapsed.TotalMilliseconds} ms for {context.ServerName} (server {context.ServerId}): " +
                 $"{candidateCount} candidates, {budget.Fetches} fetches ({budget.PlansRead} plans, {budget.NoPlan} none, {budget.Timeouts} timeouts, " +
-                $"{budget.Faults} faults, {(long)Stopwatch.GetElapsedTime(0, budget.FetchTicks).TotalMilliseconds} ms), {budget.CacheHits} answered from an earlier pass, {budget.Skipped} skipped after an earlier failure, {unverified} unverified"));
+                $"{budget.Faults} faults, {(long)Stopwatch.GetElapsedTime(0, budget.FetchTicks).TotalMilliseconds} ms, " +
+                $"slowest plan fetch {(long)Stopwatch.GetElapsedTime(0, budget.SlowestPlanTicks).TotalMilliseconds} ms, largest plan {budget.LargestPlanChars} characters), " +
+                $"{budget.CacheHits} answered from an earlier pass, {budget.Skipped} skipped after an earlier failure, {unverified} unverified " +
+                $"({causes[(int)PlanUnverifiedCause.Unreached]} unreached, {causes[(int)PlanUnverifiedCause.Skipped]} skipped, " +
+                $"{causes[(int)PlanUnverifiedCause.NoPlanToFetch]} without a plan to fetch, {causes[(int)PlanUnverifiedCause.FetchFailed]} fetch failed, " +
+                $"{causes[(int)PlanUnverifiedCause.Uncomparable]} uncomparable, {causes[(int)PlanUnverifiedCause.Withheld]} withheld by the filter, " +
+                $"{causes[(int)PlanUnverifiedCause.CompareThrew]} compare threw, {causes[(int)PlanUnverifiedCause.TextUnknown]} text unknown)"));
     }
 
     /// <summary>What the inputs check decided about one row: leave its query out, or keep it (checked or not) with its basis.</summary>
-    private readonly record struct PlanInputJudgement(bool Exclude, bool Unverified, int Basis);
+    private readonly record struct PlanInputJudgement(
+        bool Exclude, bool Unverified, int Basis, PlanUnverifiedCause Cause = PlanUnverifiedCause.None);
 
     private async Task<PlanInputJudgement> JudgePlanRegressionCandidateAsync(
         AnalysisContext context, PlanRegressionCandidate candidate,
-        Dictionary<(string Database, long Latest, long Best), PlanInputOutcome> outcomes,
+        Dictionary<(string Database, long Latest, long Best), PairJudgement> outcomes,
         PlanFetchBudget budget, CancellationToken overallToken)
     {
         /* Decided from the read alone: no plan is fetched for a recompile statement or for a plan that only returns more. */
         var outcome = PlanInputComparison.JudgeBeforePlans(
             candidate.QueryText, candidate.RegressionFactor, candidate.LatestRows, candidate.BestRows);
 
+        var cause = PlanUnverifiedCause.None;
         if (outcome == PlanInputOutcome.NeedsPlans)
         {
             outcome = PlanInputOutcome.KeepUnverified;
+            cause = PlanUnverifiedCause.NoPlanToFetch;
             if (_queryStorePlanSource is not null && candidate.LatestPlanId is long latestPlanId && candidate.BestPlanId is long bestPlanId)
             {
                 /* Two replicas of one query can be two candidates over the same two plans: one comparison. */
                 var key = (candidate.DatabaseName, latestPlanId, bestPlanId);
-                if (!outcomes.TryGetValue(key, out outcome))
+                if (!outcomes.TryGetValue(key, out var judged))
                 {
-                    /* #9195: a pair an earlier pass compared is answered from the cache and uses no fetch. Only a
-                       conclusive outcome is ever stored (see PlanInputOutcomeCache), so a miss is a pair never compared. */
+                    /* #9195: a pair an earlier pass compared is answered from the cache and uses no fetch. A stored outcome is
+                       conclusive, or the unverified answer of an uncomparable pair (see PlanInputOutcomeCache), so a miss is a
+                       pair not compared, or one whose compare a withheld plan may have cut short. */
                     var cacheKey = new PlanInputOutcomeCache.Key(context.ServerId, candidate.DatabaseName, latestPlanId, bestPlanId);
-                    if (_planInputCache.TryGet(cacheKey, out outcome))
+                    if (_planInputCache.TryGet(cacheKey, out var cached))
                     {
                         budget.CacheHits++;
+                        judged = new PairJudgement(
+                            cached, cached == PlanInputOutcome.KeepUnverified ? PlanUnverifiedCause.Uncomparable : PlanUnverifiedCause.None);
                     }
                     else
                     {
-                        outcome = await JudgeFetchedPlansAsync(
+                        judged = await JudgeFetchedPlansAsync(
                             context, budget, candidate.DatabaseName, latestPlanId, bestPlanId, overallToken);
-                        _planInputCache.Store(cacheKey, outcome);
+                        _planInputCache.Store(cacheKey, judged.Outcome);
                     }
 
-                    outcomes[key] = outcome;
+                    outcomes[key] = judged;
                 }
+
+                outcome = judged.Outcome;
+                cause = judged.Cause;
             }
         }
 
@@ -206,19 +271,25 @@ public partial class DuckDbFactCollector
 
         var textUnknown = string.IsNullOrWhiteSpace(candidate.QueryText)
             || WithheldStatementMarker.IsMarker(candidate.QueryText);
-        return new PlanInputJudgement(
-            Exclude: false,
-            Unverified: outcome == PlanInputOutcome.KeepUnverified || textUnknown,
-            Basis: PlanInputComparison.InputBasis(outcome));
+        var unverified = outcome == PlanInputOutcome.KeepUnverified || textUnknown;
+        if (outcome != PlanInputOutcome.KeepUnverified) cause = textUnknown ? PlanUnverifiedCause.TextUnknown : PlanUnverifiedCause.None;
+        return new PlanInputJudgement(Exclude: false, Unverified: unverified, Basis: PlanInputComparison.InputBasis(outcome), Cause: cause);
     }
 
-    /// <summary>The plan-based outcome for one candidate's two plans; KeepUnverified when either cannot be had or compared.</summary>
-    private async Task<PlanInputOutcome> JudgeFetchedPlansAsync(
+    /// <summary>
+    /// The plan-based outcome for one candidate's two plans; KeepUnverified when either cannot be had or compared, with the
+    /// cause (#9195). A pair that compared KeepUnverified is stored for the outcome lifetime when neither fetched plan
+    /// carries text the statement filter withheld: the same two stored plans through the same filter and rule give the same
+    /// answer every time. The filter's withholding runs under a time budget (<c>SensitiveStatements.Xml</c> through
+    /// <c>LivePlanDisplay.FilterAsync</c>: a spent budget or a match timeout withholds), and a withheld plan reads the same
+    /// whatever withheld it, so such a pair keeps the one-hour skip and is judged again once it ends.
+    /// </summary>
+    private async Task<PairJudgement> JudgeFetchedPlansAsync(
         AnalysisContext context, PlanFetchBudget budget,
         string databaseName, long latestPlanId, long bestPlanId, CancellationToken overallToken)
     {
-        /* #9195: a plan whose fetch failed in the last hour, or a pair that compared unverified in it, is not tried again.
-           That uses no fetch and no time, and the candidate stays unverified, as one the budget never reached does. */
+        /* #9195: a plan whose fetch failed in the last hour, or a pair whose compare a withheld plan cut short in it, is not
+           tried again. That uses no fetch and no time, and the candidate stays unverified, as one the budget never reached does. */
         var pairKey = new PlanInputOutcomeCache.Key(context.ServerId, databaseName, latestPlanId, bestPlanId);
         if (_planInputCache.IsSkipped(pairKey)
             || _planInputCache.IsSkipped(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, latestPlanId))
@@ -227,20 +298,28 @@ public partial class DuckDbFactCollector
             budget.Skipped++;
             AppLogger.Debug("DuckDbFactCollector", string.Create(CultureInfo.InvariantCulture,
                 $"Plan input fetch skipped after an earlier failure for plans {latestPlanId} and {bestPlanId} in {databaseName} on {context.ServerName} (server {context.ServerId})"));
-            return PlanInputOutcome.KeepUnverified;
+            return new PairJudgement(PlanInputOutcome.KeepUnverified, PlanUnverifiedCause.Skipped);
         }
 
-        var latestXml = await FetchPlanForInputsAsync(context, budget, databaseName, latestPlanId, overallToken);
-        if (latestXml is null) return PlanInputOutcome.KeepUnverified;
+        var latest = await FetchPlanForInputsAsync(context, budget, databaseName, latestPlanId, overallToken);
+        if (latest.Xml is null) return new PairJudgement(PlanInputOutcome.KeepUnverified, FetchCause(latest));
 
-        var bestXml = await FetchPlanForInputsAsync(context, budget, databaseName, bestPlanId, overallToken);
-        if (bestXml is null) return PlanInputOutcome.KeepUnverified;
+        var best = await FetchPlanForInputsAsync(context, budget, databaseName, bestPlanId, overallToken);
+        if (best.Xml is null) return new PairJudgement(PlanInputOutcome.KeepUnverified, FetchCause(best));
 
         try
         {
-            var judged = PlanInputComparison.JudgePlans(latestXml, bestXml);
-            if (judged == PlanInputOutcome.KeepUnverified) _planInputCache.Skip(pairKey);
-            return judged;
+            var judged = PlanInputComparison.JudgePlans(latest.Xml, best.Xml);
+            if (judged != PlanInputOutcome.KeepUnverified) return new PairJudgement(judged, PlanUnverifiedCause.None);
+
+            if (CarriesWithheldText(latest.Xml) || CarriesWithheldText(best.Xml))
+            {
+                _planInputCache.Skip(pairKey);
+                return new PairJudgement(judged, PlanUnverifiedCause.Withheld);
+            }
+
+            _planInputCache.StoreUncomparable(pairKey);
+            return new PairJudgement(judged, PlanUnverifiedCause.Uncomparable);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -254,21 +333,29 @@ public partial class DuckDbFactCollector
             }
 
             _planInputCache.Skip(pairKey);
-            return PlanInputOutcome.KeepUnverified;
+            return new PairJudgement(PlanInputOutcome.KeepUnverified, PlanUnverifiedCause.CompareThrew);
         }
     }
 
+    /// <summary>A fetch that returned no plan: unreached when it never started (the budget or the pass's time was spent), failed otherwise.</summary>
+    private static PlanUnverifiedCause FetchCause(PlanFetch fetch) =>
+        fetch.Tried ? PlanUnverifiedCause.FetchFailed : PlanUnverifiedCause.Unreached;
+
+    /// <summary>True when the filtered plan holds the filter's withheld-text marker (a statement, a value or the whole plan).</summary>
+    private static bool CarriesWithheldText(string planXml) =>
+        planXml.Contains(WithheldStatementMarker.Text, StringComparison.Ordinal);
+
     /// <summary>
-    /// One bounded fetch: null when the budget is spent, the source has no plan, the fetch fails, or the
+    /// One bounded fetch: no plan when the budget is spent, the source has no plan, the fetch fails, or the
     /// fetch or the pass's fetch time runs out. Only the pass's own cancellation escapes. The plan is never
     /// logged; the first fault of a pass (not a timeout) is logged once, through the collector's failure report, without
     /// marking the family unread.
     /// </summary>
-    private async Task<string?> FetchPlanForInputsAsync(
+    private async Task<PlanFetch> FetchPlanForInputsAsync(
         AnalysisContext context, PlanFetchBudget budget,
         string databaseName, long planId, CancellationToken overallToken)
     {
-        if (budget.Left <= 0 || overallToken.IsCancellationRequested) return null;
+        if (budget.Left <= 0 || overallToken.IsCancellationRequested) return new PlanFetch(null, Tried: false);
         budget.Left--;
         budget.Fetches++;
 
@@ -290,13 +377,15 @@ public partial class DuckDbFactCollector
                 result = "none";
                 budget.NoPlan++;
                 _planInputCache.Skip(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, planId));
-                return null;
+                return new PlanFetch(null, Tried: true);
             }
 
             result = "plan";
             chars = xml.Length;
             budget.PlansRead++;
-            return xml;
+            budget.SlowestPlanTicks = Math.Max(budget.SlowestPlanTicks, Stopwatch.GetTimestamp() - started);
+            budget.LargestPlanChars = Math.Max(budget.LargestPlanChars, chars);
+            return new PlanFetch(xml, Tried: true);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -323,7 +412,7 @@ public partial class DuckDbFactCollector
             }
 
             if (skipPlan) _planInputCache.Skip(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, planId));
-            return null;
+            return new PlanFetch(null, Tried: true);
         }
         finally
         {

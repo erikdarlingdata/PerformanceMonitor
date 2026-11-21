@@ -56,6 +56,39 @@ public sealed class PlanInputOutcomeCacheTests
     }
 
     [Fact]
+    public void AnUncomparablePair_IsAnsweredUnverifiedForTheLifetime_AndExpires()
+    {
+        var time = new ManualTime();
+        var cache = new PlanInputOutcomeCache(time);
+        cache.StoreUncomparable(Pair(2));
+
+        Assert.Equal(1, cache.Count);
+        Assert.True(cache.TryGet(Pair(2), out var held));
+        Assert.Equal(PlanInputOutcome.KeepUnverified, held);
+        Assert.False(cache.TryGet(Pair(3), out _));
+
+        time.Advance(PlanInputOutcomeCache.Lifetime - TimeSpan.FromMinutes(1));
+        Assert.True(cache.TryGet(Pair(2), out _));
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        Assert.False(cache.TryGet(Pair(2), out _));
+        Assert.Equal(0, cache.Count);
+    }
+
+    [Fact]
+    public void UncomparablePairs_ShareTheCapWithTheOutcomes_AndTheOldestIsEvicted()
+    {
+        var cache = new PlanInputOutcomeCache();
+        cache.Store(Pair(100), PlanInputOutcome.DropValuesOnly);
+        for (var plan = 1; plan <= PlanInputOutcomeCache.MaxEntries; plan++)
+            cache.StoreUncomparable(Pair(100 + plan));
+
+        Assert.Equal(PlanInputOutcomeCache.MaxEntries, cache.Count);
+        Assert.False(cache.TryGet(Pair(100), out _));
+        Assert.True(cache.TryGet(Pair(100 + PlanInputOutcomeCache.MaxEntries), out _));
+    }
+
+    [Fact]
     public void PastTheCap_TheOldestEntryIsEvicted_AndTheRestStay()
     {
         var cache = new PlanInputOutcomeCache();
