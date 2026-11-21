@@ -204,7 +204,7 @@ public sealed class PlanRegressionBlockLiveTests
     }
 
     [Fact]
-    public async Task ABlockWithAMissingDay_IsNotValid_ARebuiltDayMakesItStale_AndTheNextTickSumsItAgain()
+    public async Task ABlockWithAMissingDay_IsNotValid_ALateRowMakesAnotherStale_AndTheNextTickSumsOnlyTheStaleOne()
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -230,9 +230,10 @@ public sealed class PlanRegressionBlockLiveTests
 
             Assert.Equal(untouched, await ValidAsync(connection, ct));
 
-            /* The next tick builds the missing day again, which gives it a new built_seq, and then sums both blocks again: the first with the new interval in it. */
+            /* The next tick builds the missing day again. No late row moved its late_seq, so it carries the built_seq the block was summed from and the block is valid
+               again without a new sum. The first block is summed again, with the new interval in it. */
             var tick = await PlanRegressionDaily.RunTickAsync(source, Now, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
-            Assert.Equal(2, tick.BlocksBuilt);
+            Assert.Equal(1, tick.BlocksBuilt);
             Assert.Equal(whole, await ValidAsync(connection, ct));
             Assert.Equal(47L, await ScalarAsync(connection,
                 $"SELECT execs::bigint FROM collect.plan_regression_block WHERE server_id = 1 AND block_start = DATE '{DateText(rebuilt)}' AND plan_id = 1", ct));
