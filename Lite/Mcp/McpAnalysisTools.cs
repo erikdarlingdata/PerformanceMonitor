@@ -307,7 +307,16 @@ public sealed class McpAnalysisTools
         CancellationToken cancellationToken = default)
     {
         var answer = await GetAnalysisFactsCore(analysisService, serverManager, server_name, hours_back, source, min_severity, as_of, cancellationToken);
-        return await WithRunWindowNoticeAsync(answer, analysisService, serverManager, server_name, hours_back, as_of);
+        var withNotice = await WithRunWindowNoticeAsync(answer, analysisService, serverManager, server_name, hours_back, as_of);
+
+        /* #9195: a default 4 h window on a busy server answered 33.1 to 33.5 KB, a few hundred bytes past the response budget every other
+           Lite read honours (#9140), with no key to say so. The cut comes after the window notice so the notice's keys count against the budget.
+           The facts are already worst first (severity), so the cut drops the mildest, and budget_truncated and budget_note say so. total_facts,
+           shown and coverage count what was scored, not what fit. A status answer with no facts array passes through as it came. */
+        return McpResponseBudget.CapArrayInReply(
+            withNotice, "facts", "highest severity first", "facts",
+            _ => "Narrow the read with source or min_severity, or use a shorter hours_back, to see the rest. total_facts and shown count every fact that was scored.",
+            "budget_truncated", "budget_note");
     }
 
     /// <summary>
@@ -652,6 +661,9 @@ public sealed class McpAnalysisTools
                shared response target. Rows are already worse first, then better, then stable, so what is left off the end is
                the stable tail; summary and families above still count every fact. */
             var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
+            string? CutNote(int factCount) => factCount < factRows.Count
+                ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                : null;
             return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -686,9 +698,10 @@ public sealed class McpAnalysisTools
                 truncated = factCount < factRows.Count,
                 facts_returned = factCount,
                 facts_total = factRows.Count,
-                size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
-                    : null,
+                size_note = CutNote(factCount),
+                /* #9195: the budget keys every other read carries (#9140), the same sentence as size_note, which stays for readers of the older key. */
+                budget_truncated = factCount < factRows.Count,
+                budget_note = CutNote(factCount),
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;
         }
