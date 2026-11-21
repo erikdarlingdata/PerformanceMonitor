@@ -930,7 +930,8 @@ public static class PgTableTuning
            so a per-chunk build would block it). The hourly pass never builds it: it warns once that the next start does. It shares the
            one-build-per-start budget, last of the budget indexes, because it is the one that sorts every row of the uncompressed chunks
            rather than testing a filter. Compressed chunks get an empty 8 KB index. A build that outruns SetupTimeoutSeconds rolls back
-           whole and the next start retries it, and the reader keeps its one-filter shape until the index is valid. */
+           whole and is recorded (#9289, PgIndexBuildAttempts): the next start skips it for 24 hours unless the table has fewer uncompressed
+           pages than recorded, and a successful build deletes the record. The reader keeps its one-filter shape until the index is valid. */
         "CREATE INDEX IF NOT EXISTS " + QueryStoreServerHashIndexName + " ON collect.query_store_stats (server_id, query_hash, collection_time DESC)",
         /* #9171: the dropped-database read behind the top-queries reads (QueryStoreBackfillState.LastSeenPerDatabaseSql: server_id and
            collection_time to filter, database_name to group) fetched the heap row of every snapshot row in the window, because the only
@@ -971,8 +972,16 @@ public static class PgTableTuning
     /// as applied. Every other statement runs as on the start path: an <c>ALTER TABLE ... SET</c> is issued on either
     /// pass only when <see cref="AlterIsConvergedAsync"/> finds a setting missing or different.
     /// </summary>
-    public static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken = default)
+    public static Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken = default) =>
+        ApplyAsync(connection, logger, hourly, clock: null, SetupTimeoutSeconds, cancellationToken);
+
+    /// <summary>
+    /// The pass with its two test seams (#9289): the clock the build-attempt record is stamped and aged with, and the CommandTimeout
+    /// (seconds) a start-path index build runs under. Production passes <see cref="SetupTimeoutSeconds"/> and the system clock.
+    /// </summary>
+    internal static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, TimeProvider? clock, int buildTimeoutSeconds, CancellationToken cancellationToken = default)
     {
+        clock ??= TimeProvider.System;
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
@@ -986,6 +995,10 @@ public static class PgTableTuning
         {
             var sql = statement;
             var dropIssued = false;
+            var bounded = false;
+            PgIndexBuildAttempts.Attempt? priorAttempt = null;
+            long? buildPages = null;
+            var commandTimeout = SetupTimeoutSeconds;
             try
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
@@ -1062,6 +1075,21 @@ public static class PgTableTuning
                         continue;
                     }
 
+                    if (indexName == QueryStoreServerHashIndexName)
+                    {
+                        /* #9289: this build is bounded. A recorded timeout skips it while it would only time out again, without using the budget. */
+                        var bound = await BuildBoundAsync(connection, logger, indexName, CreatedIndexTable(statement), clock, cancellationToken);
+                        if (bound.Skip)
+                        {
+                            continue;
+                        }
+
+                        bounded = true;
+                        priorAttempt = bound.Prior;
+                        buildPages = bound.Pages;
+                        commandTimeout = buildTimeoutSeconds;
+                    }
+
                     buildIssued |= oneBuildPerStart;
                     buildStartedAt = Stopwatch.GetTimestamp();
                     sql = GuardedCreate(statement);
@@ -1089,9 +1117,13 @@ public static class PgTableTuning
                     sql = GuardedAlter(statement);
                 }
 
-                using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeout };
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 applied++;
+                if (bounded && priorAttempt is not null)
+                {
+                    await ClearBuildAttemptAsync(connection, logger, CreatedIndexName(statement), cancellationToken);
+                }
             }
             catch (PostgresException lockBusy) when (lockBusy.SqlState == PostgresErrorCodes.LockNotAvailable
                 && (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal)
@@ -1123,11 +1155,22 @@ public static class PgTableTuning
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal) && IsBuildTimeout(ex))
                 {
+                    var elapsed = Stopwatch.GetElapsedTime(buildStartedAt);
+                    var recorded = false;
+                    if (bounded && buildPages is { } pages)
+                    {
+                        /* The record is written outside the aborted transaction, so the ROLLBACK comes first. */
+                        await RollbackBestEffortAsync(connection, logger, cancellationToken);
+                        recorded = await RecordBuildAttemptAsync(
+                            connection, logger, CreatedIndexName(statement),
+                            new PgIndexBuildAttempts.Attempt(clock.GetUtcNow().UtcDateTime, pages, (long)elapsed.TotalMilliseconds), cancellationToken);
+                    }
+
                     logger?.LogWarning(
                         "{Message}",
-                        BuildTimeoutMessage(
-                            CreatedIndexName(statement), CreatedIndexTable(statement),
-                            Stopwatch.GetElapsedTime(buildStartedAt).TotalSeconds));
+                        recorded
+                            ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, buildTimeoutSeconds)
+                            : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds));
                 }
                 else
                 {
@@ -1184,6 +1227,76 @@ public static class PgTableTuning
     internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
             $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {SetupTimeoutSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
+
+    /// <summary>The warning for a bounded start-path index build (#9289) that timed out and was recorded.</summary>
+    internal static string BoundedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, long heapPages, int limitSeconds) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {limitSeconds} s) with {heapPages} uncompressed heap pages and was rolled back; the next start does not try it again for {PgIndexBuildAttempts.RetryAfter.TotalHours:F0} hours unless the table has fewer uncompressed pages by then, and the reader keeps its old shape until the index exists");
+
+    /// <summary>What <see cref="BuildBoundAsync"/> decided: skip the build, or build it with the prior record (if any) and the current page count.</summary>
+    private readonly record struct BuildBound(bool Skip, PgIndexBuildAttempts.Attempt? Prior, long? Pages);
+
+    /// <summary>
+    /// #9289: whether the bounded index's build is skipped this start. It is skipped while a recorded timeout is under 24 hours old and the
+    /// table's uncompressed heap pages are at least the recorded count: the build would run out of time again and hold the start for the
+    /// full timeout. A failed read answers "build", the behaviour before the bound, and returns no page count, so a timeout then records nothing.
+    /// </summary>
+    private static async Task<BuildBound> BuildBoundAsync(
+        NpgsqlConnection connection, ILogger? logger, string indexName, string table, TimeProvider clock, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var prior = await PgIndexBuildAttempts.ReadAsync(connection, indexName, EmptinessCheckTimeoutSeconds, cancellationToken);
+            var pages = await PgIndexBuildAttempts.UncompressedHeapPagesAsync(connection, table, EmptinessCheckTimeoutSeconds, cancellationToken);
+            var now = clock.GetUtcNow().UtcDateTime;
+            if (prior is not null && PgIndexBuildAttempts.Bars(prior, pages, now))
+            {
+                logger?.LogWarning(
+                    "Index collect.{Index} on {Table} is not built this start: its last build ran out of time after {ElapsedSeconds} s on {RecordedPages} uncompressed heap pages ({AttemptedAt:yyyy-MM-dd HH:mm:ss} UTC) and the table has {CurrentPages} now; the next try is at {RetryAt:yyyy-MM-dd HH:mm:ss} UTC, or earlier if the table has fewer uncompressed pages than that; the reader keeps its old shape until the index exists",
+                    indexName, table, (prior.ElapsedMs / 1000.0).ToString("F0", CultureInfo.InvariantCulture), prior.HeapPages, prior.AttemptedAtUtc, pages,
+                    prior.AttemptedAtUtc + PgIndexBuildAttempts.RetryAfter);
+                return new BuildBound(true, prior, pages);
+            }
+
+            return new BuildBound(false, prior, pages);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not read the build record or the page count of {Table}, so {Index} is built as it was before the record existed: {Message}",
+                table, indexName, ex.Message);
+            return new BuildBound(false, null, null);
+        }
+    }
+
+    /// <summary>Writes the record of a timed-out build. A failed write warns and the next start tries the build again, as before the record.</summary>
+    private static async Task<bool> RecordBuildAttemptAsync(
+        NpgsqlConnection connection, ILogger? logger, string indexName, PgIndexBuildAttempts.Attempt attempt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await PgIndexBuildAttempts.WriteAsync(connection, indexName, attempt, EmptinessCheckTimeoutSeconds, cancellationToken);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Could not record the timed-out build of {Index}, so the next start tries it again: {Message}", indexName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>Deletes the record once the index is built. A failed delete warns; the index exists, so the stale record bars nothing.</summary>
+    private static async Task ClearBuildAttemptAsync(NpgsqlConnection connection, ILogger? logger, string indexName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await PgIndexBuildAttempts.ClearAsync(connection, indexName, EmptinessCheckTimeoutSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Could not delete the build record of {Index}: {Message}", indexName, ex.Message);
+        }
+    }
 
     /// <summary>Best-effort <c>ROLLBACK</c> that leaves the connection usable after a failed statement.</summary>
     private static async Task RollbackBestEffortAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
