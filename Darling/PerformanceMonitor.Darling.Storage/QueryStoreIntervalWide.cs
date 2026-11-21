@@ -1154,13 +1154,16 @@ FROM (
     /// truncated.</param>
     /// <param name="DecisionFailed">True only when the source decision itself faulted and the plan is the
     /// raw fallback; a legitimate "the gate says raw" leaves it false, so a caller can tell the two apart.</param>
+    /// <param name="Source">#9287: the Viewer's Query Store reads set it to the UTC days they took from the closed-day rollups and the
+    /// days they read from the interval table, with the reason when no rollup day was taken. Null elsewhere.</param>
     public readonly record struct WideReadPlan(
         bool UseTable,
         DateTime ClampedStart,
         DateTime ReadStart,
         DateTime? BelowFloorStart,
         WideStartBound StartBound = WideStartBound.Window,
-        bool DecisionFailed = false)
+        bool DecisionFailed = false,
+        QueryStoreClosedDayRollup.ReadSource? Source = null)
     {
         /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
