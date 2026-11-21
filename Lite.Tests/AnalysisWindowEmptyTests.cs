@@ -354,6 +354,10 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
                 Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
             }
 
+            /* get_analysis_facts answers from its own early return, which says no fact was read; the fall-through arms count facts instead. */
+            using (var factsDoc = JsonDocument.Parse(removedFacts))
+                Assert.Contains("no fact was read for it", factsDoc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
             /* A window that starts before the oldest row and ends a day after it keeps its path: the collector runs. */
             var straddleEnd = Iso(oldestKept.AddHours(28));
             var straddle = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 48, as_of: straddleEnd);
