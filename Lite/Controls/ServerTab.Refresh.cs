@@ -405,6 +405,9 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /// <summary>#9232: one INFO line per tab (per Queries sub-tab) the first time its load completes, so a slow first open can be read from the log.</summary>
+    private TabFirstLoad? _tabFirstLoad;
+
     /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
     private async System.Threading.Tasks.Task<string?> RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
     {
@@ -421,7 +424,17 @@ public partial class ServerTab : UserControl
             if (ct.IsCancellationRequested) return null;
         }
 
+        /* #9232: the tab's reads are timed from here, once per tab (per Queries sub-tab), and logged when the first one completes. */
+        _tabFirstLoad ??= new TabFirstLoad(line => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] {line}"));
+        var tabIndex = MainTabControl.SelectedIndex;
+        var loadKey = tabIndex == QueriesTabIndex ? $"tab {tabIndex}/{QueriesSubTabControl.SelectedIndex}" : $"tab {tabIndex}";
+        var loadLabel = (MainTabControl.SelectedItem as TabItem)?.Header as string ?? loadKey;
+        if (tabIndex == QueriesTabIndex && (QueriesSubTabControl.SelectedItem as TabItem)?.Header is string subTabLabel)
+            loadLabel = $"{loadLabel} > {subTabLabel}";
+
         string? failedReads = null;
+        await _tabFirstLoad.RunAsync(loadKey, loadLabel, async () =>
+        {
         switch (MainTabControl.SelectedIndex)
         {
             case 0: failedReads = await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
@@ -444,6 +457,8 @@ public partial class ServerTab : UserControl
             case 17: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
             case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
+            return 0;
+        }, () => ct.IsCancellationRequested);
 
         /* #8647: a read that ended without being superseded has had its say; whatever still says "Loading..." never got an answer. */
         if (!ct.IsCancellationRequested) ResolveFirstPaintLoading();
@@ -545,11 +560,12 @@ public partial class ServerTab : UserControl
                         var qsdt = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
                         var ect = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
                         var disc = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Discontinuities", () => Task.Run(() => SafeDiscontinuitiesAsync(hoursBack, fromDate, toDate)));
-                        await System.Threading.Tasks.Task.WhenAll(qdt, pdt, qsdt, ect, disc);
-                        UpdateQueryDurationTrendChart(qdt.Result, hoursBack, fromDate, toDate, disc.Result);
-                        UpdateProcDurationTrendChart(pdt.Result, hoursBack, fromDate, toDate, disc.Result);
-                        UpdateQueryStoreDurationTrendChart(qsdt.Result, hoursBack, fromDate, toDate, disc.Result);
-                        UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate, disc.Result);
+                        /* #9232: each chart is drawn when ITS read (and the small discontinuity read) lands, not after the slowest of the five. */
+                        await System.Threading.Tasks.Task.WhenAll(
+                            LandedPanels.DrawAsync(qdt, disc, (trend, markers) => UpdateQueryDurationTrendChart(trend, hoursBack, fromDate, toDate, markers)),
+                            LandedPanels.DrawAsync(pdt, disc, (trend, markers) => UpdateProcDurationTrendChart(trend, hoursBack, fromDate, toDate, markers)),
+                            LandedPanels.DrawAsync(qsdt, disc, (trend, markers) => UpdateQueryStoreDurationTrendChart(trend, hoursBack, fromDate, toDate, markers)),
+                            LandedPanels.DrawAsync(ect, disc, (trend, markers) => UpdateExecutionCountTrendChart(trend, hoursBack, fromDate, toDate, markers)));
                         break;
                     case ActiveQueriesSubTabIndex: // Active Queries
                         var includeMonitor = ActiveQueriesIncludeMonitor;
