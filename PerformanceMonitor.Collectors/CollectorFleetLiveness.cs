@@ -90,8 +90,8 @@ SELECT a.server_id,
        a.last_failure,
        a.runs,
        a.failures,
-       (SELECT x.status FROM w x WHERE x.server_id = a.server_id AND x.collection_time = a.last_failure AND x.status IN ({FailureStatusSqlList}) LIMIT 1) AS failure_status,
-       (SELECT x.error_message FROM w x WHERE x.server_id = a.server_id AND x.collection_time = a.last_failure AND x.status IN ({FailureStatusSqlList}) LIMIT 1) AS failure_message,
+       f.status AS failure_status,
+       f.error_message AS failure_message,
        COALESCE(b.success_runs, a.success_runs) AS success_runs,
        COALESCE(b.error_runs, a.error_runs) AS error_runs,
        COALESCE(b.extension_missing_runs, a.extension_missing_runs) AS extension_missing_runs,
@@ -100,6 +100,15 @@ SELECT a.server_id,
        COALESCE(b.last_productive, a.last_productive) AS last_productive
 FROM agg a
 LEFT JOIN band b ON b.server_id = a.server_id
+LEFT JOIN LATERAL (
+    SELECT x.status, x.error_message
+    FROM {logRelation} x
+    WHERE x.server_id = a.server_id
+    AND   x.collector_name = $1
+    AND   x.collection_time = a.last_failure
+    AND   x.status IN ({FailureStatusSqlList})
+    LIMIT 1
+) f ON true
 ORDER BY a.server_id";
 
     /// <summary>The start of the seven-day health window the one-server read bands over, ending at <paramref name="windowEndUtc"/>: the $4 of <see cref="LivenessSql"/>.</summary>

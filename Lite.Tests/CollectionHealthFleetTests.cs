@@ -73,6 +73,7 @@ public sealed class CollectionHealthFleetTests : IDisposable
 
         /* a: success then a NEWER failure; b: success only (plus a SKIPPED run, which is no failure); c: no run of this collector. */
         await RunAsync(a, "query_store", "SUCCESS", TimeSpan.FromHours(3));
+        await RunAsync(a, "query_store", "PERMISSIONS", TimeSpan.FromHours(2), "older denial");
         await RunAsync(a, "query_store", "ERROR", TimeSpan.FromHours(1), "denied");
         await RunAsync(b, "query_store", "SUCCESS", TimeSpan.FromHours(2));
         await RunAsync(b, "query_store", "SKIPPED", TimeSpan.FromMinutes(5));
@@ -88,6 +89,8 @@ public sealed class CollectionHealthFleetTests : IDisposable
         Assert.NotEqual(JsonValueKind.Null, servers["fl-a"].GetProperty("last_success_at").ValueKind);
         Assert.Equal("succeeding", servers["fl-b"].GetProperty("outcome").GetString());
         Assert.Equal(JsonValueKind.Null, servers["fl-b"].GetProperty("last_failure_at").ValueKind);
+        Assert.Equal(JsonValueKind.Null, servers["fl-b"].GetProperty("last_failure_status").ValueKind);
+        Assert.Equal(JsonValueKind.Null, servers["fl-b"].GetProperty("last_failure_message").ValueKind);
         Assert.Equal("no_run_in_window", servers["fl-c"].GetProperty("outcome").GetString());
         Assert.Equal(2, root.GetProperty("servers_with_a_run").GetInt32());
         Assert.Equal(1, root.GetProperty("servers_with_no_run").GetInt32());
