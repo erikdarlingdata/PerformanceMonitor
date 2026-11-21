@@ -41,11 +41,12 @@ public sealed class PlanRegressionBlockLiveTests
 
     private static long s_interval;
 
-    /// <summary>The starts of the blocks whose four days all lie in the closed days a tick builds (T - 14 through T).</summary>
+    /// <summary>The starts of the blocks whose four days all lie in the days a tick builds whole (T - 14 through T + 1).</summary>
     private static List<DateOnly> WholeBlocks()
     {
         var first = DateOnly.FromDateTime(FirstDay);
-        var last = DateOnly.FromDateTime(Now);
+        /* The store's clock is months past Now, so tomorrow's stamp (T + 1, built with no totals) is a whole valid day here: the last block runs to it. */
+        var last = DateOnly.FromDateTime(Now.AddDays(PlanRegressionDaily.NewestBuiltDayAhead));
         var blocks = new List<DateOnly>();
         for (var start = PlanRegressionBlock.BlockStart(first); start.AddDays(PlanRegressionBlock.BlockDays - 1) <= last; start = start.AddDays(PlanRegressionBlock.BlockDays))
         {
