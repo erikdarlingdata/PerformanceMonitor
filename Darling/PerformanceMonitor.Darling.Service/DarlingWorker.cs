@@ -660,10 +660,10 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<int, bool>? QueryStoreReadableSecondaryOverride { get; set; }
 
     /// <summary>
-    /// Test seam (#9270): when set, stands for the read of the newest <c>database_config</c> capture for a server id (true when it holds
-    /// a database in a transitional state). Null in production, which reads the store.
+    /// Test seam (#9270): when set, stands for <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the stored <c>database_config</c>
+    /// captures of a server id. Null in production, which reads the store.
     /// </summary>
-    internal Func<int, bool>? TransitionalDatabasesOverride { get; set; }
+    internal Func<int, bool>? RecaptureDueOverride { get; set; }
 
     /// <summary>
     /// The fleet sweep gate (#5941), set once the collection loop builds it. A <c>snapshot_now</c> takes a permit from it
@@ -1820,10 +1820,10 @@ LIMIT 1";
         /// <summary>See <see cref="SqlMs"/>.</summary>
         public long? StorageMs { get; set; }
 
-        /// <summary>#9270: for a successful <c>database_config</c> run, whether its capture holds a database in a transitional state
-        /// (<c>ConfigChangeDiff.IsTransitionalDatabaseState</c>). Null for every other run, and for a <c>database_config</c> run whose read of
-        /// the capture failed, which leaves the collector's schedule as it was.</summary>
-        public bool? TransitionalDatabases { get; set; }
+        /// <summary>#9270: for a successful <c>database_config</c> run, whether the stored captures say the collector is due again in minutes
+        /// (<see cref="TransitionalDatabaseRuns.RecaptureIsDue"/>). Null for every other run, and for a <c>database_config</c> run whose read of
+        /// the captures failed, which leaves the collector's schedule as it was.</summary>
+        public bool? RecaptureEarly { get; set; }
     }
 
     /// <summary>The failed-jobs list the body read from msdb at <paramref name="FetchedUtc"/> (#5642).</summary>
@@ -1886,10 +1886,6 @@ LIMIT 1";
            record, a reload's recompute and the pass's seeds never leave the two maps describing different slots.
            Never held across an await (the C# compiler refuses an await inside a lock block). */
         public object ScheduleLock { get; } = new();
-
-        /// <summary>#9270: how many times in a row the <c>database_config</c> capture has been retaken early because it held a database in a
-        /// transitional state, by collector name. Read and written under <see cref="ScheduleLock"/>; a connect starts it over.</summary>
-        public Dictionary<string, int> TransitionalRecaptures { get; } = new(StringComparer.Ordinal);
 
         /* #5479: the held-slot watermarks, one per collector, while the memory launch guard holds collection off. Read and
            written ONLY by the sweep loop's own thread (CountHeldSlots), so a plain map is enough. */

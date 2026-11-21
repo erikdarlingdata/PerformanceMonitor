@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -70,14 +71,14 @@ public sealed class TransitionalRecaptureTests
     {
         var worker = MakeWorker();
         worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(5);
-        worker.TransitionalDatabasesOverride = _ => true;
+        worker.RecaptureDueOverride = _ => true;
         var server = MakeServer();
         server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(Daily);
 
         var outcome = await RunAtConnectAsync(worker, server);
-        worker.ApplyTransitionalRecapture(server, Collector, outcome.TransitionalDatabases);
+        worker.ApplyTransitionalRecapture(server, Collector, outcome.RecaptureEarly);
 
-        Assert.True(outcome.TransitionalDatabases);
+        Assert.True(outcome.RecaptureEarly);
         var due = server.NextDue[Collector];
         Assert.InRange(due, DateTime.UtcNow.AddMinutes(9), DateTime.UtcNow.AddMinutes(11));
     }
@@ -87,15 +88,15 @@ public sealed class TransitionalRecaptureTests
     {
         var worker = MakeWorker();
         worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(5);
-        worker.TransitionalDatabasesOverride = _ => false;
+        worker.RecaptureDueOverride = _ => false;
         var server = MakeServer();
         var normal = DateTime.UtcNow.AddMinutes(Daily);
         server.NextDue[Collector] = normal;
 
         var outcome = await RunAtConnectAsync(worker, server);
-        worker.ApplyTransitionalRecapture(server, Collector, outcome.TransitionalDatabases);
+        worker.ApplyTransitionalRecapture(server, Collector, outcome.RecaptureEarly);
 
-        Assert.False(outcome.TransitionalDatabases);
+        Assert.False(outcome.RecaptureEarly);
         Assert.Equal(normal, server.NextDue[Collector]);
     }
 
@@ -104,54 +105,51 @@ public sealed class TransitionalRecaptureTests
     {
         var worker = MakeWorker();
         worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(-1);
-        worker.TransitionalDatabasesOverride = _ => true;
+        worker.RecaptureDueOverride = _ => true;
         var server = MakeServer();
         var normal = DateTime.UtcNow.AddMinutes(Daily);
         server.NextDue[Collector] = normal;
 
         var outcome = await RunAtConnectAsync(worker, server);
-        worker.ApplyTransitionalRecapture(server, Collector, outcome.TransitionalDatabases);
+        worker.ApplyTransitionalRecapture(server, Collector, outcome.RecaptureEarly);
 
-        Assert.Null(outcome.TransitionalDatabases);
+        Assert.Null(outcome.RecaptureEarly);
         Assert.Equal(normal, server.NextDue[Collector]);
     }
 
+    private static Dictionary<string, DateTime> JustRan() => new(StringComparer.Ordinal) { [Collector] = DateTime.UtcNow };
+
+    /// <summary>
+    /// The at-connect pass of one collector (<see cref="DarlingWorker.SeedCollectorAtConnectAsync"/>): the run, the seed of its daily
+    /// recapture, then the early recapture. The apply has to come after the seed or the next capture is a day out; this fails if the apply
+    /// is moved above the seed or dropped.
+    /// </summary>
     [Fact]
-    public void TheRepeatsAreCapped_ThenTheCollectorKeepsItsNormalInterval()
+    public async Task AtConnect_ATransitionalCapture_LeavesTheCollectorDueInAboutTenMinutes_AfterTheSeed()
     {
         var worker = MakeWorker();
+        worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(5);
+        worker.RecaptureDueOverride = _ => true;
         var server = MakeServer();
-        var normal = DateTime.UtcNow.AddMinutes(Daily);
+        var effective = StoreConfigProvider.ResolveSchedule(Collector, 0, worker.ScheduleOverridesForTest);
 
-        for (var repeat = 1; repeat <= CollectorScheduleDefaults.MaxTransitionalRecaptures; repeat++)
-        {
-            server.NextDue[Collector] = normal;
-            worker.ApplyTransitionalRecapture(server, Collector, true);
-            Assert.InRange(server.NextDue[Collector], DateTime.UtcNow.AddMinutes(9), DateTime.UtcNow.AddMinutes(11));
-        }
-
-        server.NextDue[Collector] = normal;
-        worker.ApplyTransitionalRecapture(server, Collector, true);
-
-        Assert.Equal(normal, server.NextDue[Collector]);
-    }
-
-    [Fact]
-    public void ASettledCaptureEndsTheRunOfRepeats_SoTheNextTransitionalOneGetsTheFullCapAgain()
-    {
-        var worker = MakeWorker();
-        var server = MakeServer();
-        var normal = DateTime.UtcNow.AddMinutes(Daily);
-        for (var repeat = 0; repeat < CollectorScheduleDefaults.MaxTransitionalRecaptures; repeat++)
-        {
-            worker.ApplyTransitionalRecapture(server, Collector, true);
-        }
-
-        worker.ApplyTransitionalRecapture(server, Collector, false);
-        server.NextDue[Collector] = normal;
-        worker.ApplyTransitionalRecapture(server, Collector, true);
+        await worker.SeedCollectorAtConnectAsync(server, null!, Collector, 0, effective, JustRan(), DateTime.UtcNow, TestContext.Current.CancellationToken);
 
         Assert.InRange(server.NextDue[Collector], DateTime.UtcNow.AddMinutes(9), DateTime.UtcNow.AddMinutes(11));
+    }
+
+    [Fact]
+    public async Task AtConnect_ASettledCapture_LeavesTheSeededDailyDueTime()
+    {
+        var worker = MakeWorker();
+        worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(5);
+        worker.RecaptureDueOverride = _ => false;
+        var server = MakeServer();
+        var effective = StoreConfigProvider.ResolveSchedule(Collector, 0, worker.ScheduleOverridesForTest);
+
+        await worker.SeedCollectorAtConnectAsync(server, null!, Collector, 0, effective, JustRan(), DateTime.UtcNow, TestContext.Current.CancellationToken);
+
+        Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(20));
     }
 
     [Fact]
@@ -184,7 +182,7 @@ public sealed class TransitionalRecaptureTests
     {
         var worker = MakeWorker();
         worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(5);
-        worker.TransitionalDatabasesOverride = _ => true;
+        worker.RecaptureDueOverride = _ => true;
         var server = MakeServer();
         server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(-5);
 
@@ -199,7 +197,7 @@ public sealed class TransitionalRecaptureTests
     {
         var worker = MakeWorker();
         worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(5);
-        worker.TransitionalDatabasesOverride = _ => false;
+        worker.RecaptureDueOverride = _ => false;
         var server = MakeServer();
         server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(-5);
 

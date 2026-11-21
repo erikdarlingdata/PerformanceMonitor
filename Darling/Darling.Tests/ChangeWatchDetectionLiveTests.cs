@@ -281,7 +281,7 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
-    private static Task SeedStateAsync(NpgsqlConnection c, DateTime at, string database, string state, string snapshotIsolation, CancellationToken ct) =>
+    internal static Task SeedStateAsync(NpgsqlConnection c, DateTime at, string database, string state, string snapshotIsolation, CancellationToken ct) =>
         SeedAsync(c, "database_config", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["database_name"] = database,
@@ -329,6 +329,38 @@ public sealed class ChangeWatchDetectionLiveTests
 
             Assert.Equal(expected, Keys(await h.NewPass().ReadChangesAsync(ServerId, online.AddMinutes(5), h.Now, ct)));
             Assert.Equal(expected, Keys(await h.NewPass().ReadChangesAsync(ServerId, restoring.AddMinutes(5), h.Now, ct)));
+        });
+    }
+
+    /// <summary>
+    /// #9270: a database that stays in a transitional state for the stuck time still shows. ONLINE, then RECOVERY_PENDING from 90 minutes
+    /// ago, still RECOVERY_PENDING 40 minutes ago (50 minutes into the run): the row opens once, at the capture that made the run stuck,
+    /// for a mark that falls inside the run, and a mark after that capture finds nothing. When a settled capture ends the run, the row from
+    /// RECOVERY_PENDING back to ONLINE opens at that capture.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseConfig_AStuckTransitionalRun_OpensTheStateChangeOnce_AndTheRecoveryWhenItEnds()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var online = h.Now.AddMinutes(-120);
+            var first = h.Now.AddMinutes(-90);
+            var stuck = h.Now.AddMinutes(-40);
+            var back = h.Now.AddMinutes(-10);
+            await SeedStateAsync(h.Connection, online, "Sales", "ONLINE", "ON", ct);
+            await SeedStateAsync(h.Connection, first, "Sales", "RECOVERY_PENDING", "OFF", ct);
+            await SeedStateAsync(h.Connection, stuck, "Sales", "RECOVERY_PENDING", "OFF", ct);
+
+            var opened = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(5), h.Now, ct);
+            Assert.Equal(new[] { "database_config:Sales:state_desc:" + Stamp(stuck) }, Keys(opened));
+            Assert.Empty(await h.NewPass().ReadChangesAsync(ServerId, stuck, h.Now, ct));
+
+            await SeedStateAsync(h.Connection, back, "Sales", "ONLINE", "ON", ct);
+
+            Assert.Equal(new[] { "database_config:Sales:state_desc:" + Stamp(back) }, Keys(await h.NewPass().ReadChangesAsync(ServerId, stuck, h.Now, ct)));
+            Assert.Equal(
+                new[] { "database_config:Sales:state_desc:" + Stamp(back), "database_config:Sales:state_desc:" + Stamp(stuck) }.OrderBy(k => k, StringComparer.Ordinal),
+                Keys(await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(5), h.Now, ct)));
         });
     }
 

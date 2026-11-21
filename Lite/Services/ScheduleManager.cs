@@ -705,23 +705,21 @@ public class ScheduleManager
 
     /// <summary>
     /// #9270: a <c>database_config</c> capture that holds a database in a transitional state (RESTORING, RECOVERING or RECOVERY_PENDING)
-    /// holds that database's engine defaults, and the collector's next capture is a day away. With <paramref name="transitionalDatabases"/>
-    /// true the collector is made due again in <see cref="CollectorScheduleDefaults.TransitionalRecaptureMinutes"/> minutes (its last run is
-    /// recorded as that much of an interval ago), up to <see cref="CollectorScheduleDefaults.MaxTransitionalRecaptures"/> times in a row, then
-    /// it keeps its interval. A settled capture ends the run of them. A collector with a run time keeps its time of day, and one that is
-    /// switched off or not listed is left alone. Returns whether the collector was made due early.
+    /// holds that database's engine defaults, and the collector's next capture is a day away. With <paramref name="recaptureDue"/> true
+    /// (<see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the stored captures, which hold the count of repeats, so nothing is kept here)
+    /// the collector is made due again in <see cref="CollectorScheduleDefaults.TransitionalRecaptureMinutes"/> minutes (its last run is
+    /// recorded as that much of an interval ago). A collector with a run time keeps its time of day, and one that is switched off or not
+    /// listed is left alone. Returns whether the collector was made due early.
     /// </summary>
-    public bool ScheduleTransitionalRecaptureForServer(string serverId, string collectorName, bool transitionalDatabases, DateTime nowUtc)
+    public bool ScheduleTransitionalRecaptureForServer(string serverId, string collectorName, bool recaptureDue, DateTime nowUtc)
     {
+        if (!recaptureDue)
+        {
+            return false;
+        }
+
         lock (_lock)
         {
-            var key = (serverId, collectorName);
-            if (!transitionalDatabases)
-            {
-                _transitionalRecaptures.Remove(key);
-                return false;
-            }
-
             var schedules = _serverOverrides.TryGetValue(serverId, out var over)
                 ? over.Collectors
                 : _defaultSchedule;
@@ -732,15 +730,12 @@ public class ScheduleManager
             }
 
             var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes);
-            _transitionalRecaptures.TryGetValue(key, out var repeats);
-            if (repeats >= CollectorScheduleDefaults.MaxTransitionalRecaptures
-                || intervalMinutes <= CollectorScheduleDefaults.TransitionalRecaptureMinutes
+            if (intervalMinutes <= CollectorScheduleDefaults.TransitionalRecaptureMinutes
                 || ResolveRunAtMinute(serverId, schedule, intervalMinutes) is not null)
             {
                 return false;
             }
 
-            _transitionalRecaptures[key] = repeats + 1;
             if (!_serverRunState.TryGetValue(serverId, out var runState))
             {
                 runState = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
@@ -751,9 +746,6 @@ public class ScheduleManager
             return true;
         }
     }
-
-    /// <summary>#9270: how many times in a row each (server, collector) has been made due early by <see cref="ScheduleTransitionalRecaptureForServer"/>.</summary>
-    private readonly Dictionary<(string ServerId, string CollectorName), int> _transitionalRecaptures = new();
 
     /// <summary>
     /// #4938: records an attempt that did not succeed (an error, a denied permission, a declined sign-in, a lock yield)

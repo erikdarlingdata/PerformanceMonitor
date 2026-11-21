@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -528,15 +529,16 @@ public static class CollectorScheduleDefaults
     /// #9270: a <c>database_config</c> capture that holds a database in a transitional state (RESTORING, RECOVERING or
     /// RECOVERY_PENDING, the minutes after a restart or failover) is taken again after this many minutes, not after
     /// <see cref="OnLoadRecaptureMinutes"/>, so a database that has since come back is captured settled within minutes.
+    /// Defined in <see cref="TransitionalDatabaseRuns"/>, beside <see cref="TransitionalDatabaseRuns.StuckAfter"/> that the change diff uses.
     /// </summary>
-    public const int TransitionalRecaptureMinutes = 10;
+    public const int TransitionalRecaptureMinutes = TransitionalDatabaseRuns.RecaptureMinutes;
 
     /// <summary>
     /// #9270: how many times in a row a transitional <c>database_config</c> capture is retaken after
     /// <see cref="TransitionalRecaptureMinutes"/>. After that the collector keeps its normal interval, so a database that stays
     /// restoring for good (a log-shipping standby) does not hold a recapture every ten minutes.
     /// </summary>
-    public const int MaxTransitionalRecaptures = 6;
+    public const int MaxTransitionalRecaptures = TransitionalDatabaseRuns.MaxRecaptures;
 
     /// <summary>
     /// How far back the newest CPU reading may be and still count as current (#7196, #3267), in minutes. One value for

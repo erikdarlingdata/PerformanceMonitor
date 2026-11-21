@@ -7,7 +7,7 @@
  */
 
 using System;
-using System.Globalization;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -38,15 +38,15 @@ public partial class RemoteCollectorService
         => RunCollectorDefinitionAsync(DatabaseConfigCollector.Instance, server, cancellationToken);
 
     /// <summary>
-    /// #9270: after a <c>database_config</c> run, makes the collector due again in minutes when its newest capture holds a database in a
-    /// transitional state (<see cref="ScheduleManager.ScheduleTransitionalRecaptureForServer"/>). A failed read leaves the schedule as it was.
+    /// #9270: after a <c>database_config</c> run, makes the collector due again in minutes when the stored captures say so
+    /// (<see cref="ScheduleManager.ScheduleTransitionalRecaptureForServer"/>). A failed read leaves the schedule as it was.
     /// </summary>
     internal async Task ScheduleTransitionalRecaptureAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         try
         {
-            var transitional = await ReadTransitionalDatabasesAsync(GetServerId(server), cancellationToken);
-            _scheduleManager.ScheduleTransitionalRecaptureForServer(server.Id, "database_config", transitional, DateTime.UtcNow);
+            var recaptureDue = await ReadRecaptureDueAsync(GetServerId(server), cancellationToken);
+            _scheduleManager.ScheduleTransitionalRecaptureForServer(server.Id, "database_config", recaptureDue, DateTime.UtcNow);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -54,8 +54,11 @@ public partial class RemoteCollectorService
         }
     }
 
-    /// <summary>#9270: whether the newest <c>database_config</c> capture for the storage server id holds a database in a transitional state.</summary>
-    internal async Task<bool> ReadTransitionalDatabasesAsync(int storageServerId, CancellationToken cancellationToken)
+    /// <summary>
+    /// #9270: <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the stored <c>database_config</c> captures of the storage server id's
+    /// databases that are transitional in its newest capture.
+    /// </summary>
+    internal async Task<bool> ReadRecaptureDueAsync(int storageServerId, CancellationToken cancellationToken)
     {
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
@@ -63,11 +66,22 @@ public partial class RemoteCollectorService
         using var command = connection.CreateCommand();
         var states = string.Join(", ", ConfigChangeDiff.TransitionalDatabaseStates.Select(state => "'" + state + "'"));
         command.CommandText =
-            "SELECT count(*) FROM v_database_config WHERE server_id = $1 " +
-            "AND capture_time = (SELECT max(capture_time) FROM v_database_config WHERE server_id = $1) " +
-            "AND upper(state_desc) IN (" + states + ")";
+            "SELECT CAST(d.database_name AS VARCHAR), d.capture_time, CAST(d.state_desc AS VARCHAR) FROM v_database_config AS d WHERE d.server_id = $1 " +
+            "AND d.database_name IN (SELECT n.database_name FROM v_database_config AS n WHERE n.server_id = $1 " +
+            "AND n.capture_time = (SELECT max(m.capture_time) FROM v_database_config AS m WHERE m.server_id = $1) " +
+            "AND upper(n.state_desc) IN (" + states + "))";
         command.Parameters.Add(new DuckDBParameter { Value = storageServerId });
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
+        var captures = new List<TransitionalDatabaseRuns.Capture>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0) && !reader.IsDBNull(1))
+            {
+                captures.Add(new TransitionalDatabaseRuns.Capture(reader.GetDateTime(1), reader.GetString(0), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
+        return TransitionalDatabaseRuns.RecaptureIsDue(captures);
     }
 
     /// <summary>

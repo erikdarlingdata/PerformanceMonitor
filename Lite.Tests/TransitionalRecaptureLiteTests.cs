@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -15,8 +16,8 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #9270: Lite's half of the transitional-database recapture. <see cref="ScheduleManager.ScheduleTransitionalRecaptureForServer"/> makes
-/// <c>database_config</c> due in minutes when its newest capture held a restoring or recovering database, up to a cap, and
-/// <see cref="RemoteCollectorService.ReadTransitionalDatabasesAsync"/> is the read of the stored capture that decides it.
+/// <c>database_config</c> due in minutes when the stored captures say so, and
+/// <see cref="RemoteCollectorService.ReadRecaptureDueAsync"/> is the read of them that decides it (the shared <see cref="TransitionalDatabaseRuns"/> rule).
 /// </summary>
 public sealed class TransitionalRecaptureLiteTests : IDisposable
 {
@@ -54,7 +55,7 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
         var manager = SettledManager();
         Assert.False(IsDue(manager, Now.AddMinutes(60)));
 
-        Assert.True(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, transitionalDatabases: true, Now));
+        Assert.True(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, recaptureDue: true, Now));
 
         Assert.False(IsDue(manager, Now.AddMinutes(9)));
         Assert.True(IsDue(manager, Now.AddMinutes(11)));
@@ -65,45 +66,9 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
     {
         var manager = SettledManager();
 
-        Assert.False(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, transitionalDatabases: false, Now));
+        Assert.False(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, recaptureDue: false, Now));
 
         Assert.False(IsDue(manager, Now.AddMinutes(60)));
-    }
-
-    [Fact]
-    public void ARunOfTransitionalCaptures_StopsAtTheCap_AndTheCollectorKeepsItsInterval()
-    {
-        var manager = SettledManager();
-        var at = Now;
-        for (var i = 0; i < CollectorScheduleDefaults.MaxTransitionalRecaptures; i++)
-        {
-            Assert.True(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, true, at));
-            at = at.AddMinutes(CollectorScheduleDefaults.TransitionalRecaptureMinutes + 1);
-            Assert.True(IsDue(manager, at));
-            manager.MarkCollectorRunForServer(Server, Collector, at);
-        }
-
-        Assert.False(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, true, at));
-        Assert.False(IsDue(manager, at.AddMinutes(11)));
-    }
-
-    [Fact]
-    public void ASettledCapture_ResetsTheCount_SoTheNextRestoreGetsTheFullRunAgain()
-    {
-        var manager = SettledManager();
-        var at = Now;
-        for (var i = 0; i < CollectorScheduleDefaults.MaxTransitionalRecaptures; i++)
-        {
-            Assert.True(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, true, at));
-            at = at.AddMinutes(11);
-            manager.MarkCollectorRunForServer(Server, Collector, at);
-        }
-
-        Assert.False(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, true, at));
-        manager.ScheduleTransitionalRecaptureForServer(Server, Collector, false, at);
-
-        Assert.True(manager.ScheduleTransitionalRecaptureForServer(Server, Collector, true, at));
-        Assert.True(IsDue(manager, at.AddMinutes(11)));
     }
 
     [Fact]
@@ -152,10 +117,11 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
     {
         var (duckDb, service, _, server) = await OpenAsync();
         var id = RemoteCollectorService.GetServerId(server);
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-30), "restoring_db", "ONLINE");
         await CaptureAsync(duckDb, id, Now.AddMinutes(-5), "settled_db", "ONLINE");
         await CaptureAsync(duckDb, id, Now.AddMinutes(-5), "restoring_db", "restoring");
 
-        Assert.True(await service.ReadTransitionalDatabasesAsync(id, CancellationToken.None));
+        Assert.True(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
     }
 
     [Theory]
@@ -165,9 +131,10 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
     {
         var (duckDb, service, _, server) = await OpenAsync();
         var id = RemoteCollectorService.GetServerId(server);
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-30), "db", "ONLINE");
         await CaptureAsync(duckDb, id, Now.AddMinutes(-5), "db", state);
 
-        Assert.True(await service.ReadTransitionalDatabasesAsync(id, CancellationToken.None));
+        Assert.True(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
     }
 
     [Fact]
@@ -178,7 +145,7 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
         await CaptureAsync(duckDb, id, Now.AddMinutes(-30), "db", "RESTORING");
         await CaptureAsync(duckDb, id, Now.AddMinutes(-5), "db", "ONLINE");
 
-        Assert.False(await service.ReadTransitionalDatabasesAsync(id, CancellationToken.None));
+        Assert.False(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
     }
 
     [Fact]
@@ -186,12 +153,12 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
     {
         var (duckDb, service, _, server) = await OpenAsync();
         var id = RemoteCollectorService.GetServerId(server);
-        Assert.False(await service.ReadTransitionalDatabasesAsync(id, CancellationToken.None));
+        Assert.False(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
 
         await CaptureAsync(duckDb, id + 1, Now.AddMinutes(-5), "db", "RESTORING");
         await CaptureAsync(duckDb, id, Now.AddMinutes(-5), "db", null);
 
-        Assert.False(await service.ReadTransitionalDatabasesAsync(id, CancellationToken.None));
+        Assert.False(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
     }
 
     [Fact]
@@ -200,6 +167,7 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
         var (duckDb, service, manager, server) = await OpenAsync();
         var id = RemoteCollectorService.GetServerId(server);
         manager.MarkCollectorRunForServer(server.Id, Collector, DateTime.UtcNow);
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-20), "db", "ONLINE");
         await CaptureAsync(duckDb, id, Now.AddMinutes(-1), "db", "RESTORING");
 
         await service.ScheduleTransitionalRecaptureAsync(server, CancellationToken.None);
@@ -211,5 +179,65 @@ public sealed class TransitionalRecaptureLiteTests : IDisposable
         await service.ScheduleTransitionalRecaptureAsync(server, CancellationToken.None);
 
         Assert.DoesNotContain(Collector, manager.GetDueCollectorsForServer(server.Id, DateTime.UtcNow.AddMinutes(60)).Select(s => s.Name));
+    }
+
+    [Fact]
+    public async Task TheSeventhCaptureOfARun_KeepsTheNormalInterval_AndTheSixthDoesNot()
+    {
+        var (duckDb, service, _, server) = await OpenAsync();
+        var id = RemoteCollectorService.GetServerId(server);
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-100), "db", "ONLINE");
+        for (var i = 1; i <= TransitionalDatabaseRuns.MaxRecaptures; i++)
+        {
+            await CaptureAsync(duckDb, id, Now.AddMinutes(-100 + (i * 10)), "db", "RESTORING");
+            Assert.True(await service.ReadRecaptureDueAsync(id, CancellationToken.None), "capture " + i + " of the run");
+        }
+
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-100 + ((TransitionalDatabaseRuns.MaxRecaptures + 1) * 10)), "db", "RESTORING");
+
+        Assert.False(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ADatabaseTransitionalSinceFirstSeen_KeepsTheNormalInterval()
+    {
+        var (duckDb, service, _, server) = await OpenAsync();
+        var id = RemoteCollectorService.GetServerId(server);
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-30), "standby", "RESTORING");
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-1), "standby", "RESTORING");
+
+        Assert.False(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ARestartWithAStuckDatabasePresent_IsDueInTenMinutes_ForAnotherDatabaseNewlyRecovering()
+    {
+        var (duckDb, service, _, server) = await OpenAsync();
+        var id = RemoteCollectorService.GetServerId(server);
+        await CaptureAsync(duckDb, id, Now.AddDays(-3), "stuck", "ONLINE");
+        await CaptureAsync(duckDb, id, Now.AddDays(-3), "other", "ONLINE");
+        for (var i = 0; i < TransitionalDatabaseRuns.MaxRecaptures + 2; i++)
+        {
+            await CaptureAsync(duckDb, id, Now.AddDays(-2).AddMinutes(i * 10), "stuck", "RECOVERY_PENDING");
+        }
+
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-1), "stuck", "RECOVERY_PENDING");
+        await CaptureAsync(duckDb, id, Now.AddMinutes(-1), "other", "RECOVERING");
+
+        Assert.True(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AStuckDatabaseAlone_KeepsTheNormalInterval()
+    {
+        var (duckDb, service, _, server) = await OpenAsync();
+        var id = RemoteCollectorService.GetServerId(server);
+        await CaptureAsync(duckDb, id, Now.AddDays(-3), "stuck", "ONLINE");
+        for (var i = 0; i < TransitionalDatabaseRuns.MaxRecaptures + 2; i++)
+        {
+            await CaptureAsync(duckDb, id, Now.AddDays(-2).AddMinutes(i * 10), "stuck", "RECOVERY_PENDING");
+        }
+
+        Assert.False(await service.ReadRecaptureDueAsync(id, CancellationToken.None));
     }
 }
