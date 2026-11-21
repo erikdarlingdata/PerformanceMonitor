@@ -37,7 +37,13 @@ public partial class LocalDataService
                 ToInt64(reader.GetValue(3)),
                 ToInt64(reader.GetValue(4)),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                ToInt64(reader.GetValue(7)),
+                ToInt64(reader.GetValue(8)),
+                ToInt64(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                reader.IsDBNull(12) ? null : reader.GetDateTime(12)));
         }
 
         return rows;
