@@ -327,32 +327,16 @@ public partial class AddServerDialog : Window
         };
     }
 
-    /// <summary>
-    /// The Test Connection builder before authentication is applied. The Data Source goes through
-    /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
-    /// to a named pipe over SMB with this process's Windows credentials (#6352).
-    /// </summary>
+    /// <summary>The Test Connection builder before authentication is applied. The rule lives in <see cref="ServerEntryRules"/> (#9237) so
+    /// <c>--add-server</c> builds the same one.</summary>
     internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
         string serverName,
         string databaseName,
         bool trustServerCertificate,
         SqlConnectionEncryptOption encrypt,
         bool readOnlyIntent,
-        bool multiSubnetFailover)
-    {
-        var dbName = databaseName.Trim();
-        return new SqlConnectionStringBuilder
-        {
-            DataSource = ServerHostSetting.TcpDataSource(serverName.Trim()),
-            InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
-            ApplicationName = "PerformanceMonitorLite",
-            ConnectTimeout = 10,
-            TrustServerCertificate = trustServerCertificate,
-            Encrypt = encrypt,
-            ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = multiSubnetFailover
-        };
-    }
+        bool multiSubnetFailover) =>
+        ServerEntryRules.BuildBaseConnectionBuilder(serverName, databaseName, trustServerCertificate, encrypt, readOnlyIntent, multiSubnetFailover);
 
     private SqlConnectionStringBuilder BuildConnectionBuilder()
     {
@@ -941,14 +925,9 @@ public partial class AddServerDialog : Window
             username = AzureClientIdBox.Text.Trim();
             password = AzureClientSecretBox.Password;
 
-            if (string.IsNullOrEmpty(username))
+            if (ServerEntryRules.CredentialRefusal(authenticationType, username, password) is { } credentialRefusal)
             {
-                StatusText.Text = "Client (Application) ID is required for service principal authentication.";
-                return;
-            }
-            if (string.IsNullOrEmpty(password))
-            {
-                StatusText.Text = "Client secret is required for service principal authentication.";
+                StatusText.Text = credentialRefusal;
                 return;
             }
         }
@@ -963,9 +942,9 @@ public partial class AddServerDialog : Window
             username = UsernameBox.Text.Trim();
             password = PasswordBox.Password;
 
-            if (string.IsNullOrEmpty(username))
+            if (ServerEntryRules.CredentialRefusal(authenticationType, username, password) is { } credentialRefusal)
             {
-                StatusText.Text = "Username is required for SQL Server authentication.";
+                StatusText.Text = credentialRefusal;
                 return;
             }
 

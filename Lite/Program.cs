@@ -28,6 +28,13 @@ namespace PerformanceMonitorLite
                 return PrintMcpTokenCommand.RunProcess();
             }
 
+            /* #9237: --add-server writes servers.json, this user's credential and host confirmation, and exits. Same early exit as the
+               token print: no Velopack hook, no WPF application, no log file, no single-instance lock. */
+            if (LiteStartupPlan.FromArgs(args).AddServer)
+            {
+                return AddServerCommand.RunProcess(args);
+            }
+
             VelopackApp.Build().Run();
 
             // #8430: Settings > Apps shows this install's full version, a nightly's tag included. The Setup.exe
