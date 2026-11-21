@@ -869,7 +869,7 @@ ORDER BY d.host, d.database";
         }
         catch (JsonException ex)
         {
-            return (entries, invalid, DarlingJsonParseError.Describe("servers_json", ex));
+            return (entries, invalid, JsonParseError.Describe("servers_json", ex));
         }
 
         if (root is not JsonArray array)

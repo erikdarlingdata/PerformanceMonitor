@@ -1524,7 +1524,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", DarlingJsonParseError.Describe("settings_json", ex));
+                return Outcome("invalid", JsonParseError.Describe("settings_json", ex));
             }
 
             if (root is not JsonObject body)
@@ -2059,7 +2059,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", DarlingJsonParseError.Describe("the request body", ex));
+                return Outcome("invalid", JsonParseError.Describe("the request body", ex));
             }
 
             if (root is not JsonObject body)
@@ -2472,7 +2472,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", DarlingJsonParseError.Describe("changes_json", ex));
+                return Outcome("invalid", JsonParseError.Describe("changes_json", ex));
             }
 
             if (root is not JsonObject body)

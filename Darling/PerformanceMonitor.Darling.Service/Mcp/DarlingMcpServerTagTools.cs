@@ -692,7 +692,7 @@ public sealed class DarlingMcpServerTagTools
         }
         catch (JsonException ex)
         {
-            return (null, DarlingJsonParseError.Describe("changes_json", ex), null);
+            return (null, JsonParseError.Describe("changes_json", ex), null);
         }
         catch (ArgumentException)
         {

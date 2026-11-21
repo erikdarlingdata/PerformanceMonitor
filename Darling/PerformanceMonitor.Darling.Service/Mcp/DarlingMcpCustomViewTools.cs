@@ -379,7 +379,7 @@ public sealed class DarlingMcpCustomViewTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", DarlingJsonParseError.Describe("spec", ex));
+                return Outcome("invalid", JsonParseError.Describe("spec", ex));
             }
 
             if (root is not JsonObject body)
