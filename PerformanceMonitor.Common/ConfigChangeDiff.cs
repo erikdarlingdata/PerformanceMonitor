@@ -149,6 +149,32 @@ public static class ConfigChangeDiff
         "is_accelerated_database_recovery_on", "is_memory_optimized_enabled", "is_optimized_locking_on",
     };
 
+    /// <summary>
+    /// #9270: the <c>state_desc</c> values of a database that is not settled. A capture taken while a database is in one of these
+    /// holds engine defaults for most of its settings (a restoring database reads snapshot isolation OFF, for one), so the capture is
+    /// never a side of a settings comparison.
+    /// </summary>
+    public static readonly IReadOnlyList<string> TransitionalDatabaseStates = new[] { "RESTORING", "RECOVERING", "RECOVERY_PENDING" };
+
+    /// <summary>#9270: whether <paramref name="stateDesc"/> is one of <see cref="TransitionalDatabaseStates"/> (any letter case; null is settled).</summary>
+    public static bool IsTransitionalDatabaseState(string? stateDesc)
+    {
+        if (stateDesc is null)
+        {
+            return false;
+        }
+
+        foreach (var transitional in TransitionalDatabaseStates)
+        {
+            if (string.Equals(stateDesc, transitional, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /* ─────────────────────────── C# snapshot diffs (pure, unit-testable, no live store) ─────────────────────────── */
 
     /// <summary>
@@ -187,6 +213,9 @@ public static class ConfigChangeDiff
     /// consecutive captures — the WIDE row is UNPIVOTed against <see cref="DatabaseConfigChangeSettingNames"/> so
     /// the setting_name is the literal column name. Emits changes in (<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], newest first.
+    /// <para>#9270: a capture of a database in a transitional state (<see cref="IsTransitionalDatabaseState"/>) is neither side of a
+    /// comparison. The next settled capture is compared with the newest settled one before it, so a setting changed between the two still
+    /// shows, and a database's recovery after a restart or failover is not read as a run of setting changes.</para>
     /// </summary>
     public static List<DatabaseConfigChange> DiffDatabaseConfigChanges(
         IReadOnlyList<DatabaseConfigSnapshot> snapshots, DateTime startUtc, DateTime endUtc)
@@ -197,6 +226,11 @@ public static class ConfigChangeDiff
             DatabaseConfigSnapshot? prev = null;
             foreach (var cur in dbGroup.OrderBy(s => s.CaptureTime))
             {
+                if (cur.Values.Count > 0 && IsTransitionalDatabaseState(cur.Values[0]))
+                {
+                    continue;
+                }
+
                 if (prev is not null && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
                 {
                     for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)

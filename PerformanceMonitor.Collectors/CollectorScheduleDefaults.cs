@@ -525,6 +525,20 @@ public static class CollectorScheduleDefaults
     public const int OnLoadRecaptureMinutes = 1440;
 
     /// <summary>
+    /// #9270: a <c>database_config</c> capture that holds a database in a transitional state (RESTORING, RECOVERING or
+    /// RECOVERY_PENDING, the minutes after a restart or failover) is taken again after this many minutes, not after
+    /// <see cref="OnLoadRecaptureMinutes"/>, so a database that has since come back is captured settled within minutes.
+    /// </summary>
+    public const int TransitionalRecaptureMinutes = 10;
+
+    /// <summary>
+    /// #9270: how many times in a row a transitional <c>database_config</c> capture is retaken after
+    /// <see cref="TransitionalRecaptureMinutes"/>. After that the collector keeps its normal interval, so a database that stays
+    /// restoring for good (a log-shipping standby) does not hold a recapture every ten minutes.
+    /// </summary>
+    public const int MaxTransitionalRecaptures = 6;
+
+    /// <summary>
     /// How far back the newest CPU reading may be and still count as current (#7196, #3267), in minutes. One value for
     /// both SKUs: Darling's fleet card, Overview card, <c>get_server_summary</c> and PostgreSQL CPU alert read, and
     /// Lite's Overview card and <c>get_server_summary</c>. A SQL Server reading is current when newer than the larger of

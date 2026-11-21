@@ -281,6 +281,57 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
+    private static Task SeedStateAsync(NpgsqlConnection c, DateTime at, string database, string state, string snapshotIsolation, CancellationToken ct) =>
+        SeedAsync(c, "database_config", new Dictionary<string, object>
+        {
+            ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["database_name"] = database,
+            ["state_desc"] = state, ["compatibility_level"] = 150, ["recovery_model"] = "FULL", ["snapshot_isolation_state"] = snapshotIsolation,
+        }, ct);
+
+    /// <summary>
+    /// #9270: a capture taken while a database restores shows engine defaults (snapshot isolation OFF). It is never a side of a comparison, so
+    /// ONLINE (ON), RESTORING (OFF), ONLINE (ON) opens nothing: whether the mark falls before the restoring capture or after it.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseConfig_ARestoringCaptureBetweenTwoSettledOnes_OpensNoChange()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var online = h.Now.AddMinutes(-60);
+            var restoring = h.Now.AddMinutes(-40);
+            var settled = h.Now.AddMinutes(-20);
+            await SeedStateAsync(h.Connection, online, "Sales", "ONLINE", "ON", ct);
+            await SeedStateAsync(h.Connection, restoring, "Sales", "RESTORING", "OFF", ct);
+            await SeedStateAsync(h.Connection, settled, "Sales", "ONLINE", "ON", ct);
+
+            Assert.Empty(await h.NewPass().ReadChangesAsync(ServerId, online.AddMinutes(5), h.Now, ct));
+            Assert.Empty(await h.NewPass().ReadChangesAsync(ServerId, restoring.AddMinutes(5), h.Now, ct));
+        });
+    }
+
+    /// <summary>
+    /// #9270: the settled capture after a restoring one is compared with the newest settled capture before it, so a setting changed between
+    /// the two still shows: ONLINE (OFF), RESTORING, ONLINE (ON) opens the snapshot isolation change and nothing for the state, whether the
+    /// mark falls before the restoring capture or after it.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseConfig_ARealChangeAcrossARestoringCapture_IsStillReported_AgainstTheLastSettledCapture()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var online = h.Now.AddMinutes(-60);
+            var restoring = h.Now.AddMinutes(-40);
+            var settled = h.Now.AddMinutes(-20);
+            await SeedStateAsync(h.Connection, online, "Sales", "ONLINE", "OFF", ct);
+            await SeedStateAsync(h.Connection, restoring, "Sales", "RESTORING", "OFF", ct);
+            await SeedStateAsync(h.Connection, settled, "Sales", "ONLINE", "ON", ct);
+            var expected = new[] { "database_config:Sales:snapshot_isolation_state:" + Stamp(settled) };
+
+            Assert.Equal(expected, Keys(await h.NewPass().ReadChangesAsync(ServerId, online.AddMinutes(5), h.Now, ct)));
+            Assert.Equal(expected, Keys(await h.NewPass().ReadChangesAsync(ServerId, restoring.AddMinutes(5), h.Now, ct)));
+        });
+    }
+
     internal static string Stamp(DateTime time) => time.ToString("yyyyMMddTHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]

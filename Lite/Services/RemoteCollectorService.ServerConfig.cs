@@ -6,11 +6,16 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -31,6 +36,39 @@ public partial class RemoteCollectorService
     /// </summary>
     private Task<int> CollectDatabaseConfigAsync(ServerConnection server, CancellationToken cancellationToken)
         => RunCollectorDefinitionAsync(DatabaseConfigCollector.Instance, server, cancellationToken);
+
+    /// <summary>
+    /// #9270: after a <c>database_config</c> run, makes the collector due again in minutes when its newest capture holds a database in a
+    /// transitional state (<see cref="ScheduleManager.ScheduleTransitionalRecaptureForServer"/>). A failed read leaves the schedule as it was.
+    /// </summary>
+    internal async Task ScheduleTransitionalRecaptureAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var transitional = await ReadTransitionalDatabasesAsync(GetServerId(server), cancellationToken);
+            _scheduleManager.ScheduleTransitionalRecaptureForServer(server.Id, "database_config", transitional, DateTime.UtcNow);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug("Reading the transitional databases of server '{Server}' failed: {Message}", server.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>#9270: whether the newest <c>database_config</c> capture for the storage server id holds a database in a transitional state.</summary>
+    internal async Task<bool> ReadTransitionalDatabasesAsync(int storageServerId, CancellationToken cancellationToken)
+    {
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        var states = string.Join(", ", ConfigChangeDiff.TransitionalDatabaseStates.Select(state => "'" + state + "'"));
+        command.CommandText =
+            "SELECT count(*) FROM v_database_config WHERE server_id = $1 " +
+            "AND capture_time = (SELECT max(capture_time) FROM v_database_config WHERE server_id = $1) " +
+            "AND upper(state_desc) IN (" + states + ")";
+        command.Parameters.Add(new DuckDBParameter { Value = storageServerId });
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
+    }
 
     /// <summary>
     /// Collects database-scoped configurations via the shared

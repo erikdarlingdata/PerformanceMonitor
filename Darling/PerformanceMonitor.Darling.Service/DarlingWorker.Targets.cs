@@ -562,7 +562,14 @@ public sealed partial class DarlingWorker
 
                 if (effective.FrequencyMinutes == 0)
                 {
-                    var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
+                    /* #9270: a connect starts the early-recapture count over: this capture is the first of a new run of them. */
+                    lock (server.ScheduleLock)
+                    {
+                        server.TransitionalRecaptures.Remove(name);
+                    }
+
+                    var onLoadOutcome = new RunOutcome();
+                    var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken, onLoadOutcome);
 
                     /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
                        seeded from the SAME pre-dispatch watermark used below - the run just above updates it
@@ -586,6 +593,9 @@ public sealed partial class DarlingWorker
                             server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
                         }
                     }
+
+                    /* #9270: after the seed above, which would otherwise put the next capture a day out. */
+                    ApplyTransitionalRecapture(server, name, onLoadOutcome.TransitionalDatabases);
                 }
                 else
                 {
@@ -791,7 +801,7 @@ public sealed partial class DarlingWorker
     /// <returns>True when the collector ran and succeeded; false when its slot was held or the run failed.</returns>
     internal async Task<bool> RunOnLoadAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int serverId, EffectiveSchedule effective,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, RunOutcome? outcome = null)
     {
         using var slot = TryTakeInlineDailySlot(serverId, collectorName, effective);
         if (slot is null)
@@ -805,9 +815,104 @@ public sealed partial class DarlingWorker
         /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
            never resets it, so folding it in would mix a previous body's bookkeeping
            into these rows - the cross-body contamination the reset exists to prevent. */
-        var runOutcome = new RunOutcome();
+        var runOutcome = outcome ?? new RunOutcome();
         await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken, runOutcome: runOutcome);
         return runOutcome.Succeeded;
+    }
+
+    /// <summary>
+    /// #9270: a <c>database_config</c> capture taken while a database is still restoring or recovering (a connect right after a
+    /// restart or failover) holds that database's engine defaults, and the collector's next capture is a day away. When the capture holds
+    /// a database in a transitional state (<paramref name="transitionalDatabases"/> true) the collector becomes due again in
+    /// <see cref="CollectorScheduleDefaults.TransitionalRecaptureMinutes"/> minutes, up to
+    /// <see cref="CollectorScheduleDefaults.MaxTransitionalRecaptures"/> times in a row, then it keeps its normal due time. A settled capture
+    /// ends the run of them. Null (not a <c>database_config</c> run, or the read of the capture failed) changes nothing. A collector with a
+    /// run time keeps its time of day, and one no longer scheduled stays unscheduled.
+    /// </summary>
+    internal void ApplyTransitionalRecapture(ServerLoopState server, string collectorName, bool? transitionalDatabases)
+    {
+        if (transitionalDatabases is not { } transitional)
+        {
+            return;
+        }
+
+        lock (server.ScheduleLock)
+        {
+            if (!transitional)
+            {
+                server.TransitionalRecaptures.Remove(collectorName);
+                return;
+            }
+
+            server.TransitionalRecaptures.TryGetValue(collectorName, out var repeats);
+            if (repeats >= CollectorScheduleDefaults.MaxTransitionalRecaptures
+                || server.RunTimeSlots.ContainsKey(collectorName)
+                || !server.NextDue.ContainsKey(collectorName))
+            {
+                return;
+            }
+
+            server.TransitionalRecaptures[collectorName] = repeats + 1;
+            server.NextDue[collectorName] = DateTime.UtcNow.AddMinutes(CollectorScheduleDefaults.TransitionalRecaptureMinutes);
+        }
+    }
+
+    private static bool IsTransitionalCaptureCollector(string collectorName) =>
+        string.Equals(collectorName, DatabaseConfigCollector.Instance.Name, StringComparison.Ordinal);
+
+    /// <summary>
+    /// #9270: reads the capture a successful <c>database_config</c> run just wrote. A caller that passed a <paramref name="runOutcome"/>
+    /// (the at-connect run, which seeds the collector's due time after the run, and the in-sweep run) gets the answer there and applies
+    /// it itself; a run with no outcome (the detached daily run) applies it here, to the due time it was dispatched with.
+    /// </summary>
+    private async Task SettleTransitionalRecaptureAsync(
+        ServerLoopState server, ServerRuntime runtime, string collectorName, DateTime runStartedUtc, RunOutcome? runOutcome, CancellationToken cancellationToken)
+    {
+        var transitional = await ReadTransitionalDatabasesAsync(runtime, runStartedUtc, cancellationToken);
+        if (runOutcome is not null)
+        {
+            runOutcome.TransitionalDatabases = transitional;
+        }
+        else
+        {
+            ApplyTransitionalRecapture(server, collectorName, transitional);
+        }
+    }
+
+    /// <summary>
+    /// #9270: whether the newest <c>database_config</c> capture for the server, read from the hour before the run that just wrote it, holds a
+    /// database in a transitional state. Null when the read failed: a store hiccup leaves the collector's schedule as it was, and never
+    /// fails the run that asked.
+    /// </summary>
+    private async Task<bool?> ReadTransitionalDatabasesAsync(ServerRuntime runtime, DateTime runStartedUtc, CancellationToken cancellationToken)
+    {
+        if (TransitionalDatabasesOverride is { } answer)
+        {
+            return answer(runtime.ServerId);
+        }
+
+        if (_postgres is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var states = string.Join(", ", ConfigChangeDiff.TransitionalDatabaseStates.Select(state => "'" + state + "'"));
+            await using var command = _postgres.CreateCommand(
+                "SELECT EXISTS (SELECT 1 FROM v_database_config AS d WHERE d.server_id = $1 AND d.capture_time >= $2 " +
+                "AND d.capture_time = (SELECT max(n.capture_time) FROM v_database_config AS n WHERE n.server_id = $1 AND n.capture_time >= $2) " +
+                "AND upper(d.state_desc) IN (" + states + "))");
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(runtime.ServerId);
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(runStartedUtc.AddHours(-1), DateTimeKind.Unspecified) });
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug("Observability: transitional database read for server_id {ServerId} failed: {Message}", runtime.ServerId, ex.Message);
+            return null;
+        }
     }
 
     /// <summary>
@@ -1173,6 +1278,7 @@ public sealed partial class DarlingWorker
                     var collectorStarted = Stopwatch.GetTimestamp();
                     var collectorOutcome = new RunOutcome();
                     await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff, runOutcome: collectorOutcome);
+                    ApplyTransitionalRecapture(server, name, collectorOutcome.TransitionalDatabases);
                     var collectorMs = (long)Stopwatch.GetElapsedTime(collectorStarted).TotalMilliseconds;
                     var measuredMs = collectorOutcome.SqlMs is { } readMs && collectorOutcome.StorageMs is { } writeMs ? readMs + writeMs : collectorMs;
                     if (heldLongest is null || measuredMs > heldLongest.Value.TotalMs)
@@ -3041,6 +3147,7 @@ LIMIT 1";
             ? BeginDailyRunWatch(server.Config.DisplayName, runtime.ServerId, collectorName, holdsPermit: detachedDaily)
             : null;
 
+        var runStartedUtc = DateTime.UtcNow;
         if (RunOneBodyOverride is { } bodyOverride)
         {
             var overrideRows = await bodyOverride(server, runtime, collectorName, cancellationToken);
@@ -3062,6 +3169,11 @@ LIMIT 1";
             if (runOutcome is not null)
             {
                 runOutcome.Succeeded = overrideRows >= 0;
+            }
+
+            if (overrideRows >= 0 && IsTransitionalCaptureCollector(collectorName))
+            {
+                await SettleTransitionalRecaptureAsync(server, runtime, collectorName, runStartedUtc, runOutcome, cancellationToken);
             }
 
             return Math.Max(overrideRows, 0);
@@ -3355,6 +3467,12 @@ LIMIT 1";
                 runOutcome.Succeeded = true;
                 runOutcome.SqlMs = result.SqlMs;
                 runOutcome.StorageMs = result.StorageMs;
+            }
+
+            /* #9270: a database_config capture that holds a database still restoring or recovering is retaken in minutes. */
+            if (!result.Abandoned && IsTransitionalCaptureCollector(collectorName))
+            {
+                await SettleTransitionalRecaptureAsync(server, runtime, collectorName, runStartedUtc, runOutcome, cancellationToken);
             }
 
             /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once.
