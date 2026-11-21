@@ -147,7 +147,7 @@ public sealed class QueryStatsFloorMoveLiveTests
         try
         {
             await using var connection = await OpenAsync(scratch, ct);
-            var last = DateTime.UtcNow.AddMinutes(-30);
+            var last = LiveClock.AnchoredEnd().AddMinutes(-30);
             await SeedAsync(connection, last, ct);
             var batch = last.AddMinutes(30);
 
@@ -182,7 +182,7 @@ public sealed class QueryStatsFloorMoveLiveTests
         try
         {
             await using var connection = await OpenAsync(scratch, ct);
-            var last = DateTime.UtcNow.AddMinutes(-30);
+            var last = LiveClock.AnchoredEnd().AddMinutes(-30);
             await SeedAsync(connection, last, ct);
             var summaryRows = await CountSummaryAsync(connection, ct);
             Assert.True(summaryRows > 0);
@@ -219,7 +219,7 @@ public sealed class QueryStatsFloorMoveLiveTests
         try
         {
             await using var connection = await OpenAsync(scratch, ct);
-            var at = DateTime.UtcNow.AddHours(-1);
+            var at = LiveClock.AnchoredEnd().AddHours(-1);
 
             /* No summary row and no raw row: a NULL anchor and an empty prior. */
             Assert.Equal(0, await RunFloorMoveAsync(connection, at, ct));
