@@ -556,16 +556,14 @@ chunk_rels AS (
     SELECT t.obj_schema, t.obj_name, t.kind, pc.oid AS rel_oid,
            EXISTS (SELECT 1 FROM _timescaledb_catalog.compression_settings AS cs
                    WHERE cs.relid::oid = pc.oid AND cs.compress_relid IS NOT NULL) AS is_compressed
-    /* The chunk catalog, not timescaledb_information.chunks: that view joins every chunk to its dimension slices and to all of
-       pg_class, and its row count is estimated far too low, which let the planner pick the wrong join order (#9224). */
-    FROM targets AS t
-    JOIN _timescaledb_catalog.hypertable AS ht
-        ON  ht.schema_name = t.root_schema
-        AND ht.table_name = t.root_name
-    JOIN _timescaledb_catalog.chunk AS ch
-        ON  ch.hypertable_id = ht.id
-        AND NOT ch.osm_chunk
-    JOIN pg_catalog.pg_class AS pc ON pc.oid = ch.relid::oid
+    /* Chunk membership from core inheritance, not timescaledb_information.chunks: that view joins every chunk to its dimension
+       slices and to all of pg_class, and its row count is estimated far too low, which let the planner pick the wrong join order
+       (#9224). No _timescaledb_catalog column is named: TimescaleDB 2.29 rebuilt the chunk catalog, so a column of it exists on
+       one side of that version only. A chunk dropped by retention has no relation and no pg_inherits row, as in the view. The
+       tiered-storage (OSM) chunk is a foreign table, which the view skipped.*/
+    FROM root_rels AS t
+    JOIN pg_catalog.pg_inherits AS inh ON inh.inhparent = t.rel_oid
+    JOIN pg_catalog.pg_class AS pc ON pc.oid = inh.inhrelid AND pc.relkind <> 'f'
 ),
 ";
 
