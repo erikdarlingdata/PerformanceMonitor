@@ -150,6 +150,20 @@ public static class ParquetCompaction
 
     public static long RowGroupBytesFor(string table) => IsDailyTable(table) ? DailyRowGroupBytes : 0;
 
+    /* On-disk parquet bytes per merge batch for a monthly table whose merge sorts by server (#9258). Measured with
+       tools/CompactionRepro on seeded monthly batches (SEE_MEASUREMENT). A batch's sort holds more of it than the
+       streaming copy, so the sorted monthly merge gets its own smaller budget instead of DefaultBatchInputBytes:
+       more _ptNNN parts, each sorted on its own and each holding one server per row group. */
+    public const long SortedBatchInputBytes = 64L * 1024 * 1024; /* 64 MiB */
+
+    /* The per-batch input budget of a table's compaction merge when the caller has no override: the daily budget for
+       a table merged per day (query_store_stats is both daily and sorted, and its day budget stays as measured in
+       #9255), the sorted monthly budget for another server-ordered table, else the default. */
+    public static long BatchInputBytesFor(string table) =>
+        IsDailyTable(table) ? DailyBatchInputBytes
+        : ServerOrderByFor(table) is null ? DefaultBatchInputBytes
+        : SortedBatchInputBytes;
+
     /* Tables whose compaction merge sorts by server, then by the table's time column (#9255): table -> time column.
 
        Every archive file mixed every server's rows in each row group (the archiver's COPY and a merge without a sort
@@ -186,10 +200,46 @@ public static class ParquetCompaction
        200 MB batch would reach about 2.4 GB and would need its own budget first. The archiver's hourly COPY is not
        sorted: at the field's cadence an hourly file is one row group, so the sort clusters nothing, and compaction
        rewrites the day's files in the same pass. */
-    private static readonly Dictionary<string, string> ServerOrderedTables = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly Dictionary<string, string> ServerOrderedTables = BuildServerOrderedTables();
+
+    private static Dictionary<string, string> BuildServerOrderedTables()
     {
-        ["query_store_stats"] = "collection_time"
-    };
+        var tables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["query_store_stats"] = "collection_time"
+        };
+
+        /* The monthly-merged tables (#9258): every table Lite stores and archives except the three merged per day
+           above (query_snapshots and query_stats stay unsorted, see below). Each carries server_id and its own
+           time column: capture_time for the config snapshots, alert_time for the alert log, collection_time for
+           the rest. A table that is not named here keeps its merge unsorted, whatever it is called (the
+           ArchiveService tests merge tables of other names with files that have no server_id). */
+        foreach (var table in new[]
+        {
+            "ag_database_replica_states", "ag_replica_states", "agent_status", "attention_events",
+            "blocked_process_reports", "collection_log", "cpu_scheduler_stats", "cpu_utilization_stats",
+            "database_size_stats", "database_states", "deadlocks", "default_trace_events",
+            "dmv_blocking_snapshots", "file_io_stats", "index_object_stats", "job_history", "latch_stats",
+            "long_query_completions", "memory_clerks", "memory_grant_stats", "memory_pressure_events",
+            "memory_stats", "perfmon_stats", "plan_cache_stats", "plan_correction", "procedure_stats",
+            "pvs_stats", "running_jobs", "server_properties", "session_stats", "session_summary_stats",
+            "spinlock_stats", "system_health_events", "tempdb_stats", "wait_stats", "waiting_tasks"
+        })
+        {
+            tables[table] = "collection_time";
+        }
+
+        foreach (var table in new[]
+        {
+            "database_config", "database_scoped_config", "query_store_health", "server_config", "trace_flags"
+        })
+        {
+            tables[table] = "capture_time";
+        }
+
+        tables["config_alert_log"] = "alert_time";
+        return tables;
+    }
 
     /* The ORDER BY list of the table's compaction merge, or null when the merge keeps no order. */
     public static string? ServerOrderByFor(string table) =>
