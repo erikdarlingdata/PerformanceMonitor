@@ -179,6 +179,109 @@ public sealed class StoreHealthTests : IDisposable
         Assert.Equal(0L, await CountDeadlocksAsync());
     }
 
+    /// <summary>#9238: a collection checkpoint holds the write lock for 150 to 350 ms, and the used-data read gives up after the UI's
+    /// 100 ms. That null read must not reset the store on the file length, which is what this change removed. The file here is
+    /// between the reset point and twice it, with the data under the point: the old fallback reset it, and now it is left alone.</summary>
+    [Fact]
+    public async Task TheLoopsSizeCheck_WhenTheWriteLockIsHeld_AndTheDataIsUnderThePoint_DoesNotReset()
+    {
+        await SeedAsync(Deadlock(1), Deadlock(2), Deadlock(3));
+        var (usedMb, fileMb) = ReadSizes();
+        var run = NewSizeCheckStep();
+
+        var heldRun = await RunWhileTheWriteLockIsHeldAsync(run, (usedMb + fileMb) / 2);
+
+        Assert.Empty(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(3L, await CountDeadlocksAsync());
+        Assert.True(heldRun, "the call returned while the lock was still held");
+    }
+
+    /// <summary>The data is over the point, but a held lock makes the read time out. That call leaves the store alone, and the next
+    /// call, with the lock released, resets it.</summary>
+    [Fact]
+    public async Task TheLoopsSizeCheck_WhenTheWriteLockIsHeld_AndTheDataIsOverThePoint_ResetsOnTheNextCallOnly()
+    {
+        await SeedAsync(Deadlock(1), Deadlock(2), Deadlock(3));
+        var (usedMb, fileMb) = ReadSizes();
+        /* Under the data and over half the file, so the file ceiling (twice the point) is not what decides. */
+        var limitMb = Math.Max(usedMb * 0.9, fileMb * 0.55);
+        Assert.True(limitMb <= usedMb && fileMb < limitMb * 2, $"data {usedMb} MB and file {fileMb} MB leave no room for a point between them");
+        var run = NewSizeCheckStep();
+
+        var heldRun = await RunWhileTheWriteLockIsHeldAsync(run, limitMb);
+
+        Assert.True(heldRun, "the call returned while the lock was still held");
+        Assert.Empty(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(3L, await CountDeadlocksAsync());
+
+        await run(limitMb);
+
+        var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(StoreHousekeepingHistory.KindSizeReset, reset.Kind);
+        Assert.Equal(0L, await CountDeadlocksAsync());
+    }
+
+    private (double UsedMb, double FileMb) ReadSizes()
+    {
+        var fileMb = _duckDb.GetDatabaseSizeMb();
+        var usedMb = _duckDb.GetUsedDataSizeMb();
+        Assert.True(fileMb > 0);
+        Assert.NotNull(usedMb);
+        Assert.True(usedMb < fileMb, "a store file holds more than its data");
+        return (usedMb.Value, fileMb);
+    }
+
+    /// <summary>A service whose timed archive is not due, so only the size check can start a reset, and the step that runs the loop's
+    /// archival check at a given reset point.</summary>
+    private Func<double, Task> NewSizeCheckStep()
+    {
+        var history = new StoreHousekeepingHistory(_historyPath);
+        var archive = new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance) { History = history };
+        var service = new CollectionBackgroundService(null!, _duckDb, archiveService: archive);
+        const BindingFlags nonPublic = BindingFlags.NonPublic | BindingFlags.Instance;
+        typeof(CollectionBackgroundService).GetField("_lastArchiveTime", nonPublic)!.SetValue(service, DateTime.UtcNow);
+        var step = typeof(CollectionBackgroundService).GetMethod("RunArchivalIfDueAsync", nonPublic)!;
+        var args = step.GetParameters()
+            .Select(p => p.ParameterType == typeof(CancellationToken) ? (object)CancellationToken.None : null)
+            .ToArray();
+        return async limitMb =>
+        {
+            service.HotStoreReset = new HotStoreResetLimit(limitMb, HotStoreResetSetting.SourceSetting);
+            await (Task)step.Invoke(service, args)!;
+        };
+    }
+
+    /// <summary>Runs the loop's size check while another thread holds the store's write lock, as a collection checkpoint does. Returns
+    /// whether the lock was still held when the call returned. The threads hand off through flags and a clock, not waits: the suite's
+    /// lock-hold scan counts a wait as a hold. The holder gives up after ten seconds so a failed hand-off ends the test.</summary>
+    private async Task<bool> RunWhileTheWriteLockIsHeldAsync(Func<double, Task> run, double limitMb)
+    {
+        var held = false;
+        var release = false;
+        var holder = Task.Run(() =>
+        {
+            using (_duckDb.AcquireWriteLock())
+            {
+                System.Threading.Volatile.Write(ref held, true);
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                while (!System.Threading.Volatile.Read(ref release) && clock.Elapsed < TimeSpan.FromSeconds(10))
+                {
+                    System.Threading.Thread.Yield();
+                }
+            }
+        }, TestContext.Current.CancellationToken);
+        for (var i = 0; i < SpinLimit && !System.Threading.Volatile.Read(ref held); i++)
+        {
+            System.Threading.Thread.Yield();
+        }
+
+        await run(limitMb);
+        var stillHeld = !holder.IsCompleted;
+        System.Threading.Volatile.Write(ref release, true);
+        await holder;
+        return stillHeld;
+    }
+
     private async Task<long> CountDeadlocksAsync()
     {
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");

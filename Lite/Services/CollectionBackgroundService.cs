@@ -787,7 +787,8 @@ public class CollectionBackgroundService : BackgroundService
         var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
         /* #9238: the data in the store (used blocks) counts, not the file length, because the file keeps its freed blocks. The data
            cannot exceed the file, so the used read (a connection under the read lock) is made only once the file has reached the
-           reset point. A null read (busy store) leaves the file length to decide. */
+           reset point. The read waits only the UI's 100 ms budget, so a collection checkpoint can make it return null. A null read
+           leaves only the file's own ceiling (twice the reset point) to decide, and the next tick reads again. */
         var fileMb = _duckDb?.GetDatabaseSizeMb() ?? 0;
         var usedMb = _duckDb != null && fileMb >= HotStoreReset.Mb ? _duckDb.GetUsedDataSizeMb() : null;
         var sizeDue = _duckDb != null && HotStoreReset.IsReached(usedMb, fileMb);
@@ -802,8 +803,16 @@ public class CollectionBackgroundService : BackgroundService
             var complete = true;
             if (sizeDue)
             {
-                _logger?.LogInformation("Store data ({UsedMb} MB) and file ({FileMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}), or the file reached twice it. Archiving all data and resetting the database",
-                    usedMb is { } used ? used.ToString("F0", CultureInfo.InvariantCulture) : "not read", fileMb, HotStoreReset.Mb, HotStoreReset.Source);
+                if (usedMb is { } used && used >= HotStoreReset.Mb)
+                {
+                    _logger?.LogInformation("Store data ({UsedMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}), file {FileMb:F0} MB. Archiving all data and resetting the database",
+                        used, HotStoreReset.Mb, HotStoreReset.Source, fileMb);
+                }
+                else
+                {
+                    _logger?.LogInformation("Store file ({FileMb:F0} MB) reached twice the {Threshold:F0} MB reset point ({Source}), data {UsedMb} MB or not read. Archiving all data and resetting the database",
+                        fileMb, HotStoreReset.Mb, HotStoreReset.Source, usedMb is { } u ? u.ToString("F0", CultureInfo.InvariantCulture) : "not read");
+                }
                 await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
             }
             else

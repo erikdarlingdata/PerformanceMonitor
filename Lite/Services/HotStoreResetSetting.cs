@@ -32,10 +32,12 @@ internal sealed record HotStoreResetLimit(double Mb, string Source)
     /// <summary>
     /// True when the store is due a reset (#9238). The reset point counts the DATA in the store (<paramref name="usedMb"/>, the used
     /// blocks), not the file: DuckDB keeps freed blocks in the file, so the file runs well past its data, and a file-length check
-    /// reset the store long before the data warranted it. A null <paramref name="usedMb"/> (the read failed or the store was busy)
-    /// falls back to the file length. The file reaching <see cref="FileCeilingMb"/>, twice the reset point, resets either way.
+    /// reset the store long before the data warranted it. A null <paramref name="usedMb"/> (the read timed out behind a checkpoint or
+    /// failed) does not decide: the file length is not the data, so falling back to it would bring back the early reset. Only the file
+    /// reaching <see cref="FileCeilingMb"/>, twice the reset point, resets without the data read, and the next housekeeping tick
+    /// reads again.
     /// </summary>
-    internal bool IsReached(double? usedMb, double fileMb) => fileMb >= FileCeilingMb || (usedMb ?? fileMb) >= Mb;
+    internal bool IsReached(double? usedMb, double fileMb) => fileMb >= FileCeilingMb || (usedMb is { } used && used >= Mb);
 }
 
 /// <summary>

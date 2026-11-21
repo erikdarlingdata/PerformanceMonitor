@@ -253,7 +253,7 @@ For the full list of folders, see [Where Lite keeps its files](#where-lite-keeps
 |---|---|---|
 | `hot_store_reset_mb` | `512` | The amount of data in the hot store, in MB, at which Lite resets it. The range is 128 to 2048. |
 
-Lite counts the data inside `monitor.duckdb` (the used blocks, which **Store Health** also shows), not the length of the file. DuckDB keeps freed blocks in the file, so the file is longer than its data. On a test install the data was about 60% of the file length. If Lite cannot read the data size because the store is busy, it uses the file length instead. Lite also resets the store when the file reaches twice the reset point, whatever the data size.
+Lite counts the data inside `monitor.duckdb` (the used blocks, which **Store Health** also shows), not the length of the file. DuckDB keeps freed blocks in the file, so the file is longer than its data. On a test install the data was about 60% of the file length. If Lite cannot read the data size because the store is busy, it does not reset on the file length. It reads the data size again at the next check. Lite resets the store when the file reaches twice the reset point, whatever the data size, and that check does not need the data size.
 
 Lite reads the key once at start, so a change applies after a restart. A value outside the range is changed to the nearest limit, and Lite writes one warning to the log. A value that is not a number is ignored and the default applies, with one warning in the log. **Store Health** shows the reset point that is in force and says whether it is the default or comes from the setting.
 

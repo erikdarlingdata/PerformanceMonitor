@@ -132,13 +132,16 @@ public sealed class HotStoreResetSettingTests : IDisposable
         Assert.Equal(due, limit.IsReached(usedMb, fileMb));
     }
 
-    /// <summary>A failed or skipped used read (a busy store) leaves the file length to decide, as the check did before.</summary>
+    /// <summary>A failed or timed-out used read decides nothing: the file length is not the data. Only the file's own ceiling, twice
+    /// the reset point, resets without the data read.</summary>
     [Theory]
-    [InlineData(520, 512, true)]
-    [InlineData(511.9, 512, false)]
-    [InlineData(1100, 1024, true)]
-    [InlineData(1023.9, 1024, false)]
-    public void TheSizeCheck_WhenTheUsedReadIsNull_FallsBackToTheFileLength(double fileMb, double limitMb, bool due)
+    [InlineData(520, 512, false)]
+    [InlineData(1023.9, 512, false)]
+    [InlineData(1024, 512, true)]
+    [InlineData(1100, 512, true)]
+    [InlineData(2047.9, 1024, false)]
+    [InlineData(2048, 1024, true)]
+    public void TheSizeCheck_WhenTheUsedReadIsNull_OnlyTheFileCeilingResets(double fileMb, double limitMb, bool due)
     {
         var limit = new HotStoreResetLimit(limitMb, "setting");
 
@@ -146,13 +149,15 @@ public sealed class HotStoreResetSettingTests : IDisposable
     }
 
     [Fact]
-    public void TheSizeCheck_OfASettingOf1024_LeavesA520MbFileAlone_WhereTheDefaultWouldReset()
+    public void TheSizeCheck_OfASettingOf1024_LeavesAFileAndDataThatWouldResetTheDefaultAlone()
     {
         var fromSetting = Resolve("{\"hot_store_reset_mb\": 1024}", out _);
         var fromDefault = Resolve("{}", out _);
 
-        Assert.False(fromSetting.IsReached(null, 520));
-        Assert.True(fromDefault.IsReached(null, 520));
-        Assert.True(fromSetting.IsReached(null, 1030));
+        Assert.False(fromSetting.IsReached(520, 600));
+        Assert.True(fromDefault.IsReached(520, 600));
+        Assert.False(fromSetting.IsReached(null, 1030));
+        Assert.True(fromDefault.IsReached(null, 1030));
+        Assert.True(fromSetting.IsReached(null, 2050));
     }
 }
