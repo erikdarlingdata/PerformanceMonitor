@@ -183,11 +183,11 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// <summary>
     /// The estimate statement, with the two things the store health read (#9224) changes about it. <paramref name="indexBytesSql"/>
     /// is the expression for an index's size (the collector's own is <c>pg_catalog.pg_relation_size(c.oid)</c>, a file stat per index).
-    /// <paramref name="indexJoinSql"/> (empty for the collector) is one more join in the index set, before the column and statistics
-    /// joins: the store read joins the oids and sizes it already read, so the estimate covers the indexes the read keeps, with their
-    /// sizes, and no size function runs a second time.
+    /// <paramref name="indexFilterSql"/> (empty for the collector) is one more condition on the index set, before the column and
+    /// statistics joins: the store read keeps the estimate to the indexes it reads and takes their sizes from its own list, so no
+    /// size function runs a second time.
     /// </summary>
-    public static string BuildQueryText(string indexBytesSql, string indexJoinSql) => $@"WITH params AS (
+    public static string BuildQueryText(string indexBytesSql, string indexFilterSql) => $@"WITH params AS (
     SELECT
         pg_catalog.current_setting('block_size')::int AS bs,
         CASE WHEN pg_catalog.version() ~ '64-bit|x86_64|ppc64|ia64|amd64|aarch64|arm64'
@@ -212,12 +212,12 @@ idx AS (
     JOIN pg_catalog.pg_am        AS am ON am.oid = c.relam
     JOIN pg_catalog.pg_index     AS x  ON x.indexrelid = c.oid
     JOIN pg_catalog.pg_class     AS t  ON t.oid = x.indrelid
-    JOIN pg_catalog.pg_namespace AS n  ON n.oid = c.relnamespace{indexJoinSql}
+    JOIN pg_catalog.pg_namespace AS n  ON n.oid = c.relnamespace
     WHERE c.relkind = 'i'
     AND   am.amname = 'btree'
     AND   x.indisvalid
     AND   x.indisready
-    AND   n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    AND   n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast'){indexFilterSql}
     OFFSET 0
 ),
 keycols AS (

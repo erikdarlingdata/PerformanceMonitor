@@ -949,16 +949,16 @@ ptree AS (
 )";
 
     /// <summary>
-    /// The index set the estimate reads, in the presized per-index read (#9224): the indexes the read sized, with those sizes, in
-    /// place of every btree index in the database and a size function call on each.
+    /// The condition that keeps the estimate in the presized per-index read to the indexes it sized (#9224), in place of every
+    /// btree index in the database. The size column the estimate carries is not read there: the read takes it from its own list.
     /// </summary>
-    private const string EstimateIndexSizeJoinSql = @"
-    JOIN unnest($1::bigint[], $2::bigint[]) AS zs(rel_oid, bytes) ON c.oid = zs.rel_oid::oid";
+    private const string EstimateIndexFilterSql = @"
+    AND   c.oid::bigint = ANY($1::bigint[])";
 
     /// <summary>The statement for the per-index read: see <see cref="StoreIndexHealthRow"/>.</summary>
     public static string BuildIndexSql(bool timescale, bool presized = false) => $@"
 WITH est AS MATERIALIZED (
-{(presized ? PgIndexBloatCollector.BuildQueryText("zs.bytes", EstimateIndexSizeJoinSql) : PgIndexBloatCollector.QueryText)}
+{(presized ? PgIndexBloatCollector.BuildQueryText("0::bigint", EstimateIndexFilterSql) : PgIndexBloatCollector.QueryText)}
 ),
 {BuildMembersCtes(timescale)},
 {PartitionIndexCtes()},
@@ -984,7 +984,7 @@ ix AS (
         {(presized ? "COALESCE(zh.bytes, 0)" : "pg_catalog.pg_relation_size(c.oid)")} AS heap_bytes,
         COALESCE(s.idx_scan, 0) AS idx_scan,
         e.est_reclaimable_bytes,
-        e.index_bytes AS est_index_bytes,
+        {(presized ? "CASE WHEN e.index_oid IS NOT NULL THEN COALESCE(zi.bytes, 0) END" : "e.index_bytes")} AS est_index_bytes,
         e.skipped_reason
     FROM members AS m
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
