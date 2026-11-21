@@ -43,9 +43,9 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
     private const string OlderHash = "0xBB02";
     private const string UnmatchedHash = "0xDD04";
 
-    /// <summary>Two texts that both name dbo.Ledger, and one that does not. The newest statement ran in Books an hour ago, two hours ago
+    /// <summary>Two texts that both name dbo.Ledger, and one that does not. The newest statement ran in Books half an hour ago, two hours ago
     /// and three days ago, and in Archive, with the same text, three days and an hour ago; the older statement ran in Books three days ago
-    /// only; the unmatched statement ran an hour ago and three days ago. All sit inside the raw tier's window; only the newest and the
+    /// only; the unmatched statement ran half an hour ago and three days ago. All sit inside the raw tier's window; only the newest and the
     /// unmatched statements sit in its newest hours, so a text first judged there is seen again, matched or not, in a later span.</summary>
     private static async Task<(ScratchPostgres Scratch, DateTime NewestSample)> OpenScratchAsync(CancellationToken ct)
     {
@@ -68,14 +68,14 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
                   VALUES ($1,$2,1,'ledger',$5,$3,sha256($4::text::bytea))",
                 CollectionIdGenerator.Next(), now - age, hash, text, database);
 
-        await Stat(NewestHash, "newest", TimeSpan.FromHours(1));
+        await Stat(NewestHash, "newest", TimeSpan.FromMinutes(30));
         await Stat(NewestHash, "newest", TimeSpan.FromHours(2));
         await Stat(NewestHash, "newest", TimeSpan.FromDays(3));
         await Stat(NewestHash, "newest", TimeSpan.FromDays(3) + TimeSpan.FromHours(1), "Archive");
         await Stat(OlderHash, "older", TimeSpan.FromDays(3));
-        await Stat(UnmatchedHash, "unmatched", TimeSpan.FromHours(1));
+        await Stat(UnmatchedHash, "unmatched", TimeSpan.FromMinutes(30));
         await Stat(UnmatchedHash, "unmatched", TimeSpan.FromDays(3));
-        return (scratch, now - TimeSpan.FromHours(1));
+        return (scratch, now - TimeSpan.FromMinutes(30));
     }
 
     private static async Task<JsonElement> PlanCacheAsync(ScratchPostgres scratch, DarlingMcpFindQueriesByTextTools.SourceBudget planCache, int limit, CancellationToken ct)
@@ -124,14 +124,14 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
         var from = DateTime.Parse(searchedWindow.GetProperty("searched_from").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
         var to = DateTime.Parse(searchedWindow.GetProperty("searched_to").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-        var span = (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds;
+        var span = (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanParts).TotalSeconds;
         Assert.InRange((to - from).TotalSeconds, span - 1, span + 1);
         Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
     }
 
     /// <summary>#9150: a page that fills in the newest span stops the search there (one statement), and the reply says the page is the whole-window
     /// answer: <c>complete</c> is true and <c>searched_from</c> is the window's start, because spans run newest first and the older ones could not
-    /// change a full page. <c>truncated</c> says more matches exist. A second matched text an hour old makes the newest span hold two rows.</summary>
+    /// change a full page. <c>truncated</c> says more matches exist. A second matched text twenty minutes old makes the newest span hold two rows.</summary>
     [Fact]
     public async Task APageThatFillsInTheNewestSpan_IsTheWholeWindowAnswer_AndIsTruncated()
     {
@@ -144,7 +144,7 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
             await DarlingMcpTestData.ExecAsync(c, ct,
                 @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
                   VALUES ($1,$2,1,'ledger','Books',$3,sha256('older'::text::bytea))",
-                CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromMinutes(30), OlderHash);
+                CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromMinutes(20), OlderHash);
         }
 
         var statements = 0;
@@ -198,7 +198,7 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
         Assert.Equal([(NewestHash, "Books"), (OlderHash, "Books"), (NewestHash, "Archive")], Keys(planCache));
         Assert.Equal(DateTime.SpecifyKind(newestSample, DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[0].GetProperty("last_collected_at").GetString());
-        Assert.Equal(DateTime.SpecifyKind(newestSample - TimeSpan.FromDays(3), DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[2].GetProperty("last_collected_at").GetString());
+        Assert.Equal(DateTime.SpecifyKind(newestSample - TimeSpan.FromDays(3) - TimeSpan.FromMinutes(30), DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[2].GetProperty("last_collected_at").GetString());
         Assert.False(planCache.GetProperty("truncated").GetBoolean());
     }
 
@@ -226,7 +226,8 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         var planCache = await PlanCacheAsync(scratch, budget, 20, ct);
 
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
-        Assert.Equal(DarlingMcpFindQueriesByTextTools.RawTierSpanCount, carried.Count);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        Assert.Equal(DarlingMcpFindQueriesByTextTools.RawTierSpans(now - TimescaleSupport.RawRetentionSpan, now).Count, carried.Count);
         Assert.Empty(carried[0]);
         Assert.Equal(new[] { Digest("newest"), Digest("unmatched") }.Order(), carried[1].Order());
         foreach (var step in carried)
