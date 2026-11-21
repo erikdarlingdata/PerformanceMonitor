@@ -233,4 +233,84 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
 
         Assert.Equal(expected, Hashes(planCache));
     }
+
+    /// <summary>One query_hash with more matching digests than the first match limit holds (a statement with many literal variants), all sampled at
+    /// the newest time, then 300 other matching keys: a page of three. The first statement's limit is spent on the one key, so the page is short
+    /// and the statement says it was capped. The rerun keeps its limit and excludes that key, so it probes a few dozen texts more and fills the page,
+    /// and the search never reads the span's 340 sightings. A rerun with no limit probes every sighting that is left.</summary>
+    [Fact]
+    public async Task AKeyWithManyDigests_DoesNotSendTheRerunToProbeTheWholeSpan()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        const int limit = 3;
+        var bigDigests = DarlingMcpFindQueriesByTextTools.AllServersLookupMatchFactor * (limit + 1) + 8;
+        const int others = 300;
+        var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromSeconds(5);
+        await using (var c = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await c.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(c, ct);
+            await DarlingMcpTestData.RegisterServerAsync(c, 1, "nf-a", ct);
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+                  SELECT sha256(('filler' || i)::text::bytea), 'SELECT ' || i || ' FROM dbo.Common', timezone('UTC', now())
+                  FROM generate_series(1, 1100) AS i");
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+                  SELECT sha256(('b' || i)::text::bytea), 'SELECT ' || i || ' FROM dbo.Common WHERE x = ' || i, timezone('UTC', now())
+                  FROM generate_series(1, " + bigDigests + @") AS i");
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
+                  SELECT sha256(('o' || i)::text::bytea), 'SELECT ' || i || ' FROM dbo.Common', timezone('UTC', now())
+                  FROM generate_series(1, " + others + ") AS i");
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
+                  SELECT $2::bigint + i, $1::timestamp, 1, 'nf-a', 'Books', '0xA0000', sha256(('b' || i)::text::bytea)
+                  FROM generate_series(1, " + bigDigests + @") AS i", newest, CollectionIdGenerator.Next());
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
+                  SELECT $2::bigint + i, $1::timestamp - (i * interval '5 seconds'), 1, 'nf-a', 'Books', '0xH' || lpad(i::text, 4, '0'),
+                         sha256(('o' || i)::text::bytea)
+                  FROM generate_series(1, " + others + ") AS i", newest, CollectionIdGenerator.Next() + 1_000_000);
+            await DarlingMcpTestData.ExecAsync(c, ct, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                "CREATE INDEX IF NOT EXISTS " + FindQueriesByTextIndexScopeLiveTests.IndexShortName + " ON collect.query_text_dim USING gin (query_text gin_trgm_ops)");
+            foreach (var table in new[] { "collect.query_text_dim", "query_stats" })
+            {
+                await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE " + table);
+            }
+        }
+
+        /* One pooled connection, so the text table's scan counts the tool's backend adds are flushed by the flush this test asks for on the same one. */
+        await using var data = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxPoolSize = 1 }.ConnectionString);
+
+        async Task<long> TextScansAsync()
+        {
+            await using (var flush = data.CreateCommand("SELECT pg_stat_force_next_flush()"))
+            {
+                await flush.ExecuteScalarAsync(ct);
+            }
+
+            await using var read = data.CreateCommand(
+                "SELECT coalesce(seq_scan, 0) + coalesce(idx_scan, 0) FROM pg_stat_user_tables WHERE relid = 'collect.query_text_dim'::regclass");
+            return (long)(await read.ExecuteScalarAsync(ct))!;
+        }
+
+        var before = await TextScansAsync();
+        var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds) { SpanRows = 5000 };
+        var reply = await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
+            data, "dbo.Common", null, null, limit, McpDataDetail.Full, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, budget, ct, ReadyTracker());
+        var scans = await TextScansAsync() - before;
+        var planCache = JsonDocument.Parse(reply).RootElement.GetProperty("sources").GetProperty("plan_cache");
+
+        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
+        Assert.Equal(["0xA0000", "0xH0001", "0xH0002"], Hashes(planCache));
+        Assert.True(planCache.GetProperty("truncated").GetBoolean());
+        Assert.True(planCache.GetProperty("searched").GetProperty("complete").GetBoolean());
+        var sightings = bigDigests + others;
+        Assert.True(scans < sightings / 2, $"the search scanned the text table {scans} times for a page of {limit} over a span of {sightings} sightings");
+    }
 }
