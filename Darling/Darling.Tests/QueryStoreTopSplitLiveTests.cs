@@ -79,7 +79,7 @@ SELECT f + interval '1 hour', {ServerId}, 'db', g, g, 'Regular', f, f + interval
        'select 1', 10 + g, 1000 + g, g, f - interval '5 minutes'
 FROM (SELECT g, timestamp '{Ts(start)}' - interval '2 hours' - make_interval(mins => (g % 1080)) AS f FROM generate_series(20001, 23000) g) AS o;
 
-ANALYZE {Wide};", System.Globalization.CultureInfo.InvariantCulture), ct);
+ANALYZE {Wide};"), ct);
     }
 
     private static async Task<NpgsqlConnection> OpenAsync(ScratchPostgres scratch, CancellationToken ct)
