@@ -178,7 +178,16 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// other two names after, which on a store with thousands of chunks in one schema compared every index column with every
     /// statistics row of the schema (1.7 billion pairs, over three minutes, #8806). <c>OFFSET 0</c> keeps the subquery from
     /// being flattened back into that join.</para></summary>
-    public const string QueryText = @"WITH params AS (
+    public static readonly string QueryText = BuildQueryText("pg_catalog.pg_relation_size(c.oid)", string.Empty);
+
+    /// <summary>
+    /// The estimate statement, with the two things the store health read (#9224) changes about it. <paramref name="indexBytesSql"/>
+    /// is the expression for an index's size (the collector's own is <c>pg_catalog.pg_relation_size(c.oid)</c>, a file stat per index).
+    /// <paramref name="indexJoinSql"/> (empty for the collector) is one more join in the index set, before the column and statistics
+    /// joins: the store read joins the oids and sizes it already read, so the estimate covers the indexes the read keeps, with their
+    /// sizes, and no size function runs a second time.
+    /// </summary>
+    public static string BuildQueryText(string indexBytesSql, string indexJoinSql) => $@"WITH params AS (
     SELECT
         pg_catalog.current_setting('block_size')::int AS bs,
         CASE WHEN pg_catalog.version() ~ '64-bit|x86_64|ppc64|ia64|amd64|aarch64|arm64'
@@ -192,7 +201,7 @@ idx AS (
         c.relname                                     AS index_name,
         t.oid                                         AS table_oid,
         c.relpages::bigint                            AS index_pages,
-        pg_catalog.pg_relation_size(c.oid)            AS index_bytes,
+        {indexBytesSql}            AS index_bytes,
         t.reltuples                                   AS table_rows,
         x.indnatts,
         x.indkey,
@@ -203,7 +212,7 @@ idx AS (
     JOIN pg_catalog.pg_am        AS am ON am.oid = c.relam
     JOIN pg_catalog.pg_index     AS x  ON x.indexrelid = c.oid
     JOIN pg_catalog.pg_class     AS t  ON t.oid = x.indrelid
-    JOIN pg_catalog.pg_namespace AS n  ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_namespace AS n  ON n.oid = c.relnamespace{indexJoinSql}
     WHERE c.relkind = 'i'
     AND   am.amname = 'btree'
     AND   x.indisvalid
