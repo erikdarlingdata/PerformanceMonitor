@@ -834,11 +834,7 @@ HAVING COUNT(*) > 1";
     /// </summary>
     internal static bool IsOutOfTempSpace(Exception ex)
     {
-        var text = ex.ToString();
-        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+        return ParquetCompaction.IsOutOfTempSpace(ex);
     }
 
     /// <summary>Test seam only, null in production: runs first in <see cref="SurveyAsync"/>, so a test can make the survey throw.</summary>
