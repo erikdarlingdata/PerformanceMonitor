@@ -3384,8 +3384,8 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// compressed chunk's index is an empty shell, and a chunk created afterwards gets the index with the chunk. Additive for an older build: it ignores
     /// the index, and no GRANT is needed for an index. The statement is a catalog read when the index exists.</para>
     /// </summary>
-    private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
-CREATE INDEX IF NOT EXISTS " + AttentionCountIndexName + @" ON collect.attention_events (server_id, collection_time) INCLUDE (attention_count) WHERE event_kind = 'count';";
+    private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';
+" + TimescaleSupport.CreateAttentionCountIndexSql;
 
     /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per

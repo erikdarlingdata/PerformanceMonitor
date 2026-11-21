@@ -111,6 +111,38 @@ public sealed class AttentionHypertableSwapLiveTests
     }
 
     [Fact]
+    public async Task TheStartPathSwap_AfterV293_PutsTheCounterRowIndexOnTheNewTable_AndTheHypertableKeepsIt()
+    {
+        await RunAsync(enableTimescale: true, async (store, ct) =>
+        {
+            var c = store.Connection;
+            var name = PgMigrations.AttentionCountIndexName;
+            var onTable = "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND indexname = '" + name + "' AND tablename = ";
+
+            /* The ladder has run (V293 built the index on the empty table) and the table then filled: the swap did not happen at V277, so the hourly
+               pass does it. The swap puts a new table in place with the time index only, and the counter-row index stays on _legacy. */
+            Assert.Equal(1L, await ScalarAsync(c, onTable + "'attention_events'", ct));
+            await ExecAsync(c, SeedSql, ct);
+
+            await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
+
+            Assert.Equal(5L, await ScalarAsync(c, "SELECT count(*) FROM collect.attention_events_legacy", ct));
+            Assert.Equal(1L, await ScalarAsync(c, HypertableCountSql, ct));
+            Assert.Equal(1L, await ScalarAsync(c, onTable + "'attention_events'", ct));
+
+            /* A row written to the hypertable after the swap lands in a chunk that has the index too. */
+            await ExecAsync(c, SeedSql.Replace("generate_series(1, 5)", "generate_series(101, 102)", StringComparison.Ordinal), ct);
+            var chunks = await ScalarAsync(c, "SELECT count(*) FROM show_chunks('collect.attention_events')", ct);
+            Assert.True((long)chunks >= 1L);
+            Assert.Equal(chunks, await ScalarAsync(c, "SELECT count(*) FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '_timescaledb_internal' AND i.indpred IS NOT NULL AND i.indnkeyatts = 2 AND i.indnatts = 3", ct));
+
+            /* A second pass swaps nothing and leaves the one index. */
+            await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
+            Assert.Equal(1L, await ScalarAsync(c, onTable + "'attention_events'", ct));
+        });
+    }
+
+    [Fact]
     public async Task TheSwap_DoesNothing_ForAnEmptyTable_AnAlreadyConvertedTable_AndARerun()
     {
         await RunAsync(enableTimescale: true, async (store, ct) =>
