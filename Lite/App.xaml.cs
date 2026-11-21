@@ -768,6 +768,7 @@ public partial class App : Application
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
         LoadDuckDbMemoryLimit();
+        LoadHotStoreResetLimit();
         LoadDefaultTimeRange();
         LoadAlertSettings();
         /* An SMTP setup saved before the settings window warned about it is named in the log when it loads. */
@@ -1479,6 +1480,16 @@ public partial class App : Application
         var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
         Services.DuckDbMemoryLimitSetting.LoadAtStartup(
             settings.State == SettingsFileState.Unreadable ? null : settings.Text);
+    }
+
+    /// <summary>
+    /// #9238: installs the hot store reset point (settings.json hot_store_reset_mb) before the background service and the
+    /// store-health readers are built. An unreadable settings.json is reported by LoadDefaultTimeRange, so this takes the default.
+    /// </summary>
+    private static void LoadHotStoreResetLimit()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        Services.HotStoreResetSetting.LoadAtStartup(settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
     /// <summary>

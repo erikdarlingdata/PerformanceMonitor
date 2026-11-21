@@ -18,14 +18,18 @@ using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Database;
 
 /// <summary>The store's size against the point where Lite resets it.</summary>
-/// <param name="FileMb">The size of <c>monitor.duckdb</c> on disk. This is the number the size reset tests.</param>
+/// <param name="FileMb">The size of <c>monitor.duckdb</c> on disk. The size reset tests it against twice the reset point, and against the reset point itself when the data was not read.</param>
 /// <param name="WalMb">The size of the write-ahead log beside it, 0 when there is none.</param>
-/// <param name="UsedMb">Data inside the file, from <c>pragma_database_size()</c>. Null when the store was busy.</param>
+/// <param name="UsedMb">Data inside the file, from <c>pragma_database_size()</c>. This is the number the size reset tests against the reset point (#9238). Null when the store was busy.</param>
 /// <param name="ResetAtMb">The size at which Lite archives all data and starts a fresh store.</param>
-public sealed record StoreSizeInfo(double FileMb, double WalMb, double? UsedMb, double ResetAtMb)
+/// <param name="ResetSource">Where <paramref name="ResetAtMb"/> came from: <c>default</c> or <c>setting</c> (settings.json <c>hot_store_reset_mb</c>, #9238).</param>
+public sealed record StoreSizeInfo(double FileMb, double WalMb, double? UsedMb, double ResetAtMb, string ResetSource = HotStoreResetSetting.SourceDefault)
 {
-    /// <summary>The file's share of the reset point, in percent.</summary>
-    public double FilePercentOfReset => ResetAtMb <= 0 ? 0 : FileMb / ResetAtMb * 100.0;
+    /// <summary>The data's share of the reset point, in percent. When the data was not read it is the file's share, as the size check does.</summary>
+    public double DataPercentOfReset => ResetAtMb <= 0 ? 0 : (UsedMb ?? FileMb) / ResetAtMb * 100.0;
+
+    /// <summary>The file length at which the store resets whatever the data in it: twice the reset point.</summary>
+    public double FileResetAtMb => ResetAtMb * HotStoreResetLimit.FileCeilingFactor;
 }
 
 /// <summary>The archive folder: parquet files only, top level only, as the archive views read it.</summary>
@@ -50,7 +54,7 @@ public sealed record StoreHealthSnapshot(
     string? StoreNote);
 
 /// <summary>
-/// Reads Lite's own store health (#8788): the size of <c>monitor.duckdb</c> against the 512 MB reset point, the parquet archive
+/// Reads Lite's own store health (#8788): the data in <c>monitor.duckdb</c> against the reset point (512 MB unless hot_store_reset_mb says otherwise), the parquet archive
 /// folder, the housekeeping history and the rows per table. It holds the store's read lock only for the two small catalog queries
 /// and never the write lock, so collection and the UI go on. A read that cannot get the lock within <see cref="ReadLockBudget"/>
 /// still answers with the file sizes, the archive folder and the history (none of which need the store), and says why the rest is
@@ -61,6 +65,9 @@ public sealed class StoreHealthReader
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
     private readonly StoreHousekeepingHistory _history;
+
+    /// <summary>The reset point the snapshot reports (#9238). It is the one the size check uses, <see cref="HotStoreResetLimit.Current"/>.</summary>
+    internal HotStoreResetLimit HotStoreReset { get; set; } = HotStoreResetLimit.Current;
 
     public StoreHealthReader(DuckDbInitializer duckDb, StoreHousekeepingHistory history)
         : this(duckDb, duckDb.ArchivePath, history)
@@ -117,7 +124,7 @@ public sealed class StoreHealthReader
 
         return new StoreHealthSnapshot(
             DateTime.UtcNow,
-            new StoreSizeInfo(fileMb, walMb, usedMb, CollectionBackgroundService.ArchiveSizeThresholdMb),
+            new StoreSizeInfo(fileMb, walMb, usedMb, HotStoreReset.Mb, HotStoreReset.Source),
             ReadArchiveFolder(_archivePath),
             _history.Read(),
             tables,
@@ -208,7 +215,13 @@ public static class StoreHealthText
 {
     public static string StoreSentence(StoreSizeInfo store) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"Lite archives all data and starts a fresh store when the store file reaches {store.ResetAtMb:0} MB.");
+            $"Lite archives all data and starts a fresh store when the data in the store reaches {store.ResetAtMb:0} MB ({ResetSourceText(store.ResetSource)}), or when the store file reaches {store.FileResetAtMb:0} MB, twice that.");
+
+    /// <summary>Says where the reset point came from, in words the window and <c>get_store_health</c> share (#9238).</summary>
+    public static string ResetSourceText(string source) =>
+        source == HotStoreResetSetting.SourceSetting
+            ? "set by hot_store_reset_mb in settings.json"
+            : "the default, change it with hot_store_reset_mb in settings.json";
 
     public static string UndatedSentence(int files) =>
         files == 1
@@ -265,8 +278,8 @@ public static class StoreHealthText
 
         sb.AppendLine("STORE");
         sb.AppendLine(StoreSentence(snapshot.Store));
-        sb.AppendLine(ci, $"  Store file on disk: {Megabytes(snapshot.Store.FileMb)} of {snapshot.Store.ResetAtMb:0} MB reset point ({snapshot.Store.FilePercentOfReset:0}%)");
-        sb.AppendLine(ci, $"  Data inside the file: {(snapshot.Store.UsedMb is { } used ? Megabytes(used) : "not read")}");
+        sb.AppendLine(ci, $"  Data inside the file: {(snapshot.Store.UsedMb is { } used ? Megabytes(used) : "not read")} of {snapshot.Store.ResetAtMb:0} MB reset point ({snapshot.Store.DataPercentOfReset:0}%)");
+        sb.AppendLine(ci, $"  Store file on disk: {Megabytes(snapshot.Store.FileMb)} (resets at {snapshot.Store.FileResetAtMb:0} MB)");
         sb.AppendLine(ci, $"  Write-ahead log: {Megabytes(snapshot.Store.WalMb)}");
         if (snapshot.StoreNote is not null)
         {
