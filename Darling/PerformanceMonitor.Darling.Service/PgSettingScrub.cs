@@ -184,8 +184,9 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// masked corpus case's VALUE against, so the two can never drift out of rule-for-rule sync again (#4348).
     /// Each entry is a plain ILIKE pattern; <c>%</c>/<c>_</c> are literal wildcards, no escaping needed here
     /// because none of these terms contain a literal <c>%</c> or <c>_</c> character themselves (the
-    /// percent-encoding catch-all is expressed separately in <see cref="CandidateSql"/> with its own ESCAPE
-    /// clause). This is only half of the coarse filter — <c>CandidateSql</c> also selects on the setting's
+    /// percent-encoding catch-all is expressed separately in <see cref="CandidateSql"/>, with the backslash as
+    /// PostgreSQL's default LIKE escape and no ESCAPE clause, because the log reader withholds a statement that has one, #9236).
+    /// This is only half of the coarse filter — <c>CandidateSql</c> also selects on the setting's
     /// NAME (<c>ssl_passphrase_command</c> by exact name, or a dotted extension name containing one of
     /// <see cref="CandidateNameTerms"/>), which the census test checks separately by name.
     /// </summary>
@@ -208,7 +209,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         "%credential%", "%pwd%", "%pass%",
     ];
 
-    private static readonly string CandidateSql = BuildCandidateSql();
+    internal static readonly string CandidateSql = BuildCandidateSql();
 
     private static string BuildCandidateSql()
     {
@@ -234,7 +235,7 @@ SELECT server_id, collection_time, name, database_name, role_name, setting, boot
 FROM collect.pg_server_config
 WHERE
     {terms}
-    OR setting LIKE '%\%%' ESCAPE '\' OR reset_val LIKE '%\%%' ESCAPE '\' OR boot_val LIKE '%\%%' ESCAPE '\'
+    OR setting LIKE '%\%%' OR reset_val LIKE '%\%%' OR boot_val LIKE '%\%%'
     OR (name = 'ssl_passphrase_command' AND (setting <> '' OR boot_val <> '' OR reset_val <> ''))
     OR (name LIKE '%.%' AND (
         {nameTerms}))";
