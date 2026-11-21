@@ -243,13 +243,13 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, cancellationToken: ct));
             Assert.Equal(0, (await DailyChunkAsync(c, ct)).AllVisible);
 
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             Assert.Equal(0, await HeapFetchesAsync(c, from, to, ct));
 
             /* Settled: no chunk lags, so no VACUUM is issued (the last vacuum time is the same). */
-            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
+            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
             Assert.Equal(settled.LastVacuum, (await DailyChunkAsync(c, ct)).LastVacuum);
             bodySucceeded = true;
         }
@@ -302,7 +302,7 @@ public sealed class RollupChunkVisibilityLiveTests
                 await using var tx = await locker.BeginTransactionAsync(ct);
                 await Exec(locker, $"LOCK TABLE {stuck.Name} IN SHARE UPDATE EXCLUSIVE MODE", ct);
 
-                Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct, Observe));
+                Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, Observe, ct));
                 var locked = await DailyChunkAsync(c, ct);
                 Assert.Equal(0, locked.AllVisible);
                 Assert.Equal(stuck.LastVacuum, locked.LastVacuum);
@@ -314,14 +314,14 @@ public sealed class RollupChunkVisibilityLiveTests
                 /* A step cancelled by its budget while it runs: the exception reaches the caller and the session is still reset. */
                 using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => TimescaleSupport.EnsureRollupChunkVisibilityAsync(
-                    c, null, TimeSpan.Zero, cancel.Token, () => { cancel.Cancel(); return TimeSpan.Zero; }));
+                    c, null, TimeSpan.Zero, () => { cancel.Cancel(); return TimeSpan.Zero; }, cancel.Token));
                 Assert.Equal(delayBefore, await ShowAsync(c, "vacuum_cost_delay", ct));
                 Assert.Equal(limitBefore, await ShowAsync(c, "vacuum_cost_limit", ct));
 
                 await tx.CommitAsync(ct);
             }
 
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             Assert.Equal(delayBefore, await ShowAsync(c, "vacuum_cost_delay", ct));
@@ -356,15 +356,15 @@ public sealed class RollupChunkVisibilityLiveTests
             /* The budget has time for the first vacuum and none after it. */
             var asked = 0;
             TimeSpan Clock() => asked++ == 0 ? TimeSpan.Zero : TimescaleSupport.RollupVacuumStepBudget;
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct, Clock));
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, Clock, ct));
             var left = await LaggingAsync(c, ct);
             Assert.True(left >= lagging - 1 && left >= 1, $"{lagging} chunk(s) lagged and {left} still do after a one-vacuum pass");
 
             /* The next pass, with its whole budget, takes the chunks the first one left (the read lists at most RollupVacuumMaxChunksPerPass). */
-            Assert.Equal(left, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
+            Assert.Equal(left, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
             for (var pass = 0; pass < 3 && await LaggingAsync(c, ct) > 0; pass++)
             {
-                Assert.True(await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct) > 0);
+                Assert.True(await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct) > 0);
             }
 
             Assert.Equal(0, await LaggingAsync(c, ct));
@@ -407,7 +407,7 @@ public sealed class RollupChunkVisibilityLiveTests
             /* Inside the window: the refresh could still write the chunk. */
             await Exec(c, $"SELECT alter_job({jobId}, config => jsonb_set((SELECT config FROM timescaledb_information.jobs WHERE job_id = {jobId}), '{{start_offset}}', to_jsonb('3650 days'::text)))", ct);
             Assert.Equal(0, await LaggingAsync(c, ct));
-            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
+            Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
 
             /* Past the window: its range ended before the window starts. */
             await Exec(c, $"SELECT alter_job({jobId}, config => jsonb_set((SELECT config FROM timescaledb_information.jobs WHERE job_id = {jobId}), '{{start_offset}}', to_jsonb('3 days'::text)))", ct);
@@ -415,7 +415,7 @@ public sealed class RollupChunkVisibilityLiveTests
                 await Scalar<bool>(c, $"SELECT range_end < now() - interval '3 days' FROM timescaledb_information.chunks WHERE format('%I.%I', chunk_schema, chunk_name) = '{(await DailyChunkAsync(c, ct)).Name}'", ct),
                 "the seeded chunk's range ends inside a 3-day window, so it cannot be past it");
             Assert.Equal(1, await LaggingAsync(c, ct));
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, ct));
+            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             bodySucceeded = true;

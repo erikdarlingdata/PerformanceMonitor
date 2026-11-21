@@ -8154,8 +8154,8 @@ SELECT set_config('vacuum_cost_delay',
     /// meanwhile, a login that does not own it): logged, and the rest still run. A settled store pays one catalog read. Returns how many chunks it vacuumed.
     /// </summary>
     public static async Task<int> EnsureRollupChunkVisibilityAsync(
-        NpgsqlConnection connection, ILogger? logger, TimeSpan? minVacuumAge = null, CancellationToken cancellationToken = default,
-        Func<TimeSpan>? stepElapsed = null)
+        NpgsqlConnection connection, ILogger? logger, TimeSpan? minVacuumAge = null, Func<TimeSpan>? stepElapsed = null,
+        CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
