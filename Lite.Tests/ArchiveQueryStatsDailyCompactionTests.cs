@@ -89,9 +89,10 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     }
 
     /* Rows [from, to) over the hour starting at `hour`, one a second, with a payload wide enough that file
-       sizes follow row counts. */
+       sizes follow row counts. server_id is a column every archive file carries, and query_store_stats' merge
+       sorts by it (#9255): one server here, so the sort keeps the time order the tests below read. */
     private void MakeParquet(string fileName, long from, long to, string hour = "2026-09-28 14:00:00") =>
-        Exec($"COPY (SELECT i AS id, TIMESTAMP '{hour}' + INTERVAL (i - {from}) SECOND AS collection_time, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' ({ParquetCompaction.BuildArchiveCopyOptions()})");
+        Exec($"COPY (SELECT i AS id, TIMESTAMP '{hour}' + INTERVAL (i - {from}) SECOND AS collection_time, 1 AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' ({ParquetCompaction.BuildArchiveCopyOptions()})");
 
     private long SizeOf(string fileName) => new FileInfo(P(fileName).Replace("/", "\\")).Length;
 
@@ -337,6 +338,59 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
 
         Assert.Equal([$"20260928_{table}.parquet"], ArchiveFileNames());
         Assert.Equal((800L, 800L), Visible(table));
+    }
+
+    private static string Text(string sql)
+    {
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToString(cmd.ExecuteScalar())!;
+    }
+
+    /* One entry per server: its row count and a hash of every row's content, so two sources match only when each
+       server's rows are the same. */
+    private static string RowsPerServer(string source) =>
+        Text("SELECT string_agg(server_id::VARCHAR || ':' || n::VARCHAR || ':' || h::VARCHAR, ',' ORDER BY server_id) " +
+             "FROM (SELECT server_id, count(*) AS n, sum((hash(id, collection_time, payload) % 1000003)::HUGEINT) AS h " +
+             $"FROM read_parquet('{source}') GROUP BY server_id)");
+
+    /// <summary>
+    /// #9255. The archiver writes the hot table's rows in time order, which interleaves the servers, so every row
+    /// group of an archive file spanned every server and a read filtered to one server decoded them all. The day
+    /// merge of query_store_stats sorts by server, then time: each output group holds one server, except the few
+    /// that straddle a boundary between two, and the rows themselves are the same.
+    /// </summary>
+    [Fact]
+    public void ADaysQueryStoreFiles_AreMergedIntoRowGroupsOfOneServer_WithEveryServersRowsUnchanged()
+    {
+        const string table = "query_store_stats";
+        const int servers = 5;
+        const int hours = 10;
+        const int rowsPerHour = 5_000;
+
+        for (var h = 0; h < hours; h++)
+        {
+            Exec($"COPY (SELECT ({h * rowsPerHour} + i)::BIGINT AS id, TIMESTAMP '2026-09-28 {h:D2}:00:00' + to_seconds((i * 3600 / {rowsPerHour})::BIGINT) AS collection_time, " +
+                 $"(1 + i % {servers})::INTEGER AS server_id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({rowsPerHour}) t(i)) " +
+                 $"TO '{P($"20260928_{h:D2}00_{table}.parquet")}' ({ParquetCompaction.ArchiveCopyOptions})");
+        }
+
+        var before = RowsPerServer(P($"*_{table}.parquet"));
+        Assert.Equal(servers, before.Split(',').Length);
+
+        NewService().CompactParquetFiles();
+
+        Assert.Equal([$"20260928_{table}.parquet"], ArchiveFileNames());
+        var merged = P($"20260928_{table}.parquet");
+        Assert.Equal(before, RowsPerServer(merged));
+        Assert.Equal(hours * rowsPerHour, Scalar($"SELECT count(*) FROM read_parquet('{merged}')"));
+
+        var groups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id'");
+        var mixedGroups = Scalar($"SELECT count(*) FROM parquet_metadata('{merged}') WHERE path_in_schema = 'server_id' AND stats_min_value <> stats_max_value");
+        Assert.True(groups >= 4 * servers, $"{groups} row groups: too few to tell sorted from unsorted");
+        Assert.True(mixedGroups <= servers - 1, $"{mixedGroups} of {groups} row groups hold more than one server");
     }
 
     private static async Task<long> ViewScalarAsync(string dbPath, string sql)
