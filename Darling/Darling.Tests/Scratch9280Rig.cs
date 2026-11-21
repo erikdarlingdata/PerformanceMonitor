@@ -51,7 +51,7 @@ public sealed class Scratch9280Rig
 
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-            var today = DateTime.UtcNow.Date;
+            var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
             var qsEnd = today.AddHours(-12);                       /* yesterday 12:00 */
             var procEnd = today.AddHours(-12).AddMinutes(20);      /* yesterday 12:20 */
             await Exec(connection, "CREATE TABLE public.m9280_anchor (qs_end timestamp, proc_end timestamp)", ct);
