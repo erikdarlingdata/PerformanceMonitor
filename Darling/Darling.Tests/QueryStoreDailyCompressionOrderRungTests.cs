@@ -79,13 +79,11 @@ WHERE ca.view_schema = 'collect'
 
             var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, View, ct);
             Assert.NotNull(materialization);
-            var schema = materialization.Value.Schema;
-            var name = materialization.Value.Name;
-            var relation = $"\"{schema}\".\"{name}\"";
+            var relation = $"\"{materialization.Value.Schema}\".\"{materialization.Value.Name}\"";
 
             await SeedAsync(connection, relation, LiveClock.Now().Date.AddDays(-20), ct);
             await CompressAllAsync(connection, relation, ct);
-            var oldChunks = await CompressedChunksAsync(connection, schema, name, ct);
+            var oldChunks = await CompressedChunksAsync(connection, ct);
             Assert.NotEmpty(oldChunks);
 
             await RunRungAsync(connection, ct);
@@ -104,7 +102,7 @@ WHERE ca.view_schema = 'collect'
             /* A chunk compressed after the rung is laid out by hash: the same read can rule most of its batches out. */
             await SeedAsync(connection, relation, LiveClock.Now().Date.AddDays(-120), ct);
             await CompressAllAsync(connection, relation, ct);
-            var newChunks = (await CompressedChunksAsync(connection, schema, name, ct)).Where(c => !oldChunks.Contains(c)).ToList();
+            var newChunks = (await CompressedChunksAsync(connection, ct)).Where(c => !oldChunks.Contains(c)).ToList();
             Assert.NotEmpty(newChunks);
             foreach (var chunk in newChunks)
             {
@@ -178,19 +176,17 @@ FROM generate_series(0, 29999) AS g", connection);
         => Assert.True((long)(await ScalarAsync(connection,
             $"SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('{relation}'::regclass) AS c", ct))! > 0);
 
-    /* The compressed chunk relations of the materialization, by the catalog's chunk to compressed-chunk link. */
-    private static async Task<List<string>> CompressedChunksAsync(NpgsqlConnection connection, string schema, string name, CancellationToken ct)
+    /* The compressed chunk relations in the store, found by the name TimescaleDB gives them. The catalog's own chunk to compressed-chunk link
+       changed shape in TimescaleDB 2.29, and the only chunks this scratch store compresses are the ones the test seeds. */
+    private static async Task<List<string>> CompressedChunksAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var chunks = new List<string>();
         await using var command = new NpgsqlCommand(@"
-SELECT format('%I.%I', cc.schema_name, cc.table_name)
-FROM _timescaledb_catalog.hypertable AS h
-JOIN _timescaledb_catalog.chunk AS c ON c.hypertable_id = h.id
-JOIN _timescaledb_catalog.chunk AS cc ON cc.id = c.compressed_chunk_id
-WHERE h.schema_name = $1 AND h.table_name = $2 AND NOT c.dropped
-ORDER BY c.id", connection);
-        command.Parameters.AddWithValue(schema);
-        command.Parameters.AddWithValue(name);
+SELECT format('%I.%I', n.nspname, c.relname)
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE c.relkind = 'r' AND c.relname LIKE 'compress\_hyper\_%\_chunk'
+ORDER BY c.oid", connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
