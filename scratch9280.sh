@@ -8,7 +8,7 @@ dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Debug --nologo -v q 2
 cd Darling/Darling.Tests/bin/Debug/net10.0-windows || exit 1
 : > /c/runner/logs/m9280-plans.txt
 run() { ./Darling.Tests.exe -class "*Scratch9280Rig*" 2>&1 | grep -E "S9280|Total:|\[FAIL\]|Exception|Error" | head -n 30; }
-restart() { "$PGBIN/pg_ctl.exe" restart -D "$DATA" -w -t 180 2>&1 | tail -n 1; }
+restart() { "$PGBIN/pg_ctl.exe" restart -D "$DATA" -w -t 180 > "/c/runner/logs/m9280-restart-$ID.txt" 2>&1; }
 if [ "${S9280_SKIP_SEED:-0}" != "1" ]; then S9280=seed run; fi
 for TAG in base segnames ordnames; do
   export S9280_TAG=$TAG
