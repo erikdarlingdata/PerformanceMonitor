@@ -105,6 +105,10 @@ public class ArchiveService
        rebuilt (#4720): the same moment for a replay that the seam above marks for a swap. */
     internal Action? AfterCompactionReplayForTests { get; set; }
 
+    /* Fires with the batch's index after each batch's merge into its temp file, before the next batch starts (#9188). A test
+       cancels the shutdown token here to stop a group between two batches. */
+    internal Action<int>? AfterCompactionBatchMergedForTests { get; set; }
+
     /* How long one compaction pass keeps starting new merges of a daily table (query_snapshots, #5393; query_stats and query_store_stats, #5410). A store
        that already holds months of per-cycle files merges one day per group, slowly (the table's budget is a few
        MiB and one thread), so the first pass could hold the pass for hours; past this time it starts no further
@@ -516,10 +520,12 @@ public class ArchiveService
                 complete = false;
                 passNote ??= "Stopped: Lite was shutting down.";
             }
-            else if (!CompactParquetFiles())
+            else if (!CompactParquetFiles(cancellationToken: cancellationToken))
             {
                 complete = false;
-                passNote ??= "Compaction did not finish. The next pass continues it.";
+                passNote ??= cancellationToken.IsCancellationRequested
+                    ? "Stopped: Lite was shutting down during compaction. The next pass continues it."
+                    : "Compaction did not finish. The next pass continues it.";
             }
         }
         finally
@@ -1270,13 +1276,22 @@ COPY (
     /// <para>#5731: returns false when the write lock was not free within <see cref="WriteLockBudget"/> for the
     /// swap-journal replay or for a group's swap. The files of such a group are left as they were and the next
     /// pass merges them.</para>
+    /// <para>#9188: <paramref name="cancellationToken"/> is the shutdown. It is checked before each group and before each
+    /// batch's merge, never inside one: a merge already running is not interrupted, and a group whose merges are all
+    /// done finishes its swap. A cancelled run drops the temp files of the group it was in, leaves that group's inputs
+    /// as they were and returns false. Every outcome is logged, with the run's duration (<paramref name="reportIdle"/>
+    /// also logs a run that found nothing to merge, for the caller that has just said compaction started).</para>
     /// </summary>
-    internal bool CompactParquetFiles()
+    internal bool CompactParquetFiles(bool reportIdle = false, CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(_archivePath))
         {
             return true;
         }
+
+        var runClock = Stopwatch.StartNew();
+        var cancelled = false;
+        var failedGroups = 0;
 
         var (alreadyFolded, unresolvedGroups, journalReplayDeferred) = ReplayCompactionSwapJournals();
         var lockTimeouts = journalReplayDeferred ? 1 : 0;
@@ -1503,6 +1518,13 @@ COPY (
                 continue;
             }
 
+            /* #9188: shutdown. Nothing of this group is touched yet, so its files stay as they are. */
+            if (cancellationToken.IsCancellationRequested)
+            {
+                cancelled = true;
+                break;
+            }
+
             var batchOutputs = new List<(string TempPath, string FinalPath)>();
             try
             {
@@ -1624,8 +1646,12 @@ COPY (
                    place for next cycle's retry. */
                 for (var i = 0; i < batches.Count; i++)
                 {
+                    /* #9188: shutdown between batches. The catch below drops the temps merged so far. */
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
                         threads: ParquetCompaction.ThreadsFor(table));
+                    AfterCompactionBatchMergedForTests?.Invoke(i);
                 }
 
                 OnCompactionTempsReadyForTests?.Invoke(batchOutputs.Select(o => o.TempPath).ToList());
@@ -1681,6 +1707,18 @@ COPY (
                         sourcePaths.Count, batches.Count, month, table);
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                /* #9188: shutdown between two batches. No swap has started, so the inputs are exactly as the merge found
+                   them. Drop the temps and stop: the group is merged by a later pass. */
+                cancelled = true;
+                foreach (var (tempPath, _) in batchOutputs)
+                {
+                    try { File.Delete(tempPath); } catch { /* best effort */ }
+                }
+
+                break;
+            }
             catch (StoreLockTimeoutException ex)
             {
                 /* #5731: the lock is taken before the swap touches anything, so the group's inputs are exactly as
@@ -1694,6 +1732,7 @@ COPY (
             }
             catch (Exception ex)
             {
+                failedGroups++;
                 _logger?.LogError(ex, "Failed to compact {Month}/{Table} ({Count} files)", month, table, files.Count);
 
                 /* Best-effort cleanup of this group's temps. */
@@ -1723,22 +1762,40 @@ COPY (
                 _archivePath, details);
         }
 
-        if (totalMerged > 0)
+        /* #9188: the outcome, in every case: done, cancelled by shutdown, or failed groups. A run that found nothing to
+           merge is logged only when the caller asked (reportIdle), so an hourly pass that has nothing to do stays quiet. */
+        var seconds = runClock.Elapsed.TotalSeconds;
+        var remaining = totalMerged > 0 || cancelled || failedGroups > 0 || reportIdle
+            ? Directory.GetFiles(_archivePath, "*.parquet").Length
+            : 0;
+        if (cancelled)
         {
-            var remaining = Directory.GetFiles(_archivePath, "*.parquet").Length;
-            if (viewRebuildFailures > 0)
-            {
-                _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining, view rebuilds failed: {Failures}",
-                    totalMerged, totalRemoved, remaining, viewRebuildFailures);
-            }
-            else
-            {
-                _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining",
-                    totalMerged, totalRemoved, remaining);
-            }
+            _logger?.LogInformation(
+                "Parquet compaction cancelled by shutdown after {Seconds:F1} s: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining. The groups it did not reach are merged by the first archive pass after the next start",
+                seconds, totalMerged, totalRemoved, remaining);
+        }
+        else if (failedGroups > 0)
+        {
+            _logger?.LogWarning(
+                "Parquet compaction failed for {Failed} group(s), and merged {Groups} groups, removed {Removed} files, {Remaining} files remaining, in {Seconds:F1} s. The errors are logged above, and the failed groups are tried again on the next pass",
+                failedGroups, totalMerged, totalRemoved, remaining, seconds);
+        }
+        else if (totalMerged > 0 && viewRebuildFailures > 0)
+        {
+            _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining, view rebuilds failed: {Failures}, in {Seconds:F1} s",
+                totalMerged, totalRemoved, remaining, viewRebuildFailures, seconds);
+        }
+        else if (totalMerged > 0)
+        {
+            _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining, in {Seconds:F1} s",
+                totalMerged, totalRemoved, remaining, seconds);
+        }
+        else if (reportIdle)
+        {
+            _logger?.LogInformation("Parquet compaction complete: nothing to merge, {Remaining} files in the archive folder, in {Seconds:F1} s", remaining, seconds);
         }
 
-        return lockTimeouts == 0;
+        return lockTimeouts == 0 && !cancelled;
     }
 
     /* A file already in its final monthly form: YYYYMM_table or YYYYMM_table_ptNNN, with or without the imported_
@@ -2076,8 +2133,10 @@ COPY (
     /// <summary>
     /// Archives ALL data from every table to parquet, then deletes and reinitializes the database.
     /// Called when the database exceeds the size threshold. Data remains queryable through archive views.
+    /// <para>#9188: <paramref name="cancellationToken"/> is the shutdown, and reaches only the compaction after the reset.
+    /// The reset itself is not interrupted.</para>
     /// </summary>
-    public async Task ArchiveAllAndResetAsync()
+    public async Task ArchiveAllAndResetAsync(CancellationToken cancellationToken = default)
     {
         if (File.Exists(RestoreMarkerPath))
         {
@@ -2090,7 +2149,7 @@ COPY (
             return;
         }
 
-        if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
+        if (!await s_archiveLock.WaitAsync(TimeSpan.Zero, CancellationToken.None))
         {
             _logger?.LogDebug("Archive operation already in progress, skipping");
             return;
@@ -2117,7 +2176,7 @@ COPY (
            size-triggered, the store is a little over a soft threshold, and the next tick will try again;
            resetting on schedule matters far less than not resetting under a live collector. */
         var gateHeld = Stopwatch.StartNew();
-        var resetScope = await CollectionResetGate.TryBeginResetAsync();
+        var resetScope = await CollectionResetGate.TryBeginResetAsync(CancellationToken.None);
 
         if (resetScope is null)
         {
@@ -2182,7 +2241,7 @@ COPY (
             using (_duckDb.AcquireWriteLock())
             {
                 using var connection = _duckDb.CreateConnection();
-                await connection.OpenAsync();
+                await connection.OpenAsync(CancellationToken.None);
 
                 foreach (var (table, _) in ArchivableTables)
                 {
@@ -2205,7 +2264,7 @@ COPY (
                         /* Check row count */
                         using var countCmd = connection.CreateCommand();
                         countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
-                        var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+                        var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(CancellationToken.None));
                         if (rowCount == 0) continue;
 
                         /* Export all rows to a uniquely-named parquet file.
@@ -2288,12 +2347,12 @@ COPY (
                     Directory.CreateDirectory(preserveDir);
                     using (var copyConnection = _duckDb.CreateConnection())
                     {
-                        await copyConnection.OpenAsync();
+                        await copyConnection.OpenAsync(CancellationToken.None);
                         foreach (var table in PreservedConfigTables)
                         {
                             using var countCmd = copyConnection.CreateCommand();
                             countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
-                            var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+                            var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(CancellationToken.None));
                             if (rowCount == 0) continue;
 
                             var preservePath = Path.Combine(preserveDir, $"{table}.parquet").Replace("\\", "/");
@@ -2313,11 +2372,11 @@ COPY (
                         using (var checkpointCmd = copyConnection.CreateCommand())
                         {
                             checkpointCmd.CommandText = "CHECKPOINT";
-                            await checkpointCmd.ExecuteNonQueryAsync();
+                            await checkpointCmd.ExecuteNonQueryAsync(CancellationToken.None);
                         }
                         using var identityCmd = copyConnection.CreateCommand();
                         identityCmd.CommandText = "SELECT id FROM store_identity LIMIT 1";
-                        preId = await identityCmd.ExecuteScalarAsync() as string;
+                        preId = await identityCmd.ExecuteScalarAsync(CancellationToken.None) as string;
                     }
 
                     if (preId == null)
@@ -2356,7 +2415,7 @@ COPY (
                     if (preservedFiles.Count > 0)
                     {
                         using var connection = _duckDb.CreateConnection();
-                        await connection.OpenAsync();
+                        await connection.OpenAsync(CancellationToken.None);
                         foreach (var (table, path) in preservedFiles)
                         {
                             try
@@ -2436,7 +2495,7 @@ COPY (
             {
                 try
                 {
-                    CompactParquetFiles();
+                    CompactParquetFiles(reportIdle: true, cancellationToken: cancellationToken);
                 }
                 finally
                 {

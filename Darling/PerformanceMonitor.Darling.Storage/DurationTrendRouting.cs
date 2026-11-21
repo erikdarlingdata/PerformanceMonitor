@@ -434,9 +434,9 @@ public static class DurationTrendRouting
         var matchedOut = withDatabaseFilter ? ", matched_rows" : "";
 
         /* #9147: query_stats has a per-collection summary (QueryStatsCollectionSummary, V286). The collections are read from it, in place of the
-           rows, when the summary covers the whole window for this server: its oldest row is at or before $2, so every collection after $2 has a
-           summary row, and so does the one before it that the LAG needs (the first collection after $2 finds its previous collection at or after
-           the oldest summary row). The cover also needs the other end: no raw collection of the server lies after the newest summary row and
+           rows, when the summary covers the whole window for this server: its oldest row is at or before $2 and so is the server's floor
+           (#9193, V290; no floor row means no floor), so every collection after $2 has a summary row, and so does the one before it that the LAG
+           needs (the first collection after $2 finds its previous collection at or after the floor). The cover also needs the other end: no raw collection of the server lies after the newest summary row and
            at or before $3. A build older than V286 that ran after a rollback writes raw rows with no summary row, and until the next batch
            moves the floor up (FloorMoveSql) the summary would drop them from a window that ends after them. The probe is one look at the
            (server_id, collection_time) index past the newest summary row and normally finds nothing. A server with no summary row (a store fresh from V286, or a server first collected after it) has no floor and
@@ -448,6 +448,7 @@ public static class DurationTrendRouting
         summary_cover AS
         (
             SELECT COALESCE(s.oldest <= $2, false)
+                   AND COALESCE((SELECT f.valid_from FROM {QueryStatsCollectionSummary.FloorTable} AS f WHERE f.server_id = $1) <= $2, true)
                    AND NOT EXISTS
                        (
                            SELECT 1
