@@ -78,7 +78,6 @@ public sealed class AddServerCommandTests : IDisposable
                 return Task.FromResult(connect?.Invoke(server));
             },
             "TESTDOMAIN\\collector",
-            _root,
             Path.GetDirectoryName(HostsFile)!);
         using var output = new StringWriter();
         using var error = new StringWriter();
