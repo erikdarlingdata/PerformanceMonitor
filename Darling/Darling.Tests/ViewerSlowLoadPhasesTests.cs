@@ -66,7 +66,9 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.Contains("job history read ", line, StringComparison.Ordinal);
         Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
         Assert.DoesNotContain("no store phase timed", line, StringComparison.Ordinal);
-        Assert.True(ClientWorkMs(line) < 300, line);
+        /* The read ran 400 ms. Counted as client work it would make the client's share at least the read's own time; the share here is only the gap between
+           MarkSuperseded and Finish, so compare the two lines of the same load and not a fixed wall-clock number (#9249). */
+        Assert.True(ClientWorkMs(line) < ReadMs(line, "job history read"), line);
         read.SetCanceled();
     }
 
@@ -87,7 +89,7 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.NotNull(line);
         Assert.Contains("job history read ", line, StringComparison.Ordinal);
         Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
-        Assert.True(ClientWorkMs(line) < 300, line);
+        Assert.True(ClientWorkMs(line) < ReadMs(line, "job history read"), line);
     }
 
     [Fact]
@@ -155,6 +157,25 @@ public sealed class ViewerSlowLoadPhasesTests
         return long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// What the client steps the line names add up to (the grid builds and chart draws the load timed as steps).
+    /// </summary>
+    private static long ClientStepsMs(string line)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(line, @"\[client steps: ([^\]]*)\]");
+        Assert.True(m.Success, line);
+        return System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, @"(\d+) ms")
+            .Sum(x => long.Parse(x.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// A seamed read's time must not be left in "client work after the last read". What may stay there is the draws, which the line names as client
+    /// steps, so the bound is a second plus their own time and not a fixed wall-clock number: a slow runner stretches its draws and the bound with them
+    /// (#9249). A read counted as client work adds its whole time and breaks the bound.
+    /// </summary>
+    private static void AssertClientWorkIsOnlyTheDraws(string line) =>
+        Assert.True(ClientWorkMs(line) < 1000 + ClientStepsMs(line), line);
+
     [Fact]
     public void CpuTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
     {
@@ -167,7 +188,7 @@ public sealed class ViewerSlowLoadPhasesTests
         RunThemed(async () =>
         {
             var tab = new ViewerServerTab(
-                new ViewerDataService(ClosedStore(FreePort())),
+                new ViewerDataService(FailsAtOnceStore()),
                 new DarlingServer(1, "cpu-slow-load", "cpu-slow-load", true, null));
             tab.CpuReadsOverride = new ViewerServerTab.CpuTabReads(
                 async (_, _) =>
@@ -207,7 +228,7 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.True(ReadMs(line, "CPU scheduler snapshot read") >= snapshotMs - 100, line);
         Assert.Contains("CPU chart draw", line, StringComparison.Ordinal);
         /* Untimed, the 3.2 s of reads would all sit here. Only the draws after the last read remain. */
-        Assert.True(ClientWorkMs(line) < 1000, line);
+        AssertClientWorkIsOnlyTheDraws(line);
     }
 
     /// <summary>Loads one inner tab of a server tab whose reads <paramref name="seam"/> has replaced, on a clock that always writes its line, and returns the line.</summary>
@@ -216,7 +237,7 @@ public sealed class ViewerSlowLoadPhasesTests
         string? line = null;
         RunThemed(async () =>
         {
-            var tab = new ViewerServerTab(new ViewerDataService(ClosedStore(FreePort())), server);
+            var tab = new ViewerServerTab(new ViewerDataService(FailsAtOnceStore()), server);
             seam(tab);
             tab.SlowLoadSink = text => line = text;
             var window = new Window { Content = tab, Width = 1600, Height = 900 };
@@ -269,13 +290,18 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.True(ReadMs(line, "Memory summary read") >= 1200 - 100, line);
         Assert.True(ReadMs(line, "Memory trend read") >= 900 - 100, line);
         Assert.True(ReadMs(line, "Memory pressure events read") >= 600 - 100, line);
+        Assert.True(ReadMs(line, "Memory grant trend read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Memory clerk list read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Memory grant chart read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Memory pressure data start read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Plan Cache by type read") >= 500 - 100, line);
         Assert.True(ReadMs(line, "Plan Cache trend read") >= 700 - 100, line);
         Assert.True(ReadMs(line, "Plan Cache summary read") >= 600 - 100, line);
         Assert.True(ReadMs(line, "Resource Semaphore window read") >= 800 - 100, line);
         Assert.True(ReadMs(line, "Resource Semaphore snapshot read") >= 400 - 100, line);
         Assert.Contains("Memory chart draw", line, StringComparison.Ordinal);
-        /* Untimed, about 3 s of reads would all sit here. Only the draws and the unseamed store probes (a closed port) remain. */
-        Assert.True(ClientWorkMs(line) < 1000, line);
+        /* Untimed, about 3 s of reads would all sit here. Only the draws and the unseamed probes (they fail at once here, #9249) remain. */
+        AssertClientWorkIsOnlyTheDraws(line);
     }
 
     [Fact]
@@ -300,7 +326,7 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.True(ReadMs(line, "Wait Stats picker read") >= 1500 - 100, line);
         Assert.True(ReadMs(line, "Wait Stats trend read") >= 1000 - 100, line);
         Assert.Contains("Wait Stats chart draw", line, StringComparison.Ordinal);
-        Assert.True(ClientWorkMs(line) < 1000, line);
+        AssertClientWorkIsOnlyTheDraws(line);
     }
 
     [Fact]
@@ -326,7 +352,7 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.True(ReadMs(line, "PostgreSQL table bloat read") >= 1500 - 100, line);
         Assert.True(ReadMs(line, "PostgreSQL index usage read") >= 1000 - 100, line);
         Assert.Contains("PostgreSQL table bloat grid build", line, StringComparison.Ordinal);
-        Assert.True(ClientWorkMs(line) < 1000, line);
+        AssertClientWorkIsOnlyTheDraws(line);
     }
 
     /// <summary>A phase is booked by a watcher that finishes just after the read's own awaiter, so wait for the last one.</summary>
@@ -339,6 +365,11 @@ public sealed class ViewerSlowLoadPhasesTests
 
         return timer.PhaseNames.ToList();
     }
+
+    /// <summary>A store whose every read fails at once: a unix socket path nothing is at, so no connect attempt waits on the network. A closed TCP port makes
+    /// Windows retry the connect for about 2 s, and every read the test does not seam (a probe, a nested sub-tab's read) then sits in the line as client work
+    /// when its watcher has not booked it as the load ends (#9249).</summary>
+    private static string FailsAtOnceStore() => "Host=/no-such-socket-dir;Port=5432;Database=darling;Username=darling;Timeout=5";
 
     private static string ClosedStore(int port) => $"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=5";
 
