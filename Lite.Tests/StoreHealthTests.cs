@@ -252,8 +252,8 @@ public sealed class StoreHealthTests : IDisposable
     }
 
     /// <summary>Runs the loop's size check while another thread holds the store's write lock, as a collection checkpoint does. Returns
-    /// whether the lock was still held when the call returned. The threads hand off through flags and a clock, not waits: the suite's
-    /// lock-hold scan counts a wait as a hold. The holder gives up after ten seconds so a failed hand-off ends the test.</summary>
+    /// whether the lock was still held when the call returned. The threads hand off through flags, not waits or a clock: the suite's
+    /// lock-hold scan counts a wait as a hold. The holder gives up after a bounded spin so a failed hand-off ends the test.</summary>
     private async Task<bool> RunWhileTheWriteLockIsHeldAsync(Func<double, Task> run, double limitMb)
     {
         var held = false;
@@ -263,8 +263,9 @@ public sealed class StoreHealthTests : IDisposable
             using (_duckDb.AcquireWriteLock())
             {
                 System.Threading.Volatile.Write(ref held, true);
-                var clock = System.Diagnostics.Stopwatch.StartNew();
-                while (!System.Threading.Volatile.Read(ref release) && clock.Elapsed < TimeSpan.FromSeconds(10))
+                /* The call under test gives up on the lock after 100 ms and then returns, so this loop ends by the flag. The bound is
+                   a backstop only, and it is long so a fast spin cannot release the lock before the read has timed out. */
+                for (var i = 0; i < SpinLimit * 20 && !System.Threading.Volatile.Read(ref release); i++)
                 {
                     System.Threading.Thread.Yield();
                 }
