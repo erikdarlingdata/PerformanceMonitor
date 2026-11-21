@@ -226,6 +226,10 @@ public sealed partial class DarlingWorker
            reason about. Drained with the other background startup work below. */
         var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
 
+        /* #9224: the migrations are done, so the hosts' store table health passes may start (one pass of each part for the data source each
+           host reads through). Never before this point: no pass runs during a migration. */
+        StoreHealthWarmGate.Shared.MarkStoreReady();
+
         /* #5097: the slow-read writer, drained at shutdown. Failure-isolated inside; it never ends before shutdown. */
         var slowReadWriter = _slowReads is null ? Task.CompletedTask : _slowReads.RunAsync(postgres, _logger, stoppingToken);
 

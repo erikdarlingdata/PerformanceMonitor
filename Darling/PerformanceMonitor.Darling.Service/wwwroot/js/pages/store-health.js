@@ -429,7 +429,7 @@ export function readAtLine(part, asOf, ageSeconds) {
 export function heldLine(heldForSeconds) {
   const held = Number(heldForSeconds);
   return Number.isFinite(held) && held > 0
-    ? "The store's tables and indexes are read at most once every " + spanText(held) + ". A refresh inside that time shows the same read."
+    ? "The store's tables and indexes are read at most once every " + spanText(held) + ". A refresh inside that time shows the same read; after it, a refresh shows the last read at once and a new read runs behind it."
     : "";
 }
 
