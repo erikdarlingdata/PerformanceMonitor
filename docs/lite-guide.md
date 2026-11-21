@@ -231,6 +231,20 @@ The exit code says what happened:
 
 For code 1, turn MCP on and start Lite as that user once. Lite then makes the token.
 
+Add a server with `--add-server`. The Add Server window is the only other way to add one, and a dedicated user never signs in to open it. Run `--add-server` as the Windows user that runs Lite, because Lite keeps the password in the Credential Manager of that user. The command pipes a JSON array of servers to Lite on standard input:
+
+```
+type servers-to-add.json | PerformanceMonitorLite.exe --add-server
+```
+
+Each entry has `host` and can have `display_name`, `auth`, `username`, `password` and `database`. The value of `auth` is `windows`, `sql`, `serviceprincipal`, `managedidentity` or `entradefault`. For one server, you can give the fields as flags instead: `--host`, `--name`, `--auth`, `--username` and `--database`. A SQL login then needs its password as one line on standard input. There is no password flag, because a flag shows in the process list. There is no password prompt either, because a command prompt does not wait for Lite. Always pipe the input, so that the shell waits for Lite and you can read the exit code.
+
+The command runs the same checks and the same connection test as the Add Server window. It writes `servers.json`, saves the password for the user that runs it, and records the host confirmation for that user. If a server is already in the list, the command replaces its saved password and adds no second entry.
+
+If any entry fails, the command exits with code 1, gives the reason on standard error and changes nothing. When it succeeds, it exits with code 0 and prints the Windows account and the folders it wrote to.
+
+Lite keeps the server list in memory and writes it back. If a Lite is running, `--add-server` exits with code 1 and changes nothing. Run `--stop`, run `--add-server`, and start Lite again. Lite collects from the new server from that start. A Microsoft Entra MFA or device code server needs a person to sign in, so add it in the window.
+
 ### Lite Data Storage
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.

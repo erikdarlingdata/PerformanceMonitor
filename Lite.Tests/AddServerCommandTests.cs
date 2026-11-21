@@ -58,15 +58,19 @@ public sealed class AddServerCommandTests : IDisposable
         public string Out = "";
         public string Err = "";
         public List<string> Tested = [];
+        public bool ManagerMade;
     }
 
     private async Task<Run> RunVerbAsync(
         string[] args, string stdin, bool redirected = true, bool liteRunning = false, Func<ServerConnection, string?>? connect = null)
     {
         var run = new Run();
-        var manager = new ServerManager(_root, _log, HostsFile, new CredentialService(_store));
         var machine = new AddServerCommand.Machine(
-            manager,
+            () =>
+            {
+                run.ManagerMade = true;
+                return new ServerManager(_root, _log, HostsFile, new CredentialService(_store));
+            },
             () => liteRunning,
             (server, user, password) =>
             {
@@ -221,6 +225,20 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Empty(run.Tested);
     }
 
+    [Theory]
+    [InlineData("""[{"host":"np:sql01","auth":"windows"}]""")]
+    [InlineData("""[{"host":"sql01","auth":"sql","password":"p"}]""")]
+    [InlineData("""[{"host":"sql01","auth":"entramfa"}]""")]
+    [InlineData("""[{"host":"sql01","auth":"windows"},{"host":"sql01","auth":"windows"}]""")]
+    public async Task ARefusalThatNeedsNoServerList_NeverOpensOrCreatesServersJson(string stdin)
+    {
+        var run = await RunVerbAsync(["--add-server"], stdin);
+
+        Assert.Equal(1, run.Exit);
+        Assert.False(run.ManagerMade);
+        Assert.False(File.Exists(ServersFile));
+    }
+
     [Fact]
     public async Task AFailedConnectionTest_ExitsOne_AndStoresNothing()
     {
@@ -329,7 +347,7 @@ public sealed class AddServerCommandTests : IDisposable
                 {
                     var manager = new ServerManager(_root, null, Path.Combine(_root, "hosts", ServerHostBindings.FileName), credentials);
                     var machine = new AddServerCommand.Machine(
-                        manager, () => false, (_, _, _) => Task.FromResult<string?>(null), "account", _root, Path.Combine(_root, "hosts"));
+                        () => manager, () => false, (_, _, _) => Task.FromResult<string?>(null), "account", Path.Combine(_root, "hosts"));
                     using var output = new StringWriter();
                     using var error = new StringWriter();
                     var json = $$"""[{"host":"sql01","auth":"sql","username":"monitor","password":"{{password}}"}]""";

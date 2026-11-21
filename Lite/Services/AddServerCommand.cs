@@ -53,11 +53,10 @@ internal static class AddServerCommand
 
     /// <summary>What the verb needs from the machine, so a test runs it with none of it.</summary>
     internal sealed record Machine(
-        ServerManager Manager,
+        Func<ServerManager> ManagerFactory,
         Func<bool> LiteIsRunning,
         Func<ServerConnection, string?, string?, Task<string?>> TestConnection,
         string AccountName,
-        string ServersFolder,
         string HostRecordFolder);
 
     internal static string AuthWord(string value) => value.Trim().ToLowerInvariant() switch
@@ -280,8 +279,8 @@ internal static class AddServerCommand
             return ExitRefused;
         }
 
-        var manager = env.Manager;
-        var planned = new List<(Entry Entry, ServerConnection Server, bool Exists)>();
+        /* The rules that need no server list run first, so a refused entry never even opens (or creates) servers.json. */
+        var pending = new List<(Entry Entry, string Label, ServerConnection Candidate)>();
         var number = 0;
         foreach (var entry in entries)
         {
@@ -307,12 +306,19 @@ internal static class AddServerCommand
                 return ExitRefused;
             }
 
-            if (planned.Any(p => ServerManager.IsSameServerIgnoringCase(p.Server, candidate)))
+            if (pending.Any(p => ServerManager.IsSameServerIgnoringCase(p.Candidate, candidate)))
             {
                 error.WriteLine($"{label}: the same server is listed twice.");
                 return ExitRefused;
             }
 
+            pending.Add((entry, label, candidate));
+        }
+
+        var manager = env.ManagerFactory();
+        var planned = new List<(Entry Entry, ServerConnection Server, bool Exists)>();
+        foreach (var (entry, label, candidate) in pending)
+        {
             var existing = manager.GetAllServers().FirstOrDefault(s => ServerManager.IsSameServer(s, candidate));
             if (existing is null && manager.FindServerIdHolder(candidate) is { } holder)
             {
@@ -366,7 +372,7 @@ internal static class AddServerCommand
         }
 
         output.WriteLine($"Credentials were stored for the Windows account {env.AccountName}.");
-        output.WriteLine($"Server list: {Path.Combine(env.ServersFolder, "servers.json")}");
+        output.WriteLine($"Server list: {manager.ConfigFilePath}");
         output.WriteLine($"Host confirmation: {Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName)}");
         output.WriteLine("Start Lite to collect from these servers. A Lite that is already running does not see them until it is stopped and started again.");
         return ExitAdded;
@@ -383,17 +389,16 @@ internal static class AddServerCommand
         }
 
         var input = ParentConsole.OpenInput(out var redirected);
-        var serversFolder = App.ResolveSharedConfigDirectory(
-            Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), DataRootMigration.DataRootName, "config"));
         var hostFolder = Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), DataRootMigration.DataRootName, "config");
-        var manager = new ServerManager(serversFolder, hostBindingsPath: Path.Combine(hostFolder, ServerHostBindings.FileName));
         var env = new Machine(
-            manager,
+            /* Made only once an entry has passed the rules that need no list: creating it creates servers.json, and the shared folder. */
+            () => new ServerManager(
+                App.ResolveSharedConfigDirectory(hostFolder),
+                hostBindingsPath: Path.Combine(hostFolder, ServerHostBindings.FileName)),
             () => OtherLiteRunning(),
             (server, username, password) => ServerEntryRules.TestConnectionAsync(server, username, password, CancellationToken.None),
             WindowsIdentity.GetCurrent().Name,
-            serversFolder,
             hostFolder);
         return RunAsync(args, input, redirected, output, error, env).GetAwaiter().GetResult();
     }
