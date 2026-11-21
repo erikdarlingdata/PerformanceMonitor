@@ -420,6 +420,31 @@ public partial class MainWindow : Window
     /// </summary>
     internal Task StartHeadlessAsync() => InitializeServicesAsync();
 
+    /// <summary>
+    /// Opens the store. A start with a window tries once and shows the error. A headless start has no one to read it and Task
+    /// Scheduler does not restart a task that exits with code 3, so it retries for 30 minutes first (#9184). Only this step is
+    /// retried: <see cref="DuckDbInitializer.InitializeAsync"/> is written to run again on the same instance, while the steps
+    /// after it start collectors and subscribe handlers that a second pass would start twice. The exit channel is open only while the
+    /// start waits, so <c>--stop</c> ends the retry. It is closed again before each attempt, because an attempt opens the store
+    /// and can migrate or rebuild it, and a newer build that finds the channel open kills this one after 20 seconds. So a
+    /// <c>--stop</c> sent during an attempt finds nobody listening and exits 1, as it does during any start's first attempt.
+    /// A start that is only waiting holds the single-instance lock, so a second copy is refused as it is during any other start.
+    /// </summary>
+    private Task InitializeStoreAsync()
+    {
+        if (!App.IsHeadless)
+            return _databaseInitializer.InitializeAsync();
+
+        var app = (App)Application.Current;
+        return HeadlessStartRetry.RunAsync(
+            () => _databaseInitializer.InitializeAsync(),
+            HeadlessStartRetry.Timing.ForProduction(),
+            message => AppLogger.Warn("Headless", message),
+            app.EnableUpgradeHandoff,
+            app.DisableUpgradeHandoff,
+            app.StopRequested);
+    }
+
     private async Task InitializeServicesAsync()
     {
         var rebuildNoticeQueued = false;
@@ -428,7 +453,7 @@ public partial class MainWindow : Window
             StatusText.Text = "Initializing database...";
 
             // Initialize the DuckDB database
-            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
+            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => InitializeStoreAsync(), _routeLoader);
 
             /* #7812: a rebuild that left the new database without the old data says where the old file went. */
             if (_databaseInitializer.RebuildOutcome is { } rebuild)
@@ -711,6 +736,11 @@ public partial class MainWindow : Window
             (Application.Current as App)?.EnableUpgradeHandoff();
 
             _ = CheckForUpdatesOnStartupAsync();
+        }
+        catch (OperationCanceledException) when (App.IsHeadless && (Application.Current as App)?.StopRequested.IsCancellationRequested == true)
+        {
+            /* #9184: --stop ended a wait to retry the store open. The shutdown it asked for is already under way. */
+            AppLogger.Info("MainWindow", "The headless start was stopped while it waited to retry.");
         }
         catch (Exception ex)
         {
