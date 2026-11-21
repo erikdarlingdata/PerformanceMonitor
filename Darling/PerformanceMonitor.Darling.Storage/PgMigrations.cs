@@ -3383,7 +3383,8 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     /// (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). It has two shapes, and the rung runs under <see cref="V293CommandTimeoutSeconds"/>
     /// for the second. On a hypertable the build is one per chunk: it reads each uncompressed chunk's heap once and writes only its counter rows, and a
     /// compressed chunk's index is an empty shell. On a store without TimescaleDB, or one whose start-path swap to a hypertable has not yet taken its
-    /// lock, the table is one plain heap and the build reads all of it in one statement. A chunk created afterwards gets the index with the chunk.
+    /// lock, the table is one plain heap and the build reads all of it in one statement, and on such a store the service start can wait up to the
+    /// declared bound (1800 s) for this rung before collectors start. A chunk created afterwards gets the index with the chunk.
     /// Additive for an older build: it ignores the index, and no GRANT is needed for an index. The statement is a catalog read when the index exists.</para>
     /// </summary>
     private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + TimescaleSupport.CreateAttentionCountIndexSql;
