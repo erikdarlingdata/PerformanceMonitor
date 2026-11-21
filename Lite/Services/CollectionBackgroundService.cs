@@ -162,11 +162,13 @@ public class CollectionBackgroundService : BackgroundService
     /* dismissed_archive_alerts sidecar purge — the same daily cadence as its retention siblings. */
     internal static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
 
-    /* Size-based trigger — when the database exceeds this size, archive ALL data
+    /* Size-based trigger — when the database reaches the reset point, archive ALL data
        to parquet and reset the database. INSERT performance degrades badly with
        large tables (33x slower at 667MB in testing). Data remains fully queryable
-       through the archive views (hot UNION parquet). */
-    internal const double ArchiveSizeThresholdMb = 512;
+       through the archive views (hot UNION parquet). The reset point is 512 MB unless
+       settings.json sets hot_store_reset_mb (#9238), and every reader takes it from
+       HotStoreResetLimit.Current so the check, the log line and Store Health agree. */
+    internal HotStoreResetLimit HotStoreReset { get; set; } = HotStoreResetLimit.Current;
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
@@ -782,7 +784,7 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
-        var sizeDue = _duckDb != null && _duckDb.GetDatabaseSizeMb() >= ArchiveSizeThresholdMb;
+        var sizeDue = _duckDb != null && HotStoreReset.IsReached(_duckDb.GetDatabaseSizeMb());
 
         if (!timeDue && !sizeDue)
         {
@@ -794,8 +796,8 @@ public class CollectionBackgroundService : BackgroundService
             var complete = true;
             if (sizeDue)
             {
-                _logger?.LogInformation("Database size ({SizeMb:F0} MB) exceeds {Threshold} MB — archiving all data and resetting database",
-                    _duckDb!.GetDatabaseSizeMb(), ArchiveSizeThresholdMb);
+                _logger?.LogInformation("Database size ({SizeMb:F0} MB) reached the {Threshold:F0} MB reset point ({Source}) — archiving all data and resetting database",
+                    _duckDb!.GetDatabaseSizeMb(), HotStoreReset.Mb, HotStoreReset.Source);
                 await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
             }
             else

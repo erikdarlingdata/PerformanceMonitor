@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -100,6 +102,73 @@ public sealed class StoreHealthTests : IDisposable
         Assert.Equal(1, log.EstimatedRows);
         Assert.True(snapshot.Tables.ToList().IndexOf(deadlocks) < snapshot.Tables.ToList().IndexOf(log), "largest first");
         Assert.Equal(snapshot.Tables.OrderByDescending(t => t.EstimatedRows).Select(t => t.EstimatedRows), snapshot.Tables.Select(t => t.EstimatedRows));
+    }
+
+    [Fact]
+    public async Task Read_ReportsTheEffectiveResetPointAndWhereItCameFrom()
+    {
+        await SeedAsync();
+
+        var fromDefault = NewReader().Read().Store;
+        var reader = NewReader();
+        reader.HotStoreReset = new HotStoreResetLimit(1024, HotStoreResetSetting.SourceSetting);
+        var fromSetting = reader.Read();
+
+        Assert.Equal("default", fromDefault.ResetSource);
+        Assert.Equal(1024, fromSetting.Store.ResetAtMb);
+        Assert.Equal("setting", fromSetting.Store.ResetSource);
+        Assert.Equal(fromSetting.Store.FileMb / 1024 * 100, fromSetting.Store.FilePercentOfReset, 6);
+
+        /* The window and get_store_health print the same sentence, and it tells the two sources apart. */
+        var settingText = StoreHealthText.Render(fromSetting);
+        var defaultText = StoreHealthText.Render(new StoreHealthSnapshot(
+            fromSetting.ReadAtUtc, fromDefault, fromSetting.Archives, fromSetting.History, fromSetting.Tables, null));
+        Assert.Contains("1024 MB", settingText);
+        Assert.Contains("512 MB", defaultText);
+        Assert.NotEqual(StoreHealthText.StoreSentence(fromDefault), StoreHealthText.StoreSentence(fromSetting.Store));
+    }
+
+    /// <summary>#9238: the size check of the housekeeping loop uses the effective reset point, not a fixed one. The store file is
+    /// the same size in both passes. Only the limit differs, and only the lower one resets.</summary>
+    [Fact]
+    public async Task TheLoopsSizeCheck_ResetsAtTheEffectiveLimit_AndNotBelowIt()
+    {
+        await SeedAsync(Deadlock(1), Deadlock(2), Deadlock(3));
+        var history = new StoreHousekeepingHistory(_historyPath);
+        var archive = new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance) { History = history };
+        var fileMb = _duckDb.GetDatabaseSizeMb();
+        Assert.True(fileMb > 0);
+        var service = new CollectionBackgroundService(null!, _duckDb, archiveService: archive);
+        const BindingFlags nonPublic = BindingFlags.NonPublic | BindingFlags.Instance;
+        var stampField = typeof(CollectionBackgroundService).GetField("_lastArchiveTime", nonPublic)!;
+        var step = typeof(CollectionBackgroundService).GetMethod("RunArchivalIfDueAsync", nonPublic)!;
+        var args = step.GetParameters()
+            .Select(p => p.ParameterType == typeof(CancellationToken) ? (object)CancellationToken.None : null)
+            .ToArray();
+
+        /* The timed archive is not due, so only the size check can start a reset. */
+        stampField.SetValue(service, DateTime.UtcNow);
+        service.HotStoreReset = new HotStoreResetLimit(fileMb * 2, HotStoreResetSetting.SourceSetting);
+        await (Task)step.Invoke(service, args)!;
+
+        Assert.Empty(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(3L, await CountDeadlocksAsync());
+
+        service.HotStoreReset = new HotStoreResetLimit(fileMb / 2, HotStoreResetSetting.SourceSetting);
+        await (Task)step.Invoke(service, args)!;
+
+        var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read());
+        Assert.Equal(StoreHousekeepingHistory.KindSizeReset, reset.Kind);
+        Assert.Equal(0L, await CountDeadlocksAsync());
+    }
+
+    private async Task<long> CountDeadlocksAsync()
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM main.deadlocks";
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]

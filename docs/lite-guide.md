@@ -235,15 +235,35 @@ For code 1, turn MCP on and start Lite as that user once. Lite then makes the to
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints and free block reuse. The hot store holds the most recent data, about 7 days. Each hour, Lite moves older data to Parquet. The hot store has a size limit of 512 MB. When the file reaches 512 MB, Lite writes the collected data to Parquet and deletes the file. It then creates a new small file and puts back the settings, tags, mute rules and investigation records. Collection pauses for a short time while the reset runs. After the reset, Lite compacts the Parquet files into monthly archives, and collection continues during compaction.
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints and free block reuse. The hot store holds the most recent data, about 7 days. Each hour, Lite moves older data to Parquet. The hot store has a reset point. It is 512 MB unless `settings.json` sets `hot_store_reset_mb` (see [Hot store reset point](#hot-store-reset-point)). When the file reaches the reset point, Lite writes the collected data to Parquet and deletes the file. It then creates a new small file and puts back the settings, tags, mute rules and investigation records. Collection pauses for a short time while the reset runs. After the reset, Lite compacts the Parquet files into monthly archives, and collection continues during compaction.
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
-- Typical size: it depends on the number of servers, the number of collectors, and whether Query Store collection is on. The hot file does not grow past about 512 MB, because Lite resets it at that size. The Parquet archive grows with the 3 months of history that Lite keeps.
+- Typical size: it depends on the number of servers, the number of collectors, and whether Query Store collection is on. The hot file does not grow past about the reset point (512 MB by default), because Lite resets it at that size. The Parquet archive grows with the 3 months of history that Lite keeps.
 
 Compaction merges the per-run Parquet files into one file for each month. `--stop` does not wait for it to finish. Lite checks for the stop before it starts each group of files, and it waits up to 5 seconds for a merge that is already running. If that merge is still running at the end of the 5 seconds, Lite exits and the merge ends with it. In both cases a group of files is either fully merged or left as it was, so a read returns each row once. A merge writes to a `.tmp` file first, and a read never opens that file. The first archive pass after the next start runs about an hour after the start. It deletes a leftover `.tmp` file and runs the compaction again. Lite logs one line when compaction ends: complete, cancelled by shutdown, or failed.
 
 For the full list of folders, see [Where Lite keeps its files](#where-lite-keeps-its-files). To remove a server or uninstall, see [Remove a server, uninstall, and delete the data](#remove-a-server-uninstall-and-delete-the-data). To back up Lite or move it to another PC, see [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc).
+
+### Hot store reset point
+
+`settings.json` has one key for the size at which Lite archives all hot data and starts a fresh store:
+
+| Key | Default | Notes |
+|---|---|---|
+| `hot_store_reset_mb` | `512` | The size of `monitor.duckdb` in MB at which Lite resets the hot store. The range is 128 to 1024. |
+
+Lite reads the key once at start, so a change applies after a restart. A value outside the range is changed to the nearest limit, and Lite writes one warning to the log. A value that is not a number is ignored and the default applies, with one warning in the log. **Store Health** shows the reset point that is in force and says whether it is the default or comes from the setting.
+
+Raise the key when an install with many servers resets often. For example, six servers with the default collectors hold 470 to 520 MB, so they cross 512 MB while they run. Each reset pauses collection while Lite writes every hot table to Parquet.
+
+A larger hot file has these costs:
+
+- Disk: the hot file can grow to the reset point, so it uses up to that much disk space beside the Parquet archive.
+- Insert speed: an earlier test found that inserts slowed down on a large hot file. A later test of 600-row batches into one table measured no change in insert time up to 2.3 GB. We recommend raising the key in steps, and checking the collection durations in the collection log after each step.
+- Checkpoints: a checkpoint takes longer on a larger file. In the test it took about 150 ms at 560 MB and about 350 ms at 1.2 GB.
+- Start time: Lite rebuilds the indexes of the hot store at every start, so a start takes longer with a larger file. The rebuild took about 0.6 seconds on a 402 MB file.
+- Reset time: a reset exports more data, so each pause is longer. Resets are less frequent.
 
 ### Back up Lite and move it to another PC
 

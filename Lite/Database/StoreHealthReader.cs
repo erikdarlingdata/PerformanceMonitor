@@ -22,7 +22,8 @@ namespace PerformanceMonitorLite.Database;
 /// <param name="WalMb">The size of the write-ahead log beside it, 0 when there is none.</param>
 /// <param name="UsedMb">Data inside the file, from <c>pragma_database_size()</c>. Null when the store was busy.</param>
 /// <param name="ResetAtMb">The size at which Lite archives all data and starts a fresh store.</param>
-public sealed record StoreSizeInfo(double FileMb, double WalMb, double? UsedMb, double ResetAtMb)
+/// <param name="ResetSource">Where <paramref name="ResetAtMb"/> came from: <c>default</c> or <c>setting</c> (settings.json <c>hot_store_reset_mb</c>, #9238).</param>
+public sealed record StoreSizeInfo(double FileMb, double WalMb, double? UsedMb, double ResetAtMb, string ResetSource = HotStoreResetSetting.SourceDefault)
 {
     /// <summary>The file's share of the reset point, in percent.</summary>
     public double FilePercentOfReset => ResetAtMb <= 0 ? 0 : FileMb / ResetAtMb * 100.0;
@@ -50,7 +51,7 @@ public sealed record StoreHealthSnapshot(
     string? StoreNote);
 
 /// <summary>
-/// Reads Lite's own store health (#8788): the size of <c>monitor.duckdb</c> against the 512 MB reset point, the parquet archive
+/// Reads Lite's own store health (#8788): the size of <c>monitor.duckdb</c> against the reset point (512 MB unless hot_store_reset_mb says otherwise), the parquet archive
 /// folder, the housekeeping history and the rows per table. It holds the store's read lock only for the two small catalog queries
 /// and never the write lock, so collection and the UI go on. A read that cannot get the lock within <see cref="ReadLockBudget"/>
 /// still answers with the file sizes, the archive folder and the history (none of which need the store), and says why the rest is
@@ -61,6 +62,9 @@ public sealed class StoreHealthReader
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
     private readonly StoreHousekeepingHistory _history;
+
+    /// <summary>The reset point the snapshot reports (#9238). It is the one the size check uses, <see cref="HotStoreResetLimit.Current"/>.</summary>
+    internal HotStoreResetLimit HotStoreReset { get; set; } = HotStoreResetLimit.Current;
 
     public StoreHealthReader(DuckDbInitializer duckDb, StoreHousekeepingHistory history)
         : this(duckDb, duckDb.ArchivePath, history)
@@ -117,7 +121,7 @@ public sealed class StoreHealthReader
 
         return new StoreHealthSnapshot(
             DateTime.UtcNow,
-            new StoreSizeInfo(fileMb, walMb, usedMb, CollectionBackgroundService.ArchiveSizeThresholdMb),
+            new StoreSizeInfo(fileMb, walMb, usedMb, HotStoreReset.Mb, HotStoreReset.Source),
             ReadArchiveFolder(_archivePath),
             _history.Read(),
             tables,
@@ -208,7 +212,13 @@ public static class StoreHealthText
 {
     public static string StoreSentence(StoreSizeInfo store) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"Lite archives all data and starts a fresh store when the store file reaches {store.ResetAtMb:0} MB.");
+            $"Lite archives all data and starts a fresh store when the store file reaches {store.ResetAtMb:0} MB ({ResetSourceText(store.ResetSource)}).");
+
+    /// <summary>Says where the reset point came from, in words the window and <c>get_store_health</c> share (#9238).</summary>
+    public static string ResetSourceText(string source) =>
+        source == HotStoreResetSetting.SourceSetting
+            ? "set by hot_store_reset_mb in settings.json"
+            : "the default, change it with hot_store_reset_mb in settings.json";
 
     public static string UndatedSentence(int files) =>
         files == 1
