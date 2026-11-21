@@ -925,19 +925,4 @@ public sealed class FleetGateStartupTests
         var (full, _) = DarlingWorker.ReadFleetGate(clock.Stats, clock.Floor.Uptime, 4, clock.Now);
         Assert.Contains("last 31 minutes, since the service started", FleetGateLine.Describe(full, 4, FleetGateLine.SpanMinutes(clock.Floor.Uptime)), StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TheConnectBody_StampsWhenItFinishedSeeding_AndTheCollectorPassCountsFromThere()
-    {
-        /* The connect path needs a store, so this is a source pin: the stamp is written after the seeding loop and before the
-           pass counts from it. The behaviour is in ASeedFloor_CountsASlotOnlyFromTheEndOfTheSeeding. */
-        var source = ServerConnectBackoffTests.ReadWorkerSource();
-
-        var stamp = source.IndexOf("Interlocked.Exchange(ref server.SeedFinishedTicks, DateTime.UtcNow.Ticks);", StringComparison.Ordinal);
-        var seeding = source.IndexOf("server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);", StringComparison.Ordinal);
-        Assert.True(seeding >= 0 && stamp > seeding, "the stamp must follow the seeding of the due times");
-        Assert.Contains(
-            "var seeded = new DateTime(SkipCreditFloor.ClampSeedStamp(ref server.SeedFinishedTicks, now), DateTimeKind.Utc);",
-            source, StringComparison.Ordinal);
-    }
 }
