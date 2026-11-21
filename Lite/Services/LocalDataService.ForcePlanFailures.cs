@@ -110,7 +110,7 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     internal Action<string>? ArchiveReadStepForTests { get; set; }
 
     /// <summary>The same text over the hot table alone, for a window the Parquet archive holds nothing from (#7256).</summary>
-    private static readonly string ForcePlanFailuresHotOnlySql = ForcePlanFailuresSql.Replace("v_query_store_stats", "query_store_stats", StringComparison.Ordinal);
+    private static readonly string ForcePlanFailuresHotOnlySql = ForcePlanFailuresSql.Replace("v_query_store_stats", PerformanceMonitorLite.Database.LiteTextDimensions.HotSource("query_store_stats"), StringComparison.Ordinal);
 
     /// <summary>
     /// Runs <see cref="ForcePlanFailuresSql"/> for one server. The query reads <c>v_query_store_stats</c>, so it
@@ -129,7 +129,7 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
         using var _q = TimeQuery("GetForcePlanFailuresAsync", "v_query_store_stats forced plan failures");
         var windowStart = DateTime.UtcNow - ForcePlanFailureWindow;
         return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", windowStart,
-            view => view == "query_store_stats"
+            view => view != "v_query_store_stats"
                 ? ReadForcePlanFailuresAsync(ForcePlanFailuresHotOnlySql, serverId, windowStart, takeArchiveSlot: false, cancellationToken)
                 : ReadForcePlanFailuresAsync(ForcePlanFailuresSql, serverId, windowStart, takeArchiveSlot: true, cancellationToken),
             cancellationToken);

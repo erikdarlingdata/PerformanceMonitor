@@ -37,6 +37,9 @@ public sealed class LiteTextDimensionWriteTests : IDisposable
     private const string ServerName = "TextDimServer";
     private static readonly DateTime s_now = DateTime.UtcNow;
 
+    /// <summary>The id the MCP tools resolve for <see cref="ServerName"/>, so the oracle's rows are the ones every reader asks for.</summary>
+    private static readonly int s_oracleServerId = RemoteCollectorService.GetServerId(new ServerConnection { ServerName = ServerName, DisplayName = ServerName });
+
     private readonly string _tempDir;
     private readonly List<DuckDbInitializer> _stores = [];
 
@@ -328,9 +331,9 @@ public sealed class LiteTextDimensionWriteTests : IDisposable
             foreach (var diverted in s_diverted)
             {
                 /* Two rounds on one server, then a second server repeating the first text. */
-                diverted.Write(store, texts, 1, s_now.AddMinutes(-20), deltas);
-                diverted.Write(store, texts, 1, s_now.AddMinutes(-10), deltas);
-                diverted.Write(store, [texts[0]], 2, s_now.AddMinutes(-10), deltas);
+                diverted.Write(store, texts, s_oracleServerId, s_now.AddMinutes(-20), deltas);
+                diverted.Write(store, texts, s_oracleServerId, s_now.AddMinutes(-10), deltas);
+                diverted.Write(store, [texts[0]], s_oracleServerId + 1, s_now.AddMinutes(-10), deltas);
             }
         }
 
@@ -383,6 +386,9 @@ public sealed class LiteTextDimensionWriteTests : IDisposable
         return result;
     }
 
+    /// <summary>The first text <see cref="SeedBothAsync"/> writes to every table, which every reader below reads.</summary>
+    private const string SeededText = "SELECT a FROM t";
+
     [Fact]
     public async Task Oracle_KeyReaders_ReturnTheSameResultsFromBothStores()
     {
@@ -390,13 +396,13 @@ public sealed class LiteTextDimensionWriteTests : IDisposable
         var serverManager = new ServerManager(_tempDir);
         var connection = new ServerConnection { ServerName = ServerName, DisplayName = ServerName };
         serverManager.AddServer(connection);
-        var serverId = 1;
+        var serverId = s_oracleServerId;
 
         var readers = new (string Name, Func<LocalDataService, Task<object?>> Read)[]
         {
             ("query store top", async s => await s.GetQueryStoreTopQueriesAsync(serverId, hoursBack: 6)),
-            ("query store history (query text)", async s => await s.GetQueryStoreHistoryAsync(serverId, "AppDb", 100, hoursBack: 6)),
-            ("query stats history", async s => await s.GetQueryStatsHistoryAsync(serverId, "AppDb", "0xA0", hoursBack: 6)),
+            ("query store comparison", async s => (await s.GetQueryStoreComparisonAsync(serverId, s_now.AddHours(-1), s_now.AddMinutes(1), s_now.AddHours(-6), s_now.AddHours(-1))).Select(i => new { i.QueryHash, i.QueryText }).OrderBy(i => i.QueryHash, StringComparer.Ordinal).ToList()),
+            ("query stats top by cpu", async s => (await s.GetTopQueriesByCpuAsync(serverId, hoursBack: 6)).Select(r => new { r.QueryHash, r.QueryText }).OrderBy(r => r.QueryHash, StringComparer.Ordinal).ToList()),
             ("plan corrections", async s => await s.GetPlanCorrectionsAsync(serverId, hoursBack: 6)),
             ("mcp top queries by cpu", async s => await McpQueryTools.GetTopQueriesByCpu(s, serverManager, ServerName, 6, 10)),
         };
@@ -405,9 +411,21 @@ public sealed class LiteTextDimensionWriteTests : IDisposable
         {
             var fromInline = Serialize(await read(new LocalDataService(inline)));
             var fromDimension = Serialize(await read(new LocalDataService(dimension)));
-            Assert.True(fromInline.Length > 20, $"{name}: the inline store returned nothing to compare");
+            /* The seeded text must be in BOTH results: a reader that returned no rows, or rows with no text, would still be equal. */
+            Assert.True(fromInline.Contains(SeededText, StringComparison.Ordinal), $"{name}: the inline store result lacks the seeded text: {fromInline[..Math.Min(300, fromInline.Length)]}");
+            Assert.True(fromDimension.Contains(SeededText, StringComparison.Ordinal), $"{name}: the dimension store result lacks the seeded text: {fromDimension[..Math.Min(300, fromDimension.Length)]}");
             Assert.Equal(fromInline, fromDimension);
         }
+
+        /* The history reads carry metrics and no text, so they are compared for equality and for rows. */
+        var historyInline = await new LocalDataService(inline).GetQueryStoreHistoryAsync(serverId, "AppDb", 100, hoursBack: 6);
+        var historyDimension = await new LocalDataService(dimension).GetQueryStoreHistoryAsync(serverId, "AppDb", 100, hoursBack: 6);
+        Assert.NotEmpty(historyInline);
+        Assert.Equal(Serialize(historyInline), Serialize(historyDimension));
+        var statsInline = await new LocalDataService(inline).GetQueryStatsHistoryAsync(serverId, "AppDb", "0xA0", hoursBack: 6);
+        var statsDimension = await new LocalDataService(dimension).GetQueryStatsHistoryAsync(serverId, "AppDb", "0xA0", hoursBack: 6);
+        Assert.NotEmpty(statsInline);
+        Assert.Equal(Serialize(statsInline), Serialize(statsDimension));
 
         /* The fact collector reads query_stats and Query Store text for the analysis. */
         var context = new AnalysisContext { ServerId = serverId, ServerName = ServerName, TimeRangeStart = s_now.AddHours(-4), TimeRangeEnd = s_now.AddMinutes(1) };
