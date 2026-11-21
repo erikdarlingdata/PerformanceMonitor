@@ -104,7 +104,7 @@ public sealed class FindQueriesByTextLookupSpanLiveTests
 
     /// <summary>The text-table rows a plan examined: each scan of <c>query_text_dim</c> counts the rows it returned, the rows it threw away and the
     /// rows its index recheck threw away, times its loops.</summary>
-    private static long TextRowsRead(JsonElement node)
+    internal static long TextRowsRead(JsonElement node)
     {
         long total = 0;
         if (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() == "query_text_dim")
@@ -154,6 +154,7 @@ public sealed class FindQueriesByTextLookupSpanLiveTests
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = Array.Empty<int>() });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 21 * DarlingMcpFindQueriesByTextTools.AllServersLookupMatchFactor });
         var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!).RootElement[0].GetProperty("Plan");
 
         var read = TextRowsRead(plan);

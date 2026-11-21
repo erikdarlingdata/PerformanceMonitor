@@ -72,8 +72,9 @@ public sealed class QueryFleetSummaryQueryStoreTailIndexLiveTests
 
             await TuningStartPasses.ConvergeAsync(connection, ct);
 
-            var now = LiveClock.Now();
-            var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+            /* One anchor for the fact: the tool is asked about this end as its as_of, and it refuses an as_of after the real clock, so a test clock
+               pinned ahead of the real clock (the 23:30 and 00:30 passes) must not put the window past it. */
+            var end = LiveClock.AnchoredEndNotAfterNow();
             var start = end.AddHours(-Hours);
             await Exec(connection, $@"INSERT INTO collect.query_store_stats
                   (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash, query_id, plan_id, execution_type_desc, replica_role,
@@ -205,6 +206,7 @@ public sealed class QueryFleetSummaryQueryStoreTailIndexLiveTests
         var json = await DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, Hash, Hours, as_of: asOf, limit: 200, cancellationToken: ct);
         using var doc = JsonDocument.Parse(json);
         Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
+        Assert.True(doc.RootElement.TryGetProperty("servers", out _), json.Length > 300 ? json[..300] : json);
         return doc.RootElement.GetProperty("servers").EnumerateArray()
             .Where(r => r.GetProperty("source").GetString() == DarlingMcpQueryFleetSummaryTools.QueryStoreSource)
             .Select(r => new Shaped(r.GetProperty("server_name").GetString(), r.GetProperty("database_name").GetString(), r.GetProperty("execution_count").GetInt64(),
