@@ -48,7 +48,7 @@ import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
 import { renderStoreHealth } from "./pages/store-health.js";
 import { renderAdmin } from "./pages/admin.js";
-import { renderServer } from "./pages/server.js";
+import { renderServer, holdsRenamedServerRoute } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderInvestigations, requestIdFromQuery } from "./pages/investigations.js";
@@ -332,7 +332,9 @@ function route(opts) {
      and starts a fresh read count, so a read left behind cannot hold the new page's poll, Refresh button, tab-return
      refresh or render-time back-off. The poll and the Refresh button re-render the SAME page (`poll: true`): that page
      aborts its own older load, as before, and the count carries on. */
-  if (!(opts && opts.poll === true)) beginPageScope();
+  /* #9220: a first visit by a partial server name moves to the server's own name with the panel reads it already has out: those reads are
+     for the page that stays, so this one route change does not end them. */
+  if (!(opts && opts.poll === true) && !holdsRenamedServerRoute()) beginPageScope();
 
   if (frontDoor() && gateStore(opts)) return;
 
