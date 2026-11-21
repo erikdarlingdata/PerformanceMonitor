@@ -377,6 +377,27 @@ public static partial class TimescaleSupport
     public const string AttentionEventsSegmentBy = CompressionSegmentByColumn + ", event_kind";
 
     /// <summary>
+    /// How many chunks one run of the attention_events compression policy may compress (#9267): the policy config key
+    /// <c>maxchunks_to_compress</c>. A store that already holds weeks of attention events, when the policy is first added,
+    /// would otherwise compress the whole backlog in the first run, and store writes ran several times slower for the minutes
+    /// that took. With the cap the backlog goes over several hourly runs, each short; the chunks past the cap are still
+    /// eligible and the next run takes the next ones. A store with no backlog compresses one daily chunk a day, far under
+    /// the cap, so it sees no change in what gets compressed.
+    /// </summary>
+    public const int AttentionEventsCompressionChunkCap = 3;
+
+    /// <summary>
+    /// How long after it is added the attention_events policy first runs (#9267): one hour. Without an <c>initial_start</c>
+    /// TimescaleDB starts a new policy at once, which on the upgrade that adds it is the service's restart warm-up. One hour
+    /// also puts the first run after the next hourly convergence pass, which sets the cap if the pass that added the policy
+    /// could not. <c>initial_start</c> also puts the job on a fixed schedule (measured on 2.32.1: <c>fixed_schedule</c> turns
+    /// true and <c>next_start</c> is the given instant), so later runs start on the same minute each hour. Taking the job off
+    /// the fixed schedule again would reset <c>next_start</c> to the past and run it at once, which is what this delay avoids.
+    /// The job does one daily chunk a day once the backlog is gone, so its minute does not need a slot on the compression grid.
+    /// </summary>
+    public static readonly TimeSpan AttentionEventsCompressionFirstRunDelay = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// The segmentby the enable statement sets for <paramref name="table"/> and the convergence read compares
     /// against: <see cref="CollectionLogSegmentBy"/> for collection_log, <see cref="PerfmonStatsSegmentBy"/> for
     /// perfmon_stats (#5574), <see cref="AttentionEventsSegmentBy"/> for attention_events (#9216),
@@ -14789,6 +14810,33 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
         return true;
     }
 
+    /// <summary>
+    /// The statement that adds the attention_events compression policy (#9267): the same <c>compress_after</c> and cadence as
+    /// <see cref="AddCompressionPolicySql(string)"/> gives it, plus an <c>initial_start</c> of
+    /// <see cref="AttentionEventsCompressionFirstRunDelay"/> from now. Against a policy the store already has,
+    /// <c>if_not_exists</c> returns -1 and changes nothing, so a policy that is already running keeps its schedule.
+    /// </summary>
+    public static string AddAttentionEventsCompressionPolicySql() =>
+        $"SELECT add_compression_policy('{AttentionEventsTable}', compress_after => INTERVAL '{CompressAfterFor(AttentionEventsTable)}', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true, "
+        + $"initial_start => now() + INTERVAL '{AttentionEventsCompressionFirstRunDelay.TotalMinutes.ToString(CultureInfo.InvariantCulture)} minutes')";
+
+    /// <summary>
+    /// Sets <c>maxchunks_to_compress</c> on the attention_events compression job (#9267), only when it differs from
+    /// <see cref="AttentionEventsCompressionChunkCap"/> (<c>$1</c>, an integer), so a converged store issues no
+    /// <c>alter_job</c>. The policy function has no argument for the key, so it is written into the job's own config with
+    /// <c>jsonb_set</c>, which leaves <c>compress_after</c> and the rest as they were. Only <c>config</c> is named, so the
+    /// schedule, <c>next_start</c> and a paused job stay as they are (measured on 2.32.1). A store whose policy already existed
+    /// takes the cap too: its backlog, if it has one left, then goes over several runs, and a store that compressed its
+    /// backlog already compresses the same chunks, one a day. Returns a row for each job changed.
+    /// </summary>
+    public const string SetAttentionEventsChunkCapSql = @"
+SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{maxchunks_to_compress}', to_jsonb($1::int)))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_compression'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '" + AttentionEventsTable + @"'
+AND   (j.config ->> 'maxchunks_to_compress') IS DISTINCT FROM $1::int::text";
+
     /// <summary>Whether <c>collect.attention_events</c> is a hypertable now: false on a store without TimescaleDB, and on a
     /// store whose attention table is still plain (its heap was over <see cref="AttentionConversionMaxHeapBytes"/>, or the swap
     /// has not run), where neither compression statement can work.</summary>
@@ -14815,6 +14863,11 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     /// before the policy step and the next pass does both. A settings change that fails for another reason still lets the
     /// policy step run, as it does for collection_log. A table that is not a hypertable is left alone without a line; the
     /// conversion step names why.</para>
+    ///
+    /// <para>#9267: the policy is added with a first run <see cref="AttentionEventsCompressionFirstRunDelay"/> after it is
+    /// added, and the job takes <see cref="AttentionEventsCompressionChunkCap"/> as <c>maxchunks_to_compress</c>, a pass
+    /// after pass, only when it differs. A store with weeks of uncompressed attention events then compresses them over several
+    /// hourly runs, not in one run at the restart that adds the policy.</para>
     ///
     /// <para>Returns true only when the table is a hypertable with the settings and the policy in place.</para>
     /// </summary>
@@ -14860,7 +14913,7 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
 
         try
         {
-            using var policy = new NpgsqlCommand(AddCompressionPolicySql(AttentionEventsTable), connection) { CommandTimeout = SetupTimeoutSeconds };
+            using var policy = new NpgsqlCommand(AddAttentionEventsCompressionPolicySql(), connection) { CommandTimeout = SetupTimeoutSeconds };
             await policy.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -14868,6 +14921,21 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
             logger?.LogWarning(
                 "attention_events's compression policy could not be added; a policy that already exists keeps running, and the next pass tries again: {Message}",
                 ex.Message);
+            return false;
+        }
+
+        /* #9267: the cap on how many chunks one run compresses, so a backlog goes over several runs. */
+        try
+        {
+            using var cap = new NpgsqlCommand(SetAttentionEventsChunkCapSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            cap.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Integer, AttentionEventsCompressionChunkCap);
+            await cap.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "attention_events's compression policy could not be capped at {Cap} chunks a run; the next pass tries again: {Message}",
+                AttentionEventsCompressionChunkCap, ex.Message);
             return false;
         }
 

@@ -73,8 +73,9 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var lines = new List<string>();
         RunThemed(async () =>
         {
+            using var fast = new FastFailingStore();
             var tab = new ViewerServerTab(
-                new ViewerDataService($"Host=127.0.0.1;Port={FreePort()};Database=darling;Username=darling;Timeout=5"),
+                new ViewerDataService($"Host=127.0.0.1;Port={fast.Port};Database=darling;Username=darling;Timeout=5"),
                 new DarlingServer(8, "first-open-fast", "first-open-fast", true, null))
             {
                 FirstOpenSlowThresholdMs = 600_000,
@@ -102,8 +103,9 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var lines = new List<string>();
         RunThemed(async () =>
         {
+            using var fast = new FastFailingStore();
             var tab = new ViewerServerTab(
-                new ViewerDataService($"Host=127.0.0.1;Port={FreePort()};Database=darling;Username=darling;Timeout=5"),
+                new ViewerDataService($"Host=127.0.0.1;Port={fast.Port};Database=darling;Username=darling;Timeout=5"),
                 new DarlingServer(9, "first-open-twice", "first-open-twice", true, null))
             {
                 /* Zero makes every load that runs on a first-open clock write a line. */
@@ -415,13 +417,45 @@ public sealed class ViewerFirstOpenSlowLoadTests
         Assert.Contains("[client steps: tab construction 3500 ms]", line, StringComparison.Ordinal);
     }
 
-    private static int FreePort()
+    /// <summary>
+    /// A store that fails every read at once: it accepts a connection and closes it. #9266: the stand-in used to be a port nothing
+    /// listens on, and Windows retries a refused loopback connection twice before it gives up, so each read of a refresh cost about two
+    /// seconds and one refresh about fourteen. A closed connection ends a read in milliseconds and is the same failure to the Viewer
+    /// (a connection error that is not a server response), so what the tests check about the clock and the lines is unchanged.
+    /// </summary>
+    private sealed class FastFailingStore : IDisposable
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly Task _accepting;
+
+        public FastFailingStore()
+        {
+            _listener.Start();
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            _accepting = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        using var client = await _listener.AcceptTcpClientAsync();
+                    }
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+                    {
+                        /* The listener closed at the test's end: no more reads to fail. */
+                        return;
+                    }
+                }
+            });
+        }
+
+        public int Port { get; }
+
+        public void Dispose()
+        {
+            _listener.Stop();
+            _accepting.Wait(TimeSpan.FromSeconds(5));
+        }
     }
 
     /// <summary>Runs <paramref name="body"/> on the STA thread with the Viewer's theme resources in the application, as the tabs' cell styles need them.</summary>

@@ -27,13 +27,13 @@ namespace Darling.Tests;
 /// stay exactly where it is); and <c>log_timezone = 'UTC'</c> at the end (a key no managed block owns, so it
 /// stays exactly where it is too).
 ///
-/// <para><b>This fixture's numbers</b> are 69 lines removed / 35 managed keys / 1 operator line moved.
+/// <para><b>This fixture's numbers</b> are 69 lines removed / 36 managed keys / 1 operator line moved.
 /// The "1 operator line moved" is exactly what the rewrite logic requires. The counts below explain why they
-/// are 69/35 rather than some other plausible pair, given how today's builders emit their blocks:
+/// are 69/36 rather than some other plausible pair, given how today's builders emit their blocks:
 /// <list type="bullet">
-/// <item><b>managed keys 35 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
+/// <item><b>managed keys 36 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
 /// <see cref="DarlingManagedPostgres.ParseConfText"/> reads back from calling every <c>Build*ConfAppend</c> in
-/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 35 keys.
+/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 36 keys.
 /// One extra key is <c>min_wal_size</c>: v12's WAL-sizing block
 /// (<see cref="DarlingManagedPostgres.BuildWalSizingConfAppend"/>) writes both <c>max_wal_size</c> AND
 /// <c>min_wal_size</c>, and nothing later in the v1-v14 order overwrites the second one, so it survives the
@@ -43,8 +43,8 @@ namespace Darling.Tests;
 /// last extra key is <c>log_line_prefix</c>: v17
 /// (<see cref="DarlingManagedPostgres.BuildLogLinePrefixConfAppend"/>) is appended in
 /// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key
-/// either. The newest two keys are <c>random_page_cost</c> and <c>timescaledb.telemetry_level</c>: the planner
-/// page-cost block (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>) and the telemetry block
+/// either. The newest three keys are <c>random_page_cost</c>, <c>timescaledb.telemetry_level</c> and <c>log_lock_waits</c> (#9267): the planner
+/// page-cost block (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>), the lock-wait block (<see cref="DarlingManagedPostgres.BuildLogLockWaitsConfAppend"/>) and the telemetry block
 /// (<see cref="DarlingManagedPostgres.BuildTelemetryLevelConfAppend"/>) have no legacy block, so the fixture's
 /// stock conf never carries them and each adds a managed key but no removed line.</item>
 /// <item><b>lines removed 69.</b> The initdb stock conf, v1-v14
@@ -116,7 +116,7 @@ public sealed class ManagedConfRehearsalTests
         throw new FileNotFoundException($"Could not locate '{relativePath}' walking up from '{AppContext.BaseDirectory}'.");
     }
 
-    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/35 rather than the
+    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/36 rather than the
     /// design's 48/23): lines removed, managed keys in the map handed to <c>Rewrite</c>, and operator lines
     /// moved below the include — the last of which holds exactly at 1, as required.</summary>
     [Fact]
@@ -131,7 +131,7 @@ public sealed class ManagedConfRehearsalTests
         var afterLineCount = result.NewConfText.Split('\n').Length;
 
         Assert.Equal(69, beforeLineCount - afterLineCount);
-        Assert.Equal(35, managedValues.Count);
+        Assert.Equal(36, managedValues.Count);
         Assert.Single(result.ExcludedKeys);
         Assert.Contains("max_connections", result.ExcludedKeys);
     }
