@@ -368,6 +368,19 @@ def _holders_of(lines: list[str]) -> set[str]:
 # test time, against 509 s for shard 5 in that run). The shard cut is unchanged.
 MAP_SHARD_ENV = frozenset({"DARLING_TEST_PG", "DARLING_TEST_PGRUNTIME"})
 GATE_TRAIT = "Gate=Env"
+# #9260: a Gate=Env class that names the files its tests can run code from is selected when a changed file matches one of them
+# (or its own file or a covered helper changes, the map's usual reasons), not on every narrowed Darling pull request. The
+# list is the class's whole possible reach, not a guess from coverage: the map has none for it, because its tests skip at
+# map build. PgServerLogTailCsvJsonRotationLiveTests (44 s, selected on about half of all pull request runs) drives
+# PgLogEventsCollector, PgServerLogTail and the two log parsers on a live target server and touches no store, so the
+# code it can run is PerformanceMonitor.Collectors and what that project references (PerformanceMonitor.Common only: its
+# csproj has the one ProjectReference), plus start-test-pg.ps1, which starts the log-rotation targets the class reads
+# through its two environment variables. A Darling.Tests helper it names is found by the type-name rule (the map's `files`).
+# A class not in this table stays always selected.
+GATE_ENV_DEPS = {
+    "PgServerLogTailCsvJsonRotationLiveTests": (
+        "PerformanceMonitor.Collectors/**", "PerformanceMonitor.Common/**", ".github/scripts/start-test-pg.ps1"),
+}
 GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
 
 SUITE_DIRS = {
@@ -1675,7 +1688,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             elif "Stage=Guard" in traits:
                 reasons.setdefault(cls, "guard stage")
             if GATE_TRAIT in traits and NO_TESTS_TRAIT not in traits:
-                reasons.setdefault(cls, "gated on an environment the map shards lack")
+                deps = GATE_ENV_DEPS.get(cls)
+                if deps is None:
+                    reasons.setdefault(cls, "gated on an environment the map shards lack")
+                elif any(matches(p, f) for p in deps for f in live):
+                    reasons.setdefault(cls, "gated on an environment the map shards lack, and a file it reads changed")
         # #5872: a changed test class's xunit collection mates run too: they share its fixture and its serialized
         # statics, and moving a class into a collection (a changed [Collection] attribute) changes what runs beside
         # them. A collection over COLLECTION_MATE_CAP classes (live-postgres, about 650) is a serialization bucket for
