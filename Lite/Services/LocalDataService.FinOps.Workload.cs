@@ -589,17 +589,23 @@ ranked AS
     FROM per_hash AS h
     -- #7166: max_grant_kb is a per-plan high-water mark since that plan was cached, so MAX across a hash's plans is
     -- the largest grant any plan ever had (the max_dop trap, #3648). The reading is the hash's newest row's, the same
-    -- choice max_dop makes: newest collection first, newest plan first within it. Explicit NULLS LAST: DuckDB and
-    -- Postgres default DESC null placement differently.
-    LEFT JOIN LATERAL
+    -- choice max_dop makes: newest collection first, newest plan first within it. #9233: one grouped pass over win,
+    -- where a per-hash LATERAL with ORDER BY ... LIMIT 1 sorted the whole window (the statement's costliest operator
+    -- after the scan). arg_max over a struct ranks a NULL field ABOVE every value (#9195), so each key that sorted
+    -- NULLS LAST maps to a value below every real one. The grant is the last key, so rows tied on the other three
+    -- agree on the largest grant, not on whichever the sort met first.
+    LEFT JOIN
     (
-        SELECT qs.max_grant_kb
-        FROM win AS qs
-        WHERE qs.query_hash = h.query_hash
-        AND   qs.delta_execution_count > 0
-        ORDER BY qs.collection_time DESC, qs.creation_time DESC NULLS LAST, qs.delta_worker_time DESC NULLS LAST
-        LIMIT 1
-    ) AS g ON true
+        SELECT query_hash,
+               arg_max(COALESCE(max_grant_kb, 0),
+                       (collection_time,
+                        COALESCE(creation_time, '-infinity'::TIMESTAMP),
+                        COALESCE(delta_worker_time, -9223372036854775807),
+                        COALESCE(max_grant_kb, 0))) AS max_grant_kb
+        FROM win
+        WHERE delta_execution_count > 0
+        GROUP BY query_hash
+    ) AS g ON g.query_hash = h.query_hash
 ),
 kept AS
 (
@@ -613,14 +619,22 @@ sample_text AS
     -- The sample text for the kept hashes only (#6803), from each hash's busiest row in the window. #9058: one pass for
     -- the whole set. The two per-hash lookups this replaces each scanned the window again. A NULL count ranks last. A tie
     -- on the count goes to the newest collection, then the newest plan creation, then the text itself, so the pick is
-    -- the same on every read even for rows of one collection (several plans or databases).
-    SELECT qs2.query_hash, qs2.query_text
+    -- the same on every read even for rows of one collection (several plans or databases). #9233: the pick is an
+    -- arg_min over the key as a struct, not a ROW_NUMBER sort that carried the text of every row of the kept hashes.
+    -- Each DESC key is negated and its NULL maps to the largest value, so a NULL still ranks last, and the text is the
+    -- struct's last member, so a full tie still goes to the smallest text.
+    SELECT qs2.query_hash,
+           arg_min(qs2.query_text,
+                   (COALESCE(-qs2.delta_execution_count, 9223372036854775807),
+                    -epoch_us(qs2.collection_time),
+                    COALESCE(-epoch_us(qs2.creation_time), 9223372036854775807),
+                    qs2.query_text)) AS query_text
     FROM v_query_stats AS qs2
     JOIN kept AS kk ON kk.query_hash = qs2.query_hash
     WHERE qs2.server_id = $1
     AND   qs2.collection_time >= $2
     AND   qs2.query_text IS NOT NULL AND qs2.query_text != ''
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY qs2.query_hash ORDER BY qs2.delta_execution_count DESC NULLS LAST, qs2.collection_time DESC, qs2.creation_time DESC NULLS LAST, qs2.query_text) = 1
+    GROUP BY qs2.query_hash
 )
 SELECT
     k.query_hash,
