@@ -2520,47 +2520,72 @@ internal static partial class DarlingDataReader
         ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
 
-    /// <summary>The seek arm's name match: the same expression <see cref="ProcedureStatsNameIndex"/> keys, so each winner's rows are an index range.</summary>
+    /// <summary>The seek arm's name match: the expression <see cref="ProcedureStatsNameIndex"/> keys, so each winner's rows are an index range.</summary>
     internal const string MidSeekNameMatch = "AND " + DurationTrendRouting.ProcedureFullNameSql + " = COALESCE(NULLIF(w.win_schema_name, '') || '.', '') || w.win_object_name";
 
     /// <summary>
-    /// #9280: <see cref="TopProceduresWideSql"/> for the mid route on a store that has <see cref="ProcedureStatsNameIndex"/>. The one-statement
-    /// wide pass joins the winners to every raw row of the server in the window and keeps the winners' rows, so its cost follows the
-    /// server's row count. Here each winner with a database and an object seeks its own rows through the index (a LATERAL, so each
-    /// winner is an index range), and a winner with a NULL in either keeps today's NULL-safe join. Same rows, same sums, same order:
-    /// the per-winner aggregate is the wide row's own group (the key's four columns are all matched).
+    /// #9280: <see cref="TopProceduresWideSql"/> for the mid route on a store that has <see cref="ProcedureStatsNameIndex"/>. The
+    /// one-statement wide pass joins the winners to every raw row of the server in the window and keeps the winners' rows, so on the
+    /// uncompressed chunks (a bitmap scan of the heap, which holds every server's rows) its cost follows the server's row count. $9 splits
+    /// the window: rows before it (the compressed chunks, which hold no B-tree) keep today's join; rows from it on (the uncompressed
+    /// chunks, <see cref="SeekBoundary"/>) are read per winner through the index (a LATERAL, so each winner is an index range), and
+    /// a winner with a NULL database or object keeps the NULL-safe join there. The three arms are partial sums of disjoint rows, so the
+    /// outer group adds them up to the one-statement pass's own row: same sums, same extremes, same order.
     /// </summary>
     internal const string TopProceduresMidSeekWideSql = $"""
-        /* #9280: the winners' wide rows by index seek (see TopProceduresWideSql for the columns). */
+        /* #9280: the winners' wide rows, the uncompressed part by index seek (see TopProceduresWideSql for the columns). */
         SELECT
             database_name,
             schema_name,
             object_name,
             object_type,
-            sql_handle,
-            plan_handle,
-            total_executions,
-            total_cpu_us,
-            total_elapsed_us,
-            total_reads,
-            total_writes,
-            total_physical_reads,
-            total_spills,
-            min_worker_time,
-            max_worker_time,
-            min_elapsed_time,
-            max_elapsed_time,
-            last_execution_time,
-            cached_time,
-            min_logical_reads,
-            max_logical_reads,
-            min_physical_reads,
-            max_physical_reads,
-            min_logical_writes,
-            max_logical_writes,
-            min_spills,
-            max_spills
+            MAX(sql_handle) AS sql_handle,
+            MAX(plan_handle) AS plan_handle,
+            CAST(SUM(total_executions) AS bigint) AS total_executions,
+            CAST(SUM(total_cpu_us) AS bigint) AS total_cpu_us,
+            CAST(SUM(total_elapsed_us) AS bigint) AS total_elapsed_us,
+            CAST(SUM(total_reads) AS bigint) AS total_reads,
+            CAST(SUM(total_writes) AS bigint) AS total_writes,
+            CAST(SUM(total_physical_reads) AS bigint) AS total_physical_reads,
+            CAST(SUM(total_spills) AS bigint) AS total_spills,
+            MIN(min_worker_time) AS min_worker_time,
+            MAX(max_worker_time) AS max_worker_time,
+            MIN(min_elapsed_time) AS min_elapsed_time,
+            MAX(max_elapsed_time) AS max_elapsed_time,
+            MAX(last_execution_time) AS last_execution_time,
+            MAX(cached_time) AS cached_time,
+            MIN(min_logical_reads) AS min_logical_reads,
+            MAX(max_logical_reads) AS max_logical_reads,
+            MIN(min_physical_reads) AS min_physical_reads,
+            MAX(max_physical_reads) AS max_physical_reads,
+            MIN(min_logical_writes) AS min_logical_writes,
+            MAX(max_logical_writes) AS max_logical_writes,
+            MIN(min_spills) AS min_spills,
+            MAX(max_spills) AS max_spills
         FROM (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                {TopProceduresWideAggregates},
+                MAX(w.rank_metric) AS seek_rank_metric,
+                MAX(w.rank_cpu) AS seek_rank_cpu
+            FROM procedure_stats
+            JOIN winners AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+            WHERE server_id = $1
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time < $9
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+            UNION ALL
             SELECT s.*, w.rank_metric AS seek_rank_metric, w.rank_cpu AS seek_rank_cpu
             FROM winners AS w
             CROSS JOIN LATERAL (
@@ -2578,6 +2603,7 @@ internal static partial class DarlingDataReader
                 AND   object_name = w.win_object_name
                 AND   collection_time > $2
                 AND   collection_time <= $3
+                AND   collection_time >= $9
                 AND   ($5::text[] IS NULL OR database_name = ANY($5))
                 AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
                 AND   {TimescaleSupport.IntervalHonestSourceFilter}
@@ -2603,13 +2629,23 @@ internal static partial class DarlingDataReader
             WHERE server_id = $1
             AND   collection_time > $2
             AND   collection_time <= $3
+            AND   collection_time >= $9
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, schema_name, object_name, object_type
         ) AS u
-        ORDER BY seek_rank_metric DESC NULLS LAST, seek_rank_cpu DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        GROUP BY database_name, schema_name, object_name, object_type
+        ORDER BY MAX(seek_rank_metric) DESC NULLS LAST, MAX(seek_rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
+
+    /// <summary>
+    /// #9280: the time from which the rows of <c>procedure_stats</c> are surely in uncompressed chunks: the compression policy's own
+    /// delay (<see cref="TimescaleSupport.CompressAfterFor"/>) before <paramref name="nowUtc"/>. A chunk is compressed only once its whole
+    /// range is older than that, so every row at or after the boundary has a B-tree to seek; a row before it may be in either kind.
+    /// </summary>
+    internal static DateTime SeekBoundary(DateTime nowUtc) =>
+        DateTime.SpecifyKind(nowUtc.AddDays(-TimescaleSupport.CompressAfterDays).AddHours(-TimescaleSupport.HeavyOffsetHoursFor("procedure_stats")), DateTimeKind.Unspecified);
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
     /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
@@ -2779,8 +2815,9 @@ internal static partial class DarlingDataReader
         var mid = tier == RetentionTier.Raw ? PlanProceduresHourlyMid(rollups, coverage, ranking, startUtc, endUtc) : null;
         if (mid is not null && await ProceduresMidHasNoHoleAsync(postgres, mid, cancellationToken))
         {
-            var midSql = QueryTagReadJoin.Apply(BuildProceduresMidSql(ranking, mid), serverId, tags);
-            var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken);
+            var (chosenSql, seekFrom) = await ChooseProceduresMidSqlAsync(postgres, ranking, mid, DateTime.UtcNow, cancellationToken);
+            var midSql = QueryTagReadJoin.Apply(chosenSql, serverId, tags);
+            var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken, seekFrom);
             if (midRows.Select(r => (r.DatabaseName, r.SchemaName, r.ObjectName)).Distinct().Count() == midRows.Count)
             {
                 return new TopProceduresReadResult(midRows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice) { ServedByHourlyMid = true };
@@ -2801,6 +2838,16 @@ internal static partial class DarlingDataReader
     internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid, bool seek = false) =>
         TopRankings.Apply(TopProceduresMidWinnersSql, ranking, hourly: true).Replace(HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
         + "\n" + (seek ? TopProceduresMidSeekWideSql : TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal));
+
+    /// <summary>#9280: the mid route's statement for this store, and the boundary it binds at $9 (null for today's statement, which has no $9): the per-winner
+    /// seek when <see cref="ProcedureStatsNameIndex"/> is present and valid, today's one-statement wide pass when it is not (a store whose
+    /// start has not built it yet, or a probe that failed).</summary>
+    internal static async Task<(string Sql, DateTime? SeekFrom)> ChooseProceduresMidSqlAsync(
+        NpgsqlDataSource postgres, TopRanking ranking, HourlyMid mid, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var seek = await ProcedureStatsNameIndex.IsPresentAsync(postgres, cancellationToken);
+        return (BuildProceduresMidSql(ranking, mid, seek), seek ? SeekBoundary(nowUtc) : null);
+    }
 
     /// <summary>#9147: the whole hours <c>[MidStart, MidEnd)</c> a raw top-procedures read takes from <c>Relation</c>.</summary>
     internal sealed record HourlyMid(string Relation, string View, DateTime MidStart, DateTime MidEnd);
@@ -2855,10 +2902,10 @@ internal static partial class DarlingDataReader
     }
 
     /// <summary>Runs a top-procedures statement (<see cref="TopProceduresSql"/>, or the mid route's) and reads its rows. The mid's
-    /// two hours bind at $7 and $8.</summary>
+    /// two hours bind at $7 and $8, and the seek statement's boundary (#9280) at $9.</summary>
     private static async Task<List<TopProcedureRow>> ReadTopProcedureRowsAsync(
         NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
-        HourlyMid? mid, ServerClock clock, CancellationToken cancellationToken)
+        HourlyMid? mid, ServerClock clock, CancellationToken cancellationToken, DateTime? seekFrom = null)
     {
         var rows = new List<TopProcedureRow>();
         await using var command = postgres.CreateCommand(sql);
@@ -2871,6 +2918,11 @@ internal static partial class DarlingDataReader
         {
             AddTimestamp(command, mid.MidStart);
             AddTimestamp(command, mid.MidEnd);
+        }
+
+        if (seekFrom is not null)
+        {
+            AddTimestamp(command, seekFrom.Value);
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

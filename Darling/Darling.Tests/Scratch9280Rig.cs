@@ -152,14 +152,14 @@ CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '{cadence} min
             var sql = SqlFor(variant, mid!);
             for (var i = 0; i < runs; i++)
             {
-                await using var cmd = Cmd("EXPLAIN (ANALYZE, BUFFERS) " + sql, connection, start, procEnd, top, mid!);
+                await using var cmd = Cmd("EXPLAIN (ANALYZE, BUFFERS) " + sql, connection, start, procEnd, top, mid!, SeekFrom(variant));
                 await Record($"{label} {variant} {hours}h top{top} run{i}", cmd, ct, i == runs - 1);
             }
 
             if (label == "warm" && variant != "dev")
             {
-                var devRows = await Rows(Cmd(SqlFor("dev", mid!), connection, start, procEnd, top, mid!), ct);
-                var newRows = await Rows(Cmd(sql, connection, start, procEnd, top, mid!), ct);
+                var devRows = await Rows(Cmd(SqlFor("dev", mid!), connection, start, procEnd, top, mid!, null), ct);
+                var newRows = await Rows(Cmd(sql, connection, start, procEnd, top, mid!, SeekFrom(variant)), ct);
                 Console.WriteLine($"Total: S9280 compare {variant} {hours}h top{top} rows {devRows.Count} equal={devRows.SequenceEqual(newRows)}");
                 Assert.Equal(devRows, newRows);
             }
@@ -170,11 +170,12 @@ CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '{cadence} min
     {
         "dev" => DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid, seek: false),
         "seek" => DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid, seek: true),
-        _ => DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid, seek: true)
-            .Replace(DarlingDataReader.MidSeekNameMatch, "", StringComparison.Ordinal),
+        _ => DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid, seek: true),
     };
 
-    private static NpgsqlCommand Cmd(string sql, NpgsqlConnection connection, DateTime start, DateTime end, int top, DarlingDataReader.HourlyMid mid)
+    private static DateTime? SeekFrom(string variant) => variant == "dev" ? null : DarlingDataReader.SeekBoundary(DateTime.UtcNow);
+
+    private static NpgsqlCommand Cmd(string sql, NpgsqlConnection connection, DateTime start, DateTime end, int top, DarlingDataReader.HourlyMid mid, DateTime? seekFrom)
     {
         var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 600 };
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Busy });
@@ -185,6 +186,11 @@ CROSS JOIN generate_series($1::timestamp, $2::timestamp, interval '{cadence} min
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidStart });
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidEnd });
+        if (seekFrom is not null)
+        {
+            cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = seekFrom.Value });
+        }
+
         return cmd;
     }
 
