@@ -124,8 +124,8 @@ public sealed class JobCountWithinWorkerSizingTests
 
         /* The counts the formula is keyed on are the store's real ones (a new aggregate must move the constant). */
         Assert.Equal(aggregates, TimescaleSupport.ContinuousAggregateCount);
-        /* A compression-deferred hypertable (#8967) carries no policy job, so the sizing does not count it. */
-        Assert.Equal(hypertables - CollectorCatalog.All.Count(c => c.CompressionDeferred), TimescaleSupport.HypertableCount);
+        /* An off-grid hypertable (#8967, the attention table) holds a policy job (#9216) but is not counted in the sizing: the headroom covers it, and the ceiling check below proves it. */
+        Assert.Equal(hypertables - CollectorCatalog.All.Count(c => c.CompressionOffGrid), TimescaleSupport.HypertableCount);
 
         /* The ceiling (what a host with enough RAM gets) covers every real job plus the scheduler, and is not
            loose: within 40 slots of the real count, so a count that outgrows the model or a constant that

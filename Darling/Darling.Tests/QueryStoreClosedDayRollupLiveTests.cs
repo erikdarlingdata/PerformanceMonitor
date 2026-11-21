@@ -613,4 +613,59 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(firstKept.ToDateTime(TimeOnly.MinValue), DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
         AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after retention was raised");
     }
+
+    /// <summary>
+    /// #9221: the worker's own closed-day pass, with no fleet override row. Its clutter retention used to be looked up under the TABLE
+    /// name <c>query_store_stats</c>, the schedule defaults key the collector as <c>query_store</c>, so the lookup threw before the tick started
+    /// and no server got a heartbeat. Two servers hold a coverage claim, and each gets its row.
+    /// </summary>
+    [Fact]
+    public async Task TheWorkersClosedDayPass_WithNoFleetOverrideRow_WritesOneHeartbeatPerServerWithACoverageClaim()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        const int otherServerId = ServerId - 1;
+        await QueryStoreIntervalWideGridLiveTests.SeedGridAsync(store.Runner, otherServerId, Anchor, ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_interval_wide_coverage SET filled_since = @value WHERE server_id = @server_id", ct,
+            ("server_id", otherServerId), ("value", Anchor.AddDays(-90)));
+        await ExecuteAsync(store.Connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (@server_id, 'rollup-9221', TRUE) ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct,
+            ("server_id", otherServerId));
+        Assert.Equal(0L, await ScalarAsync<long>(store.Connection, "SELECT COUNT(*) FROM collect.query_store_closed_day_tick", ct));
+
+        var worker = SelfAlertFleetPassTests.MakeWorker();
+        worker.StoreForTests = store.Postgres;
+        worker.ScheduleOverridesForTest = Array.Empty<ScheduleOverride>();
+        await worker.RunQueryStoreClosedDayTickAsync(ct);
+
+        Assert.Equal(2L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_tick WHERE server_id IN (@a, @b)", ct, ("a", ServerId), ("b", otherServerId)));
+        Assert.Equal(2L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_tick WHERE server_id IN (@a, @b) AND ticked_at IS NOT NULL", ct, ("a", ServerId), ("b", otherServerId)));
+    }
+
+    /// <summary>
+    /// #9221: the retention the clutter step prunes on is the one the purge applies to <c>query_store_stats</c>' raw rows, with no fleet
+    /// override row and with one. The purge builds that argument for each catalog entry from its collector name, so the expected value
+    /// here is built the same way from the entry whose target table it is.
+    /// </summary>
+    [Fact]
+    public void TheClutterStepsRetention_IsThePurgesForQueryStoreStats_WithAndWithoutAFleetOverrideRow()
+    {
+        static int PurgeDays(IReadOnlyList<ScheduleOverride> overrides)
+        {
+            var owner = Assert.Single(CollectorCatalog.All, c => c.TargetTable == "query_store_stats");
+            return DarlingRetention.EffectivePurgeRetentionDays(owner.Name, StoreConfigProvider.ResolveFleetRetentionDays(owner.Name, overrides));
+        }
+
+        var entry = Assert.Single(CollectorCatalog.All, c => c.TargetTable == "query_store_stats");
+        Assert.Equal(PurgeDays(Array.Empty<ScheduleOverride>()), DarlingRetention.QueryStoreStatsPurgeRetentionDays(Array.Empty<ScheduleOverride>()));
+        Assert.Equal(CollectorScheduleDefaults.All[entry.Name].RetentionDays, DarlingRetention.QueryStoreStatsPurgeRetentionDays(Array.Empty<ScheduleOverride>()));
+
+        var fleet = new[] { new ScheduleOverride(null, entry.Name, null, 45, true) };
+        Assert.Equal(PurgeDays(fleet), DarlingRetention.QueryStoreStatsPurgeRetentionDays(fleet));
+        Assert.Equal(45, DarlingRetention.QueryStoreStatsPurgeRetentionDays(fleet));
+
+        var perServerOnly = new[] { new ScheduleOverride(7, entry.Name, null, 45, true) };
+        Assert.Equal(PurgeDays(perServerOnly), DarlingRetention.QueryStoreStatsPurgeRetentionDays(perServerOnly));
+    }
 }
