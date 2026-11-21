@@ -135,10 +135,13 @@ public partial class DuckDbFactCollector : IFactCollector
            calls through a local step is what buys the per-collector check without writing it out
            thirty-one times. The two grouping helpers below rewrite facts already in hand rather
            than reading the store, so they stay inline where their ordering matters. */
-        async Task RunCollectorAsync(Func<AnalysisContext, List<Fact>, Task> collect)
+        /* #9195: each collector's own elapsed time is logged (Debug), and a slow pass names its three slowest (Info), so a field log says
+           which collectors a long get_analysis_facts went to. The name is the method group the caller wrote. */
+        var timer = new CollectorPassTimer(context.ServerName, context.ServerId);
+        async Task RunCollectorAsync(Func<AnalysisContext, List<Fact>, Task> collect, [CallerArgumentExpression(nameof(collect))] string collectorName = "")
         {
             context.CancellationToken.ThrowIfCancellationRequested();
-            await collect(context, facts);
+            await timer.RunAsync(collectorName, () => collect(context, facts));
         }
 
         /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
@@ -186,6 +189,7 @@ public partial class DuckDbFactCollector : IFactCollector
         await RunCollectorAsync(CollectDiskSpaceFactsAsync);
         await RunCollectorAsync(CollectPlanAdvisoryFactsAsync);
 
+        timer.Finish();
         return facts;
     }
 

@@ -206,7 +206,8 @@ public sealed class CollectionCaveatsTests : IDisposable
             Assert.Contains("1 of 33 fact families could not be read (trace_flag (error))", doc.RootElement.GetProperty("caveat").GetString(), StringComparison.Ordinal);
             var caveats = doc.RootElement.GetProperty("collection_caveats");
             Assert.Equal("trace_flag", Assert.Single(caveats.GetProperty("entries").EnumerateArray()).GetProperty("family").GetString());
-            Assert.Equal("collection_caveats", doc.RootElement.EnumerateObject().Last().Name);
+            /* #9195: the budget keys (budget_truncated, budget_note) close every facts answer; the caveat block is still the last thing the pass itself adds. */
+            Assert.Equal("collection_caveats", doc.RootElement.EnumerateObject().Select(p => p.Name).Last(n => n is not ("budget_truncated" or "budget_note")));
         }
     }
 

@@ -478,7 +478,7 @@ public sealed class DarlingMcpTools
 
             var dataNotice = await NoticeAsync(emptyAnswer: false);
             /* #8572: the ranked objects carry stored doubles; the reply is rounded as a whole. */
-            return DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
+            var factsReply = DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -497,6 +497,15 @@ public sealed class DarlingMcpTools
                 coverage = coverage.ToPayload(),
                 facts = result
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)), dataNotice);
+
+            /* #9195: Lite's twin answered 33.1 to 33.5 KB at its default window with no key saying the answer was over the response budget
+               (#9140). The cut comes after the window notice so the notice's keys count against the budget. The facts are worst first, so the
+               cut drops the mildest, and budget_truncated and budget_note say so. total_facts, shown and coverage count what was scored, not
+               what fit. */
+            return McpResponseBudget.CapArrayInReply(
+                factsReply, "facts", "highest severity first", "facts",
+                _ => "Narrow the read with source or min_severity, or use a shorter hours_back, to see the rest. total_facts and shown count every fact that was scored.",
+                "budget_truncated", "budget_note");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -661,6 +670,9 @@ public sealed class DarlingMcpTools
                shared response target. Rows are already worse first, then better, then stable, so what is left off the end is
                the stable tail; summary and families above still count every fact. */
             var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
+            string? CutNote(int factCount) => factCount < factRows.Count
+                ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                : null;
             return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -695,9 +707,10 @@ public sealed class DarlingMcpTools
                 truncated = factCount < factRows.Count,
                 facts_returned = factCount,
                 facts_total = factRows.Count,
-                size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
-                    : null,
+                size_note = CutNote(factCount),
+                /* #9195: the budget keys every other read carries (#9140), the same sentence as size_note, which stays for readers of the older key. */
+                budget_truncated = factCount < factRows.Count,
+                budget_note = CutNote(factCount),
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;
         }

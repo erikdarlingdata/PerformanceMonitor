@@ -34,11 +34,14 @@ public static class CollectorFleetLiveness
     /// status and text of the newest failure. $1 collector, $2 window start, $3 window end (inclusive both), $4 the start of the health window
     /// (<see cref="BandWindowStart"/>). <paramref name="logRelation"/> is
     /// <c>collection_log</c> (Darling) or <c>v_collection_log</c> (Lite, hot plus archive); the text is otherwise identical on PostgreSQL and DuckDB.
-    /// The first seven counts and instants are over $2 to $3 (the row's runs, failures and newest success and failure). The last six (#9202) are what
+    /// The first seven counts and instants are over $2 to $3 (the row's runs, failures and newest success and failure). The last seven (#9202) are what
     /// <see cref="CollectorHealthClassifier"/> bands a collector from, and they are over the one-server read's seven-day window ($4 to $3), whatever
     /// the window is, so a collector that produced 30 hours ago and has only been skipping since cannot read as a setup state on a 24-hour read.
     /// Only a server whose window could change the band reads the longer window: one that is currently skipping, or that has no error and an
-    /// EXTENSION_MISSING run. Every other server's six values are the window's own, so the fleet scan stays on the window it was asked for.
+    /// EXTENSION_MISSING run, or that has neither an error nor a success (#9213: its band can still turn on EXTENSION_MISSING runs from earlier in
+    /// the seven days). Every other server's seven values are the window's own, so the fleet scan stays on the window it was asked for. The last
+    /// value, <c>total_runs</c>, is the run count of that same longer window: the band's empty-successes rung compares it with the success and
+    /// EXTENSION_MISSING counts, so it has to come from the window they do, while the row's <c>runs</c> stays the <c>hours_back</c> count.
     /// </summary>
     public static string LivenessSql(string logRelation) => $@"
 WITH w AS (
@@ -67,11 +70,13 @@ cand AS (
     SELECT server_id
     FROM agg
     WHERE (error_runs = 0 AND extension_missing_runs > 0)
+    OR    (error_runs = 0 AND success_runs = 0)
     OR    last_non_skip IS NULL
     OR    last_non_skip < last_run
 ),
 band AS (
     SELECT l.server_id,
+           COUNT(*) AS total_runs,
            COUNT(*) FILTER (WHERE l.status = 'SUCCESS' AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}) AS success_runs,
            COUNT(*) FILTER (WHERE l.status = 'ERROR') AS error_runs,
            COUNT(*) FILTER (WHERE l.status = 'EXTENSION_MISSING') AS extension_missing_runs,
@@ -90,16 +95,26 @@ SELECT a.server_id,
        a.last_failure,
        a.runs,
        a.failures,
-       (SELECT x.status FROM w x WHERE x.server_id = a.server_id AND x.collection_time = a.last_failure AND x.status IN ({FailureStatusSqlList}) LIMIT 1) AS failure_status,
-       (SELECT x.error_message FROM w x WHERE x.server_id = a.server_id AND x.collection_time = a.last_failure AND x.status IN ({FailureStatusSqlList}) LIMIT 1) AS failure_message,
+       f.status AS failure_status,
+       f.error_message AS failure_message,
        COALESCE(b.success_runs, a.success_runs) AS success_runs,
        COALESCE(b.error_runs, a.error_runs) AS error_runs,
        COALESCE(b.extension_missing_runs, a.extension_missing_runs) AS extension_missing_runs,
        COALESCE(b.last_run, a.last_run) AS last_run,
        COALESCE(b.last_non_skip, a.last_non_skip) AS last_non_skip,
-       COALESCE(b.last_productive, a.last_productive) AS last_productive
+       COALESCE(b.last_productive, a.last_productive) AS last_productive,
+       COALESCE(b.total_runs, a.runs) AS total_runs
 FROM agg a
 LEFT JOIN band b ON b.server_id = a.server_id
+LEFT JOIN LATERAL (
+    SELECT x.status, x.error_message
+    FROM {logRelation} x
+    WHERE x.server_id = a.server_id
+    AND   x.collector_name = $1
+    AND   x.collection_time = a.last_failure
+    AND   x.status IN ({FailureStatusSqlList})
+    LIMIT 1
+) f ON true
 ORDER BY a.server_id";
 
     /// <summary>The start of the seven-day health window the one-server read bands over, ending at <paramref name="windowEndUtc"/>: the $4 of <see cref="LivenessSql"/>.</summary>
@@ -109,11 +124,12 @@ ORDER BY a.server_id";
     public sealed record ServerFacts(int ServerId, string ServerName, string? DisplayName, int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind, int SqlMajorVersion = 0);
 
     /// <summary>One row of <see cref="LivenessSql"/>. The last six fields (#9202) are what <see cref="CollectorHealthClassifier"/> bands a collector from,
-    /// the same counts and instants the one-server read selects, over its seven-day window. A caller that leaves them at their defaults gets the plain outcomes.</summary>
+    /// the same counts and instants the one-server read selects, over its seven-day window, and <paramref name="BandRuns"/> (#9213) is that window's run count.
+    /// A caller that leaves them at their defaults gets the plain outcomes; a null <paramref name="BandRuns"/> reads as <see cref="Runs"/>.</summary>
     public sealed record RunFacts(
         int ServerId, DateTime? LastSuccessUtc, DateTime? LastFailureUtc, long Runs, long Failures, string? FailureStatus, string? FailureMessage,
         long SuccessRuns = 0, long ErrorRuns = 0, long ExtensionMissingRuns = 0,
-        DateTime? LastRunUtc = null, DateTime? LastNonSkipUtc = null, DateTime? LastProductiveUtc = null);
+        DateTime? LastRunUtc = null, DateTime? LastNonSkipUtc = null, DateTime? LastProductiveUtc = null, long? BandRuns = null);
 
     /// <summary>The refusal for a collector name this build does not know, or null when it is known. A typo would otherwise read as "no run on any server".</summary>
     public static string? ValidateCollector(string? collectorName)
@@ -193,10 +209,11 @@ ORDER BY a.server_id";
             /* #9202: the one-server read's band decides whether this is a setup state, so the fleet form cannot answer "is it failing" differently.
                The inputs are over that read's seven-day window (LivenessSql), not hours_back. The ladder returns EXTENSION_MISSING before any rung that
                reads a clock, so the time inputs here are only the ones SuccessCountForLadder reads. */
+            var bandRuns = run.BandRuns ?? run.Runs;
             var needsSetup = CollectorHealthClassifier.Classify(
-                run.Runs,
+                bandRuns,
                 CollectorHealthClassifier.SuccessCountForLadder(
-                    run.Runs, run.SuccessRuns, run.ExtensionMissingRuns, run.LastRunUtc, run.LastNonSkipUtc, run.LastProductiveUtc),
+                    bandRuns, run.SuccessRuns, run.ExtensionMissingRuns, run.LastRunUtc, run.LastNonSkipUtc, run.LastProductiveUtc),
                 run.ErrorRuns, 0, run.ExtensionMissingRuns, 0, 0, 0, 0, null, 0) == CollectorHealthClassifier.ExtensionMissing;
 
             /* The outcome is the newer of the two: a failure after the last success is the collector's current state; a success after the last failure means it recovered.

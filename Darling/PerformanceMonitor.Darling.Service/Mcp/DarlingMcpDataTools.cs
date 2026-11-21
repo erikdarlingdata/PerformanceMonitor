@@ -2170,7 +2170,8 @@ ORDER BY server_name";
                         Convert.ToInt64(reader.GetValue(9), System.Globalization.CultureInfo.InvariantCulture),
                         reader.IsDBNull(10) ? null : reader.GetDateTime(10),
                         reader.IsDBNull(11) ? null : reader.GetDateTime(11),
-                        reader.IsDBNull(12) ? null : reader.GetDateTime(12)));
+                        reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                        Convert.ToInt64(reader.GetValue(13), System.Globalization.CultureInfo.InvariantCulture)));
                 }
             }
 
