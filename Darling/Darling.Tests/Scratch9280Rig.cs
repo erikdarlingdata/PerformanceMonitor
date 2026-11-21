@@ -326,8 +326,7 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
     private static string ProcSql(string variant, DarlingDataReader.HourlyMid mid) => variant == "new"
         ? DarlingDataReader.BuildProceduresMidSql(TopRanking.Cpu, mid)
         : TopRankings.Apply(DarlingDataReader.TopProceduresMidWinnersSql, TopRanking.Cpu, hourly: true).Replace(DarlingDataReader.HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
-          + "
-" + OldWide.Replace("AND object_type IS NOT DISTINCT FROM w.win_object_type", "", StringComparison.Ordinal);
+          + "\n" + OldWide.Replace("AND object_type IS NOT DISTINCT FROM w.win_object_type", "", StringComparison.Ordinal);
 
     private static async Task Record(string label, NpgsqlCommand cmd, CancellationToken ct, bool print = true)
     {
@@ -343,8 +342,7 @@ WHERE ct <= $2::timestamp", connection) { CommandTimeout = 1800 };
 
         var text = sb.ToString();
         var exec = text.Split('\n').FirstOrDefault(l => l.StartsWith("Execution Time", StringComparison.Ordinal))?.Trim();
-        var buf = text.Split('
-').FirstOrDefault(l => l.TrimStart().StartsWith("Buffers:", StringComparison.Ordinal))?.Trim();
+        var buf = text.Split('\n').FirstOrDefault(l => l.TrimStart().StartsWith("Buffers:", StringComparison.Ordinal))?.Trim();
         if (print)
         {
             Console.WriteLine($"Total: S9280 {label} {exec} {buf}");
