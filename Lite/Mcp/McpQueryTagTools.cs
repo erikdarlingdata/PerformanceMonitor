@@ -879,7 +879,7 @@ public sealed class McpQueryTagTools
 
     private const string UnknownFieldCode = "unknown_field";
 
-    private static (TagTreeEdit? Edit, string? Error, string? Code) ParseTagChanges(string? changesJson)
+    internal static (TagTreeEdit? Edit, string? Error, string? Code) ParseTagChanges(string? changesJson)
     {
         if (string.IsNullOrWhiteSpace(changesJson))
         {
@@ -891,9 +891,13 @@ public sealed class McpQueryTagTools
         {
             root = JsonNode.Parse(changesJson);
         }
-        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        catch (JsonException ex)
         {
-            return (null, "changes_json is not valid JSON: " + ex.Message, null);
+            return (null, JsonParseError.Describe("changes_json", ex), null);
+        }
+        catch (ArgumentException)
+        {
+            return (null, "changes_json is not valid JSON.", null);
         }
 
         if (root is not JsonObject body)

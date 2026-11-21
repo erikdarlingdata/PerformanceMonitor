@@ -869,7 +869,7 @@ ORDER BY d.host, d.database";
         }
         catch (JsonException ex)
         {
-            return (entries, invalid, $"servers_json is not valid JSON: {ex.Message}");
+            return (entries, invalid, JsonParseError.Describe("servers_json", ex));
         }
 
         if (root is not JsonArray array)
