@@ -760,6 +760,7 @@
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
+          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.140.0, )",
           "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
@@ -829,6 +830,12 @@
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.15"
         }
+      },
+      "Microsoft.SqlServer.TransactSql.ScriptDom": {
+        "type": "CentralTransitive",
+        "requested": "[180.140.0, )",
+        "resolved": "180.140.0",
+        "contentHash": "qdSHJPR3t2mqLcYQ31E9hBhQfuHo34jOtMEOrCKHBNuV+IShlLfDR8/tDzXR7MeI2ZhlZ+8wCVRMACifoAepAA=="
       }
     },
     "net10.0-windows7.0/win-x64": {

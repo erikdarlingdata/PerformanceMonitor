@@ -46,7 +46,7 @@ public sealed class AttentionPlainTableTests
         /* Every opt-out is a table that is NOT in the hypertable grid. The list is exact, so the exception cannot spread
            silently: a second entry reddens here, and its author has to argue the grid decision again. */
         var optedOut = CollectorCatalog.All.Where(c => c.StaysPlainTable).Select(c => c.TargetTable).ToArray();
-        Assert.Equal(new[] { "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity", "object_inventory", "schema_capture_passes", "column_stats_runs" }, optedOut);
+        Assert.Equal(new[] { "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity", "object_inventory", "object_dependencies", "schema_capture_passes", "column_stats_runs" }, optedOut);
 
         /* A hypertable that joins none of the compression grid is declared too, and the list is exact for the same reason. */
         var deferred = CollectorCatalog.All.Where(c => c.CompressionDeferred).Select(c => c.TargetTable).ToArray();

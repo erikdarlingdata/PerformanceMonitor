@@ -61,12 +61,16 @@ public sealed record ObjectInventory(DateTime CapturedAtUtc, IReadOnlyList<Objec
 /// <param name="ToUtc">Converts a server-local stamp from <paramref name="Tables"/> or <paramref name="Inventory"/> to UTC.</param>
 /// <param name="Executions">The module executions, or null when this registration has none to read.</param>
 /// <param name="Inventory">The object list, or null where none is kept (Lite, or a store with no capture yet).</param>
+/// <param name="References">The names Query Store statements referenced over the window (#8784 part 2), or null where none were read.</param>
+/// <param name="Dependencies">The dependency list (Darling's <c>object_dependencies</c>), or null where none is kept.</param>
 public sealed record ObjectUsageSide(
     string ServerDisplayName,
     ObjectUsageWindowResult Tables,
     Func<DateTime, DateTime> ToUtc,
     ObjectExecutionWindow? Executions,
-    ObjectInventory? Inventory);
+    ObjectInventory? Inventory,
+    ObjectReferenceWindow? References = null,
+    ObjectDependencyList? Dependencies = null);
 
 /// <summary>
 /// The <c>get_object_usage</c> reply (#8784), built the same way on both products from each side's evidence, so Lite and Darling answer in
@@ -115,6 +119,25 @@ public sealed record ObjectUsageSide(
 /// rows are keyed by ordinal comparison. Every name here comes from the catalog (<c>sys.objects</c> for tables and the object list, Query
 /// Store's own object id for modules), so the same object is spelled the same way in every source.</para>
 ///
+/// <para><b>Views (#8784 part 2).</b> A view that is not indexed is expanded at compile time, so reading it moves only its base tables'
+/// counters and its name is left only in the statement text. Each side's <see cref="ObjectUsageSide.References"/> are the names Query Store
+/// statements named as table sources over the window, found by parsing the text. A view (or a table-valued function, or an indexed view the
+/// index counters call unused) that a statement names is <c>Referenced</c>, with the executions of those statements and the newest of
+/// them. A name written without a schema binds through the caller's default schema, so it matches the name under any schema, and names are
+/// matched ignoring case, since a case-insensitive database lets a statement spell a view any way: both can only make a view look used. As
+/// with modules, the sides read one Query Store, so a view's count is the larger of the sides', not the sum.</para>
+///
+/// <para><b>Used through another object.</b> A view used only through another view, or through an inline function, is not named in any
+/// statement. So the dependency list is walked from everything the evidence shows in use (every name a statement referenced and every module
+/// that ran): an object it reaches is <c>Referenced</c> too, and <c>used_via</c> names the object it was reached from. This also reaches a
+/// procedure that is only ever called by other procedures, which Query Store shows no executions for.</para>
+///
+/// <para><b>A view no statement named</b> is <c>Not used in window</c> only where the evidence could have shown it: statement text for the
+/// database in the window, a capture mode of <c>ALL</c>, and a dependency list to walk. Without any of them it is <c>Not tracked</c>, with
+/// the reason in <c>caveat</c>. Where no side has an object list (Lite), a view that was never named cannot be listed at all, so only the
+/// names statements referenced that are not a table or module the evidence knows are listed, as views, with a caveat that they could also be
+/// synonyms.</para>
+///
 /// <para>Rows are ordered decommission candidates first (not used, then write-only, then the rest, not tracked last), then by type, schema
 /// and name, and held to the shared response budget.</para>
 /// </summary>
@@ -138,7 +161,14 @@ public static class ObjectUsageReport
     /// <summary>The classification of an object whose use the evidence cannot show: see <c>caveat</c> on the row.</summary>
     public const string NotTracked = "Not tracked";
 
-    /// <summary>The module types of the object list that the reply lists (views are left to the view usage read).</summary>
+    /// <summary>The classification of a view, function or module that a Query Store statement named in the window, or that the dependency
+    /// list reaches from something in use (#8784 part 2).</summary>
+    public const string Referenced = "Referenced";
+
+    /// <summary>The view type of the object list and of a view row.</summary>
+    internal const string ViewType = "VIEW";
+
+    /// <summary>The module types of the object list that the reply lists. Views are listed too, through <see cref="IsViewType"/>.</summary>
     private static readonly HashSet<string> ModuleTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "SQL_STORED_PROCEDURE", "CLR_STORED_PROCEDURE", "SQL_SCALAR_FUNCTION", "SQL_INLINE_TABLE_VALUED_FUNCTION",
@@ -184,6 +214,42 @@ public static class ObjectUsageReport
 
     internal const string NoExecutionEvidenceCaveat =
         "Query Store held no data for this database in the window, so there is no evidence either way about whether this module ran.";
+
+    internal const string NoReferenceEvidenceCaveat =
+        "No Query Store statement text was stored for this database in the window, so there is no evidence either way about whether this "
+        + "view was used.";
+
+    internal const string NoDependencyListCaveat =
+        "No dependency list has been captured for this database (the object_dependencies collector has not run or is off, or the monitoring "
+        + "login has no SELECT on sys.sql_expression_dependencies there, which only db_owner has by default), so a view used only through "
+        + "another view or an inline function cannot be seen. No statement naming it is not evidence that it is unused.";
+
+    internal const string ViewCaveat =
+        "Only a view named in a Query Store statement, or reached through the dependency list from something in use, counts as used. Use "
+        + "through a synonym, from another server, from a database whose Query Store is off, or from a statement Query Store did not keep is "
+        + "not seen.";
+
+    internal const string TextMatchedCaveat =
+        "Found by a whole-word search of statement text that did not parse, which also matches a name inside a comment or a string.";
+
+    internal const string GuessedViewCaveat =
+        "No object list is kept here, so this is a name statements read as a table that is not a table in the index stats: most likely a "
+        + "view, but it could be a synonym or an object of another database. Views no statement named are not listed.";
+
+    /// <summary>The caveat of a view no statement named where some statements had no stored text.</summary>
+    internal static string StatementsWithoutTextCaveat(long withoutText, long statements) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"{withoutText:N0} of the {statements:N0} statements looked at had no stored text, so could not be checked for this view.");
+
+    /// <summary>The caveat of a view no statement named where Query Store captures only some statements.</summary>
+    internal static string ViewCaptureModeCaveat(string mode) =>
+        $"Query Store's capture mode for this database is {mode}, not ALL, so it leaves out statements it judges infrequent or cheap: a view "
+        + "read rarely can be named by no stored statement while it is in use. No statement naming it is not evidence that it is unused.";
+
+    /// <summary>The caveat of a view no statement named where the statement text covered only part of the window.</summary>
+    internal static string PartialReferenceEvidenceCaveat(double coveredDays, int daysBack) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Query Store statement text for this database covers only {coveredDays:0.#} of the {daysBack} days asked for, so this view may have been used in the days not covered.");
 
     /// <summary>The caveat of a module that did not run where Query Store captures only some statements.</summary>
     internal static string CaptureModeCaveat(string mode) =>
@@ -242,6 +308,11 @@ public static class ObjectUsageReport
         foreach (var side in sides)
         {
             AddTables(rows, side);
+        }
+
+        /* After every side's tables, so a view that a side's index stats hold as an indexed view is not listed twice. */
+        foreach (var side in sides)
+        {
             AddInventory(rows, side);
         }
 
@@ -257,15 +328,23 @@ public static class ObjectUsageReport
             AddExecutions(rows, modules, side);
         }
 
+        var hasInventory = sides.Any(s => s.Inventory is not null);
+        AddReferences(rows, sides, hasInventory);
+        WalkDependencies(rows, sides);
+
         /* The registrations read one Query Store, so the best-covered side is how much of the window was looked at. Any side seeing a mode
            other than ALL is enough to stop calling a module that did not run a candidate. */
         var executionDays = sides.Max(ExecutionDays);
         var partialCaptureMode = sides
             .Select(s => s.Executions?.QueryCaptureMode)
             .FirstOrDefault(m => m is not null && IsPartialCaptureMode(m));
+        var views = new ViewEvidence(
+            sides.Max(ReferenceDays),
+            sides.Any(s => s.Dependencies is not null),
+            sides.Select(s => s.References).Where(r => r is not null).MaxBy(r => r!.Statements));
         foreach (var row in rows.Values)
         {
-            (row.Classification, row.Caveat) = Classify(row, windowStartUtc, nowUtc, executionDays, daysBack, partialCaptureMode);
+            (row.Classification, row.Caveat) = Classify(row, windowStartUtc, nowUtc, executionDays, daysBack, partialCaptureMode, views);
         }
 
         var ordered = rows.Values
@@ -280,7 +359,6 @@ public static class ObjectUsageReport
         var paired = sides.Count > 1;
         var page = ordered.Skip(offset).Take(limit).Select(r => ToJson(r, paired)).ToArray();
         var totalObjects = ordered.Count;
-        var hasInventory = sides.Any(s => s.Inventory is not null);
 
         var payload = new JsonObject
         {
@@ -299,6 +377,7 @@ public static class ObjectUsageReport
                 ["executed"] = ordered.Count(r => r.Classification == Executed),
                 ["not_executed"] = ordered.Count(r => r.Classification == NotExecuted),
                 ["not_tracked"] = ordered.Count(r => r.Classification == NotTracked),
+                ["referenced"] = ordered.Count(r => r.Classification == Referenced),
             },
             ["note"] = Note(sides, hasInventory, retentionNote),
             ["offset"] = offset,
@@ -379,9 +458,15 @@ public static class ObjectUsageReport
             return;
         }
 
-        foreach (var o in inventory.Objects.Where(o => ModuleTypes.Contains(o.TypeDesc)))
+        foreach (var o in inventory.Objects.Where(o => ModuleTypes.Contains(o.TypeDesc) || IsViewType(o.TypeDesc)))
         {
-            var row = Get(rows, o.TypeDesc.ToUpperInvariant(), o.SchemaName, o.ObjectName);
+            var type = o.TypeDesc.ToUpperInvariant();
+            if (type == ViewType && rows.ContainsKey("INDEXED_VIEW|" + o.SchemaName + "|" + o.ObjectName))
+            {
+                continue;
+            }
+
+            var row = Get(rows, type, o.SchemaName, o.ObjectName);
             row.IsNativelyCompiled |= o.IsNativelyCompiled;
             row.CreatedUtc ??= o.CreateDate is { } c ? side.ToUtc(c) : null;
             row.ModifiedUtc ??= o.ModifyDate is { } m ? side.ToUtc(m) : null;
@@ -417,6 +502,159 @@ public static class ObjectUsageReport
             });
         }
     }
+
+    private static bool IsViewType(string typeDesc) => string.Equals(typeDesc, ViewType, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The rows a name as written matches: the same name ignoring case, under the given schema or, with none given, under any.</summary>
+    private static IEnumerable<Row> Matching(ILookup<string, Row> byName, string schema, string name) =>
+        byName[name].Where(r => schema.Length == 0 || string.Equals(r.SchemaName, schema, StringComparison.OrdinalIgnoreCase));
+
+    private static ILookup<string, Row> ByName(Dictionary<string, Row> rows) =>
+        rows.Values.ToLookup(r => r.ObjectName, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Adds each side's referenced names to the rows they match (#8784 part 2). A name can match a table, a view, a function or a module;
+    /// every row but a plain table records it. The sides read one Query Store, so a row's count is the larger of the sides' sums. With no
+    /// object list on any side, a parsed name that matches no row and is not named as a function becomes a view row of its own.
+    /// </summary>
+    private static void AddReferences(Dictionary<string, Row> rows, IReadOnlyList<ObjectUsageSide> sides, bool hasInventory)
+    {
+        foreach (var side in sides)
+        {
+            if (side.References is not { } references)
+            {
+                continue;
+            }
+
+            var byName = ByName(rows);
+            var sums = new Dictionary<Row, (long Executions, DateTime? Last, bool TextMatched, bool Parsed)>();
+            foreach (var r in references.References)
+            {
+                var matched = Matching(byName, r.SchemaName, r.ObjectName).ToList();
+                if (matched.Count == 0)
+                {
+                    if (hasInventory || r.IsFunction || r.TextMatched || IsCatalogName(r.SchemaName, r.ObjectName))
+                    {
+                        continue;
+                    }
+
+                    var guessed = Get(rows, ViewType, r.SchemaName, r.ObjectName);
+                    guessed.IsGuessedView = true;
+                    byName = ByName(rows);
+                    matched.Add(guessed);
+                }
+
+                foreach (var row in matched.Where(m => !m.IsPlainTable))
+                {
+                    sums.TryGetValue(row, out var sum);
+                    sums[row] = (sum.Executions + r.Executions, Newest(sum.Last, r.LastExecutionUtc), sum.TextMatched || r.TextMatched,
+                        sum.Parsed || !r.TextMatched);
+                }
+            }
+
+            foreach (var (row, sum) in sums)
+            {
+                row.ReferenceExecutions = Math.Max(row.ReferenceExecutions ?? 0, sum.Executions);
+                row.LastReferenceUtc = Newest(row.LastReferenceUtc, sum.Last);
+                row.ReferencedByParse |= sum.Parsed;
+                row.ReferencedByText |= sum.TextMatched;
+                row.Sides.Add(new JsonObject
+                {
+                    ["server"] = side.ServerDisplayName,
+                    ["referencing_executions"] = sum.Executions,
+                    ["last_referenced_utc"] = Iso(sum.Last),
+                });
+            }
+        }
+    }
+
+    /// <summary>A name that is a catalog view rather than a user object: one starting <c>sys</c> written without a schema
+    /// (<c>FROM sysobjects</c>). Only consulted for a view guessed with no object list, where it would otherwise be listed.</summary>
+    private static bool IsCatalogName(string schema, string name) =>
+        schema.Length == 0 && name.StartsWith("sys", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Walks every side's dependency list from what the evidence shows in use (#8784 part 2): every name a statement referenced, and every
+    /// module that ran. A row it reaches that has no use of its own is marked used, with <c>used_via</c> naming the object it was reached
+    /// from, and the walk goes on from it. Names are matched the same way as references: ignoring case, and under any schema where none was
+    /// written.
+    /// </summary>
+    private static void WalkDependencies(Dictionary<string, Row> rows, IReadOnlyList<ObjectUsageSide> sides)
+    {
+        var edges = sides
+            .Where(s => s.Dependencies is not null)
+            .SelectMany(s => s.Dependencies!.Dependencies)
+            .ToLookup(d => d.ReferencingName, StringComparer.OrdinalIgnoreCase);
+        if (edges.Count == 0)
+        {
+            return;
+        }
+
+        var byName = ByName(rows);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<(string Schema, string Name)>();
+        void Enqueue(string schema, string name)
+        {
+            if (visited.Add(schema + "|" + name))
+            {
+                queue.Enqueue((schema, name));
+            }
+        }
+
+        foreach (var side in sides)
+        {
+            foreach (var r in side.References?.References ?? [])
+            {
+                Enqueue(r.SchemaName, r.ObjectName);
+            }
+        }
+
+        foreach (var row in rows.Values.Where(r => r.Executions is > 0))
+        {
+            Enqueue(row.SchemaName, row.ObjectName);
+        }
+
+        while (queue.Count > 0)
+        {
+            var (schema, name) = queue.Dequeue();
+            foreach (var edge in edges[name])
+            {
+                if (schema.Length > 0 && !string.Equals(edge.ReferencingSchema, schema, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var via = edge.ReferencingSchema.Length > 0 ? edge.ReferencingSchema + "." + edge.ReferencingName : edge.ReferencingName;
+                foreach (var target in Matching(byName, edge.ReferencedSchema, edge.ReferencedName))
+                {
+                    if (!target.IsPlainTable && target.UsedVia is null && target.ReferenceExecutions is null && target.Executions is not > 0)
+                    {
+                        target.UsedVia = via;
+                    }
+                }
+
+                Enqueue(edge.ReferencedSchema, edge.ReferencedName);
+            }
+        }
+    }
+
+    /// <summary>How many days of the window one side's statement text covers, the same way as <see cref="ExecutionDays(ObjectExecutionWindow?)"/>.</summary>
+    internal static double ReferenceDays(ObjectReferenceWindow? references)
+    {
+        if (references is not { CoveredFromUtc: { } from, CoveredToUtc: { } to } || to <= from)
+        {
+            return 0;
+        }
+
+        var span = (to - from).TotalDays;
+        return references.DaysWithData is { } days ? Math.Min(days, span) : span;
+    }
+
+    private static double ReferenceDays(ObjectUsageSide side) => ReferenceDays(side.References);
+
+    /// <summary>What the view classification needs from all sides: the best-covered side's statement text, whether any side has a dependency
+    /// list, and the reference read with the most statements (for its count of statements with no text).</summary>
+    private sealed record ViewEvidence(double ReferenceDays, bool HasDependencies, ObjectReferenceWindow? BestReferences);
 
     /// <summary>Splits Query Store's <c>schema.name</c> at the first dot. A schema name with a dot in it is split wrongly, and such a module
     /// then shows as its own row beside the object list's entry rather than being merged into it.</summary>
@@ -458,8 +696,31 @@ public static class ObjectUsageReport
     internal static bool IsPartialCaptureMode(string mode) => !string.Equals(mode.Trim(), "ALL", StringComparison.OrdinalIgnoreCase);
 
     private static (string Classification, string? Caveat) Classify(
-        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? partialCaptureMode)
+        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? partialCaptureMode, ViewEvidence views)
     {
+        var (classification, caveat) = ClassifyByOwnEvidence(row, windowStartUtc, nowUtc, executionDays, daysBack, partialCaptureMode, views);
+
+        /* A statement naming it, or the dependency list reaching it, is evidence of use that the index counters and Query Store's module
+           executions cannot give for a view or an inline function: it lifts anything short of a counted use. */
+        if (classification is NotUsed or NotExecuted or NotTracked
+            && !row.IsPlainTable
+            && (row.ReferenceExecutions is not null || row.UsedVia is not null))
+        {
+            var textOnly = row.ReferencedByText && !row.ReferencedByParse && row.UsedVia is null;
+            return (Referenced, row.IsGuessedView ? GuessedViewCaveat + (textOnly ? " " + TextMatchedCaveat : "") : textOnly ? TextMatchedCaveat : null);
+        }
+
+        return (classification, caveat);
+    }
+
+    private static (string Classification, string? Caveat) ClassifyByOwnEvidence(
+        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? partialCaptureMode, ViewEvidence views)
+    {
+        if (row.ObjectType == ViewType)
+        {
+            return ClassifyView(row, windowStartUtc, nowUtc, daysBack, partialCaptureMode, views);
+        }
+
         if (row.IsTable)
         {
             /* A memory-optimized table's counters are always zero, so nothing below would be evidence. */
@@ -531,6 +792,50 @@ public static class ObjectUsageReport
         return (NotExecuted, caveats.Count > 0 ? string.Join(" ", caveats) : null);
     }
 
+    /// <summary>A view by its own evidence: unused only where the evidence could have shown it was used.</summary>
+    private static (string Classification, string? Caveat) ClassifyView(
+        Row row, DateTime windowStartUtc, DateTime nowUtc, int daysBack, string? partialCaptureMode, ViewEvidence views)
+    {
+        if (row.IsGuessedView)
+        {
+            return (NotTracked, GuessedViewCaveat);
+        }
+
+        if (views.ReferenceDays <= 0)
+        {
+            return (NotTracked, NoReferenceEvidenceCaveat);
+        }
+
+        if (partialCaptureMode is not null)
+        {
+            return (NotTracked, ViewCaptureModeCaveat(partialCaptureMode.Trim().ToUpperInvariant()));
+        }
+
+        if (!views.HasDependencies)
+        {
+            return (NotTracked, NoDependencyListCaveat);
+        }
+
+        var caveats = new List<string>(4);
+        if (views.ReferenceDays < daysBack - ExecutionCoverageSlackDays)
+        {
+            caveats.Add(PartialReferenceEvidenceCaveat(Math.Round(views.ReferenceDays, 1), daysBack));
+        }
+
+        if (row.CreatedUtc is { } created && created > windowStartUtc)
+        {
+            caveats.Add(CreatedInWindowCaveat(created, Math.Round(Math.Max(0, (nowUtc - created).TotalDays), 1), daysBack));
+        }
+
+        if (views.BestReferences is { StatementsWithoutText: > 0 } best)
+        {
+            caveats.Add(StatementsWithoutTextCaveat(best.StatementsWithoutText, best.Statements));
+        }
+
+        caveats.Add(ViewCaveat);
+        return (NotUsed, string.Join(" ", caveats));
+    }
+
     private static int Rank(string classification) => classification switch
     {
         NotUsed or NotExecuted => 0,
@@ -542,6 +847,8 @@ public static class ObjectUsageReport
     private static JsonObject ToJson(Row r, bool paired)
     {
         var isTable = r.IsTable;
+        var isModule = !isTable && r.ObjectType != ViewType;
+        var referenced = r.ReferenceExecutions is not null;
         return new JsonObject
         {
             ["schema_name"] = r.SchemaName,
@@ -553,8 +860,11 @@ public static class ObjectUsageReport
             ["writes"] = isTable ? r.Writes : null,
             ["last_read_utc"] = isTable ? Iso(r.LastReadUtc) : null,
             ["last_write_utc"] = isTable ? Iso(r.LastWriteUtc) : null,
-            ["executions"] = isTable ? null : r.Executions ?? 0,
-            ["last_execution_utc"] = isTable ? null : Iso(r.LastExecutionUtc),
+            ["executions"] = isModule ? r.Executions ?? 0 : null,
+            ["last_execution_utc"] = isModule ? Iso(r.LastExecutionUtc) : null,
+            ["referencing_executions"] = referenced ? r.ReferenceExecutions : r.ObjectType == ViewType ? 0 : null,
+            ["last_referenced_utc"] = referenced ? Iso(r.LastReferenceUtc) : null,
+            ["used_via"] = r.UsedVia,
             ["created_utc"] = Iso(r.CreatedUtc),
             ["modified_utc"] = Iso(r.ModifiedUtc),
             ["dropped"] = isTable && r.Dropped == true ? true : null,
@@ -599,7 +909,21 @@ public static class ObjectUsageReport
                     ["source"] = e.Source,
                 }
                 : null,
+            ["views"] = side.References is { } refs
+                ? new JsonObject
+                {
+                    ["covered_from_utc"] = Iso(refs.CoveredFromUtc),
+                    ["covered_to_utc"] = Iso(refs.CoveredToUtc),
+                    ["days_with_data"] = refs.DaysWithData,
+                    ["short_of_window"] = Math.Round(ReferenceDays(refs), 1) < daysBack - 1,
+                    ["statements"] = refs.Statements,
+                    ["statements_without_text"] = refs.StatementsWithoutText,
+                    ["statements_unparsed"] = refs.StatementsUnparsed,
+                    ["source"] = refs.Source,
+                }
+                : null,
             ["object_list_captured_at_utc"] = side.Inventory is { } inv ? Iso(inv.CapturedAtUtc) : null,
+            ["dependency_list_captured_at_utc"] = side.Dependencies is { } deps ? Iso(deps.CapturedAtUtc) : null,
             ["data_age_hours"] = t.CoveredTo is { } newest ? Math.Round((nowUtc - newest).TotalHours, 1) : null,
         };
     }
@@ -648,7 +972,18 @@ public static class ObjectUsageReport
                 : "No object list is kept here, so a module that never ran in the window is NOT listed: its absence is not evidence that it is unused.",
             "'Not tracked' rows (memory-optimized tables, inline table-valued functions, CLR and natively compiled modules, and anything "
             + "the evidence does not cover) leave no trace here whatever their use: they are NOT candidates, and caveat on the row says why.",
-            "Views that are not indexed are not covered: their reads land on the base tables.",
+            sides.Any(s => s.References is not null)
+                ? "Views: a view that is not indexed moves only its base tables' counters, so its use is read from Query Store statement "
+                + "text. A view a statement names (parsed, so names in comments and strings do not count) is 'Referenced', with "
+                + "referencing_executions; so is one the dependency list reaches from a referenced object or a module that ran, with "
+                + "used_via naming that object. A name written without a schema matches the name under any schema, and names are matched "
+                + "ignoring case. coverage.views says how much statement text was looked at. "
+                + (hasInventory
+                    ? "A view no statement named is 'Not used in window' only with statement text for the database, a capture mode of ALL "
+                    + "and a dependency list to walk; otherwise it is 'Not tracked'."
+                    : "No object list is kept here, so a view no statement named is NOT listed, and a listed view is a name statements read "
+                    + "as a table that is not a known table.")
+                : "Views that are not indexed are not covered: their reads land on the base tables.",
         };
 
         if (sides.Count > 1)
@@ -693,6 +1028,13 @@ public static class ObjectUsageReport
         public string SchemaName { get; } = schemaName;
         public string ObjectName { get; } = objectName;
         public bool IsTable { get; } = objectType is "USER_TABLE" or "INDEXED_VIEW";
+        public bool IsPlainTable { get; } = objectType is "USER_TABLE";
+        public bool IsGuessedView { get; set; }
+        public long? ReferenceExecutions { get; set; }
+        public DateTime? LastReferenceUtc { get; set; }
+        public bool ReferencedByParse { get; set; }
+        public bool ReferencedByText { get; set; }
+        public string? UsedVia { get; set; }
         public string Classification { get; set; } = "";
         public string? Caveat { get; set; }
         public bool? IsMemoryOptimized { get; set; }

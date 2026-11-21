@@ -904,10 +904,17 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_built') IS NOT NULL T
         // V286 (#9147): the query_stats per-collection summary table, the probe's newest sentinel until V287 (#9164) went on top. The rewind drops it, so a re-run of V286 creates it
         // empty and the duration trend reads raw until it covers a window. Safe on a store that never had it.
         new(286, "hasQueryStatsCollectionSummary", @"DROP TABLE IF EXISTS collect.query_stats_collection;"),
-        // V287 (#9164): the hourly host rollup's two tables. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V287
-        // creates them empty and the service builds the hours again. Safe on a store that never had them.
+        // V287 (#9164): the hourly host rollup's two tables, the probe's newest sentinel until V288 (#8784 part 2) went on top. The rewind drops
+        // both, so a re-run of V287 creates them empty and the service builds the hours again. Safe on a store that never had them.
         new(287, "hasQueryStatsHostHourly", @"DROP TABLE IF EXISTS collect.query_stats_host_hourly;
 DROP TABLE IF EXISTS collect.query_stats_host_hourly_built;"),
+        // V288 (#8784 part 2): the dependency list and the per-day referenced-names summary. The pair object_dependencies and
+        // object_references_daily_databases is the probe's newest sentinel. The rewind drops all four tables, so a re-run of V288 creates them
+        // empty, the collector captures the list again and the service builds the days again. Safe on a store that never had them.
+        new(288, "hasObjectReferences", @"DROP TABLE IF EXISTS collect.object_dependencies;
+DROP TABLE IF EXISTS collect.object_references_daily;
+DROP TABLE IF EXISTS collect.object_references_daily_built;
+DROP TABLE IF EXISTS collect.object_references_daily_databases;"),
     ];
 
     /// <summary>

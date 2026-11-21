@@ -57,11 +57,15 @@ memory_pressure_events,collected,yes,
 memory_stats,collected,yes,
 module_map,derived,derived,module names kept past procedure_stats retention
 module_map_state,internal,no,module map watermark
+object_dependencies,collected,yes,
 object_executions_daily,derived,derived,per-day module executions
 object_executions_daily_built,internal,no,which days are built
 object_executions_daily_databases,derived,derived,days on which Query Store held rows per database
 object_executions_daily_retention,internal,no,retention in effect for the daily table
 object_inventory,collected,yes,
+object_references_daily,derived,derived,per-day names Query Store statements referenced
+object_references_daily_built,internal,no,which days are built
+object_references_daily_databases,derived,derived,statements looked at per database per day
 oversized_plan_backlog,internal,no,queue of oversized plans
 oversized_plan_backlog_drops,internal,no,plans dropped from the queue
 perfmon_interval_baseline,derived,derived,rollup view

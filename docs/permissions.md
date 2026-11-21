@@ -98,6 +98,8 @@ Darling uses the same target-server grants. Its bundled PostgreSQL store and ser
 
 Applies to **all editions**. The FinOps Index Analysis tab runs `sp_IndexCleanup` against each user database you ask it to inspect, executing as your app login. The server-level grants above (`VIEW SERVER STATE` and friends) are *not* sufficient on their own — the login also needs a user mapping in every user database it will analyze, plus `VIEW DATABASE STATE`, `VIEW DEFINITION`, and `SELECT` on `sys.sql_expression_dependencies` in each.
 
+The same `SELECT` on `sys.sql_expression_dependencies` also feeds Darling's optional view usage evidence. The daily `object_dependencies` collector reads that catalog view, so `get_object_usage` can tell when a view is used only through another view or an inline function. Without the grant, the collector checks first and stores no rows for that database instead of failing. Views no statement named are then reported as `Not tracked`, never as unused.
+
 The third grant is the easy one to miss: by default only members of `db_owner` have `SELECT` on `sys.sql_expression_dependencies`, and `VIEW DEFINITION` does not include it. `sp_IndexCleanup` queries that catalog view (via three-part name to the target database) when checking for computed columns and check constraints that reference UDFs, so the failure only surfaces on databases that actually have those — which is why a smoke-test database may pass and a real workload database fails with `Msg 229`.
 
 For each target user database:

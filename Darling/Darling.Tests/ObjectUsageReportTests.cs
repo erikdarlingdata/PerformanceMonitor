@@ -94,8 +94,9 @@ public sealed class ObjectUsageReportTests
         Assert.Equal(90, Obj(root, "usp_Daily").GetProperty("executions").GetInt64());
         Assert.Equal("SQL_STORED_PROCEDURE", Obj(root, "usp_Daily").GetProperty("object_type").GetString());
         Assert.Equal(ObjectUsageReport.NotExecuted, Obj(root, "usp_YearEnd").GetProperty("classification").GetString());
-        /* Views that are not indexed are left to the view usage read: listing them here would call every one of them unused. */
-        Assert.DoesNotContain(root.GetProperty("objects").EnumerateArray(), o => o.GetProperty("object_name").GetString() == "vSomething");
+        /* #8784 part 2: a view is listed, but with no statement text read it is never called unused: there is no evidence either way. */
+        Assert.Equal(ObjectUsageReport.NotTracked, Obj(root, "vSomething").GetProperty("classification").GetString());
+        Assert.Equal("VIEW", Obj(root, "vSomething").GetProperty("object_type").GetString());
     }
 
     [Fact]

@@ -4104,6 +4104,7 @@ LIMIT 1";
         ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["identity_capacity"] = (r, s, ct) => r.RunAsync(IdentityCapacityCollector.Instance, s, ct),
         ["object_inventory"] = (r, s, ct) => r.RunAsync(ObjectInventoryCollector.Instance, s, ct),
+        ["object_dependencies"] = (r, s, ct) => r.RunAsync(ObjectDependenciesCollector.Instance, s, ct),
         /* #7643: the schema pass has its own run (events, probe, per-database catalog reads, versioned store), not the one-query path. */
         ["schema_objects"] = (r, s, ct) => DarlingSchemaCapture.RunAsync(r, s, ct),
         /* #8798: the column selectivity run has its own body, not the one-query path. */

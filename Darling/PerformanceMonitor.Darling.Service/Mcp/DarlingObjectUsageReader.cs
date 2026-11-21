@@ -95,6 +95,77 @@ internal static class DarlingObjectUsageReader
               )
         """;
 
+    /// <summary>
+    /// The names Query Store statements referenced over the window that can be objects of THIS database (#8784 part 2): names statements run
+    /// in it wrote with no database part (or its own), and names statements run in any other database of the server wrote with its name as
+    /// the database part, so a view read only from another database counts. The database part is compared ignoring case, as SQL Server
+    /// compares database names on a default collation. $1 server_id, $2 database_name, $3 the first day.
+    /// </summary>
+    internal static readonly string ReferencesSql = $"""
+        SELECT
+            r.referenced_schema,
+            r.referenced_name,
+            r.is_function,
+            sum(r.execution_count),
+            max(r.last_execution_time),
+            bool_and(r.text_matched)
+        FROM {ObjectReferencesDaily.Table} AS r
+        WHERE r.server_id = $1
+        AND   r.day >= $3
+        AND   (
+                  (r.database_name = $2 AND (r.referenced_database = '' OR lower(r.referenced_database) = lower($2)))
+               OR (r.database_name <> $2 AND lower(r.referenced_database) = lower($2))
+              )
+        GROUP BY
+            r.referenced_schema,
+            r.referenced_name,
+            r.is_function
+        """;
+
+    /// <summary>
+    /// The days of the window on which the summary looked at statement text for THIS database: the oldest, the newest, how many, and the
+    /// statements looked at, with no text and unparsed. $1 server_id, $2 database_name, $3 the first day.
+    /// </summary>
+    internal static readonly string ReferenceDaysSql = $"""
+        SELECT
+            min(d.day),
+            max(d.day),
+            count(*),
+            COALESCE(sum(d.statements), 0)::bigint,
+            COALESCE(sum(d.statements_without_text), 0)::bigint,
+            COALESCE(sum(d.statements_unparsed), 0)::bigint
+        FROM {ObjectReferencesDaily.DatabaseDaysTable} AS d
+        WHERE d.server_id = $1
+        AND   d.database_name = $2
+        AND   d.day >= $3
+        """;
+
+    /// <summary>The database's newest dependency list capture (#8784 part 2). $1 server_id, $2 database_name.</summary>
+    internal const string DependenciesSql = """
+        SELECT
+            d.collection_time,
+            d.referencing_schema,
+            d.referencing_name,
+            d.referencing_type,
+            d.referenced_server,
+            d.referenced_database,
+            d.referenced_schema,
+            d.referenced_name,
+            COALESCE(d.is_bound, false),
+            COALESCE(d.is_caller_dependent, false),
+            COALESCE(d.is_ambiguous, false)
+        FROM collect.object_dependencies AS d
+        WHERE d.server_id = $1
+        AND   d.database_name = $2
+        AND   d.collection_time =
+              (
+                  SELECT max(l.collection_time)
+                  FROM collect.object_dependencies AS l
+                  WHERE l.server_id = $1
+                  AND   l.database_name = $2
+              )
+        """;
+
     /// <summary>Reads the window and runs it through <see cref="ObjectUsageWindow"/>.</summary>
     public static async Task<ObjectUsageWindowResult> ReadTablesAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken)
@@ -177,6 +248,99 @@ internal static class DarlingObjectUsageReader
             modules,
             daysWithData,
             captureMode);
+    }
+
+    /// <summary>Reads the names Query Store statements referenced over the window. The covered range is the days the summary looked at
+    /// statement text for this database.</summary>
+    public static async Task<ObjectReferenceWindow> ReadReferencesAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken)
+    {
+        var firstDay = DateOnly.FromDateTime(windowStartUtc);
+        DateTime? from = null;
+        DateTime? to = null;
+        var daysWithData = 0;
+        long statements = 0, withoutText = 0, unparsed = 0;
+        await using (var days = postgres.CreateCommand(ReferenceDaysSql))
+        {
+            days.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(days, serverId);
+            DarlingMcpReadParameters.AddText(days, databaseName);
+            days.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay });
+            await using var reader = await days.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+            {
+                from = reader.GetFieldValue<DateOnly>(0).ToDateTime(TimeOnly.MinValue);
+                to = reader.GetFieldValue<DateOnly>(1).ToDateTime(TimeOnly.MinValue).AddDays(1);
+                daysWithData = Convert.ToInt32(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
+                statements = reader.GetInt64(3);
+                withoutText = reader.GetInt64(4);
+                unparsed = reader.GetInt64(5);
+            }
+        }
+
+        var references = new List<ObjectReferenceTotals>();
+        await using (var command = postgres.CreateCommand(ReferencesSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddText(command, databaseName);
+            command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var executions = reader.IsDBNull(3) ? 0m : reader.GetDecimal(3);
+                references.Add(new ObjectReferenceTotals(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    executions >= long.MaxValue ? long.MaxValue : (long)executions,
+                    reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                    TextMatched: !reader.IsDBNull(5) && reader.GetBoolean(5),
+                    IsFunction: reader.GetBoolean(2)));
+            }
+        }
+
+        return new ObjectReferenceWindow(
+            from,
+            to,
+            daysWithData,
+            "Darling's per-day summary of the names Query Store statements referenced, parsed from the stored statement text and kept as long "
+            + "as index_object_stats. A day is summarised after it ends, so the newest day or two are not in it yet. Covered days are the days "
+            + "statement text was looked at for this database.",
+            references,
+            statements,
+            withoutText,
+            unparsed);
+    }
+
+    /// <summary>Reads the database's newest dependency list, the rows that never name a user object of the database left out
+    /// (<see cref="ObjectDependencyFilter"/>), or null when the store has no capture of it.</summary>
+    public static async Task<ObjectDependencyList?> ReadDependenciesAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(DependenciesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, databaseName);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        DateTime? captured = null;
+        var rows = new List<RawObjectDependency>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            captured ??= reader.GetDateTime(0);
+            rows.Add(new RawObjectDependency(
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? "" : reader.GetString(7),
+                reader.GetBoolean(8),
+                reader.GetBoolean(9),
+                reader.GetBoolean(10)));
+        }
+
+        return captured is { } at ? new ObjectDependencyList(at, ObjectDependencyFilter.ToEdges(rows, databaseName)) : null;
     }
 
     /// <summary>Reads the database's newest object list, or null when the store has no capture of it (the collector is off, or has not run).</summary>

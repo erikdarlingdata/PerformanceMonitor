@@ -3765,6 +3765,11 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
         /* V287 (#9164): the hourly host rollup the top-queries read ranks whole hours from, and the table that says which hours are built.
            Two new plain tables created empty: no data moves, so the upgrade stays fast. An older build ignores them. */
         new Migration(QueryStatsHostHourly.Version, "query-stats-host-hourly", QueryStatsHostHourly.CreateSql),
+        /* V288 (#8784 part 2): view usage. The object_dependencies collector's table, and the per-day summary of the names Query Store
+           statements referenced with its build record and per-database counts. Four new plain tables created empty: no data moves, so the
+           upgrade stays fast and the housekeeping tick fills the summary from the days the daily Query Store summary still holds. An older
+           build ignores them. */
+        new Migration(ObjectReferencesDaily.Version, "object-references", V288Sql),
     };
 
     /// <summary>
@@ -4023,6 +4028,43 @@ CREATE INDEX IF NOT EXISTS idx_object_inventory_time ON collect.object_inventory
 
 CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inventory (server_id, database_name, collection_time);
 " + ObjectExecutionsDaily.CreateSql;
+
+    /// <summary>
+    /// V288 (#8784 part 2): view usage from Query Store statement text.
+    ///
+    /// <para><c>collect.object_dependencies</c> is <c>ObjectDependenciesCollector</c>'s table, the daily dependency list per database from
+    /// <c>sys.sql_expression_dependencies</c> (Darling only). A PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE.
+    /// Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store and an upgraded one
+    /// agree; the (server_id, database_name, collection_time) index finds a database's newest capture by one seek.</para>
+    ///
+    /// <para><c>collect.object_references_daily</c>, <c>collect.object_references_daily_built</c> and
+    /// <c>collect.object_references_daily_databases</c> are the per-day summary of referenced names, its build record and the per-database
+    /// statement counts (<see cref="ObjectReferencesDaily"/>), created empty. New tables, no data moves, no grant. Every statement is
+    /// idempotent.</para>
+    /// </summary>
+    private const string V288Sql = @"
+CREATE TABLE IF NOT EXISTS collect.object_dependencies (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    referencing_schema text,
+    referencing_name text,
+    referencing_type text,
+    referenced_server text,
+    referenced_database text,
+    referenced_schema text,
+    referenced_name text,
+    is_bound boolean,
+    is_caller_dependent boolean,
+    is_ambiguous boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_dependencies_time ON collect.object_dependencies(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_object_dependencies_database ON collect.object_dependencies (server_id, database_name, collection_time);
+" + ObjectReferencesDaily.CreateSql;
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
        collect.schema_objects holds one row per version of an object: valid_from to valid_to, what changed it and who detected it, the

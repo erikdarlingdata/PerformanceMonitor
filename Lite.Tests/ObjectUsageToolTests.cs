@@ -110,6 +110,21 @@ public sealed class ObjectUsageToolTests : IClassFixture<SharedDuckDbFixture>, I
         await cmd.ExecuteNonQueryAsync();
     }
 
+    private async Task InsertStatementAsync(
+        DateTime collected, string database, long queryId, long intervalId, long executions, DateTime intervalStart, string? text)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO query_store_stats
+            (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, module_name,
+             execution_count, last_execution_time, runtime_stats_interval_id, interval_start_time_utc, first_execution_time, query_text)
+            VALUES ($1,$2,$3,$4,$5,$6,1,'Regular','Adhoc',$7,$8,$9,$10,$10,$11)";
+        void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
+        P(_nextId--); P(collected); P(_serverId); P(ServerName); P(database); P(queryId); P(executions); P(collected); P(intervalId); P(intervalStart); P(text);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     private static DateTime Day(int daysAgo) => DateTime.SpecifyKind(Now.AddDays(-daysAgo), DateTimeKind.Unspecified);
 
     private async Task<JsonElement> CallAsync(string? database = Database, int daysBack = 60) =>
@@ -293,6 +308,44 @@ public sealed class ObjectUsageToolTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal("Executed", daily.GetProperty("classification").GetString());
         Assert.DoesNotContain(root.GetProperty("objects").EnumerateArray(), o => o.GetProperty("object_name").GetString() == "Adhoc");
         Assert.Contains("NOT listed", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Views_AreReadFromTheStoredStatementText_IncludingFromAnotherDatabase()
+    {
+        /* #8784 part 2. */
+        await InsertIndexAsync(Day(5), StartA, "NODE1", 100, "Orders", 3, 0);
+        var interval = Day(3);
+
+        /* vReport is named by one statement whose open interval was re-collected (only its newest snapshot, 6, counts) and by a second one. */
+        await InsertStatementAsync(interval.AddMinutes(10), Database, 1, 601, 2, interval, "(@p1 int)SELECT * FROM dbo.vReport JOIN dbo.Orders ON 1 = 1 WHERE a = @p1");
+        await InsertStatementAsync(interval.AddMinutes(70), Database, 1, 601, 6, interval, "(@p1 int)SELECT * FROM dbo.vReport JOIN dbo.Orders ON 1 = 1 WHERE a = @p1");
+        await InsertStatementAsync(interval.AddMinutes(20), Database, 2, 601, 4, interval, "WITH vCte AS (SELECT 1 AS a) SELECT * FROM vCte, dbo.vReport");
+
+        /* Another database reads vCross by a three-part name, and its own vElse by a plain one. */
+        await InsertStatementAsync(interval.AddMinutes(30), "Reports", 3, 601, 5, interval, "SELECT * FROM Sales.dbo.vCross");
+        await InsertStatementAsync(interval.AddMinutes(40), "Reports", 4, 601, 5, interval, "SELECT * FROM dbo.vElse /* Sales */");
+
+        /* A statement that does not parse is counted, and with no object list it is not searched. */
+        await InsertStatementAsync(interval.AddMinutes(50), Database, 5, 601, 1, interval, "SELEC * FROM dbo.vBroken");
+
+        var root = await CallAsync();
+
+        var report = Obj(root, "vReport");
+        Assert.Equal("VIEW", report.GetProperty("object_type").GetString());
+        Assert.Equal(ObjectUsageReport.Referenced, report.GetProperty("classification").GetString());
+        Assert.Equal(10, report.GetProperty("referencing_executions").GetInt64());
+        Assert.Equal(ObjectUsageReport.Referenced, Obj(root, "vCross").GetProperty("classification").GetString());
+        Assert.Equal("USER_TABLE", Obj(root, "Orders").GetProperty("object_type").GetString());
+
+        var names = root.GetProperty("objects").EnumerateArray().Select(o => o.GetProperty("object_name").GetString()).ToArray();
+        Assert.DoesNotContain("vCte", names);
+        Assert.DoesNotContain("vElse", names);
+        Assert.DoesNotContain("vBroken", names);
+
+        var views = root.GetProperty("coverage")[0].GetProperty("views");
+        Assert.Equal(3, views.GetProperty("statements").GetInt64());
+        Assert.Equal(1, views.GetProperty("statements_unparsed").GetInt64());
     }
 
     [Fact]
