@@ -445,8 +445,18 @@ export function renderServer(main, server, tabId, opts) {
              aborted the batch in flight and sent every panel read again. A card that changes the tab set or the offline wording, or a range
              waiting on the catalog, still draws afresh as before. The hold lives for the synchronous dispatch only. */
           const tabKey = tabId || "";
+          /* The custom range is held by route name, and the panels in flight read the one held under the partial name. The render under the
+             exact name reads its own, so the range moves with the rename (the exact name takes it, the partial name lets go), on the
+             restart path too. The batch in flight agrees only when the exact name will read the same range: the partial name's own, or,
+             with none held there, no range held under the exact name either (it would read that one, where the batch read the preset). */
+          const partialRange = customRanges.get(server);
+          const sameRange = !!partialRange || !customRanges.has(exactName);
+          if (partialRange) {
+            customRanges.set(exactName, partialRange);
+            customRanges.delete(server);
+          }
           const agrees = beforeCard && !!painted && serverTabsFor(card) === painted && !(serverIsOffline(exactName) && current.tab && current.tab.readsOffline === true)
-            && !!gridNode && gridKey === server + "|" + tabKey && !catalogWaits.has(server);
+            && !!gridNode && gridKey === server + "|" + tabKey && !catalogWaits.has(server) && sameRange;
           if (agrees) renameHold = { from: server, to: exactName, tabKey };
           try {
             window.dispatchEvent(new Event("hashchange"));

@@ -177,6 +177,14 @@ const summary = () => {
 
 const serverOf = (r) => new URLSearchParams(r.url.split("?")[1] || "").get("server");
 const tally = (reads) => { const t = {}; for (const r of reads) { const n = serverOf(r); t[n] = (t[n] || 0) + 1; } return t; };
+const tallyBy = (reads, param) => { const t = {}; for (const r of reads) { const n = new URLSearchParams(r.url.split("?")[1] || "").get(param); t[n] = (t[n] || 0) + 1; } return t; };
+/* The text of every range picker button in the page on screen. */
+const pickerTexts = () => {
+  const found = [];
+  const walk = (n) => { if (!n || typeof n !== "object") return; if (n.className === "trp-button" || (n.attrs && n.attrs.class === "trp-button")) found.push(n.textContent); (n.children || []).forEach(walk); };
+  walk(byId.main);
+  return found;
+};
 const ROUTE = process.env.ROUTE || "alpha";
 const FULL = process.env.FULL || "alpha";
 
@@ -222,6 +230,26 @@ const scenarios = {
     await go("#/s/use1/server/" + encodeURIComponent(FULL) + "/" + (process.env.NEXT_TAB || "queries"));
     await advance(2500);
     return { ...summary(), afterPoll: tally(afterPoll), afterTabClick: tally(panelReads().slice(second)), finalHash: location.hash };
+  },
+  /* #9220: a first visit by a PARTIAL route name while the reader holds a custom range under that name (a range set from the link before the
+     card lands). The range is a live 36 hours, not one of the presets. Reports the range each panel read carried, the picker's text
+     after the move, and the reads the page's own 60 s poll sent under the own name. */
+  async partialCustomRange() {
+    const server = await import(pathToFileURL(path.join(jsDir, "pages", "server.js")).href);
+    const HOUR = 3600000;
+    server.applyCustomRange(ROUTE, now - 36 * HOUR, now, now, { redraw: false });
+    startScenario(Number(process.env.OWN_MS || 700));
+    await boot(hashFor("use1", ROUTE));
+    await advance(12000);
+    /* What the first visit alone did, before the poll: the summary and the tallies are taken here. */
+    const first = panelReads().length;
+    const visit = { ...summary(), byServer: tally(panelReads()), byHours: tallyBy(panelReads(), "hours"), pickerText: pickerTexts() };
+    await advance(65000);
+    const afterPoll = panelReads().slice(first);
+    return {
+      ...visit,
+      afterPoll: tally(afterPoll), afterPollHours: tallyBy(afterPoll, "hours"), finalHash: location.hash,
+    };
   },
   /* A first visit by a partial name that fits two servers: the page says so and sends no panel read after the card answers. */
   async partialAmbiguous() {

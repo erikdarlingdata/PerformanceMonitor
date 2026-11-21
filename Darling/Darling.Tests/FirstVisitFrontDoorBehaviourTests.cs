@@ -172,6 +172,50 @@ public sealed class FirstVisitFrontDoorBehaviourTests
         Assert.Equal("#/s/use1/server/alpha.corp.test/queries", r.GetProperty("finalHash").GetString());
     }
 
+    private static void AssertEveryReadUsesTheHeldRange(JsonElement byHours)
+    {
+        var total = 0;
+        foreach (var p in byHours.EnumerateObject())
+        {
+            // The held range is a live 36 hours. A read with no hours at all is not a panel read of the range (the catalog, the alert badge).
+            Assert.True(p.Name is "36" or "null", "a panel read went out with hours=" + p.Name + " instead of the held range");
+            if (p.Name == "36") total += p.Value.GetInt32();
+        }
+
+        Assert.True(total > 0, "no panel read carried the held range");
+    }
+
+    // A custom range held under the PARTIAL name (a range set from the link before the card lands) follows the move to the own name. The reads in
+    // flight were sent with it and are kept (none aborted, none sent again), the picker the new render draws names it, and the page's next poll
+    // reads the own name with the same range instead of the preset.
+    [Theory]
+    [InlineData("overview")]
+    [InlineData("queries")]
+    public void FirstVisit_ByPartialServerName_WithACustomRangeHeld_KeepsTheBatch_AndTheRangeFollowsTheMove(string tab)
+    {
+        var r = RunPartial("partialCustomRange", tab, "", 700, 1500, PartialCards);
+        AssertNothingRestarted(r);
+        AssertReadsUnder(r.GetProperty("byServer"), "alpha", "null");
+        AssertEveryReadUsesTheHeldRange(r.GetProperty("byHours"));
+        Assert.Equal(new[] { "Past 36 hours" }, r.GetProperty("pickerText").EnumerateArray().Select(e => e.GetString()).ToArray());
+        AssertReadsUnder(r.GetProperty("afterPoll"), "alpha.corp.test", "null");
+        AssertEveryReadUsesTheHeldRange(r.GetProperty("afterPollHours"));
+        Assert.Equal("#/s/use1/server/alpha.corp.test/" + tab, r.GetProperty("finalHash").GetString());
+    }
+
+    // The restart path (a stale server's Running Jobs tab draws afresh under the own name) keeps the range too: nothing reads the preset, and the
+    // picker still names the held range.
+    [Fact]
+    public void FirstVisit_ByPartialServerName_WithACustomRangeHeld_OnTheRestartPath_KeepsTheRange()
+    {
+        var r = RunPartial("partialCustomRange", "activity", OfflineCard, 700, 1500, PartialCards);
+        Assert.True(r.GetProperty("aborted").GetArrayLength() > 0, "the stale server's Running Jobs tab should draw again under the own name");
+        AssertEveryReadUsesTheHeldRange(r.GetProperty("byHours"));
+        Assert.Equal(new[] { "Past 36 hours" }, r.GetProperty("pickerText").EnumerateArray().Select(e => e.GetString()).ToArray());
+        AssertReadsUnder(r.GetProperty("afterPoll"), "alpha.corp.test", "null");
+        AssertEveryReadUsesTheHeldRange(r.GetProperty("afterPollHours"));
+    }
+
     // A partial name that fits two servers shows its message and reads nothing once the card answers; the link stays as it was.
     [Fact]
     public void FirstVisit_ByAmbiguousPartialName_ReadsNothingAfterTheCard()
