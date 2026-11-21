@@ -292,7 +292,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         if (boundEventWindow)
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new BlockingTrendPoint(
@@ -334,7 +334,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -410,7 +410,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, long TotalWaitMs)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -465,7 +465,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string DatabaseName, DateTime BucketStart, DateTime FirstCollectionTime, int BlockedCount)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)

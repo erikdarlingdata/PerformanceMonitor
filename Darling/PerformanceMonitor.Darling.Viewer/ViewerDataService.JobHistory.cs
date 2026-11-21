@@ -485,7 +485,7 @@ FROM
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
             }
 
-            if (await command.ExecuteScalarAsync(cancellationToken) is DateTime collected)
+            if (await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is DateTime collected)
             {
                 oldest = DateTime.SpecifyKind(collected, DateTimeKind.Utc);
             }
@@ -548,7 +548,7 @@ FROM
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
         }
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!reader.IsDBNull(1))
@@ -570,7 +570,7 @@ FROM
         await using (var probe = _dataSource.CreateCommand(JobHistoryOldestDailyIsAggregateSql))
         {
             probe.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            if (await probe.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is not true)
             {
                 return null;
             }
@@ -578,7 +578,7 @@ FROM
 
         await using var bounds = _dataSource.CreateCommand(JobHistoryOldestDailyBoundsSql);
         bounds.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await bounds.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await bounds.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
         {
             return null;
@@ -659,7 +659,7 @@ FROM
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
         }
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await ReadAgentStatusRowsAsync(reader, clocks, cancellationToken);
     }
 

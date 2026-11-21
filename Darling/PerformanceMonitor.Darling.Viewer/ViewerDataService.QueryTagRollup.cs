@@ -243,7 +243,7 @@ public sealed partial class ViewerDataService
             await using var command = _dataSource.CreateCommand(NewestQueryStoreHealthCaptureSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
             {
                 return (null, null);

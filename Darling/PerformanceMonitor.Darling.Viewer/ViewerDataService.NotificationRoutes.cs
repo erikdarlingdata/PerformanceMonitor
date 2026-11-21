@@ -147,7 +147,7 @@ public sealed partial class ViewerDataService
             : (hasSlackBotChannel ? NotificationRoutesSelectWithSlackBotChannelSql : hasApproval ? NotificationRoutesSelectWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);
         await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(IsReadOnly
@@ -328,7 +328,7 @@ public sealed partial class ViewerDataService
             return;
         }
 
-        var ownConnection = connection is null ? await _dataSource.OpenConnectionAsync(cancellationToken) : null;
+        var ownConnection = connection is null ? await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken)) : null;
         try
         {
             if (await NotificationRouteWriter.FallbackRefusalAsync(

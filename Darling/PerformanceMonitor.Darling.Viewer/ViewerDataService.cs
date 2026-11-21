@@ -743,7 +743,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         {
             await using var command = _dataSource.CreateCommand(ReadOnlyProbeSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            var canInsert = await command.ExecuteScalarAsync(cancellationToken);
+            var canInsert = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             IsReadOnly = canInsert is not true;
         }
         catch (Exception ex) when (IsConnectionFailure(ex))
@@ -776,7 +776,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         }
         catch (Exception ex) when (IsConnectionFailure(ex))
         {
@@ -1630,7 +1630,7 @@ SELECT
         {
             await using var command = _dataSource.CreateCommand(StoreSchemaProbeSql);
             command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100), reader.GetBoolean(101), reader.GetBoolean(102), reader.GetBoolean(103), reader.GetBoolean(104), reader.GetBoolean(105), reader.GetBoolean(106), reader.GetBoolean(107), reader.GetBoolean(108), reader.GetBoolean(109), reader.GetBoolean(110), reader.GetBoolean(111), reader.GetBoolean(112), reader.GetBoolean(113), reader.GetBoolean(114), reader.GetBoolean(115), reader.GetBoolean(116), reader.GetBoolean(117), reader.GetBoolean(118), reader.GetBoolean(119), reader.GetBoolean(120), reader.GetBoolean(121), reader.GetBoolean(122), reader.GetBoolean(123), reader.GetBoolean(124), reader.GetBoolean(125), reader.GetBoolean(126), reader.GetBoolean(127), reader.GetBoolean(128), reader.GetBoolean(129), reader.GetBoolean(130), reader.GetBoolean(131), reader.GetBoolean(132), reader.GetBoolean(133), reader.GetBoolean(134), reader.GetBoolean(135), reader.GetBoolean(136), reader.GetBoolean(137), reader.GetBoolean(138), reader.GetBoolean(139), reader.GetBoolean(140), reader.GetBoolean(141), reader.GetBoolean(142), reader.GetBoolean(143), reader.GetBoolean(144), reader.GetBoolean(145), reader.GetBoolean(146), reader.GetBoolean(147), reader.GetBoolean(148), reader.GetBoolean(149), reader.GetBoolean(150), reader.GetBoolean(151), reader.GetBoolean(152), reader.GetBoolean(153), reader.GetBoolean(154), reader.GetBoolean(155), reader.GetBoolean(156), reader.GetBoolean(157), reader.GetBoolean(158), reader.GetBoolean(159), reader.GetBoolean(160), reader.GetBoolean(161), reader.GetBoolean(162), reader.GetBoolean(163), reader.GetBoolean(164), reader.GetBoolean(165), reader.GetBoolean(166), reader.GetBoolean(167), reader.GetBoolean(168), reader.GetBoolean(169), reader.GetBoolean(170), reader.GetBoolean(171), reader.GetBoolean(172), reader.GetBoolean(173), reader.GetBoolean(174), reader.GetBoolean(175), reader.GetBoolean(176), reader.GetBoolean(177), reader.GetBoolean(178), reader.GetBoolean(179), reader.GetBoolean(180), reader.GetBoolean(181), reader.GetBoolean(182), reader.GetBoolean(183), reader.GetBoolean(184), reader.GetBoolean(185), reader.GetBoolean(186), reader.GetBoolean(187), reader.GetBoolean(188), reader.GetBoolean(189), reader.GetBoolean(190), reader.GetBoolean(191), reader.GetBoolean(192), reader.GetBoolean(193), reader.GetBoolean(194), reader.GetBoolean(195), reader.GetBoolean(196), reader.GetBoolean(197), reader.GetBoolean(198), reader.GetBoolean(199), reader.GetBoolean(200), reader.GetBoolean(201), reader.GetBoolean(202), reader.GetBoolean(203), reader.GetBoolean(204), reader.GetBoolean(205), reader.GetBoolean(206), reader.GetBoolean(207), reader.GetBoolean(208), reader.GetBoolean(209), reader.GetBoolean(210), reader.GetBoolean(211), reader.GetBoolean(212), reader.GetBoolean(213), reader.GetBoolean(214), reader.GetBoolean(215), reader.GetBoolean(216), reader.GetBoolean(217), reader.GetBoolean(218), reader.GetBoolean(219), reader.GetBoolean(220), reader.GetBoolean(221), reader.GetBoolean(222), reader.GetBoolean(223), reader.GetBoolean(224), reader.GetBoolean(225), reader.GetBoolean(226), reader.GetBoolean(227), reader.GetBoolean(228), reader.GetBoolean(229), reader.GetBoolean(230), reader.GetBoolean(231), reader.GetBoolean(232), reader.GetBoolean(233), reader.GetBoolean(234), reader.GetBoolean(235), reader.GetBoolean(236), reader.GetBoolean(237), reader.GetBoolean(238), reader.GetBoolean(239), reader.GetBoolean(240), reader.GetBoolean(241), reader.GetBoolean(242), reader.GetBoolean(243), reader.GetBoolean(244), reader.GetBoolean(245), reader.GetBoolean(246), reader.GetBoolean(247), reader.GetBoolean(248), reader.GetBoolean(249), reader.GetBoolean(250), reader.GetBoolean(251), reader.GetBoolean(252), reader.GetBoolean(253), reader.GetBoolean(254), reader.GetBoolean(255), reader.GetBoolean(256), reader.GetBoolean(257), reader.GetBoolean(258), reader.GetBoolean(259), reader.GetBoolean(260), reader.GetBoolean(261), reader.GetBoolean(262), reader.GetBoolean(263), reader.GetBoolean(264));
@@ -4075,7 +4075,7 @@ SELECT
 
         await using var command = _dataSource.CreateCommand(ServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverName = reader.GetString(1);
@@ -4119,7 +4119,7 @@ LIMIT 1";
         await using var command = _dataSource.CreateCommand(ServerUtcOffsetSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is null or DBNull
             ? null
             : Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
@@ -4154,7 +4154,7 @@ LIMIT 1";
             await using var command = _dataSource.CreateCommand(ServerClockSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (!await reader.ReadAsync(cancellationToken))
             {
                 return null;
@@ -4233,7 +4233,7 @@ LIMIT 1";
     {
         try
         {
-            return await command.ExecuteScalarAsync(cancellationToken);
+            return await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {

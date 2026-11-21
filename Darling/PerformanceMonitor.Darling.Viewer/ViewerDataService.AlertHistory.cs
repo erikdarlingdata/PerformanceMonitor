@@ -323,7 +323,7 @@ AND    dismissed = FALSE";
             TypedValue = DateTime.SpecifyKind(untilUtc ?? AlertWindowOpenEnd, DateTimeKind.Unspecified),
         });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var rowServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
@@ -373,7 +373,7 @@ AND    dismissed = FALSE";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = alert.ServerId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(OpenEngineAlerts.AttachedUntil(alertUtc), DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (OpenEngineAlerts.Names(

@@ -147,7 +147,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 
         await using var command = _dataSource.CreateCommand(CollectorSchedulesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new CollectorScheduleRow(
@@ -180,7 +180,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         {
             await using var command = _dataSource.CreateCommand(CollectorRunTimesSelectSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 rows.Add(new CollectorRunTimeRow(
@@ -222,7 +222,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await WriteRunTimeChangesAsync(connection, transaction, changes, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -356,7 +356,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             int scheduleOverrides;
@@ -396,7 +396,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
             CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds,
         })
         {
-            if (await exists.ExecuteScalarAsync(cancellationToken) is not true)
+            if (await exists.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is not true)
             {
                 return 0;
             }
@@ -427,7 +427,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             if (clearScopeRunTimes)

@@ -147,7 +147,7 @@ public partial class ViewerServerTab
             return;
         }
 
-        await RefreshActiveInnerTabAsync();
+        await RefreshAfterSubTabPickAsync();
     }
 
     /// <summary>
@@ -210,6 +210,9 @@ public partial class ViewerServerTab
     /// which step kept the UI thread busy. With no clock (a refresh that is not an inner-tab load) it is just the work.</summary>
     internal static void ClientStep(ViewerLoadTimer? timer, string step, Action work)
     {
+        /* #9194: a load whose sub-tab was left draws nothing more, so no chart or grid on it is half drawn. */
+        ViewerReadScope.Current.ThrowIfCancellationRequested();
+
         if (timer is null)
         {
             work();
