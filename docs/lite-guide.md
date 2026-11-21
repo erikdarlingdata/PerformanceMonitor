@@ -105,6 +105,8 @@ If a headless Lite cannot open its database when it starts, for example because 
 
 Task Scheduler's **If the task fails, restart every** setting did not restart a run that exited with code 3. In a test, the task went to Ready with Last Result 3 and no second run started. So a Lite that gives up stays down until someone starts it again. To see that this happened, look for a **Last Result** of `3` on the task, and for the giving up line in the Lite log.
 
+A start also fails with code 3 when the account is not allowed to create the lock that keeps Lite to one copy and no other Lite is running in the same Windows session. Lite writes the reason to the log.
+
 #### Set up a dedicated Windows user
 
 1. Make a Windows user for Lite. If the user has the "Log on as a batch job" right, a standard user is enough. The setting "Run whether the user is logged on or not" in the scheduled task logs the user on as a batch job. To give the right, open Local Security Policy. Go to Local Policies, then User Rights Assignment, then "Log on as a batch job", and add the user. You can also add the user to a group that has the right. On a stand-alone server, Windows gives the right to Administrators, Backup Operators and Performance Log Users by default. If a Group Policy sets this right, add the user there. Without the right, Windows refuses the logon. Task Scheduler says that the task is registered but may fail to start. It says that the batch logon privilege must be enabled for the task user. The logon then fails. Windows words this error as "Logon failure: the user has not been granted the requested logon type at this computer."

@@ -639,7 +639,8 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         var created = await rig.CreateAsync(vera, "laptop");
         var value = (string)created.Body!["token"]!;
         Assert.True(PersonalTokenFormat.TryParse(value, out _, out var hash));
-        var secret = value[(value.LastIndexOf('_') + 1)..];
+        /* #9211: the secret is base64url and can hold '_', so take it after the separator that follows the id, as PersonalTokenFormat.TryParse does. */
+        var secret = value[(value.IndexOf('_', PersonalTokenFormat.Prefix.Length) + 1)..];
 
         var own = await rig.SendAsync("GET", "/api/mcp-tokens", vera);
         var all = await rig.SendAsync("GET", "/api/mcp-tokens?all=1", ada);

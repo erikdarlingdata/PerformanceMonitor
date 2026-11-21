@@ -895,6 +895,51 @@ public sealed class FrontDoorWebProxyTests
         Assert.True((bool)list[1]!["admin_writes_off"]!);
     }
 
+    /// <summary>#9203: the front door's own <c>/api/session</c> names its own build, the string the Viewer's About shows for the same build,
+    /// and a store's build never stands in for it.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task TheFrontDoorsSession_NamesItsOwnBuild_AsTheViewerAboutWouldForTheSameAssembly()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        a.Build = "Version 0.0.1 (commit aaaaaaaaa)";
+
+        var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/session"));
+
+        var build = (string?)Json(body)["build"];
+        Assert.False(string.IsNullOrWhiteSpace(build));
+        Assert.Equal(PerformanceMonitor.Darling.Viewer.AboutVersionText.ForAssembly(typeof(DarlingCliCommands).Assembly), build);
+        Assert.NotEqual(a.Build, build);
+    }
+
+    /// <summary>#9203: two stores on different builds each show their own next to their name, and a store that says none shows none.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task TheStoreList_CarriesEachStoresOwnServiceBuild_AndNoKeyForAStoreThatSaidNone()
+    {
+        var time = new ManualTime();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken, time: time);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        a.Build = "Version 3.12.0 (commit 111111111)";
+        b.Build = "Version 3.13.0 (commit 222222222)";
+
+        var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door"));
+
+        var list = Json(body)["stores"]!.AsArray();
+        Assert.Equal("Version 3.12.0 (commit 111111111)", (string?)list[0]!["service_build"]);
+        Assert.Equal("Version 3.13.0 (commit 222222222)", (string?)list[1]!["service_build"]);
+
+        a.Build = null;
+        time.Advance(TimeSpan.FromMinutes(5));
+        var (_, again) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door"));
+        var second = Json(again)["stores"]!.AsArray();
+        Assert.False(second[0]!.AsObject().ContainsKey("service_build"));
+        Assert.Equal("Version 3.13.0 (commit 222222222)", (string?)second[1]!["service_build"]);
+    }
+
     [Fact(Timeout = 60_000)]
     public async Task TheSignInRoutesAndTheStaticPages_AreServedByTheFrontDoor_NeverForwarded()
     {
