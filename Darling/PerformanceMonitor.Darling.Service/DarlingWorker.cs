@@ -660,6 +660,12 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<int, bool>? QueryStoreReadableSecondaryOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#9270): when set, stands for <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the stored <c>database_config</c>
+    /// captures of a server id. Null in production, which reads the store.
+    /// </summary>
+    internal Func<int, bool>? RecaptureDueOverride { get; set; }
+
+    /// <summary>
     /// The fleet sweep gate (#5941), set once the collection loop builds it. A <c>snapshot_now</c> takes a permit from it
     /// like a scheduled pass does. Null before the loop starts (and in tests that do not stand one in): no permit is taken.
     /// </summary>
@@ -1813,6 +1819,11 @@ LIMIT 1";
 
         /// <summary>See <see cref="SqlMs"/>.</summary>
         public long? StorageMs { get; set; }
+
+        /// <summary>#9270: for a successful <c>database_config</c> run, whether the stored captures say the collector is due again in minutes
+        /// (<see cref="TransitionalDatabaseRuns.RecaptureIsDue"/>). Null for every other run, and for a <c>database_config</c> run whose read of
+        /// the captures failed, which leaves the collector's schedule as it was.</summary>
+        public bool? RecaptureEarly { get; set; }
     }
 
     /// <summary>The failed-jobs list the body read from msdb at <paramref name="FetchedUtc"/> (#5642).</summary>
