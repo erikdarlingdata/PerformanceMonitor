@@ -1054,7 +1054,7 @@ public class ArchiveService
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = $@"
 COPY (
-    SELECT * FROM {table} WHERE {RangePredicate(timeColumn, lower)}
+    SELECT * FROM {LiteTextDimensions.HotSource(table)} WHERE {RangePredicate(timeColumn, lower)}
 ) TO '{EscapeSqlPath(filePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                 AddRangeParameters(cmd, lower, upper);
                 await cmd.ExecuteNonQueryAsync();
@@ -2283,7 +2283,8 @@ COPY (
                         await WithRaisedCopyMemoryLimit(connection, async () =>
                         {
                             using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
+                            /* #9241: through the vh_ view for a table whose query text is kept in a dimension, so the file carries the text on every row. */
+                            exportCmd.CommandText = $"COPY (SELECT * FROM {LiteTextDimensions.HotSource(table)}) TO '{EscapeSqlPath(tempParquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                             await exportCmd.ExecuteNonQueryAsync();
                         });
 

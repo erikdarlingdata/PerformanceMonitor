@@ -179,7 +179,11 @@ internal sealed class ArchiveReadPlan
     /// <summary>The tables this plan reads as the hot table, while the generation holds.</summary>
     internal bool IsHot(string table) => _hot.Contains(table) && _duckDb.ArchiveViewGeneration == _generation;
 
-    /// <summary><paramref name="sql"/> with each hot table's <c>v_</c> view replaced by the hot table. The view names are
+    /// <summary>What a statement reads for <paramref name="table"/>: its hot rows when the plan reads it as hot (the table, or the
+    /// <c>vh_</c> view for one whose query text is kept in a dimension, #9241), else its <c>v_</c> view.</summary>
+    internal string SourceFor(string table) => IsHot(table) ? LiteTextDimensions.HotSource(table) : "v_" + table;
+
+    /// <summary><paramref name="sql"/> with each hot table's <c>v_</c> view replaced by the hot table (its <c>vh_</c> view when its query text is kept in a dimension, #9241). The view names are
     /// distinct whole words in the statement's text, so a plain replace is exact. Call it with the read lock held.</summary>
     internal string Apply(string sql)
     {
@@ -190,7 +194,7 @@ internal sealed class ArchiveReadPlan
 
         foreach (var table in _hot)
         {
-            sql = sql.Replace("v_" + table, table, StringComparison.Ordinal);
+            sql = sql.Replace("v_" + table, LiteTextDimensions.HotSource(table), StringComparison.Ordinal);
         }
 
         return sql;
