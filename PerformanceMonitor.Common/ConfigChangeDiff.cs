@@ -175,6 +175,22 @@ public static class ConfigChangeDiff
         return false;
     }
 
+    /// <summary>#9270: where <c>state_desc</c> sits in <see cref="DatabaseConfigChangeSettingNames"/> and so in a snapshot's values, found by name so a reorder of the list cannot turn the transitional skip off.</summary>
+    private static readonly int StateIndex = IndexOfSetting("state_desc");
+
+    private static int IndexOfSetting(string name)
+    {
+        for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)
+        {
+            if (string.Equals(DatabaseConfigChangeSettingNames[i], name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return int.MaxValue;
+    }
+
     /* ─────────────────────────── C# snapshot diffs (pure, unit-testable, no live store) ─────────────────────────── */
 
     /// <summary>
@@ -226,7 +242,7 @@ public static class ConfigChangeDiff
             DatabaseConfigSnapshot? prev = null;
             foreach (var cur in dbGroup.OrderBy(s => s.CaptureTime))
             {
-                if (cur.Values.Count > 0 && IsTransitionalDatabaseState(cur.Values[0]))
+                if (StateIndex < cur.Values.Count && IsTransitionalDatabaseState(cur.Values[StateIndex]))
                 {
                     continue;
                 }
