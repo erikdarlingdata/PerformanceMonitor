@@ -233,11 +233,11 @@ For code 1, turn MCP on and start Lite as that user once. Lite then makes the to
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints and free block reuse. The hot store holds the most recent data, about 7 days. Each hour, Lite moves older data to Parquet. The hot store has a size limit of 512 MB. When the file reaches 512 MB, Lite writes the collected data to Parquet and deletes the file. It then creates a new small file and puts back the settings, tags, mute rules and investigation records. Collection pauses for a short time while the reset runs. After the reset, Lite compacts the Parquet files into monthly archives, and collection continues during compaction.
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
-- Typical size: ~50–200 MB per server per week
+- Typical size: it depends on the number of servers, the number of collectors, and whether Query Store collection is on. The hot file does not grow past about 512 MB, because Lite resets it at that size. The Parquet archive grows with the 3 months of history that Lite keeps.
 
 Compaction merges the per-run Parquet files into one file for each month. `--stop` does not wait for it to finish. Lite checks for the stop before it starts each group of files, and it waits up to 5 seconds for a merge that is already running. If that merge is still running at the end of the 5 seconds, Lite exits and the merge ends with it. In both cases a group of files is either fully merged or left as it was, so a read returns each row once. A merge writes to a `.tmp` file first, and a read never opens that file. The first archive pass after the next start runs about an hour after the start. It deletes a leftover `.tmp` file and runs the compaction again. Lite logs one line when compaction ends: complete, cancelled by shutdown, or failed.
 
