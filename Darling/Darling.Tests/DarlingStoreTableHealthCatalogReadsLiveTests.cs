@@ -173,4 +173,47 @@ ANALYZE;", ct);
         // the read has indexes.
         Assert.True(estimated <= indexesHandedIn, $"per-index estimate: {estimated} rows for {indexesHandedIn} indexes handed in");
     }
+
+    [Fact]
+    public async Task TheTablesRead_AndTheIndexesRead_StatEachRelationOnce_AndSizeTheSame()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9224 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await ExecAsync(connection, SeedSql, ct);
+
+        // The relations the two reads use, counted outside the reader: every member heap and every index on one.
+        await using var count = new NpgsqlCommand("SELECT count(*) FROM (" + DarlingStoreTableHealthReader.IndexRelationsSql(timescale: true) + ") AS l(oid)", connection);
+        var listed = (long)(await count.ExecuteScalarAsync(ct))!;
+        Assert.True(listed >= 300, $"relations listed {listed}");
+
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tables = await DarlingStoreTableHealthReader.GetAsync(store, ct);
+        var indexes = await DarlingStoreTableHealthReader.GetIndexesAsync(store, ct);
+
+        // The first read sized every relation, and the second took that pass: one stat per relation, not two. Before, the tables
+        // read sized the heaps and the indexes' forks and the indexes read sized every heap and index again.
+        Assert.Equal(listed, DarlingStoreTableHealthReader.RelationsSizedOn(store));
+        Assert.NotEmpty(tables);
+        Assert.NotEmpty(indexes);
+
+        // The values are the ones the size functions give on their own: a plain table's heap, index and TOAST bytes.
+        foreach (var n in new[] { 1, 40, 150 })
+        {
+            await using var direct = new NpgsqlCommand(
+                $"SELECT pg_catalog.pg_relation_size('zz9224.t{n}'), pg_catalog.pg_indexes_size('zz9224.t{n}'), "
+                + $"COALESCE(pg_catalog.pg_total_relation_size(NULLIF((SELECT reltoastrelid FROM pg_catalog.pg_class WHERE oid = 'zz9224.t{n}'::regclass), 0)), 0)", connection);
+            await using var reader = await direct.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var row = tables.Single(t => t.SchemaName == "zz9224" && t.TableName == $"t{n}");
+            Assert.Equal(reader.GetInt64(0), row.HeapBytes);
+            Assert.Equal(reader.GetInt64(1), row.IndexBytes);
+            Assert.Equal(reader.GetInt64(2), row.ToastBytes);
+        }
+    }
 }
