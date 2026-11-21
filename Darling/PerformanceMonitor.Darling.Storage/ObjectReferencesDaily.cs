@@ -21,7 +21,7 @@ using PerformanceMonitor.Analysis.ObjectReferences;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// The per-day summary of which names Query Store statements referenced (V288, #8784 part 2): one row per (server, statement database,
+/// The per-day summary of which names Query Store statements referenced (V290, #8784 part 2): one row per (server, statement database,
 /// referenced database, schema, name, kind, day) with the executions of the statements that named it, so <c>get_object_usage</c> can say
 /// whether a view was used at all across a year without keeping a year of statement text.
 ///
@@ -48,7 +48,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class ObjectReferencesDaily
 {
     /// <summary>The store schema version that creates these tables.</summary>
-    public const int Version = 288;
+    public const int Version = 290;
 
     /// <summary>The summary table.</summary>
     public const string Table = "collect.object_references_daily";
@@ -72,7 +72,7 @@ public static class ObjectReferencesDaily
     public static QueryTextScanCache ScanCache { get; } = new();
 
     /// <summary>
-    /// The three tables as the V288 rung runs them. Idempotent. The rung embeds this text, so editing it after it ships edits a shipped
+    /// The three tables as the V290 rung runs them. Idempotent. The rung embeds this text, so editing it after it ships edits a shipped
     /// rung: add a new rung instead. Plain tables on every store. The primary key serves the build's upsert and the read's range per server;
     /// <c>idx_object_references_daily_day</c> serves the retention delete. Needs no GRANT: the <c>collect</c> schema's blanket SELECT covers a
     /// table a migration introduces.

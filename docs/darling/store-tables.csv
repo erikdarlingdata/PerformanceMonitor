@@ -136,7 +136,10 @@ query_stats_io_hourly,derived,derived,rollup view
 query_store_closed_day_built,internal,no,which days of the Query Store closed-day rollups are built
 query_store_closed_day_tick,internal,no,when the closed-day rollups last looked for new rows
 query_store_clutter_collections_daily,derived,derived,daily count of Query Store collections by database
+query_store_clutter_collections_hourly,derived,derived,hourly count of Query Store collections by database
+query_store_clutter_hour_built,internal,no,which hours are built
 query_store_clutter_plan_daily,derived,derived,daily first and last sighting of each Query Store plan
+query_store_clutter_plan_hourly,derived,derived,hourly first and last sighting of each Query Store plan
 query_store_compose_fleet,derived,derived,fleet rollup of the compose stamp
 query_store_compose_stamp,derived,derived,rollup of the Query Store interval rows by stamp
 query_store_compose_stamp_built,internal,no,which stamps are built

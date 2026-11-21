@@ -1264,8 +1264,11 @@ public sealed partial class DarlingWorker
            daily summary above reads and writes its own three tables, so it has its own catch and a failure leaves the passes above standing. */
         try
         {
+            /* #9173: the hourly clutter step follows the retention query_store_stats' raw rows are purged on, resolved the way the purge resolves it. */
             await QueryStoreClosedDayRollup.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
+                DarlingRetention.EffectivePurgeRetentionDays("query_store_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_store_stats", _scheduleOverrides)),
+                _logger, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -507,6 +507,16 @@ public sealed class MigrationDataMovingRungCensusPins
             + "4.8-4.9 s; about 11 s in all, warm and on local NVMe. The time follows the text heap, which is one of the largest plain tables "
             + "of a store that collects Query Store and is read cold at start, so it sets the floor as V22's and V39's index builds do. "
             + "Loading before the constraints is what keeps it at about 11 s (51-55 s with the key in place first)."),
+        new(
+            288,
+            SetsTheFloor: false,
+            "#9151: CREATE INDEX over the populated collect.collection_log hypertable (created V2), V150's shape with INCLUDE (rows_collected): "
+            + "the covering index is built under idx_collection_log_watermark_new, the narrow idx_collection_log_watermark is dropped and the new one "
+            + "renamed to the old name, in the ladder's transaction. V257's case: compression leaves only the newest chunks uncompressed at migration "
+            + "time, and a compressed chunk's index is an empty shell, so the build reads only the uncompressed chunks. Measured on a seeded store of "
+            + "5 uncompressed six-hour chunks holding 1,700,000 rows (40 servers, 40 collector names) plus 135 compressed chunks: 3.2 to 3.3 s for "
+            + "the whole rung on PostgreSQL 18.7, every one of the 140 chunks ending with one covering index. Far inside one command timeout, so it "
+            + "does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

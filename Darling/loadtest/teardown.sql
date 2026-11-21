@@ -112,6 +112,9 @@ BEGIN
         'collect.query_store_clutter_collections_daily',
         'collect.query_stats_host_hourly',
         'collect.query_stats_host_hourly_built',
+        'collect.query_store_clutter_plan_hourly',
+        'collect.query_store_clutter_collections_hourly',
+        'collect.query_store_clutter_hour_built',
         'collect.query_store_compose_stamp',
         'collect.query_store_compose_stamp_built'
     ]

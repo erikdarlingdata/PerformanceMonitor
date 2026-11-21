@@ -904,14 +904,24 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_built') IS NOT NULL T
         // V286 (#9147): the query_stats per-collection summary table, the probe's newest sentinel until V287 (#9164) went on top. The rewind drops it, so a re-run of V286 creates it
         // empty and the duration trend reads raw until it covers a window. Safe on a store that never had it.
         new(286, "hasQueryStatsCollectionSummary", @"DROP TABLE IF EXISTS collect.query_stats_collection;"),
-        // V287 (#9164): the hourly host rollup's two tables, the probe's newest sentinel until V288 (#8784 part 2) went on top. The rewind drops
-        // both, so a re-run of V287 creates them empty and the service builds the hours again. Safe on a store that never had them.
+        // V287 (#9164): the hourly host rollup's two tables. The pair is the probe's newest sentinel until V288 (#9151) went on top. The rewind drops both, so a re-run of V287
+        // creates them empty and the service builds the hours again. Safe on a store that never had them.
         new(287, "hasQueryStatsHostHourly", @"DROP TABLE IF EXISTS collect.query_stats_host_hourly;
 DROP TABLE IF EXISTS collect.query_stats_host_hourly_built;"),
-        // V288 (#8784 part 2): the dependency list and the per-day referenced-names summary. The pair object_dependencies and
-        // object_references_daily_databases is the probe's newest sentinel. The rewind drops all four tables, so a re-run of V288 creates them
+        // V288 (#9151): idx_collection_log_watermark with its INCLUDE column. It is the probe's newest sentinel until V289 (#9173) went on top, found by the index's shape, not its name. The rewind puts back V150's narrow index under the same name,
+        // so V150's own sentinel stays true and a re-run of V288 finds the narrow index and replaces it.
+        new(288, "hasCollectionLogWatermarkCovering", @"DROP INDEX IF EXISTS collect.idx_collection_log_watermark;
+CREATE INDEX idx_collection_log_watermark ON collect.collection_log (server_id, collector_name, collection_time DESC);"),
+        // V289 (#9173): the hourly Query Store clutter rollups' three tables and the hour heartbeat column on the tick table. The three tables are the
+        // probe's newest sentinel until V290 (#8784 part 2) went on top. The rewind drops them and the column, so a re-run of V289 creates them empty and the service builds the hours again.
+        new(289, "hasQueryStoreClutterHourly", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_hourly;
+DROP TABLE IF EXISTS collect.query_store_clutter_collections_hourly;
+DROP TABLE IF EXISTS collect.query_store_clutter_hour_built;
+DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_tick DROP COLUMN IF EXISTS hour_ticked_at; END IF; END $$;"),
+        // V290 (#8784 part 2): the dependency list and the per-day referenced-names summary. The pair object_dependencies and
+        // object_references_daily_databases is the probe's newest sentinel. The rewind drops all four tables, so a re-run of V290 creates them
         // empty, the collector captures the list again and the service builds the days again. Safe on a store that never had them.
-        new(288, "hasObjectReferences", @"DROP TABLE IF EXISTS collect.object_dependencies;
+        new(290, "hasObjectReferences", @"DROP TABLE IF EXISTS collect.object_dependencies;
 DROP TABLE IF EXISTS collect.object_references_daily;
 DROP TABLE IF EXISTS collect.object_references_daily_built;
 DROP TABLE IF EXISTS collect.object_references_daily_databases;"),

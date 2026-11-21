@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /* #1776 own-store: every live test mints its own scratch database through ScratchPostgres and touches nothing shared. */
 
 /// <summary>
-/// #8784 part 2: view usage from Query Store statement text. The V288 rung (the dependency list table and the per-day referenced-names
+/// #8784 part 2: view usage from Query Store statement text. The V290 rung (the dependency list table and the per-day referenced-names
 /// summary) and its probe arm; the summary's build from the daily Query Store summary and the stored text (parsed names, a CTE left out, an
 /// unparsed statement searched for the object list's views, a statement with no text counted, a rebuilt day only adding, expired days
 /// deleted); the reads (a view read from another database by a three-part name counts for its own database; the dependency list's traps
@@ -42,10 +42,10 @@ public sealed class ObjectReferencesLiveTests
     // ── The rung ────────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void TheRungIsV288_AndTheProbeMapsItToV288()
+    public void TheRungIsV290_AndTheProbeMapsItToV290()
     {
         var rung = PgMigrations.Scripts.Single(r => r.Version == ObjectReferencesDaily.Version);
-        Assert.Equal(288, rung.Version);
+        Assert.Equal(290, rung.Version);
         Assert.Equal("object-references", rung.Name);
         Assert.Contains("collect.object_dependencies", rung.Sql, StringComparison.Ordinal);
         Assert.Contains(ObjectReferencesDaily.Table, rung.Sql, StringComparison.Ordinal);
