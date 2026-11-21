@@ -454,15 +454,21 @@ export function renderServer(main, server, tabId, opts) {
 
       /* Repaint only when there is nothing painted yet, when the fresh card chooses a DIFFERENT registry —
          the two registries are module constants, so that comparison is exact — or when it flips the server's online
-         state, which the panels were built with (ctx.offline: the poll where a server first goes stale painted them
-         from the remembered, still-online card). A null card never repaints over a painted page: a fleet read that
+         state on a tab that words something by it (readsOffline), which the panels were built with (ctx.offline: the poll where a
+         server first goes stale painted them from the remembered, still-online card). Any other tab keeps its panels and the reads
+         in flight, whatever the card says about the server being online (#9220). A null card never repaints over a painted page: a fleet read that
          failed says nothing about which engine this server runs, and it leaves lastCard, so the online state, as it was. */
-      if (!painted || (card && serverTabsFor(card) !== painted) || serverIsOffline(server) !== paintedOffline) {
+      if (!painted || (card && serverTabsFor(card) !== painted) || (serverIsOffline(server) !== paintedOffline && current.tab && current.tab.readsOffline === true)) {
         painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card, inPlace);
         paintedOffline = serverIsOffline(server);
       } else if (beforeCard) {
-        /* The card agrees with the set the panels were started on (#8554): draw the tab bar and notes around them, and read nothing again. */
+        /* The card agrees with the set the panels were started on (#8554): draw the tab bar and notes around them, and read nothing again.
+           #9220: a card that says the server is offline agrees too, unless the tab words something by it (readsOffline), so a stale server's
+           first visit no longer aborts the reads in flight and sends each of them again. */
         painted = paintTabsKeeping(true, tabsSlot, server, tabId, card, inPlace);
+        paintedOffline = serverIsOffline(server);
+      } else {
+        paintedOffline = serverIsOffline(server);
       }
       beforeCard = false;
     });
