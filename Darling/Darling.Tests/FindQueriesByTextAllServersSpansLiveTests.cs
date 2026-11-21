@@ -42,9 +42,9 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
     private const string CountHash = "0xBB02";
     private const string OtherHash = "0xDD04";
 
-    /// <summary>Two texts that name dbo.Ledger and one that does not, on two servers. The ledger statement ran on span-a an hour ago, two hours
+    /// <summary>Two texts that name dbo.Ledger and one that does not, on two servers. The ledger statement ran on span-a half an hour ago, two hours
     /// ago and three days ago, and on span-b, with the same query_hash and database, three days and an hour ago; the count statement ran on
-    /// span-a three days and a half hour ago; the other statement ran on span-a an hour ago. Only span-a's ledger and other statements sit in
+    /// span-a three days and a half hour ago; the other statement ran on span-a half an hour ago. Only span-a's ledger and other statements sit in
     /// the newest span.</summary>
     private static async Task<(ScratchPostgres Scratch, DateTime NewestSample)> OpenScratchAsync(CancellationToken ct)
     {
@@ -68,17 +68,17 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
                   VALUES ($1,$2,$3,$4,'Books',$5,sha256($6::text::bytea))",
                 CollectionIdGenerator.Next(), now - age, server, name, hash, text);
 
-        await Stat(1, "span-a", LedgerHash, "ledger", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", LedgerHash, "ledger", TimeSpan.FromMinutes(30));
         await Stat(1, "span-a", LedgerHash, "ledger", TimeSpan.FromHours(2));
         await Stat(1, "span-a", LedgerHash, "ledger", TimeSpan.FromDays(3));
         await Stat(2, "span-b", LedgerHash, "ledger", TimeSpan.FromDays(3) + TimeSpan.FromHours(1));
         await Stat(1, "span-a", CountHash, "count", TimeSpan.FromDays(3) + TimeSpan.FromMinutes(30));
-        await Stat(1, "span-a", OtherHash, "other", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", OtherHash, "other", TimeSpan.FromMinutes(30));
 
         await DarlingMcpTestData.ExecAsync(c, ct, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
         await DarlingMcpTestData.ExecAsync(c, ct,
             "CREATE INDEX IF NOT EXISTS " + FindQueriesByTextIndexScopeLiveTests.IndexShortName + " ON collect.query_text_dim USING gin (query_text gin_trgm_ops)");
-        return (scratch, now - TimeSpan.FromHours(1));
+        return (scratch, now - TimeSpan.FromMinutes(30));
     }
 
     private static QueryTextTrigramIndexTracker ReadyTracker()
@@ -102,6 +102,17 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         planCache.GetProperty("rows").EnumerateArray()
             .Select(r => r.GetProperty("server").GetString() + "@" + r.GetProperty("query_hash").GetString() + "@" + r.GetProperty("database_name").GetString())
             .ToArray();
+
+    /// <summary>How many statements an uncut search runs: one per span of the raw window.</summary>
+    private static int SpanCount()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        return DarlingMcpFindQueriesByTextTools.RawTierSpans(now - TimescaleSupport.RawRetentionSpan, now).Count;
+    }
+
+    /// <summary>#9219: the newest span a search reads first, a small slice of the window, not a sixteenth of it.</summary>
+    private static double FirstSpanSeconds() =>
+        (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanParts).TotalSeconds;
 
     private static string Stamp(DateTime naiveUtc) => DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
@@ -149,7 +160,7 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
         var from = DateTime.Parse(searchedWindow.GetProperty("searched_from").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
         var to = DateTime.Parse(searchedWindow.GetProperty("searched_to").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-        Assert.InRange((to - from).TotalSeconds, (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds - 1, (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds + 1);
+        Assert.InRange((to - from).TotalSeconds, FirstSpanSeconds() - 1, FirstSpanSeconds() + 1);
         Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
     }
 
@@ -201,10 +212,10 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         string[] expected = ["span-a@" + LedgerHash + "@Books", "span-a@" + CountHash + "@Books", "span-b@" + LedgerHash + "@Books"];
         Assert.Equal(expected, Keys(planCache));
         Assert.Equal(Stamp(newestSample), planCache.GetProperty("rows")[0].GetProperty("last_collected_at").GetString());
-        Assert.Equal(Stamp(newestSample - TimeSpan.FromDays(3)), planCache.GetProperty("rows")[2].GetProperty("last_collected_at").GetString());
+        Assert.Equal(Stamp(newestSample - TimeSpan.FromDays(3) - TimeSpan.FromMinutes(30)), planCache.GetProperty("rows")[2].GetProperty("last_collected_at").GetString());
         Assert.False(planCache.GetProperty("truncated").GetBoolean());
 
-        Assert.Equal(DarlingMcpFindQueriesByTextTools.RawTierSpanCount, carried.Count);
+        Assert.Equal(SpanCount(), carried.Count);
         Assert.Empty(carried[0]);
         Assert.Equal(new[] { 1 }, carried[1]);
         Assert.Equal(new[] { 1, 1, 2 }, carried[^1].Order());
@@ -227,12 +238,12 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
         Assert.True(planCache.GetProperty("truncated").GetBoolean());
         Assert.Equal(["span-a@" + LedgerHash + "@Books"], Keys(planCache));
-        Assert.InRange(statements, 2, DarlingMcpFindQueriesByTextTools.RawTierSpanCount - 1);
+        Assert.InRange(statements, 2, SpanCount() - 1);
     }
 
     /// <summary>#9150: a page that fills in the newest span stops the search there (one statement), and the reply says the page is the whole-window
     /// answer: <c>complete</c> is true and <c>searched_from</c> is the window's start, because spans run newest first and the older ones could not
-    /// change a full page. <c>truncated</c> says more matches exist. A count statement on span-b half an hour ago makes the newest span hold two rows.</summary>
+    /// change a full page. <c>truncated</c> says more matches exist. A count statement on span-b twenty minutes ago makes the newest span hold two rows.</summary>
     [Fact]
     public async Task APageThatFillsInTheNewestSpan_IsTheWholeWindowAnswer_AndIsTruncated()
     {
@@ -245,7 +256,7 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
             await DarlingMcpTestData.ExecAsync(c, ct,
                 @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
                   VALUES ($1,$2,2,'span-b','Books',$3,sha256('count'::text::bytea))",
-                CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromMinutes(30), CountHash);
+                CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow) - TimeSpan.FromMinutes(20), CountHash);
         }
 
         var statements = 0;
@@ -265,9 +276,9 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
     private const string NullDatabaseHash = "0xC003";
 
     /// <summary>A pattern more texts contain than the probe takes (1,100 filler texts name dbo.Common), so the search joins the window in spans. Server
-    /// span-a ran the first statement an hour ago and two and a half days ago, and the third statement, with no database, an hour ago and three days
+    /// span-a ran the first statement half an hour ago and two and a half days ago, and the third statement, with no database, half an hour ago and three days
     /// ago; span-b ran the first statement, with the same query_hash and database, two and a half days ago; span-a ran the second statement three and
-    /// a half days ago; a statement that does not name dbo.Common ran an hour ago. Only the first and third span-a statements sit in the newest span.</summary>
+    /// a half days ago; a statement that does not name dbo.Common ran half an hour ago. Only the first and third span-a statements sit in the newest span.</summary>
     private static async Task<(ScratchPostgres Scratch, DateTime NewestSample)> OpenCommonScratchAsync(CancellationToken ct)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
@@ -295,18 +306,18 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
                   VALUES ($1,$2,$3,$4,$5,$6,sha256($7::text::bytea))",
                 CollectionIdGenerator.Next(), now - age, server, name, (object?)database ?? DBNull.Value, hash, text);
 
-        await Stat(1, "span-a", "Books", CommonHash, "first", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", "Books", CommonHash, "first", TimeSpan.FromMinutes(30));
         await Stat(1, "span-a", "Books", CommonHash, "first", TimeSpan.FromDays(2.5));
         await Stat(2, "span-b", "Books", CommonHash, "first", TimeSpan.FromDays(2.5));
         await Stat(1, "span-a", "Books", SecondCommonHash, "second", TimeSpan.FromDays(3.5));
-        await Stat(1, "span-a", null, NullDatabaseHash, "third", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", null, NullDatabaseHash, "third", TimeSpan.FromMinutes(30));
         await Stat(1, "span-a", null, NullDatabaseHash, "third", TimeSpan.FromDays(3));
-        await Stat(1, "span-a", "Books", OtherHash, "other", TimeSpan.FromHours(1));
+        await Stat(1, "span-a", "Books", OtherHash, "other", TimeSpan.FromMinutes(30));
 
         await DarlingMcpTestData.ExecAsync(c, ct, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
         await DarlingMcpTestData.ExecAsync(c, ct,
             "CREATE INDEX IF NOT EXISTS " + FindQueriesByTextIndexScopeLiveTests.IndexShortName + " ON collect.query_text_dim USING gin (query_text gin_trgm_ops)");
-        return (scratch, now - TimeSpan.FromHours(1));
+        return (scratch, now - TimeSpan.FromMinutes(30));
     }
 
     /// <summary>#9150: a pattern more texts contain than the probe takes is joined to the window in spans, newest first. An uncut search runs every
@@ -325,7 +336,7 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
         Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
         Assert.Equal(JsonValueKind.Null, planCache.GetProperty("matched_texts").ValueKind);
-        Assert.Equal(DarlingMcpFindQueriesByTextTools.RawTierSpanCount, statements);
+        Assert.Equal(SpanCount(), statements);
         string[] expected =
         [
             "span-a@" + CommonHash + "@Books", "span-a@" + NullDatabaseHash + "@",
@@ -365,8 +376,7 @@ public sealed class FindQueriesByTextAllServersSpansLiveTests
         Assert.False(searchedWindow.GetProperty("complete").GetBoolean());
         var from = DateTime.Parse(searchedWindow.GetProperty("searched_from").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
         var to = DateTime.Parse(searchedWindow.GetProperty("searched_to").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-        var span = (TimescaleSupport.RawRetentionSpan / DarlingMcpFindQueriesByTextTools.RawTierSpanCount).TotalSeconds;
-        Assert.InRange((to - from).TotalSeconds, span - 1, span + 1);
+        Assert.InRange((to - from).TotalSeconds, FirstSpanSeconds() - 1, FirstSpanSeconds() + 1);
         Assert.Equal(searchedWindow.GetProperty("window_to").GetString(), searchedWindow.GetProperty("searched_to").GetString());
     }
 

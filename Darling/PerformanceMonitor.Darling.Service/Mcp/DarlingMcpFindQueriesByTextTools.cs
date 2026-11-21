@@ -199,7 +199,7 @@ ORDER BY m.database_name, m.query_id";
     /// procedure and parameterized text, therefore has its text tested in its newest span only, and a span whose distinct texts number in the
     /// tens of thousands, where the planner tests the pattern by scanning every text rather than reading each by key, pays that scan once per
     /// search instead of once per span. The carried arrays grow to the server's distinct digests in the window, 32 bytes and a boolean each.
-    /// Measured: see <see cref="RawTierSpanCount"/>. A digest with no text row is judged unmatched.</para>
+    /// Measured: see <see cref="RawTierSpanParts"/>. A digest with no text row is judged unmatched.</para>
     /// <para>#7674: the match is <c>(d.query_text || '') ILIKE</c>, not <c>d.query_text ILIKE</c>, on purpose. With the opt-in trigram index on
     /// <c>query_text_dim.query_text</c> the planner would otherwise run a bitmap scan of that index over the whole table and join it to this server's
     /// digests, which the issue measured at 1.7 to 2.0 s cold for one server and one database against 0.2 to 0.7 s without the index. The concatenation is
@@ -335,6 +335,68 @@ FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
 ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
+    /// <summary>#9219: <see cref="PlanCacheAllServersSpanSql"/> for the newest spans (<see cref="AllServersLookupSpans"/>): the same parameters and the same
+    /// rows, but the pattern is tested only on the texts the span's own samples carry, each read by primary key, and not on every text in the store. The
+    /// window join repeats a whole text match in every span, which on a common pattern reads most of the text table before the span's rows can be
+    /// listed (about 29,000 heap blocks on the measured store, most of the first span's time), so a budget that fit the span's samples still ran out. The
+    /// <c>LIMIT 1</c> keeps the planner from flattening the lookup back into a join with the whole table. Measured on 320,000 texts and 3.0 M samples over
+    /// four days, a first span of one hour (about 26,000 distinct texts): a pattern every text contains took 2.3 s with the window join and 0.7 s with
+    /// this statement. It is not used past the newest spans: the lookup costs more per text than the join's single pass over the table, so it stops
+    /// paying once a span carries a large share of the texts (the four-hour span took 1.3 to 2.7 s here against 2.4 s for the join).</summary>
+    internal const string PlanCacheAllServersLookupSpanSql = @"
+WITH seen AS MATERIALIZED (
+    SELECT DISTINCT s.query_text_digest AS digest
+    FROM query_stats AS s
+    JOIN servers AS v ON v.server_id = s.server_id AND v.is_enabled
+    WHERE s.collection_time >= $3
+    AND   s.collection_time < $4
+    AND   s.query_text_digest IS NOT NULL
+),
+matched AS MATERIALIZED (
+    SELECT f.digest
+    FROM seen AS f
+    CROSS JOIN LATERAL (SELECT 1 AS hit
+                        FROM query_text_dim AS d
+                        WHERE d.digest = f.digest
+                        AND   d.query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+                        LIMIT 1) AS t
+),
+hits AS (
+    SELECT DISTINCT ON (s.server_id, s.query_hash, s.database_name)
+           s.server_id, s.query_hash, s.database_name, s.collection_time AS last_collected, s.query_text_digest
+    FROM query_stats AS s
+    JOIN matched AS m ON m.digest = s.query_text_digest
+    JOIN servers AS v ON v.server_id = s.server_id AND v.is_enabled
+    WHERE s.collection_time >= $3
+    AND   s.collection_time < $4
+    ORDER BY s.server_id, s.query_hash, s.database_name, s.collection_time DESC
+),
+page AS (
+    SELECT h.server_id, h.query_hash, h.database_name, h.last_collected, h.query_text_digest
+    FROM hits AS h
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM unnest($5::integer[], $6::text[], $7::text[]) AS k(server_id, query_hash, database_name)
+        WHERE k.server_id = h.server_id
+        AND   k.query_hash IS NOT DISTINCT FROM h.query_hash
+        AND   k.database_name IS NOT DISTINCT FROM h.database_name
+    )
+    ORDER BY h.last_collected DESC, h.server_id, h.query_hash, h.database_name
+    LIMIT $2
+)
+SELECT p.server_id, p.query_hash, p.database_name, p.last_collected, d.query_text
+FROM page AS p
+JOIN query_text_dim AS d ON d.digest = p.query_text_digest
+ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
+
+    /// <summary>#9219: how many of the newest spans the all-servers window join reads with <see cref="PlanCacheAllServersLookupSpanSql"/>: the first two, an hour
+    /// each of a four-day tier. The spans after them are wider and carry too large a share of the texts for a lookup per text to beat the join.</summary>
+    internal const int AllServersLookupSpans = 2;
+
+    /// <summary>#9219: the window-join statement the all-servers search runs for span <paramref name="step"/> (0 is the newest).</summary>
+    internal static string AllServersJoinSql(int step) =>
+        step < AllServersLookupSpans ? PlanCacheAllServersLookupSpanSql : PlanCacheAllServersSpanSql;
+
     /// <summary>
     /// #7849: how many matched texts the all-servers sample read takes as an array (<see cref="PlanCacheAllServersProbeSql"/>) before it falls back to
     /// the window join (<see cref="PlanCacheAllServersSpanSql"/>). Measured on a seeded large store (40 servers, 3.0 M sample rows over four days, 300,000
@@ -347,33 +409,47 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     public const int ProbeDigestCap = 1000;
 
     /// <summary>
-    /// How many spans the one-server plan-cache search cuts the raw window into. Each span is one statement (<see cref="PlanCacheSql"/>) under
-    /// what is left of the source's budget, run newest span first, so a budget that runs out leaves the rows the earlier spans found and the
-    /// reply says how much of the window they cover. Sixteen spans of a four-day window are six hours each: a window whose whole-window
-    /// statement takes twice the budget still answers from its newest two days. Each text is judged once per search whichever spans it
-    /// runs in (see <see cref="PlanCacheSql"/>), which keeps the sixteen statements at about the cost of one. Measured warm on a seeded
-    /// large store (330,000 texts; a server with 30,000 distinct texts in 970,000 samples over four days, the older half compressed): the
-    /// whole window in one statement takes 0.50 s, and in sixteen spans carrying the judged digests 0.66 s (0.40 s and 0.24 s with a
-    /// database named; about 36 ms a span while carrying 20,000 to 30,000 digests), where sixteen spans that each judge every text they
-    /// see take 4.9 s, more than the budget, because a span with tens of thousands of distinct texts judges them by scanning every text in
-    /// the store and pays that scan once per span; seven coarser spans cut that only to 2.2 s.
+    /// #9219: how many equal parts the raw window is measured in for the spans of a plan-cache search (<see cref="RawTierSpans"/>): the newest span
+    /// is one part (an hour of a four-day tier) and the spans after it widen, so the first statement of a search is small whatever the store
+    /// holds. Each span is one statement (<see cref="PlanCacheSql"/> for one server) under what is left of the source's budget, run newest span
+    /// first, so a budget that runs out leaves the rows the earlier spans found and the reply says how much of the window they cover. Under
+    /// sixteen equal six-hour spans the first statement read a sixteenth of the raw tier, and on a large store that statement alone could miss
+    /// the whole budget (the search then stopped with nothing searched, and which searches did so changed with the limit, because the limit
+    /// changes the plan). Each text is judged once per search whichever spans it runs in (see <see cref="PlanCacheSql"/>), which keeps the
+    /// statements of a finished one-server search at about the cost of one; the all-servers join repeats its text match in each span, which is
+    /// why the spans stop widening at <see cref="RawTierSpanMaxParts"/> parts and the whole window is twelve spans, not more.
     /// </summary>
-    public const int RawTierSpanCount = 16;
+    public const int RawTierSpanParts = 96;
+
+    /// <summary>#9219: the widest a span grows, in <see cref="RawTierSpanParts"/> (twelve hours of a four-day tier). The spans run 1, 1, 2, 4, 8 parts
+    /// and then this many each, the oldest cut short at the floor.</summary>
+    public const int RawTierSpanMaxParts = 12;
 
     /// <summary>
-    /// The spans of the raw window <paramref name="floor"/> to <paramref name="now"/>, newest first: equal lengths, each one's floor the next
-    /// one's ceiling, the oldest starting exactly at the floor and the newest open a day past <paramref name="now"/>, so a sample stamped
-    /// slightly ahead of this host's clock is still in the first span.
+    /// The spans of the raw window <paramref name="floor"/> to <paramref name="now"/>, newest first: each one's floor the next one's ceiling, the
+    /// oldest starting exactly at the floor and the newest open a day past <paramref name="now"/>, so a sample stamped slightly ahead of this
+    /// host's clock is still in the first span. Their lengths are 1, 1, 2, 4, 8 and then <see cref="RawTierSpanMaxParts"/> parts of
+    /// <see cref="RawTierSpanParts"/> (#9219), so the first statement reads the newest slice only and the search widens while time remains.
     /// </summary>
     internal static IReadOnlyList<(DateTime Floor, DateTime Ceiling)> RawTierSpans(DateTime floor, DateTime now)
     {
-        var length = (now - floor) / RawTierSpanCount;
-        var spans = new (DateTime Floor, DateTime Ceiling)[RawTierSpanCount];
-        for (var i = 0; i < RawTierSpanCount; i++)
+        var part = (now - floor) / RawTierSpanParts;
+        var spans = new List<(DateTime Floor, DateTime Ceiling)>();
+        var ceiling = now.AddDays(1);
+        var reached = now;
+        var width = 1;
+        var next = 1;
+        while (reached > floor)
         {
-            var spanFloor = i == RawTierSpanCount - 1 ? floor : now - length * (i + 1);
-            var ceiling = i == 0 ? now.AddDays(1) : now - length * i;
-            spans[i] = (spanFloor, ceiling);
+            /* The oldest span takes whatever is left, including the few ticks the division by the parts dropped. */
+            var spanFloor = reached - floor < part * (width + 1) ? floor : reached - part * width;
+
+            spans.Add((spanFloor, ceiling));
+            ceiling = spanFloor;
+            reached = spanFloor;
+
+            /* 1, 1, 2, 4, 8, 12, 12 ...: the width doubles from the second span on, up to the cap. */
+            (width, next) = (Math.Min(next, RawTierSpanMaxParts), next * 2);
         }
 
         return spans;
@@ -384,7 +460,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// Query Store source's time is in the window, reads "1 day".</summary>
     internal static string DescribeSearched(int completedSpans, DateTime floor, DateTime now)
     {
-        var searched = (now - floor) / RawTierSpanCount * completedSpans;
+        var searched = now - RawTierSpans(floor, now)[completedSpans - 1].Floor;
         var (value, unit) = searched.TotalHours < 24 ? (searched.TotalHours, "hour") : (searched.TotalDays, "day");
         var rendered = value.ToString("0.#", CultureInfo.InvariantCulture);
         return rendered + " " + unit + (rendered == "1" ? string.Empty : "s");
@@ -402,7 +478,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         var stopped = string.Equals(status, "stopped", StringComparison.Ordinal);
         DateTime? searchedFrom = !stopped
             ? floor
-            : completedSpans is > 0 ? now - (now - floor) / RawTierSpanCount * completedSpans.Value : null;
+            : completedSpans is > 0 ? RawTierSpans(floor, now)[completedSpans.Value - 1].Floor : null;
         return new
         {
             servers,
@@ -672,7 +748,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
             var (probeWanted, matched) = await matchAhead;
 
-            /* The raw window newest span first, one statement per span inside the one transaction and budget (see RawTierSpanCount): the rows
+            /* The raw window newest span first, one statement per span inside the one transaction and budget (see RawTierSpanParts): the rows
                a span finds are kept whatever happens to the spans after it, and a span already-found statements ran in again does not list them
                twice. On the span read the digests each span judged, with their verdicts, are carried to the spans after it, so a text is judged once. */
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -888,7 +964,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     }
 
                     /* The probe runs the raw window newest span first, one statement per span inside the one transaction and budget (see
-                       RawTierSpanCount): the rows a span finds are kept whatever happens to the spans after it, and a server, query_hash and
+                       RawTierSpanParts): the rows a span finds are kept whatever happens to the spans after it, and a server, query_hash and
                        database an earlier span found is not listed again. #9150: the window join runs in the same spans, matching the pattern in
                        each (the matched texts are too many to bind as an array). */
                     if (step >= spans.Count || collected.Count > limit)
@@ -900,7 +976,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     var wanted = limit + 1 - collected.Count;
                     var probed = digests;
                     return probed is null
-                        ? new SourceStatement(PlanCacheAllServersSpanSql, p => BindAllServersSpan(
+                        ? new SourceStatement(AllServersJoinSql(step), p => BindAllServersSpan(
                             p, new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped }, wanted, span, collected))
                         : new SourceStatement(PlanCacheAllServersProbeSql, p => BindAllServersSpan(
                             p, new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = probed }, wanted, span, collected));
