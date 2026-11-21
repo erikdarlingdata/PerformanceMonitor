@@ -716,7 +716,8 @@ WITH plan_agg AS
     /// tomorrow, so on a store that is current the first unbuilt day is the day after tomorrow and the floor is today's
     /// watermark: the live half reads the last two or three hours of first executions, not the open days.
     /// </summary>
-    internal static DateTime PlanRegressionLiveFloorWithWatermarks(DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays)
+    internal static DateTime PlanRegressionLiveFloorWithWatermarks(
+        DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, TimeSpan? unbuiltReach = null)
     {
         var through = new Dictionary<DateOnly, DateTime>();
         foreach (var b in builtDays)
@@ -736,13 +737,58 @@ WITH plan_agg AS
             cursor = cursor.AddDays(1);
         }
 
-        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue).AddDays(-1);
+        /* #9225: how far below the first unbuilt day a live row's first execution can sit. A day (the longest an interval spans) unless the
+           caller resolved the server's longest interval length, which is shorter on a server that keeps hourly intervals. */
+        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue) - (unbuiltReach ?? QueryStoreIntervalWide.IntervalSpanMargin);
         return DateTime.SpecifyKind(unbuilt < floor ? unbuilt : floor, DateTimeKind.Unspecified);
+    }
+
+    /// <summary>
+    /// The live floor the daily read binds (#9225). The floor is one interval length below the first unbuilt day, where it was a whole day.
+    /// A live row's last execution is at or after that day's midnight and its first execution is at most one interval earlier
+    /// (<see cref="QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync"/>). A whole day below read the floor day's entire partition and
+    /// threw away every row of it but the few that cross midnight (no index finds those), which is most of what a read anchored a few
+    /// hours back read. The server's interval length is looked up only when the unbuilt day sets the floor: a partial built day's
+    /// watermark that is already lower sets it exactly, and a server whose length cannot be trusted keeps the whole day.
+    /// </summary>
+    internal static async Task<DateTime> ResolvePlanRegressionLiveFloorAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime windowFloor,
+        IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, DateTime end, DateTime utcNow, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var wholeDay = PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays);
+        var days = builtDays.Select(b => b.Day).ToHashSet();
+        var cursor = DateOnly.FromDateTime(windowFloor);
+        while (days.Contains(cursor))
+        {
+            cursor = cursor.AddDays(1);
+        }
+
+        var firstUnbuilt = cursor.ToDateTime(TimeOnly.MinValue);
+        if (wholeDay < firstUnbuilt.AddDays(-1))
+        {
+            return wholeDay;
+        }
+
+        /* The trust test lists the server's databases from the wide table, which keeps WideHorizonDays. A day at or below that horizon
+           (counting the day the floor reaches into) may have databases only the 15-day latest table still holds, so the test cannot
+           vouch for them: the whole day stays. */
+        if (firstUnbuilt - QueryStoreIntervalWide.IntervalSpanMargin < utcNow.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays))
+        {
+            return wholeDay;
+        }
+
+        var reach = await QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync(
+            connection, transaction, serverId, firstUnbuilt, end, commandTimeoutSeconds, cancellationToken);
+        return PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays, reach);
     }
 
     /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
     /// store from another connection at exactly the point a snapshot has to hold. Null in production.</summary>
     internal static readonly System.Threading.AsyncLocal<Func<System.Threading.CancellationToken, System.Threading.Tasks.Task>?> TestOnlyAfterBuiltDaysRead = new();
+
+    /// <summary>Test seam (#9225): receives the live floor the daily read binds, so a test asserts the value the collector sends and not
+    /// a count taken through <c>pg_stat_statements</c>. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Action<DateTime>?> TestOnlyLiveFloorBound = new();
 
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
@@ -1058,7 +1104,11 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
                     Value = builtDays.Select(b => b.Day).ToArray()
                 });
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays));
+                /* #9225: one interval length below the first unbuilt day, not a day, where the server's interval length can be trusted. */
+                var liveFloor = await ResolvePlanRegressionLiveFloorAsync(
+                    connection, snapshot, context.ServerId, windowFloor, builtDays, AsNaive(context.TimeRangeEnd), DateTime.UtcNow, FactCommandTimeoutSeconds, context.CancellationToken);
+                TestOnlyLiveFloorBound.Value?.Invoke(liveFloor);
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, liveFloor);
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
                 cmd.Parameters.Add(new NpgsqlParameter
                 {
