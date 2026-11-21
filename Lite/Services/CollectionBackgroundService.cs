@@ -958,7 +958,7 @@ public class CollectionBackgroundService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Dismissed-archive-alert cleanup failed");
+            LogPurgeFailure(logger, ex, "Dismissed-archive-alert cleanup", "nothing was purged and the next housekeeping tick retries");
         }
 
         /* #5989: the query-tag sightings age out on the same daily tick; only they are aged, the tags, assignments and rules are configuration. */
@@ -968,8 +968,24 @@ public class CollectionBackgroundService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Query-tag sightings cleanup failed");
+            LogPurgeFailure(logger, ex, "Query-tag sightings cleanup", "nothing was purged and the next daily sweep retries");
         }
+    }
+
+    /// <summary>
+    /// A failed daily purge. A write-lock timeout (#9196) is the routine outcome of a burst of reads holding the store, not a fault:
+    /// one Warning line that names the holder, as the neighbouring passes write it, with no stack and no Error. Anything else keeps
+    /// its Error with the exception.
+    /// </summary>
+    private static void LogPurgeFailure(ILogger? logger, Exception ex, string pass, string outcome)
+    {
+        if (ex is StoreLockTimeoutException timeout)
+        {
+            logger?.LogWarning("{Line}", StoreBusyReport.LogLine(pass, timeout, outcome));
+            return;
+        }
+
+        logger?.LogError(ex, "{Pass} failed", pass);
     }
 
     /// <summary>

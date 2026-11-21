@@ -163,14 +163,14 @@ public sealed class StoreBusyReportTests
     [Fact]
     public void TheMaintenanceSkipWarning_PrintsTheBudgetTheCallWaited_NotAFixedFiveSeconds()
     {
-        var shipped = LocalDataService.MaintenanceSkippedWarning(7, "holder unknown", TimeSpan.FromSeconds(5));
+        var shipped = LocalDataService.MaintenanceSkippedWarning("7", "holder unknown", TimeSpan.FromSeconds(5));
         Assert.Contains("within 5s", shipped, StringComparison.Ordinal);
 
-        var host = LocalDataService.MaintenanceSkippedWarning(7, "holder unknown", TimeSpan.FromSeconds(120));
+        var host = LocalDataService.MaintenanceSkippedWarning("7", "holder unknown", TimeSpan.FromSeconds(120));
         Assert.Contains("within 120s", host, StringComparison.Ordinal);
         Assert.DoesNotContain("within 5s", host, StringComparison.Ordinal);
 
-        var fraction = LocalDataService.MaintenanceSkippedWarning(7, "x", TimeSpan.FromMilliseconds(150));
+        var fraction = LocalDataService.MaintenanceSkippedWarning("7", "x", TimeSpan.FromMilliseconds(150));
         Assert.Contains("within 0.15s", fraction, StringComparison.Ordinal);
     }
 
