@@ -1008,6 +1008,17 @@ public sealed partial class DarlingWorker : BackgroundService
 
     private FleetSlotWaiters? _slotWaiters;
 
+    /// <summary>#9192: the last bodies that held a fleet collection slot, each with its slowest collector run. A body that
+    /// waited past <see cref="DarlingCycleSkip.CauseFloorMs"/> for a slot names the longest of the bodies that held slots
+    /// meanwhile in the row it writes. Created on first use, like <see cref="SlotWaiters"/>. Internal so a test can read it.</summary>
+    internal FleetSlotHolds SlotHolds => LazyInitializer.EnsureInitialized(ref _slotHolds, static () => new FleetSlotHolds());
+
+    private FleetSlotHolds? _slotHolds;
+
+    /// <summary>Test seam (#9192): maps the time a body really waited for its fleet slot to the time it reports, so a test states
+    /// a wait past <see cref="DarlingCycleSkip.CauseFloorMs"/> without waiting that long. Null in production.</summary>
+    internal Func<TimeSpan, TimeSpan>? GateWaitedForTests { get; set; }
+
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
        cancellation raised at that budget — wedged inside one of the store reads that still take no
@@ -1789,6 +1800,13 @@ LIMIT 1";
     internal sealed class RunOutcome
     {
         public bool Succeeded { get; set; }
+
+        /// <summary>#9192: the run's monitored-server read and store write, in milliseconds, as the collection log records them.
+        /// Null when the run did not report them (it faulted, or never started).</summary>
+        public long? SqlMs { get; set; }
+
+        /// <summary>See <see cref="SqlMs"/>.</summary>
+        public long? StorageMs { get; set; }
     }
 
     /// <summary>The failed-jobs list the body read from msdb at <paramref name="FetchedUtc"/> (#5642).</summary>
@@ -1867,6 +1885,10 @@ LIMIT 1";
         public string? LastBodySlowestName;
         public long LastBodySlowestMs;
         public long LastGateWaitMs;
+
+        /* #9192: what held the fleet slots during the current body's wait, when the wait was past the cause floor and bodies
+           held slots meanwhile. Set with LastGateWaitMs when the body gets its slot, read by the same body's flush. */
+        public SlotHolder? LastGateWaitHolder;
 
         /* #5824: the last finished body's scheduled analysis pass length (0 when no pass ran in it), and how many analysis
            passes held fleet slots when the current body got its slot. LastBodyMs ends with the collectors, before the

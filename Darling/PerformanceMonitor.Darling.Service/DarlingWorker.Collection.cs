@@ -2167,6 +2167,7 @@ public sealed partial class DarlingWorker
 
         /* #8539: kept with the time it started waiting for as long as it waits, a cancelled wait included, so a due
            scheduled analysis pass gives way once this wait is long enough to cost a collection slot. */
+        var holdMark = SlotHolds.Mark();
         var waiter = SlotWaiters.Enter(DateTime.UtcNow);
         try
         {
@@ -2178,9 +2179,18 @@ public sealed partial class DarlingWorker
         }
 
         var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
+        if (GateWaitedForTests is { } statedWait)
+        {
+            gateWaited = statedWait(gateWaited);
+        }
+
         _fleetGateStats?.RecordQueueWait(gateWaited);
         server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;
         server.LastGateWaitAnalysisHolders = Volatile.Read(ref _analysisPassesInSlot);
+
+        /* #9192: the bodies that held slots while this one waited, for the row that blames the wait. Set on every body so a
+           short wait clears an earlier body's holder. */
+        server.LastGateWaitHolder = SlotHolds.HolderSince(holdMark, server.LastGateWaitMs);
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.

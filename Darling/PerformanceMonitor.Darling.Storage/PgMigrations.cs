@@ -3818,6 +3818,10 @@ END $$;";
            Three new plain tables created empty and a nullable column: no data moves, so the upgrade stays fast. The next ticks build the closed hours
            inside raw's retention. An older build ignores them. */
         new Migration(QueryStoreClutterHourly.Version, "query-store-clutter-hourly", QueryStoreClutterHourly.CreateSql),
+        /* V290 (#9193): the per-server floor of the query_stats summary (V286). One plain table created empty: no data moves, so the upgrade
+           stays fast, and a server with no floor row has no floor. The floor move writes one row here instead of deleting summary rows inside
+           the batch. An older build ignores the table, so after a rollback with a hole it can read the summary across the hole. */
+        new Migration(QueryStatsCollectionSummary.FloorRungVersion, "query-stats-collection-floor", QueryStatsCollectionSummary.FloorCreateSql),
     };
 
     /// <summary>
