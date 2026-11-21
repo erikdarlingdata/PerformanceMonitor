@@ -35,7 +35,7 @@ namespace Lite.Tests;
 /// <c>EveryQueryStoreAggregateInTheFile_CarriesADedupCte</c> reads exactly one file,
 /// <c>LocalDataService.QueryStore.cs</c>, which is right for what it checks (the dedup CTEs, the rank
 /// filters, the trend's two arms) but leaves 2 of Lite's 7 dedup sites — the ones in
-/// <c>Analysis/DrillDownCollector.Queries.cs</c> and <c>Analysis/DuckDbFactCollector.QueryPerf.cs</c> —
+/// <c>Analysis/DrillDownCollector.Queries.cs</c> and <c>Analysis/DuckDbFactCollector.PlanRegressionCost.cs</c> —
 /// covered by no test at all. A future edit dropping <c>execution_count DESC</c> from either would have gone
 /// uncaught, which is precisely the recurrence mode #1841 / #1845 / #1853 / #1907 keep demonstrating. Caught
 /// by review on #1919; the alternative on offer was to soften the source comment to stop claiming coverage
@@ -52,7 +52,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     [
         (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 5), // one site is now the arg_max pick (#9195)
         (Path.Combine("Lite", "Analysis", "DrillDownCollector.Queries.cs"), 1),
-        (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.QueryPerf.cs"), 1),
+        (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.PlanRegressionCost.cs"), 1),
         /* #8784: get_object_usage sums module executions over the stored Query Store rows, newest snapshot per interval. */
         (Path.Combine("Lite", "Services", "LocalDataService.ObjectUsage.cs"), 1),
     ];
