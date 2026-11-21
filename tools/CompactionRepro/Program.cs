@@ -85,7 +85,7 @@ var syntheticRows = int.Parse(GetArg(args, "--synthetic-rows", "30000"));
 var syntheticBaseOps = int.Parse(GetArg(args, "--synthetic-base-ops", "130"));
 var syntheticTailOps = int.Parse(GetArg(args, "--synthetic-tail-ops", "75000"));
 var syntheticTailEvery = int.Parse(GetArg(args, "--synthetic-tail-every", "500"));
-if (string.IsNullOrEmpty(sourceFile) && string.IsNullOrEmpty(mergeFilesArg) && !synthetic)
+if (string.IsNullOrEmpty(sourceFile) && string.IsNullOrEmpty(mergeFilesArg) && !synthetic && !args.Contains("--seed-files"))
 {
     Console.Error.WriteLine("error: --source-file <path> OR --merge-files <a.parquet,...> OR --synthetic required");
     Console.Error.WriteLine("  --source-file:  split the given monthly parquet into chunks, then compact (full repro)");
