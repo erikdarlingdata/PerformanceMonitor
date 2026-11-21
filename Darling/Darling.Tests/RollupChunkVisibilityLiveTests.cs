@@ -129,7 +129,7 @@ public sealed class RollupChunkVisibilityLiveTests
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var _ = scratch;
+        await using var scratchHandle = scratch;
         await using var c = new NpgsqlConnection(scratch.ConnectionString);
         var bodySucceeded = false;
         try
