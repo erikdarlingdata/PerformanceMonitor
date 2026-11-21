@@ -152,13 +152,13 @@ public sealed class DarlingStoreTableHealthCache
     public async Task WarmAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
-        await WarmPartAsync("tables", cancellationToken, () => GetTablesAsync(postgres, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        await WarmPartAsync("indexes", cancellationToken, () => GetIndexesAsync(postgres, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        await WarmPartAsync("partition index coverage", cancellationToken, () => GetIndexCoverageAsync(postgres, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        await WarmPartAsync("autovacuum settings", cancellationToken, () => GetAutovacuumSettingsAsync(postgres, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        await WarmPartAsync("tables", () => GetTablesAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+        await WarmPartAsync("indexes", () => GetIndexesAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+        await WarmPartAsync("partition index coverage", () => GetIndexCoverageAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+        await WarmPartAsync("autovacuum settings", () => GetAutovacuumSettingsAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task WarmPartAsync(string name, CancellationToken cancellationToken, Func<Task> read)
+    private async Task WarmPartAsync(string name, Func<Task> read, CancellationToken cancellationToken)
     {
         try
         {
