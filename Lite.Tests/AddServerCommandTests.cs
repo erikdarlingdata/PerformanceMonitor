@@ -536,7 +536,7 @@ public sealed class AddServerCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task AFirstRunThatFails_LeavesNoServerListAndNoHostRecord()
+    public async Task AFirstRunThatFails_LeavesAnEmptyServerList_AndNoHostRecordEntry_AndNoCredential()
     {
         var store = new RefusingStore(_store, "user1", throwInstead: false);
 
@@ -544,9 +544,37 @@ public sealed class AddServerCommandTests : IDisposable
             ["--add-server"], """[{"host":"sql02","auth":"sql","username":"user1","password":"value-one"}]""", store: store);
 
         Assert.Equal(1, run.Exit);
-        Assert.Empty(ServerNames());
+        /* The manager makes an empty list file when it opens a folder with none. An empty list is harmless, so it is kept. */
+        Assert.True(File.Exists(ServersFile));
+        using (var doc = JsonDocument.Parse(File.ReadAllText(ServersFile)))
+            Assert.Equal(0, doc.RootElement.GetProperty("Servers").GetArrayLength());
         Assert.False(File.Exists(HostsFile));
         Assert.Empty(StoredKeys());
+    }
+
+    [Theory]
+    [InlineData("""[{"host":"SQL01","auth":"sql","username":"monitor2","password":"second-value"}]""")]
+    [InlineData("""[{"host":"sql01","database":"Utility","auth":"sql","username":"monitor2","password":"second-value"}]""")]
+    public async Task AReAdd_SpelledInAnotherLetterCase_IsRefusedAndAddsNoSecondEntry(string reAdd)
+    {
+        var lower = reAdd.Contains("Utility")
+            ? """[{"host":"sql01","database":"utility","auth":"sql","username":"monitor","password":"first-value"}]"""
+            : """[{"host":"sql01","auth":"sql","username":"monitor","password":"first-value"}]""";
+        await RunVerbAsync(["--add-server"], lower);
+        var id = Reload().GetAllServers().Single().Id;
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+
+        var run = await RunVerbAsync(["--add-server"], reAdd);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("another letter case", run.Err);
+        Assert.Contains("spelled as the entry has them", run.Err);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(id));
+        Assert.Single(Reload().GetAllServers());
     }
 
     private const string ReAddSql01 = """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""";

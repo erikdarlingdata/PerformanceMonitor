@@ -82,15 +82,10 @@ internal static class ServerEntryRules
     }
 
     /// <summary>
-    /// The encryption option a stored mode builds, as <see cref="ServerConnection"/> builds it: a blank or unknown mode (an old or
-    /// hand-edited servers.json) is Mandatory, never a silent drop to an unencrypted connection (#9237).
+    /// The encryption option a stored mode builds. It is <see cref="ServerConnection.EncryptOptionFor"/>, the one mapping the connection
+    /// builder uses: a blank or unknown mode is Mandatory, never a silent drop to an unencrypted connection (#9237).
     /// </summary>
-    internal static SqlConnectionEncryptOption EncryptOptionFor(string? encryptMode) => encryptMode switch
-    {
-        "Optional" => SqlConnectionEncryptOption.Optional,
-        "Strict" => SqlConnectionEncryptOption.Strict,
-        _ => SqlConnectionEncryptOption.Mandatory
-    };
+    internal static SqlConnectionEncryptOption EncryptOptionFor(string? encryptMode) => ServerConnection.EncryptOptionFor(encryptMode);
 
     /// <summary>
     /// The connection test <c>--add-server</c> runs: opens the server with the entry's own credentials and reads the detection

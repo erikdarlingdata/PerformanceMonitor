@@ -332,6 +332,16 @@ internal static class AddServerCommand
         {
             var listed = manager.GetAllServers();
             var existing = listed.FirstOrDefault(s => ServerManager.IsSameServer(s, candidate));
+            if (existing is null && listed.FirstOrDefault(s => ServerManager.IsSameServerIgnoringCase(s, candidate)) is { } spelledAnotherWay)
+            {
+                /* The listed entry is the same server in another letter case. The id hashes the spelling, so it would not collide and a
+                   second entry for the one server would be added. A case-blind match here would skip the ordinal host check, so it is refused. */
+                error.WriteLine($"{label}: the listed entry '{ServerHostChange.Shown(ServerManager.NameForMessage(spelledAnotherWay))}' (host '{ServerHostChange.Shown(spelledAnotherWay.ServerName)}', "
+                    + $"database '{ServerHostChange.Shown(spelledAnotherWay.DatabaseName)}') is this server spelled in another letter case, so nothing was changed. "
+                    + "Add this server with the host and database spelled as the entry has them.");
+                return ExitRefused;
+            }
+
             if (existing is null && manager.FindServerIdHolder(candidate) is { } holder)
             {
                 error.WriteLine($"{label}: {ServerManager.DescribeIdHolder(candidate, holder)}");
