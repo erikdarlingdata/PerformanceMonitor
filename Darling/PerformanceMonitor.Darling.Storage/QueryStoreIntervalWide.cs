@@ -904,6 +904,46 @@ SELECT EXISTS
     /// The Viewer's grid and the MCP top and aborts reads place their window with it, so a window's rows are the intervals its bars draw.</summary>
     public const string IntervalStartExpressionSql = "COALESCE(interval_start_time_utc, collection_time)";
 
+    /// <summary>
+    /// The interval-start-placed window of a per-server read of this table as two arms, <c>UNION ALL</c>, each with the
+    /// <c>first_execution_time</c> floor that holds for its rows (#9276). <paramref name="selectList"/> is projected from both arms
+    /// and <paramref name="trailingPredicates"/> (each line starting with <c>AND</c>) is repeated in both. $1 server_id, $2/$3 the
+    /// window (naive UTC, half-open), as the single-arm window of the top read binds them.
+    /// <list type="bullet">
+    /// <item>Rows WITH <c>interval_start_time_utc</c> are placed by it, and <c>first_execution_time</c> is an end time inside the
+    /// interval (<see cref="IntervalStartSlack"/> explains it), so the floor is the window's start less that hour, not
+    /// <see cref="PurgeEdgeMargin"/> (26 hours).</item>
+    /// <item>Rows WITHOUT it are placed by <c>collection_time</c> and keep <see cref="PurgeEdgeMarginSql"/>, which
+    /// <see cref="WithEdgeMargin"/> still narrows. Only this arm carries that text. The partial index
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> holds exactly these rows, so the arm is one short range.</item>
+    /// </list>
+    /// Every row of the one-arm window is in exactly one arm, so the rows are the same. The caller uses this statement only when
+    /// that index is built (<see cref="QueryStoreBackgroundIndexes.IsBuiltAsync"/>); without it the two arms would each walk the
+    /// server's rows.
+    /// </summary>
+    public static string IntervalStartSplitSql(string selectList, string trailingPredicates, string indent = "            ") =>
+        $@"{indent}SELECT
+{indent}    {selectList}
+{indent}FROM query_store_interval_wide
+{indent}WHERE server_id = $1
+{indent}AND   interval_start_time_utc IS NOT NULL
+{indent}AND   interval_start_time_utc >= $2
+{indent}AND   interval_start_time_utc < $3
+{indent}AND   first_execution_time >= $2 - {IntervalStartSlackSql}
+{indent}AND   first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}
+{trailingPredicates}
+{indent}UNION ALL
+{indent}SELECT
+{indent}    {selectList}
+{indent}FROM query_store_interval_wide
+{indent}WHERE server_id = $1
+{indent}AND   interval_start_time_utc IS NULL
+{indent}AND   collection_time >= $2
+{indent}AND   collection_time < $3
+{indent}AND   first_execution_time >= $2 - {PurgeEdgeMarginSql}
+{indent}AND   first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}
+{trailingPredicates}";
+
     /// <summary>The <c>collection_time</c> floor beside an interval-start-placed window on the raw Query Store reads (#7776, #7814): an
     /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
     public const string CollectionFloorSlackSql = "interval '1 hour'";
