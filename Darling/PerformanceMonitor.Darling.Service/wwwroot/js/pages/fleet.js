@@ -314,6 +314,8 @@ async function renderStoreFleets(main, isPoll) {
       el("span", { class: "fleet-store-name", text: st.name }),
       isCurrent ? currentMark() : null,
       el("span", { class: "fleet-store-health", text: healthLabel(st.health) }),
+      /* #9203: each store's own service build next to its name, so a mixed-version setup shows. Nothing when the store did not say. */
+      st.service_build ? el("span", { class: "fleet-store-build muted", text: st.service_build }) : null,
       st.server_count != null ? el("span", { class: "muted", text: st.server_count + " server" + (st.server_count === 1 ? "" : "s") }) : null,
     ]);
     return { st, body, section: el("section", { class: "fleet-store", dataset: { store: st.name } }, [head, body]) };

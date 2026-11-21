@@ -691,6 +691,10 @@ public static partial class DarlingCliCommands
         return assembly.GetName().Version?.ToString() ?? "unknown";
     }
 
+    /// <summary>#9203: the line that names this build ("Version 3.13.0 (commit 0993a1441)"), the same words the Viewer's About shows for the
+    /// same build. The web dashboard's footer shows it, and the front door shows each store's next to the store's name.</summary>
+    public static string BuildText() => ProductBuildText.ForAssembly(typeof(DarlingCliCommands).Assembly);
+
     /// <summary>The usage text for <c>--help</c> and the unknown-option error. Pure ASCII, one verb per line.</summary>
     public static string UsageText() =>
         "PerformanceMonitor Darling service." + Environment.NewLine +

@@ -68,7 +68,7 @@ public static partial class DarlingWebEndpoints
                GET /api/people answers every session its own key, and only an administrator (a signed-in admin or the shared web token) the list
                of people with their keys and Slack ids (#7107). MCP get_people shows identity kinds, never the ids. */
             var seat = DarlingWebSeat.FromContext(context);
-            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["scoped"] = seat.AllowedTagIds is not null, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["scoped"] = seat.AllowedTagIds is not null, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm), ["build"] = DarlingCliCommands.BuildText() });
         });
 
         /* #8737: the calling session's own identity, seat and expiry, for the profile menu. It reads no store; /api/session above still
