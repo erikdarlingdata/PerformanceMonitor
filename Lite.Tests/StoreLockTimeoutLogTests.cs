@@ -170,21 +170,22 @@ public sealed class StoreLockTimeoutLogTests : IClassFixture<SharedDuckDbFixture
         holder.Start();
 
         var lines = new List<string>();
-        TimeSpan? firstLineAfter = null;
+        int? firstLineAtSkip = null;
         try
         {
             Assert.True(held.Wait(TimeSpan.FromSeconds(10)), "the read never took the lock");
             AppLogger.DrainBufferedLines();
-            var started = System.Diagnostics.Stopwatch.StartNew();
+            var skipNumber = 0;
             foreach (var serverId in serverIds)
             {
                 /* Each skip waits the 100 ms budget, then the pause puts the skips half a quiet period apart: four and a
                    half quiet periods in all, and no gap between skips as long as one quiet period. */
                 await service.GetDatabaseStateDeviationsAsync(serverId);
                 var seen = AppLogger.DrainBufferedLines().Where(l => l.Contains("skipped this cycle's database-state maintenance", StringComparison.Ordinal)).ToList();
-                if (seen.Count > 0 && firstLineAfter is null)
+                skipNumber++;
+                if (seen.Count > 0 && firstLineAtSkip is null)
                 {
-                    firstLineAfter = started.Elapsed;
+                    firstLineAtSkip = skipNumber;
                 }
 
                 lines.AddRange(seen);
@@ -201,8 +202,8 @@ public sealed class StoreLockTimeoutLogTests : IClassFixture<SharedDuckDbFixture
         }
 
         /* With a window that slid, nothing logged until the final flush and the one line held all nine servers. */
-        Assert.NotNull(firstLineAfter);
-        Assert.True(firstLineAfter < quiet * 2.5, $"the first line came {firstLineAfter} after the first skip");
+        Assert.NotNull(firstLineAtSkip);
+        Assert.True(firstLineAtSkip <= 5, $"the first line came after skip {firstLineAtSkip}, skips being half a window apart");
         Assert.True(lines.Count >= 3, $"{lines.Count} lines for a burst that ran several windows");
         foreach (var id in serverIds)
         {
