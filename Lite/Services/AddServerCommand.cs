@@ -35,7 +35,7 @@ internal sealed record AddServerFlags(string? Host = null, string? DisplayName =
 /// <para>The servers come from a JSON array on standard input (fields <c>host</c>, <c>display_name</c>, <c>auth</c>,
 /// <c>username</c>, <c>password</c>, <c>database</c>, as Darling's) or from flags for one server. A password is only ever read
 /// from standard input, one line when flags name the server: never an argument, never echoed, never logged. There is no hidden
-/// keyboard prompt, because Lite is a GUI-subsystem exe and a shell does not wait for one, so the shell and the exe would both read
+/// password prompt, because Lite is a GUI-subsystem exe and a shell does not wait for one, so the shell and the exe would both read
 /// the keyboard.</para>
 ///
 /// <para>Every entry is checked (host rule, credential rule, id rule, connection test) before anything is written, and one refused
@@ -159,7 +159,7 @@ internal static class AddServerCommand
             {
                 if (!inputRedirected)
                     return (null, "A password is read from stdin, and stdin is not redirected, so no server was added. "
-                        + "There is no keyboard prompt (this program has no console of its own, so a shell and the program would both read the keys). "
+                        + "There is no password prompt (this program has no console of its own, so a shell and the program would both read the keys). "
                         + "Pipe the password as one line, or pipe a JSON array with a password field.");
 
                 password = input.ReadLine();
