@@ -919,18 +919,24 @@ SELECT EXISTS
     /// </list>
     /// Every row of the one-arm window is in exactly one arm, so the rows are the same. The caller uses this statement only when
     /// that index is built (<see cref="QueryStoreBackgroundIndexes.IsBuiltAsync"/>); without it the two arms would each walk the
-    /// server's rows.
+    /// server's rows. <paramref name="openEnd"/> (#9283) lets $3 be NULL, an open end that reads to now, as the Viewer grid's window
+    /// can; the end bounds of both arms are then dropped for that call.
     /// </summary>
-    public static string IntervalStartSplitSql(string selectList, string trailingPredicates, string indent = "            ") =>
-        $@"{indent}SELECT
+    public static string IntervalStartSplitSql(string selectList, string trailingPredicates, string indent = "            ", bool openEnd = false)
+    {
+        /* #9283: the Viewer grid's window can have no end ($3 NULL, a preset that reads to now). Each end bound is then true, as the one-arm
+           statement's are, and the start bounds and floors stay. */
+        string EndBound(string predicate) => openEnd ? $"($3::timestamp IS NULL OR {predicate})" : predicate;
+
+        return $@"{indent}SELECT
 {indent}    {selectList}
 {indent}FROM query_store_interval_wide
 {indent}WHERE server_id = $1
 {indent}AND   interval_start_time_utc IS NOT NULL
 {indent}AND   interval_start_time_utc >= $2
-{indent}AND   interval_start_time_utc < $3
+{indent}AND   {EndBound("interval_start_time_utc < $3")}
 {indent}AND   first_execution_time >= $2 - {IntervalStartSlackSql}
-{indent}AND   first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}
+{indent}AND   {EndBound($"first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}")}
 {trailingPredicates}
 {indent}UNION ALL
 {indent}SELECT
@@ -939,10 +945,11 @@ SELECT EXISTS
 {indent}WHERE server_id = $1
 {indent}AND   interval_start_time_utc IS NULL
 {indent}AND   collection_time >= $2
-{indent}AND   collection_time < $3
+{indent}AND   {EndBound("collection_time < $3")}
 {indent}AND   first_execution_time >= $2 - {PurgeEdgeMarginSql}
-{indent}AND   first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}
+{indent}AND   {EndBound($"first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}")}
 {trailingPredicates}";
+    }
 
     /// <summary>The <c>collection_time</c> floor beside an interval-start-placed window on the raw Query Store reads (#7776, #7814): an
     /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
