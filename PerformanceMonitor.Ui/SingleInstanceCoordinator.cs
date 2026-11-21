@@ -315,6 +315,19 @@ namespace PerformanceMonitor.Ui
             _exitSignal = new SingleInstanceSignal(_options.ExitEventName, _options.GracefulSelfExit);
         }
 
+        /// <summary>
+        /// Closes the "exit for upgrade" channel again, so a later <see cref="EnableUpgradeHandoff"/> can open it anew. The
+        /// listener and its named event are gone when this returns, so a newer build that launches afterwards finds nobody
+        /// listening and surfaces instead of signaling/killing us. A headless start that retries its store open uses this to
+        /// keep the channel shut while an attempt runs (#9184). No-op when the channel is not open.
+        /// </summary>
+        public void DisableUpgradeHandoff()
+        {
+            var signal = _exitSignal;
+            _exitSignal = null;
+            signal?.Dispose();
+        }
+
         private bool SurfaceAndExit()
         {
             try { _options.SurfaceRunningInstance(); }
