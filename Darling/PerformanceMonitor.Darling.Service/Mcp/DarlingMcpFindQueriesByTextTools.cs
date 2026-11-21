@@ -977,6 +977,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             (DateTime Floor, DateTime Ceiling)? joinPending = null;
             var joinCapped = false;
             DateTime? joinCovered = null;
+            var joinClock = System.Diagnostics.Stopwatch.StartNew();
 
             /* #9219: the next statement of the window join. The span the last statement ran is done, except that a lookup span that hit its match
                limit without filling the page runs again with the same limit, for the keys not yet found (the keys it found are excluded, so each
@@ -1010,7 +1011,21 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     var spanFloor = joinReached - floor < part * (width + 1) ? floor : joinReached - part * width;
                     if (lookup && spanFloor < joinReached)
                     {
-                        spanFloor = await ReadRowFloorAsync(joinConnection, joinTransaction, spanFloor, joinCeiling, planCacheBudget.SpanRows * width, joinToken);
+                        /* The cut-off read runs inside this call, before the source arms the statement timeout for the statement that follows,
+                           so it is armed here to what is left of the budget; with nothing left it is not run, and the source stops at the gate
+                           after this call. */
+                        var left = planCacheBudget.Milliseconds - (long)(planCacheBudget.ElapsedClock?.Invoke() ?? joinClock.Elapsed).TotalMilliseconds;
+                        if (left > 0)
+                        {
+                            await using (var arm = new NpgsqlCommand(
+                                "SET LOCAL statement_timeout = " + left.ToString(CultureInfo.InvariantCulture), joinConnection, joinTransaction)
+                                { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+                            {
+                                await arm.ExecuteNonQueryAsync(joinToken);
+                            }
+
+                            spanFloor = await ReadRowFloorAsync(joinConnection, joinTransaction, spanFloor, joinCeiling, planCacheBudget.SpanRows * width, joinToken);
+                        }
                     }
 
                     joinPending = (spanFloor, joinCeiling);
@@ -1082,7 +1097,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                        window. */
                     null => $"before the matching texts had been read, so none of the {RawTierDays} raw tier of the {servers.Count} enabled servers had been searched",
                     SampleReadJoin => joinCovered is null
-                        ? $"before the newest span of the {RawTierDays} raw tier had been searched"
+                        ? $"before the newest span of the {RawTierDays} raw tier had been searched through"
                         : $"after the newest {DescribeSearchedFrom(joinCovered.Value, now)} of the {RawTierDays} raw tier had been searched, newest first, and the rest had not",
                     _ => completedSpans == 0
                         ? $"before the newest span of the {RawTierDays} raw tier had been searched"
