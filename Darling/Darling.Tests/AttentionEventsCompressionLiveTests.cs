@@ -139,7 +139,7 @@ public sealed class AttentionEventsCompressionLiveTests
 
             var floor = now.AddDays(-30);
             var ceiling = now.AddHours(1);
-            var before = await ReadAllAsync(connection, floor, ceiling, ct);
+            var before = await ReadAllAsync(connection, "collect.attention_events", new[] { ServerA, ServerB }, floor, ceiling, ct);
             Assert.NotEmpty(before["rows"]);
 
             var uncompressedBefore = await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct);
@@ -150,10 +150,16 @@ public sealed class AttentionEventsCompressionLiveTests
             await ExecAsync(connection, $"CALL run_job({job!.JobId})", ct);
 
             Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct));
+
+            /* The table keeps no orderby of its own (the hypertable's setting is empty), so each chunk takes the default when it compresses. */
+            Assert.Equal(
+                "collection_time DESC",
+                await ScalarAsync<string>(connection,
+                    "SELECT string_agg(DISTINCT orderby, '; ') FROM timescaledb_information.chunk_compression_settings WHERE hypertable = 'collect.attention_events'::regclass", ct));
             Assert.True(
                 await ScalarAsync<long>(connection, "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events' AND is_compressed", ct) > 0);
 
-            var after = await ReadAllAsync(connection, floor, ceiling, ct);
+            var after = await ReadAllAsync(connection, "collect.attention_events", new[] { ServerA, ServerB }, floor, ceiling, ct);
             Assert.Equal(before.Keys, after.Keys);
             foreach (var (read, rows) in before)
             {
@@ -280,16 +286,16 @@ CROSS JOIN generate_series(1, 20) AS g(n)";
         + "AND NOT is_compressed AND range_end <= now() - INTERVAL '1 day'";
 
     /// <summary>Every row, and the shapes the attention reads take (counts, sample groups, top lists), each rendered to one string.</summary>
-    private static async Task<Dictionary<string, string>> ReadAllAsync(NpgsqlConnection connection, DateTime floor, DateTime ceiling, CancellationToken ct)
+    internal static async Task<Dictionary<string, string>> ReadAllAsync(
+        NpgsqlConnection connection, string events, int[] servers, DateTime floor, DateTime ceiling, CancellationToken ct)
     {
-        const string events = "collect.attention_events";
         var reads = new List<(string Name, string Sql, object[] Args)>
         {
             ("rows",
-                "SELECT attention_event_id, collection_time, server_id, event_kind, attention_count, database_name, client_app_name, client_hostname, interrupt_duration_us, statement_fingerprint, statement_text FROM collect.attention_events ORDER BY attention_event_id",
+                "SELECT attention_event_id, collection_time, server_id, event_kind, attention_count, database_name, client_app_name, client_hostname, interrupt_duration_us, statement_fingerprint, statement_text FROM " + events + " ORDER BY attention_event_id",
                 Array.Empty<object>()),
         };
-        foreach (var server in new[] { ServerA, ServerB })
+        foreach (var server in servers)
         {
             var args = new object[] { server, floor, ceiling };
             reads.Add(($"counts {server}", AttentionWindowSql.Counts(events, bounded: true), args));

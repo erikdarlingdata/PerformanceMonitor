@@ -270,7 +270,7 @@ public static class OptionalTables
             "Daily snapshot: the exporter stamps snapshot_time and exports it only in the 00:00Z fresh window."),
         new("attention_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
             "Client-timeout events. All columns are exported, including statement_text and client_hostname, in clear: the owner ruled on 2026-11-19 to keep them, the same as the deadlock and blocked-process reports. " +
-            "Index (server_id, collection_time) serves the window read. #8967 makes it a hypertable on a store with the extension, outside the compression grid (CompressionOffGrid), with a compression policy of its own (#9216), so a window read of an older day decompresses its chunk. " +
+            "Index (server_id, collection_time) serves the window read. #8967 makes it a hypertable on a store with the extension, outside the compression grid (CompressionOffGrid), with a compression policy of its own (#9216), so a window read of an older day decompresses only the batches whose collection_time range overlaps the window, not the whole chunk. " +
             "The swapped-out attention_events_legacy and attention_events_legacy_copy tables are never read.")
         {
             MinDarlingSchemaVersion = 179,
