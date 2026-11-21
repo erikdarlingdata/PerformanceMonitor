@@ -9,7 +9,11 @@ dotnet build -c Release -nologo -v q 2>&1 | grep -E " error |Warn|Elapsed" | hea
 DLL=bin/Release/net10.0/CompactionRepro.dll
 
 seed() {
-  dotnet $DLL "$@" --profile-only --keep 2>&1 | grep "Temp dir retained" | sed 's/.*: //' | tr -d '\r'
+  s=$(mktemp)
+  dotnet $DLL "$@" --profile-only --keep > "$s" 2>&1
+  grep "Temp dir retained" "$s" | sed 's/.*: //' | tr -d '\r'
+  grep -q "Temp dir retained" "$s" || tail -n 6 "$s" | cut -c1-200 | sed 's/^/Total: seed failed: /' >&2
+  rm -f "$s"
 }
 
 field() { grep -E "$1" "$2" | head -1 | sed -E "s/^ *$3: *//" | tr -s ' '; }
