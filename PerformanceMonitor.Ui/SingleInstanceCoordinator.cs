@@ -126,6 +126,15 @@ namespace PerformanceMonitor.Ui
         /// <summary>Injectable for tests (a mutex that is denied); defaults to <c>new Mutex(true, name, out createdNew)</c>.</summary>
         public MutexFactory? CreateMutex { get; set; }
 
+        /// <summary>
+        /// Injectable for tests: the session id of a candidate process, or null when it cannot be read. Defaults to
+        /// <c>Process.SessionId</c>, null on access denied.
+        /// </summary>
+        public Func<Process, int?>? SessionIdOf { get; set; }
+
+        /// <summary>Injectable for tests: this process's session id. Defaults to the current process's <c>SessionId</c>.</summary>
+        public int? CurrentSessionId { get; set; }
+
         /// <summary>Optional diagnostic logging.</summary>
         public Action<string>? Log { get; set; }
     }
@@ -379,15 +388,23 @@ namespace PerformanceMonitor.Ui
             }
         }
 
+        /// <summary>
+        /// The other processes of this app that run in THIS session. The mutex and the show-window and exit events have no
+        /// Global prefix, so they are session-local: a peer in another session (a headless Lite under a dedicated account
+        /// while a user runs Lite on the desktop) cannot hold our mutex, hear the events, or be surfaced, so it is not a peer
+        /// (#9197). A process whose session id cannot be read counts as another session. Dropped processes are disposed.
+        /// </summary>
         private List<Process> FindOtherInstances()
         {
             var self = Environment.ProcessId;
             var result = new List<Process>();
             try
             {
+                var mySession = _options.CurrentSessionId ?? CurrentProcessSessionId();
+                var sessionOf = _options.SessionIdOf ?? ReadSessionId;
                 foreach (var proc in Process.GetProcessesByName(_options.ProcessName))
                 {
-                    if (proc.Id == self)
+                    if (proc.Id == self || mySession is null || sessionOf(proc) != mySession)
                     {
                         proc.Dispose();
                         continue;
@@ -400,6 +417,18 @@ namespace PerformanceMonitor.Ui
                 _options.Log?.Invoke($"Enumerate instances failed: {ex.Message}");
             }
             return result;
+        }
+
+        private static int? ReadSessionId(Process proc)
+        {
+            try { return proc.SessionId; }
+            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException) { return null; }
+        }
+
+        private static int? CurrentProcessSessionId()
+        {
+            using var me = Process.GetCurrentProcess();
+            return ReadSessionId(me);
         }
 
         private static List<Process> WaitForExit(List<Process> procs, int totalBudgetMs)

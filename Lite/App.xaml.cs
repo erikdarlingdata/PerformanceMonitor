@@ -669,8 +669,10 @@ public partial class App : Application
                A start with a window also shows the reason once. */
             if (_instanceCoordinator.FailureReason is { } startFailure)
             {
-                StartFailureLog.Write(startFailure, Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Services.DataRootMigration.DataRootName, "logs"));
+                var failureRoot = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                StartFailureLog.Write(startFailure, Services.DataRootMigration.LogDirectoryForStart(
+                    Path.Combine(failureRoot, Services.DataRootMigration.LegacyRootName),
+                    Path.Combine(failureRoot, Services.DataRootMigration.DataRootName)));
                 Shutdown(_startupPlan.ExitCodeAfterOwnershipFailure(
                     startFailure, reason => MessageBoxHandoffPrompts.ShowStartFailed("Performance Monitor Lite", reason)));
                 return;
