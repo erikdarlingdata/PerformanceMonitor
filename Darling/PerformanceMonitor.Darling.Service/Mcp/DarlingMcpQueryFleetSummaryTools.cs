@@ -430,18 +430,10 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// carries no hour, so first_hour and last_hour of a pair that is only in the mid are the two ordered LIMIT 1 probes of the corrected
     /// hourly <see cref="BuildMidSql"/> makes. On a compressed store each hourly arm is a ColumnarScan that decompresses a chunk to keep the
     /// rows of one hash, the cost the daily rollup (24 times fewer rows) takes out of the days between the edges.
-    ///
-    /// <para>#9223: <c>edge_start</c> reads the hourly rollup once per registered server. The window's first partial day is its oldest hours, in a
-    /// chunk the compression policy has long since rewritten, and a compressed chunk is segmented by <c>server_id</c> with batch metadata on
-    /// <c>query_hash</c> behind an index that leads with <c>server_id</c>. A read with no <c>server_id</c> condition cannot use that index, so on a
-    /// large store it scanned the whole compressed chunk (a parallel sequential scan with a bloom filter) to keep the rows of one hash. One
-    /// probe per server reads only the batches whose hash range holds the hash. Every server id in the rollup is a registered server (the
-    /// statement's last join drops any other), so the rows are the same.</para>
     /// </summary>
     public static string BuildQueryStoreMidSql()
     {
-        var hourlyView = TimescaleSupport.QueryStoreStatsCorrectedHourlyView;
-        var hourlyRelation = $"{hourlyView} AS f";
+        var hourlyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedHourlyView} AS f";
         var dailyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedDailyView} AS d";
         return $"""
         WITH edge_start AS
@@ -449,16 +441,10 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             SELECT f.server_id, f.database_name,
                    SUM(f.execution_count_sum)::double precision AS executions, SUM(f.cpu_us_weighted_sum) AS cpu_us, SUM(f.duration_us_weighted_sum) AS elapsed_us,
                    MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
-            FROM servers AS sv
-            CROSS JOIN LATERAL
-            (
-                SELECT x.server_id, x.database_name, x.execution_count_sum, x.cpu_us_weighted_sum, x.duration_us_weighted_sum, x.bucket
-                FROM {hourlyView} AS x
-                WHERE x.server_id = sv.server_id
-                AND   x.query_hash = $1
-                AND   x.bucket >= $2
-                AND   x.bucket < $7
-            ) AS f
+            FROM {hourlyRelation}
+            WHERE f.query_hash = $1
+            AND   f.bucket >= $2
+            AND   f.bucket < $7
             GROUP BY f.server_id, f.database_name
         ),
         edge_end AS
