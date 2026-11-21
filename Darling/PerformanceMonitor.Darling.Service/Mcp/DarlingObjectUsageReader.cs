@@ -166,6 +166,44 @@ internal static class DarlingObjectUsageReader
               )
         """;
 
+    /// <summary>
+    /// The rows of the other databases' newest dependency lists on the same server that name the asked database by a three-part name
+    /// (#8784 review): a reporting database's <c>A.dbo.vReport</c> reading <c>B.dbo.vCustomer</c> is read for B here, so <c>vCustomer</c> is
+    /// not called unused when only <c>vReport</c> is ever queried. $1 server id, $2 database name. The database part is matched ignoring case,
+    /// as SQL Server does on a case-insensitive server; a linked-server row is never the same server's database.
+    /// </summary>
+    internal const string InboundDependenciesSql = """
+        SELECT
+            d.database_name,
+            d.referencing_schema,
+            d.referencing_name,
+            d.referencing_type,
+            d.referenced_server,
+            d.referenced_database,
+            d.referenced_schema,
+            d.referenced_name,
+            COALESCE(d.is_bound, false),
+            COALESCE(d.is_caller_dependent, false),
+            COALESCE(d.is_ambiguous, false)
+        FROM collect.object_dependencies AS d
+        JOIN
+        (
+            SELECT
+                l.database_name,
+                max(l.collection_time) AS collection_time
+            FROM collect.object_dependencies AS l
+            WHERE l.server_id = $1
+            AND   l.database_name <> $2
+            GROUP BY
+                l.database_name
+        ) AS newest
+          ON  newest.database_name = d.database_name
+          AND newest.collection_time = d.collection_time
+        WHERE d.server_id = $1
+        AND   lower(d.referenced_database) = lower($2)
+        AND   COALESCE(d.referenced_server, '') = ''
+        """;
+
     /// <summary>Reads the window and runs it through <see cref="ObjectUsageWindow"/>.</summary>
     public static async Task<ObjectUsageWindowResult> ReadTablesAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken)
@@ -341,6 +379,40 @@ internal static class DarlingObjectUsageReader
         }
 
         return captured is { } at ? new ObjectDependencyList(at, ObjectDependencyFilter.ToEdges(rows, databaseName)) : null;
+    }
+
+    /// <summary>Reads the edges from the other databases' newest dependency lists on the same server into this database
+    /// (<see cref="InboundDependenciesSql"/>, filtered by <see cref="ObjectDependencyFilter.ToInboundEdge"/>).</summary>
+    public static async Task<IReadOnlyList<ObjectDependency>> ReadInboundDependenciesAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(InboundDependenciesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, databaseName);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var edges = new List<ObjectDependency>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var source = reader.GetString(0);
+            var row = new RawObjectDependency(
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? "" : reader.GetString(7),
+                reader.GetBoolean(8),
+                reader.GetBoolean(9),
+                reader.GetBoolean(10));
+            if (ObjectDependencyFilter.ToInboundEdge(row, source, databaseName) is { } edge)
+            {
+                edges.Add(edge);
+            }
+        }
+
+        return edges;
     }
 
     /// <summary>Reads the database's newest object list, or null when the store has no capture of it (the collector is off, or has not run).</summary>

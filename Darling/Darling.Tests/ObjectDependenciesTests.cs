@@ -148,4 +148,56 @@ public sealed class ObjectDependenciesTests
 
         Assert.Equal("vInner", Assert.Single(edges).ReferencedName);
     }
+
+    // ── #8784 review ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void TheCollector_ShipsEachSynonym_AsARowOfItsOwn_ItsBaseObjectSplitByParsename()
+    {
+        /* Synonyms are never the referencing object in sys.sql_expression_dependencies, so a statement naming one would reach nothing. */
+        var body = ObjectDependenciesCollector.BuildPayloadBody();
+        Assert.Contains("FROM sys.synonyms AS sn", body, StringComparison.Ordinal);
+        Assert.Contains("referencing_type = CONVERT(nvarchar(2), N'SN')", body, StringComparison.Ordinal);
+        foreach (var (column, part) in new[] { ("referenced_server", 4), ("referenced_database", 3), ("referenced_schema", 2), ("referenced_name", 1) })
+        {
+            Assert.Contains($"{column} = PARSENAME(sn.base_object_name, {part})", body, StringComparison.Ordinal);
+        }
+
+        /* Inside the permission check: a database that ships synonyms but no dependency list would read as having a list. */
+        Assert.True(body.IndexOf("RETURN;", StringComparison.Ordinal) < body.IndexOf("sys.synonyms", StringComparison.Ordinal));
+        Assert.True(body.IndexOf("UNION ALL", StringComparison.Ordinal) > body.IndexOf("sys.sql_expression_dependencies AS d", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ASynonymRow_IsAnEdgeLikeAnyOther()
+    {
+        var edge = ObjectDependencyFilter.ToEdge(
+            new RawObjectDependency("dbo", "synOrders", "SN", null, null, "dbo", "vOrders", false, false, false), "Sales");
+
+        Assert.Equal(("synOrders", "SN", "vOrders"), (edge!.ReferencingName, edge.ReferencingType, edge.ReferencedName));
+    }
+
+    [Fact]
+    public void ARowOfAnotherDatabase_NamingThisOneByThreeParts_IsAnInboundEdge_IgnoringCase()
+    {
+        var edge = ObjectDependencyFilter.ToInboundEdge(Row("vCustomer", database: "SALES"), "Reports", "Sales");
+
+        Assert.NotNull(edge);
+        Assert.Equal(("Reports", "vOuter", "vCustomer"), (edge!.ReferencingDatabase, edge.ReferencingName, edge.ReferencedName));
+        Assert.Null(ObjectDependencyFilter.ToEdge(Row("vCustomer", database: "SALES"), "Reports"));
+    }
+
+    [Theory]
+    [InlineData("vCustomer", "dbo", null, null)]           // no database part: the other database's own object
+    [InlineData("vCustomer", "dbo", "Archive", null)]      // a third database
+    [InlineData("vCustomer", "dbo", "Sales", "LINKED")]   // a linked server is never this server's database
+    [InlineData("value", "col", "Sales", null)]           // an XML type method artifact
+    [InlineData("objects", "sys", "Sales", null)]
+    [InlineData("TABLES", "INFORMATION_SCHEMA", "Sales", null)]
+    public void RowsThatDoNotNameAUserObjectOfThisDatabase_AreNotInboundEdges(string name, string? schema, string? database, string? server) =>
+        Assert.Null(ObjectDependencyFilter.ToInboundEdge(Row(name, schema, database, server), "Reports", "Sales"));
+
+    [Fact]
+    public void ADatabasesOwnRows_AreNeverItsInboundEdges() =>
+        Assert.Null(ObjectDependencyFilter.ToInboundEdge(Row("vCustomer", database: "Sales"), "sales", "Sales"));
 }

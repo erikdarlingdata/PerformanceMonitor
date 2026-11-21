@@ -30,6 +30,10 @@ namespace PerformanceMonitor.Collectors;
 /// name a user object (XML type method artifacts, <c>sys</c>, <c>inserted</c>/<c>deleted</c>) are shipped and left out at read time by
 /// <c>ObjectDependencyFilter</c>, which is one tested place for the rule.</para>
 ///
+/// <para><b>Synonyms</b> are never the referencing object in <c>sys.sql_expression_dependencies</c>, so a statement naming a synonym would
+/// reach nothing (#8784 review). Each synonym ships as one more row, type <c>SN</c>, its <c>base_object_name</c> split by <c>PARSENAME</c>,
+/// so the same filter and walk carry use of the synonym on to its target, in this database or (by three-part name) another.</para>
+///
 /// <para><b>Load.</b> One catalog read per database per day, bounded by <see cref="MaxRowsPerDatabase"/>. A plain table on every store
 /// (<see cref="StaysPlainTable"/>), kept 30 days: only the newest capture is read.</para>
 /// </summary>
@@ -113,29 +117,62 @@ BEGIN
 END;
 
 SELECT DISTINCT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase.ToString(CultureInfo.InvariantCulture)})
-    referencing_schema = s.name,
-    referencing_name = o.name,
-    referencing_type = RTRIM(o.type),
-    referenced_server = d.referenced_server_name,
-    referenced_database = d.referenced_database_name,
-    referenced_schema = COALESCE(rs.name, d.referenced_schema_name),
-    referenced_name = COALESCE(ro.name, d.referenced_entity_name),
-    is_bound = CONVERT(bit, CASE WHEN d.referenced_id IS NULL THEN 0 ELSE 1 END),
-    is_caller_dependent = d.is_caller_dependent,
-    is_ambiguous = d.is_ambiguous
-FROM sys.sql_expression_dependencies AS d
-JOIN sys.objects AS o
-  ON o.object_id = d.referencing_id
-JOIN sys.schemas AS s
-  ON s.schema_id = o.schema_id
-LEFT JOIN sys.objects AS ro
-  ON ro.object_id = d.referenced_id
-LEFT JOIN sys.schemas AS rs
-  ON rs.schema_id = ro.schema_id
-WHERE d.referencing_class = 1
-AND   d.referenced_class = 1
-AND   o.is_ms_shipped = 0
-AND   COALESCE(ro.name, d.referenced_entity_name) IS NOT NULL
+    x.referencing_schema,
+    x.referencing_name,
+    x.referencing_type,
+    x.referenced_server,
+    x.referenced_database,
+    x.referenced_schema,
+    x.referenced_name,
+    x.is_bound,
+    x.is_caller_dependent,
+    x.is_ambiguous
+FROM
+(
+    SELECT
+        referencing_schema = s.name,
+        referencing_name = o.name,
+        referencing_type = CONVERT(nvarchar(2), RTRIM(o.type)),
+        referenced_server = d.referenced_server_name,
+        referenced_database = d.referenced_database_name,
+        referenced_schema = COALESCE(rs.name, d.referenced_schema_name),
+        referenced_name = COALESCE(ro.name, d.referenced_entity_name),
+        is_bound = CONVERT(bit, CASE WHEN d.referenced_id IS NULL THEN 0 ELSE 1 END),
+        is_caller_dependent = d.is_caller_dependent,
+        is_ambiguous = d.is_ambiguous
+    FROM sys.sql_expression_dependencies AS d
+    JOIN sys.objects AS o
+      ON o.object_id = d.referencing_id
+    JOIN sys.schemas AS s
+      ON s.schema_id = o.schema_id
+    LEFT JOIN sys.objects AS ro
+      ON ro.object_id = d.referenced_id
+    LEFT JOIN sys.schemas AS rs
+      ON rs.schema_id = ro.schema_id
+    WHERE d.referencing_class = 1
+    AND   d.referenced_class = 1
+    AND   o.is_ms_shipped = 0
+    AND   COALESCE(ro.name, d.referenced_entity_name) IS NOT NULL
+
+    UNION ALL
+
+    SELECT
+        referencing_schema = s.name,
+        referencing_name = sn.name,
+        referencing_type = CONVERT(nvarchar(2), N'SN'),
+        referenced_server = PARSENAME(sn.base_object_name, 4),
+        referenced_database = PARSENAME(sn.base_object_name, 3),
+        referenced_schema = PARSENAME(sn.base_object_name, 2),
+        referenced_name = PARSENAME(sn.base_object_name, 1),
+        is_bound = CONVERT(bit, 0),
+        is_caller_dependent = CONVERT(bit, 0),
+        is_ambiguous = CONVERT(bit, 0)
+    FROM sys.synonyms AS sn
+    JOIN sys.schemas AS s
+      ON s.schema_id = sn.schema_id
+    WHERE sn.is_ms_shipped = 0
+    AND   PARSENAME(sn.base_object_name, 1) IS NOT NULL
+) AS x
 ORDER BY
     referencing_schema,
     referencing_name,

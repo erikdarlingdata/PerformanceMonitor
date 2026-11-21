@@ -48,8 +48,8 @@ public sealed class ObjectUsageViewReportTests
 
     private static ObjectUsageSide Side(
         ObjectInventory? inventory, ObjectReferenceWindow? references, ObjectDependencyList? dependencies, ObjectExecutionWindow? executions = null,
-        ObjectUsageWindowResult? tables = null, string server = "srv") =>
-        new(server, tables ?? Tables(), t => t, executions ?? Executions(), inventory, references, dependencies);
+        ObjectUsageWindowResult? tables = null, string server = "srv", params ObjectDependency[] inbound) =>
+        new(server, tables ?? Tables(), t => t, executions ?? Executions(), inventory, references, dependencies, inbound.Length > 0 ? inbound : null);
 
     private static JsonElement Build(params ObjectUsageSide[] sides) =>
         JsonDocument.Parse(ObjectUsageReport.Build("Sales", 90, WindowStart, Now, sides, null, 100, 0)).RootElement;
@@ -286,5 +286,84 @@ public sealed class ObjectUsageViewReportTests
 
         Assert.Contains("Views that are not indexed are not covered", root.GetProperty("note").GetString(), StringComparison.Ordinal);
         Assert.Equal(ObjectUsageReport.NotTracked, Class(root, "vOld"));
+    }
+
+    // ── #8784 review ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void WithNoStoredCaptureMode_AViewNothingReaches_IsNotTracked()
+    {
+        var root = Build(Side(Inventory(("dbo", "vOld", "VIEW")), References(Ref("dbo", "other")), Dependencies(), Executions(captureMode: null)));
+
+        Assert.Equal(ObjectUsageReport.NotTracked, Class(root, "vOld"));
+        Assert.Equal(ObjectUsageReport.CaptureModeUnknownCaveat, Obj(root, "vOld").GetProperty("caveat").GetString());
+    }
+
+    [Fact]
+    public void AViewAnotherDatabasesViewReads_IsReferenced_AndTheWalkGoesOnFromIt()
+    {
+        /* Reports.dbo.vReport selects from Sales.dbo.vCustomer, which reads vAddress; nothing in Sales names either. */
+        var inbound = new ObjectDependency("dbo", "vReport", "V", "dbo", "vCustomer", false, ReferencingDatabase: "Reports");
+        var root = Build(Side(
+            Inventory(("dbo", "vCustomer", "VIEW"), ("dbo", "vAddress", "VIEW"), ("dbo", "vOld", "VIEW")),
+            References(Ref("dbo", "other")),
+            Dependencies(("vCustomer", "vAddress")),
+            inbound: inbound));
+
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "vCustomer"));
+        Assert.Equal("Reports.dbo.vReport", Obj(root, "vCustomer").GetProperty("used_via").GetString());
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "vAddress"));
+        Assert.Equal("dbo.vCustomer", Obj(root, "vAddress").GetProperty("used_via").GetString());
+        Assert.Equal(ObjectUsageReport.NotUsed, Class(root, "vOld"));
+    }
+
+    [Fact]
+    public void InboundEdgesAlone_WithNoOwnDependencyList_StillLiftTheirTargets()
+    {
+        var inbound = new ObjectDependency("dbo", "vReport", "V", "", "vCustomer", false, ReferencingDatabase: "Reports");
+        var root = Build(Side(Inventory(("dbo", "vCustomer", "VIEW")), References(), dependencies: null, inbound: inbound));
+
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "vCustomer"));
+    }
+
+    [Fact]
+    public void AViewUsedThroughASynonym_IsReferenced()
+    {
+        var synonym = new ObjectDependencyList(Now, [new ObjectDependency("dbo", "synOrders", "SN", "dbo", "vOrders", false)]);
+        var root = Build(Side(Inventory(("dbo", "vOrders", "VIEW")), References(Ref("dbo", "synOrders")), synonym));
+
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "vOrders"));
+        Assert.Equal("dbo.synOrders", Obj(root, "vOrders").GetProperty("used_via").GetString());
+    }
+
+    [Fact]
+    public void AViewUsedOnlyInsideAScalarFunction_IsReferenced_ThroughTheCallOfTheFunction()
+    {
+        var root = Build(Side(
+            Inventory(("dbo", "GetRate", "SQL_SCALAR_FUNCTION"), ("dbo", "vRates", "VIEW")),
+            References(Ref("dbo", "GetRate", function: true)),
+            new ObjectDependencyList(Now, [new ObjectDependency("dbo", "GetRate", "FN", "dbo", "vRates", true)])));
+
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "vRates"));
+        Assert.Equal("dbo.GetRate", Obj(root, "vRates").GetProperty("used_via").GetString());
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "GetRate"));
+    }
+
+    [Theory]
+    [InlineData("", "sysobjects", true)]
+    [InlineData("", "SYSINDEXES", true)]
+    [InlineData("", "SysUserSettings", false)]
+    [InlineData("", "systemConfig", false)]
+    [InlineData("dbo", "sysobjects", false)]
+    public void TheCatalogNamesLeftOut_AreTheCompatibilityViews_NotEveryNameStartingSys(string schema, string name, bool catalog) =>
+        Assert.Equal(catalog, ObjectUsageReport.IsCatalogName(schema, name));
+
+    [Fact]
+    public void WithNoObjectList_AViewNamedLikeASystemTable_IsStillListed()
+    {
+        var root = Build(Side(null, References(Ref("", "SysUserSettings"), Ref("", "sysobjects")), dependencies: null));
+
+        Assert.Equal(ObjectUsageReport.Referenced, Class(root, "SysUserSettings"));
+        Assert.DoesNotContain(root.GetProperty("objects").EnumerateArray(), o => o.GetProperty("object_name").GetString() == "sysobjects");
     }
 }

@@ -59,13 +59,17 @@ public sealed record ObjectReferenceWindow(
 /// written, empty when the definition gave none.</param>
 /// <param name="ReferencedName">The referenced object's name, the same way.</param>
 /// <param name="IsBound">True where SQL Server bound the name to an object (<c>referenced_id</c> is not null), so the schema is exact.</param>
+/// <param name="ReferencingDatabase">Null for an edge of the database's own list. For an edge from another database's list into this one
+/// (<c>A.dbo.vReport</c> reading <c>B.dbo.vCustomer</c>, read for B), the database the referencing object is in: such an edge's target is
+/// taken as used, since the read does not weigh the other database's own evidence.</param>
 public sealed record ObjectDependency(
     string ReferencingSchema,
     string ReferencingName,
     string ReferencingType,
     string ReferencedSchema,
     string ReferencedName,
-    bool IsBound);
+    bool IsBound,
+    string? ReferencingDatabase = null);
 
 /// <summary>The stored dependency list of one database, as of its newest capture (#8784 part 2).</summary>
 /// <param name="CapturedAtUtc">When the list was captured.</param>

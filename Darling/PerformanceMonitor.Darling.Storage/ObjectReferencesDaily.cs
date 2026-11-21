@@ -139,10 +139,11 @@ LIMIT $2;";
 
     /// <summary>
     /// The views of every database of one server, from each database's newest object list: the names an unparsed statement's text is
-    /// searched for. $1 server_id.
+    /// searched for. $1 server_id. The anchor column comes third, as every newest-capture read projects it
+    /// (<c>McpPayloadContractCensusTests</c>); the build reads only the first two.
     /// </summary>
     internal const string FallbackNamesSql = @"
-SELECT i.database_name, i.object_name
+SELECT i.database_name, i.object_name, i.collection_time
 FROM collect.object_inventory AS i
 WHERE i.server_id = $1
 AND   i.type_desc = 'VIEW'
@@ -183,13 +184,18 @@ GROUP BY
     /// Upserts one (server, day)'s referenced names from parallel arrays. $1 server_id, $2 day, $3..$11 the columns. A name already stored
     /// keeps the larger count and the newer execution time (PostgreSQL's GREATEST skips a NULL), and text_matched stays true only while
     /// every build of the day found the name by the text search alone.
+    ///
+    /// <para>The referenced names are stored lower-cased (#8784 review). One build merges <c>dbo.VSales</c> and <c>dbo.vSales</c> into one
+    /// row, but keeps whichever spelling it met first, and the key is case-sensitive: two builds of the same day meeting the spellings in a
+    /// different order would leave two rows, and the read would count that day twice. The read matches names ignoring case, so nothing is
+    /// lost.</para>
     /// </summary>
     internal const string UpsertReferencesSql = @"
 INSERT INTO collect.object_references_daily
     (server_id, database_name, referenced_database, referenced_schema, referenced_name, is_function, day, execution_count, statement_count,
      last_execution_time, text_matched)
-SELECT $1, u.database_name, u.referenced_database, u.referenced_schema, u.referenced_name, u.is_function, $2, u.execution_count,
-       u.statement_count, u.last_execution_time, u.text_matched
+SELECT $1, u.database_name, lower(u.referenced_database), lower(u.referenced_schema), lower(u.referenced_name), u.is_function, $2,
+       u.execution_count, u.statement_count, u.last_execution_time, u.text_matched
 FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::boolean[], $8::numeric[], $9::integer[], $10::timestamp[], $11::boolean[])
      AS u (database_name, referenced_database, referenced_schema, referenced_name, is_function, execution_count, statement_count,
            last_execution_time, text_matched)

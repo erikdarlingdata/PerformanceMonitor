@@ -21,7 +21,8 @@ public enum ScannedReferenceKind
     /// <summary>A table or view (<c>NamedTableReference</c>): <c>FROM dbo.v</c>, an UPDATE, INSERT, DELETE or MERGE target.</summary>
     TableOrView,
 
-    /// <summary>A table-valued function (<c>SchemaObjectFunctionTableReference</c>): <c>FROM dbo.f(1)</c>.</summary>
+    /// <summary>A function: a table-valued one as a table source (<c>SchemaObjectFunctionTableReference</c>, <c>FROM dbo.f(1)</c>), or a
+    /// scalar one called in an expression (<c>FunctionCall</c> on a schema, <c>SELECT dbo.f(id)</c>).</summary>
     Function,
 }
 
@@ -309,9 +310,44 @@ public static class QueryTextReferenceScanner
 
         public override void Visit(SchemaObjectFunctionTableReference node)
         {
+            /* CROSS APPLY t.doc.nodes('/r') is an XML type method on a column, not a function of schema "doc". */
+            if (node.SchemaObject?.SchemaIdentifier is not null && XmlTypeMethodNames.Contains(node.SchemaObject.BaseIdentifier?.Value ?? ""))
+            {
+                AddAlias(node.Alias?.Value);
+                return;
+            }
+
             AddReference(node.SchemaObject, ScannedReferenceKind.Function, node.Alias);
             AddAlias(node.Alias?.Value);
         }
+
+        /* A scalar UDF call is always schema-qualified (dbo.f(x), or db.dbo.f(x)), so it is a FunctionCall whose call target is a one- or
+           two-part identifier (#8784 review). On SQL Server 2019 and later an inlined scalar UDF gets no executions in Query Store, so the
+           statement naming it is the only place the dependency walk can start from to reach a view the function reads. A method call on a
+           column of a CLR or spatial type (t.geo.STDistance(...)) has the same shape: recorded too, it names nothing that exists and only
+           costs a lookup. The XML type methods are left out, as the dependency filter leaves them out. */
+        public override void Visit(FunctionCall node)
+        {
+            var name = node.FunctionName?.Value;
+            if (string.IsNullOrEmpty(name)
+                || node.CallTarget is not MultiPartIdentifierCallTarget { MultiPartIdentifier.Identifiers: { Count: 1 or 2 } parts }
+                || XmlTypeMethodNames.Contains(name))
+            {
+                return;
+            }
+
+            References.Add((new ScannedReference(
+                Server: null,
+                Database: parts.Count == 2 ? NullIfEmpty(parts[0].Value) : null,
+                Schema: NullIfEmpty(parts[^1].Value),
+                Name: name,
+                Kind: ScannedReferenceKind.Function), HasAlias: false));
+        }
+
+        private static readonly HashSet<string> XmlTypeMethodNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "value", "exist", "query", "nodes", "modify",
+        };
 
         public override void Visit(QueryDerivedTable node) => AddAlias(node.Alias?.Value);
 

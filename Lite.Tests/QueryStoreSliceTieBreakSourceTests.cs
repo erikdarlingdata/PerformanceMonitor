@@ -53,8 +53,9 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 6),
         (Path.Combine("Lite", "Analysis", "DrillDownCollector.Queries.cs"), 1),
         (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.QueryPerf.cs"), 1),
-        /* #8784: get_object_usage sums module executions over the stored Query Store rows, newest snapshot per interval. */
-        (Path.Combine("Lite", "Services", "LocalDataService.ObjectUsage.cs"), 1),
+        /* #8784: get_object_usage sums module executions over the stored Query Store rows, newest snapshot per interval. #8784 part 2: and
+           reads each statement's text with its executions the same way, for the view usage read. */
+        (Path.Combine("Lite", "Services", "LocalDataService.ObjectUsage.cs"), 2),
     ];
 
     [Fact]
@@ -96,8 +97,8 @@ public sealed class QueryStoreSliceTieBreakSourceTests
 
         /* The count is asserted as a whole too: a file dropping to zero sites would otherwise be caught only
            by its own per-file assertion, and this states the total the fix actually swept. */
-        /* 8 -> 9 with #8784 (get_object_usage's module executions). */
-        Assert.Equal(9, total);
+        /* 8 -> 9 with #8784 (get_object_usage's module executions). 9 -> 10 with #8784 part 2 (its statement text read). */
+        Assert.Equal(10, total);
     }
 
     /// <summary>

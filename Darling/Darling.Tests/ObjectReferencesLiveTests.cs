@@ -125,12 +125,13 @@ public sealed class ObjectReferencesLiveTests
         Assert.Equal(0, first.Failed);
 
         Assert.Equal(42L, await ScalarAsync<long>(connection, RefCount("vOrders"), ct));
-        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vCte'", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE lower(referenced_name) = 'vcte'", ct));
         Assert.Equal(5L, await ScalarAsync<long>(connection, RefCount("vLegacy"), ct));
-        Assert.True(await ScalarAsync<bool>(connection, $"SELECT text_matched FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vLegacy'", ct));
-        Assert.Equal("Sales", await ScalarAsync<string>(connection,
-            $"SELECT referenced_database FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vCrossDb'", ct));
-        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vGone'", ct));
+        Assert.True(await ScalarAsync<bool>(connection, $"SELECT text_matched FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vlegacy'", ct));
+        /* The referenced names are stored lower-cased (#8784 review), so two builds that meet two spellings key one row. */
+        Assert.Equal("sales", await ScalarAsync<string>(connection,
+            $"SELECT referenced_database FROM {ObjectReferencesDaily.Table} WHERE referenced_name = 'vcrossdb'", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE lower(referenced_name) = 'vgone'", ct));
 
         Assert.Equal(4L, await ScalarAsync<long>(connection,
             $"SELECT statements FROM {ObjectReferencesDaily.DatabaseDaysTable} WHERE database_name = '{Db}'", ct));
@@ -142,11 +143,15 @@ public sealed class ObjectReferencesLiveTests
         /* Nothing new: the next tick builds nothing. */
         Assert.Equal(0, (await ObjectReferencesDaily.RunTickAsync(dataSource, now.AddHours(1), NullLogger.Instance, ct)).Built);
 
-        /* The day is rebuilt from a source whose text has since been pruned: the build only adds, so the count stays. */
+        /* The day is rebuilt from a source whose text has since been pruned: the build only adds, so the count stays. The rebuild also meets
+           the view spelled another way first, and still adds to the one row. */
         await ExecuteAsync(connection, $"DELETE FROM collect.query_store_text WHERE server_id = {ServerId} AND query_id = 1", ct);
+        await PlantStatementAsync(connection, day, Db, 0, 1, "SELECT a FROM DBO.VORDERS", now.AddDays(-4), ct);
         await PlantBuiltAsync(connection, day, now.AddDays(-1), ct);
         Assert.Equal(1, (await ObjectReferencesDaily.RunTickAsync(dataSource, now.AddHours(2), NullLogger.Instance, ct)).Built);
         Assert.Equal(42L, await ScalarAsync<long>(connection, RefCount("vOrders"), ct));
+        Assert.Equal(1L, await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM {ObjectReferencesDaily.Table} WHERE server_id = {ServerId} AND lower(referenced_name) = 'vorders'", ct));
     }
 
     // ── The reads and the tool ──────────────────────────────────────────────────────────────
@@ -165,10 +170,15 @@ public sealed class ObjectReferencesLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Server, ct);
 
         var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
-        foreach (var view in new[] { "vOuter", "vInner", "vOld", "vCrossDb" })
+        foreach (var view in new[] { "vOuter", "vInner", "vOld", "vCrossDb", "vCustomer", "vBehindSynonym" })
         {
             await PlantInventoryAsync(connection, Db, view, "VIEW", now.AddDays(-1), ct);
         }
+
+        /* Only a stored ALL lets a view reach Not used in window (#8784 review): an unknown capture mode holds it at Not tracked. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, query_capture_mode) VALUES ($1,$2,$3,$4,$5,$6)",
+            1L, DarlingMcpTestData.Naive(now.AddDays(-5)), ServerId, Server, Db, "ALL");
 
         /* Statement text on 85 of the 90 days, with vOuter named on one of them and vCrossDb read from another database. */
         for (var d = 2; d <= 86; d++)
@@ -189,10 +199,21 @@ public sealed class ObjectReferencesLiveTests
         await PlantDependencyAsync(connection, "vOuter", "V", null, "dbo", "vInner", now.AddDays(-1), ct);
         await PlantDependencyAsync(connection, "vOuter", "V", null, "sys", "objects", now.AddDays(-1), ct);
         await PlantDependencyAsync(connection, "vOuter", "V", "alias", "col", "value", now.AddDays(-1), ct);
+        /* A statement names the synonym synOrders; the collector ships the synonym as a row of its own, type SN. */
+        await PlantDependencyAsync(connection, "synOrders", "SN", null, "dbo", "vBehindSynonym", now.AddDays(-1), ct);
+        await ExecuteAsync(connection,
+            $"INSERT INTO {ObjectReferencesDaily.Table} VALUES ({ServerId}, '{Db}', '', 'dbo', 'synorders', false, DATE '{now.AddDays(-3):yyyy-MM-dd}', 3, 1, NULL, false)", ct);
+        /* A reporting database's view reads vCustomer by a three-part name, and nothing in Sales names it (#8784 review). An older capture of
+           Reports, and a linked-server row, are not read. */
+        await PlantDependencyAsync(connection, "vReport", "V", "SALES", "dbo", "vCustomer", now.AddDays(-1), ct, database: "Reports");
+        await PlantDependencyAsync(connection, "vReportOld", "V", "Sales", "dbo", "vOld", now.AddDays(-9), ct, database: "Reports");
 
         var deps = await DarlingObjectUsageReader.ReadDependenciesAsync(dataSource, ServerId, Db, ct);
         Assert.NotNull(deps);
-        Assert.Equal("vInner", Assert.Single(deps!.Dependencies).ReferencedName);
+        Assert.Equal(["vBehindSynonym", "vInner"], deps!.Dependencies.Select(d => d.ReferencedName).Order(StringComparer.Ordinal));
+
+        var inbound = Assert.Single(await DarlingObjectUsageReader.ReadInboundDependenciesAsync(dataSource, ServerId, Db, ct));
+        Assert.Equal(("Reports", "vReport", "vCustomer"), (inbound.ReferencingDatabase, inbound.ReferencingName, inbound.ReferencedName));
 
         var json = await DarlingMcpObjectUsageTools.GetObjectUsage(dataSource, Server, Db, 90, false, 100, 0, now, ct);
         var root = JsonDocument.Parse(json).RootElement;
@@ -205,6 +226,10 @@ public sealed class ObjectReferencesLiveTests
         Assert.Equal(ObjectUsageReport.Referenced, Obj("vCrossDb").GetProperty("classification").GetString());
         Assert.Equal(4, Obj("vCrossDb").GetProperty("referencing_executions").GetInt64());
         Assert.Equal(ObjectUsageReport.NotUsed, Obj("vOld").GetProperty("classification").GetString());
+        Assert.Equal(ObjectUsageReport.Referenced, Obj("vCustomer").GetProperty("classification").GetString());
+        Assert.Equal("Reports.dbo.vReport", Obj("vCustomer").GetProperty("used_via").GetString());
+        Assert.Equal(ObjectUsageReport.Referenced, Obj("vBehindSynonym").GetProperty("classification").GetString());
+        Assert.Equal("dbo.synOrders", Obj("vBehindSynonym").GetProperty("used_via").GetString());
 
         var views = root.GetProperty("coverage")[0].GetProperty("views");
         Assert.Equal(85, views.GetProperty("days_with_data").GetInt32());
@@ -214,7 +239,7 @@ public sealed class ObjectReferencesLiveTests
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private static string RefCount(string name) =>
-        $"SELECT execution_count::bigint FROM {ObjectReferencesDaily.Table} WHERE server_id = {ServerId} AND referenced_name = '{name}'";
+        $"SELECT execution_count::bigint FROM {ObjectReferencesDaily.Table} WHERE server_id = {ServerId} AND referenced_name = '{name.ToLowerInvariant()}'";
 
     private static async Task PlantStatementAsync(
         NpgsqlConnection connection, DateOnly day, string database, long queryId, long executions, string? text, DateTime lastExecution, CancellationToken ct)
@@ -244,10 +269,10 @@ ON CONFLICT (server_id, day) DO UPDATE SET built_at = EXCLUDED.built_at",
 
     private static Task PlantDependencyAsync(
         NpgsqlConnection connection, string referencing, string type, string? referencedDatabase, string referencedSchema, string referencedName, DateTime at,
-        CancellationToken ct) =>
+        CancellationToken ct, string database = Db) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO collect.object_dependencies (collection_id, collection_time, server_id, server_name, database_name, referencing_schema, referencing_name, referencing_type, referenced_server, referenced_database, referenced_schema, referenced_name, is_bound, is_caller_dependent, is_ambiguous) VALUES ($1,$2,$3,$4,$5,'dbo',$6,$7,NULL,$8,$9,$10,true,false,false)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, Server, Db, referencing, type, (object?)referencedDatabase ?? DBNull.Value,
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, Server, database, referencing, type, (object?)referencedDatabase ?? DBNull.Value,
             referencedSchema, referencedName);
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

@@ -63,6 +63,8 @@ public sealed record ObjectInventory(DateTime CapturedAtUtc, IReadOnlyList<Objec
 /// <param name="Inventory">The object list, or null where none is kept (Lite, or a store with no capture yet).</param>
 /// <param name="References">The names Query Store statements referenced over the window (#8784 part 2), or null where none were read.</param>
 /// <param name="Dependencies">The dependency list (Darling's <c>object_dependencies</c>), or null where none is kept.</param>
+/// <param name="InboundDependencies">The edges from the other databases' newest lists on the same server into this one
+/// (<see cref="ObjectDependencyFilter.ToInboundEdge"/>), each target taken as used, or null where none are kept.</param>
 public sealed record ObjectUsageSide(
     string ServerDisplayName,
     ObjectUsageWindowResult Tables,
@@ -70,7 +72,8 @@ public sealed record ObjectUsageSide(
     ObjectExecutionWindow? Executions,
     ObjectInventory? Inventory,
     ObjectReferenceWindow? References = null,
-    ObjectDependencyList? Dependencies = null);
+    ObjectDependencyList? Dependencies = null,
+    IReadOnlyList<ObjectDependency>? InboundDependencies = null);
 
 /// <summary>
 /// The <c>get_object_usage</c> reply (#8784), built the same way on both products from each side's evidence, so Lite and Darling answer in
@@ -251,6 +254,13 @@ public static class ObjectUsageReport
         string.Create(CultureInfo.InvariantCulture,
             $"Query Store statement text for this database covers only {coveredDays:0.#} of the {daysBack} days asked for, so this view may have been used in the days not covered.");
 
+    /// <summary>The caveat of a module that did not run, or a view nothing reached, where no stored health snapshot says what Query Store's
+    /// capture mode is (#8784 review): the default AUTO leaves rare statements out, so an unknown mode is not taken to be ALL.</summary>
+    internal const string CaptureModeUnknownCaveat =
+        "No stored Query Store health snapshot for this database says what its capture mode is (the query_store_health collection is off, "
+        + "failing or scoped to other databases). Under the default AUTO mode Query Store leaves out statements it judges infrequent or "
+        + "cheap, so an object used rarely can show no use here while it is in use. No use here is not evidence that it is unused.";
+
     /// <summary>The caveat of a module that did not run where Query Store captures only some statements.</summary>
     internal static string CaptureModeCaveat(string mode) =>
         $"Query Store's capture mode for this database is {mode}, not ALL, so it leaves out statements it judges infrequent or cheap (or, "
@@ -333,18 +343,17 @@ public static class ObjectUsageReport
         WalkDependencies(rows, sides);
 
         /* The registrations read one Query Store, so the best-covered side is how much of the window was looked at. Any side seeing a mode
-           other than ALL is enough to stop calling a module that did not run a candidate. */
+           other than ALL is enough to stop calling a module that did not run a candidate, and so is no side knowing the mode at all: only a
+           stored ALL lets an object reach a candidate classification (#8784 review). */
         var executionDays = sides.Max(ExecutionDays);
-        var partialCaptureMode = sides
-            .Select(s => s.Executions?.QueryCaptureMode)
-            .FirstOrDefault(m => m is not null && IsPartialCaptureMode(m));
+        var captureMode = EffectiveCaptureMode(sides.Select(s => s.Executions?.QueryCaptureMode));
         var views = new ViewEvidence(
             sides.Max(ReferenceDays),
             sides.Any(s => s.Dependencies is not null),
             sides.Select(s => s.References).Where(r => r is not null).MaxBy(r => r!.Statements));
         foreach (var row in rows.Values)
         {
-            (row.Classification, row.Caveat) = Classify(row, windowStartUtc, nowUtc, executionDays, daysBack, partialCaptureMode, views);
+            (row.Classification, row.Caveat) = Classify(row, windowStartUtc, nowUtc, executionDays, daysBack, captureMode, views);
         }
 
         var ordered = rows.Values
@@ -568,10 +577,21 @@ public static class ObjectUsageReport
         }
     }
 
-    /// <summary>A name that is a catalog view rather than a user object: one starting <c>sys</c> written without a schema
-    /// (<c>FROM sysobjects</c>). Only consulted for a view guessed with no object list, where it would otherwise be listed.</summary>
-    private static bool IsCatalogName(string schema, string name) =>
-        schema.Length == 0 && name.StartsWith("sys", StringComparison.OrdinalIgnoreCase);
+    /// <summary>The SQL Server 2000 system tables, kept as compatibility views that resolve without a schema (<c>FROM sysobjects</c>). A
+    /// fixed list rather than "starts with sys", so a user view such as <c>SysUserSettings</c> is still listed (#8784 review).</summary>
+    private static readonly HashSet<string> CompatibilityCatalogNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sysaltfiles", "syscacheobjects", "syscharsets", "syscolumns", "syscomments", "sysconfigures", "sysconstraints", "syscurconfigs",
+        "sysdatabases", "sysdepends", "sysdevices", "sysfilegroups", "sysfiles", "sysforeignkeys", "sysfulltextcatalogs", "sysindexes",
+        "sysindexkeys", "syslanguages", "syslockinfo", "syslogins", "sysmembers", "sysmessages", "sysobjects", "sysoledbusers", "sysopentapes",
+        "sysperfinfo", "syspermissions", "sysprocesses", "sysprotects", "sysreferences", "sysremotelogins", "sysservers", "systypes",
+        "sysusers",
+    };
+
+    /// <summary>A name that is a catalog compatibility view rather than a user object: one of <see cref="CompatibilityCatalogNames"/>
+    /// written without a schema. Only consulted for a view guessed with no object list, where it would otherwise be listed.</summary>
+    internal static bool IsCatalogName(string schema, string name) =>
+        schema.Length == 0 && CompatibilityCatalogNames.Contains(name);
 
     /// <summary>
     /// Walks every side's dependency list from what the evidence shows in use (#8784 part 2): every name a statement referenced, and every
@@ -585,7 +605,8 @@ public static class ObjectUsageReport
             .Where(s => s.Dependencies is not null)
             .SelectMany(s => s.Dependencies!.Dependencies)
             .ToLookup(d => d.ReferencingName, StringComparer.OrdinalIgnoreCase);
-        if (edges.Count == 0)
+        var inbound = sides.SelectMany(s => s.InboundDependencies ?? []).ToList();
+        if (edges.Count == 0 && inbound.Count == 0)
         {
             return;
         }
@@ -612,6 +633,22 @@ public static class ObjectUsageReport
         foreach (var row in rows.Values.Where(r => r.Executions is > 0))
         {
             Enqueue(row.SchemaName, row.ObjectName);
+        }
+
+        /* An object another database's view or module names by a three-part name is taken as used (#8784 review): this read does not weigh
+           that database's own evidence, and a target taken as used wrongly only makes a view look used. used_via names it with its database. */
+        foreach (var edge in inbound)
+        {
+            var via = edge.ReferencingDatabase + "." + (edge.ReferencingSchema.Length > 0 ? edge.ReferencingSchema + "." : "") + edge.ReferencingName;
+            foreach (var target in Matching(byName, edge.ReferencedSchema, edge.ReferencedName))
+            {
+                if (!target.IsPlainTable && target.UsedVia is null && target.ReferenceExecutions is null && target.Executions is not > 0)
+                {
+                    target.UsedVia = via;
+                }
+            }
+
+            Enqueue(edge.ReferencedSchema, edge.ReferencedName);
         }
 
         while (queue.Count > 0)
@@ -695,10 +732,24 @@ public static class ObjectUsageReport
     /// <summary>Whether a stored capture mode leaves statements out: anything but <c>ALL</c>.</summary>
     internal static bool IsPartialCaptureMode(string mode) => !string.Equals(mode.Trim(), "ALL", StringComparison.OrdinalIgnoreCase);
 
-    private static (string Classification, string? Caveat) Classify(
-        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? partialCaptureMode, ViewEvidence views)
+    /// <summary>The capture mode the classification goes by across all sides: the first one stored that is not <c>ALL</c>, otherwise
+    /// <c>ALL</c> where some side stored it, otherwise null (unknown, which holds an object at Not tracked just as a partial mode does).</summary>
+    internal static string? EffectiveCaptureMode(IEnumerable<string?> modes)
     {
-        var (classification, caveat) = ClassifyByOwnEvidence(row, windowStartUtc, nowUtc, executionDays, daysBack, partialCaptureMode, views);
+        var known = modes.Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m!.Trim().ToUpperInvariant()).ToList();
+        return known.FirstOrDefault(IsPartialCaptureMode) ?? (known.Count > 0 ? "ALL" : null);
+    }
+
+    /// <summary>The Not tracked caveat a capture mode imposes, or null where the mode is <c>ALL</c>.</summary>
+    private static string? CaptureModeHold(string? captureMode, bool view) =>
+        captureMode is null ? CaptureModeUnknownCaveat
+        : !IsPartialCaptureMode(captureMode) ? null
+        : view ? ViewCaptureModeCaveat(captureMode) : CaptureModeCaveat(captureMode);
+
+    private static (string Classification, string? Caveat) Classify(
+        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? captureMode, ViewEvidence views)
+    {
+        var (classification, caveat) = ClassifyByOwnEvidence(row, windowStartUtc, nowUtc, executionDays, daysBack, captureMode, views);
 
         /* A statement naming it, or the dependency list reaching it, is evidence of use that the index counters and Query Store's module
            executions cannot give for a view or an inline function: it lifts anything short of a counted use. */
@@ -714,11 +765,11 @@ public static class ObjectUsageReport
     }
 
     private static (string Classification, string? Caveat) ClassifyByOwnEvidence(
-        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? partialCaptureMode, ViewEvidence views)
+        Row row, DateTime windowStartUtc, DateTime nowUtc, double executionDays, int daysBack, string? captureMode, ViewEvidence views)
     {
         if (row.ObjectType == ViewType)
         {
-            return ClassifyView(row, windowStartUtc, nowUtc, daysBack, partialCaptureMode, views);
+            return ClassifyView(row, windowStartUtc, nowUtc, daysBack, captureMode, views);
         }
 
         if (row.IsTable)
@@ -763,10 +814,11 @@ public static class ObjectUsageReport
             return (NotTracked, NoExecutionEvidenceCaveat);
         }
 
-        /* Query Store leaves out what it judges rare or cheap, which is exactly the module this read is asked about. */
-        if (partialCaptureMode is not null)
+        /* Query Store leaves out what it judges rare or cheap, which is exactly the module this read is asked about, and an unknown mode may
+           be the default AUTO. */
+        if (CaptureModeHold(captureMode, view: false) is { } moduleHold)
         {
-            return (NotTracked, CaptureModeCaveat(partialCaptureMode.Trim().ToUpperInvariant()));
+            return (NotTracked, moduleHold);
         }
 
         var caveats = new List<string>(3);
@@ -794,7 +846,7 @@ public static class ObjectUsageReport
 
     /// <summary>A view by its own evidence: unused only where the evidence could have shown it was used.</summary>
     private static (string Classification, string? Caveat) ClassifyView(
-        Row row, DateTime windowStartUtc, DateTime nowUtc, int daysBack, string? partialCaptureMode, ViewEvidence views)
+        Row row, DateTime windowStartUtc, DateTime nowUtc, int daysBack, string? captureMode, ViewEvidence views)
     {
         if (row.IsGuessedView)
         {
@@ -806,9 +858,9 @@ public static class ObjectUsageReport
             return (NotTracked, NoReferenceEvidenceCaveat);
         }
 
-        if (partialCaptureMode is not null)
+        if (CaptureModeHold(captureMode, view: true) is { } viewHold)
         {
-            return (NotTracked, ViewCaptureModeCaveat(partialCaptureMode.Trim().ToUpperInvariant()));
+            return (NotTracked, viewHold);
         }
 
         if (!views.HasDependencies)

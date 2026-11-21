@@ -279,6 +279,11 @@ public sealed class ObjectUsageLiveTests
         await ExecuteAsync(connection,
             $"INSERT INTO {ObjectExecutionsDaily.DatabaseDaysTable} VALUES ({SecondaryId}, '{Db}', DATE '{now.AddDays(-3):yyyy-MM-dd}', 500)", ct);
 
+        /* Only a stored ALL lets a module that did not run be a candidate (#8784 review): with no health snapshot it is Not tracked. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, query_capture_mode) VALUES ($1,$2,$3,$4,$5,$6)",
+            1L, DarlingMcpTestData.Naive(now.AddDays(-5)), PrimaryId, Primary, Db, "ALL");
+
         var json = await DarlingMcpObjectUsageTools.GetObjectUsage(dataSource, Primary, Db, 60, true, 100, 0, now, ct);
         var root = JsonDocument.Parse(json).RootElement;
 

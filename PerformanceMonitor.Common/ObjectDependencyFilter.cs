@@ -40,8 +40,8 @@ public sealed record RawObjectDependency(
 /// Turns the rows of <c>sys.sql_expression_dependencies</c> into the edges the view usage read walks (#8784 part 2), leaving out the rows
 /// that are never a reference to a user object in the same database:
 /// <list type="bullet">
-/// <item>a reference on a linked server or into another database (the read is per database, and the other database's dependency list is its
-/// own);</item>
+/// <item>a reference on a linked server or into another database (the read is per database; the other database reads it as an inbound edge
+/// through <see cref="ToInboundEdge"/>);</item>
 /// <item>the bogus multi-part names that <c>xmlcol.value('...')</c> and the other XML type methods (<c>value</c>, <c>exist</c>,
 /// <c>query</c>, <c>nodes</c>, <c>modify</c>) leave, where the "database" part is really a table alias;</item>
 /// <item>references into <c>sys</c> and <c>INFORMATION_SCHEMA</c>;</item>
@@ -115,6 +115,38 @@ public static class ObjectDependencyFilter
             row.ReferencedSchema ?? "",
             row.ReferencedName,
             row.IsBound);
+    }
+
+    /// <summary>
+    /// The inbound edge for a row of <paramref name="sourceDatabase"/>'s list that names an object of <paramref name="targetDatabase"/> by a
+    /// three-part name (#8784 review: <c>A.dbo.vReport</c> selecting from <c>B.dbo.vCustomer</c>), or null where it does not: no database
+    /// part, another database, a linked server, an XML type method artifact, or <c>sys</c> and <c>INFORMATION_SCHEMA</c>. The edge carries
+    /// <paramref name="sourceDatabase"/> as its <see cref="ObjectDependency.ReferencingDatabase"/>.
+    /// </summary>
+    public static ObjectDependency? ToInboundEdge(RawObjectDependency row, string sourceDatabase, string targetDatabase)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+
+        if (string.IsNullOrEmpty(row.ReferencedName)
+            || !string.IsNullOrEmpty(row.ReferencedServer)
+            || string.IsNullOrEmpty(row.ReferencedDatabase)
+            || !string.Equals(row.ReferencedDatabase, targetDatabase, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(sourceDatabase, targetDatabase, StringComparison.OrdinalIgnoreCase)
+            || TypeMethodNames.Contains(row.ReferencedName)
+            || string.Equals(row.ReferencedSchema, "sys", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(row.ReferencedSchema, "INFORMATION_SCHEMA", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return new ObjectDependency(
+            row.ReferencingSchema,
+            row.ReferencingName,
+            row.ReferencingType?.Trim() ?? "",
+            row.ReferencedSchema ?? "",
+            row.ReferencedName,
+            row.IsBound,
+            sourceDatabase);
     }
 
     /// <summary>The edges for <paramref name="rows"/>, the rows <see cref="ToEdge"/> leaves out dropped.</summary>

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
@@ -44,29 +45,36 @@ public sealed record AggregatedDatabase(string DatabaseName, long Statements, lo
 
 /// <summary>
 /// A bounded cache of statement scans keyed by a hash of the text (#8784 part 2): the same statement comes back every day it runs, and a
-/// parse costs far more than a hash. Thread-safe. When full it is cleared and starts again, which costs a re-parse and nothing else.
+/// parse costs far more than a hash. Thread-safe.
+///
+/// <para><b>Two generations</b> (#8784 review). New scans go into the current generation; a hit in the previous one is moved up. When the
+/// current one holds <c>capacity</c> scans it becomes the previous one and the old previous one is dropped. So a full cache drops only the
+/// scans not used for a whole generation, not every scan: a store with many servers and tens of thousands of distinct texts each keeps
+/// the texts that recur from day to day, where clearing it whole would parse each day's text again. It holds at most twice
+/// <c>capacity</c>, each key the first 128 bits of the text's SHA-256.</para>
 /// </summary>
 public sealed class QueryTextScanCache
 {
-    private readonly Dictionary<string, QueryTextScan> _scans = new(StringComparer.Ordinal);
+    private Dictionary<UInt128, QueryTextScan> _current = new();
+    private Dictionary<UInt128, QueryTextScan> _previous = new();
     private readonly object _gate = new();
     private readonly int _capacity;
 
-    /// <summary>Creates a cache of at most <paramref name="capacity"/> scans.</summary>
+    /// <summary>Creates a cache whose generations hold at most <paramref name="capacity"/> scans each.</summary>
     public QueryTextScanCache(int capacity = 200_000)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         _capacity = capacity;
     }
 
-    /// <summary>How many scans are held.</summary>
+    /// <summary>How many scans are held, in both generations.</summary>
     public int Count
     {
         get
         {
             lock (_gate)
             {
-                return _scans.Count;
+                return _current.Count + _previous.Count;
             }
         }
     }
@@ -76,11 +84,19 @@ public sealed class QueryTextScanCache
     {
         ArgumentNullException.ThrowIfNull(text);
 
-        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+        Span<byte> hash = stackalloc byte[SHA256.HashSizeInBytes];
+        SHA256.HashData(Encoding.UTF8.GetBytes(text), hash);
+        var key = BinaryPrimitives.ReadUInt128LittleEndian(hash);
         lock (_gate)
         {
-            if (_scans.TryGetValue(key, out var cached))
+            if (_current.TryGetValue(key, out var cached))
             {
+                return cached;
+            }
+
+            if (_previous.Remove(key, out cached))
+            {
+                Store(key, cached);
                 return cached;
             }
         }
@@ -88,15 +104,22 @@ public sealed class QueryTextScanCache
         var scan = QueryTextReferenceScanner.Scan(text);
         lock (_gate)
         {
-            if (_scans.Count >= _capacity)
-            {
-                _scans.Clear();
-            }
-
-            _scans[key] = scan;
+            Store(key, scan);
         }
 
         return scan;
+    }
+
+    /// <summary>Adds to the current generation, turning it over first when full. Called under the lock.</summary>
+    private void Store(UInt128 key, QueryTextScan scan)
+    {
+        if (_current.Count >= _capacity && !_current.ContainsKey(key))
+        {
+            _previous = _current;
+            _current = new Dictionary<UInt128, QueryTextScan>();
+        }
+
+        _current[key] = scan;
     }
 }
 

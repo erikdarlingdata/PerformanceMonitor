@@ -104,6 +104,28 @@ public sealed class QueryTextReferenceScannerTests
     }
 
     [Fact]
+    public void AScalarFunctionCall_IsNamedAsAFunction_WithItsDatabaseWhereWritten()
+    {
+        /* #8784 review: an inlined scalar UDF gets no executions in Query Store, so the call is where the walk to a view it reads starts. */
+        var scan = QueryTextReferenceScanner.Scan("SELECT dbo.GetRate(t.id), Rates.dbo.GetTax(t.id) FROM dbo.Orders AS t WHERE dbo.IsOpen(t.id) = 1");
+
+        Assert.True(scan.Parsed);
+        var functions = scan.References.Where(r => r.Kind == ScannedReferenceKind.Function)
+            .Select(r => string.Join(".", new[] { r.Database, r.Schema, r.Name }.Where(p => p is not null))).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(new[] { "Rates.dbo.GetTax", "dbo.GetRate", "dbo.IsOpen" }, functions);
+    }
+
+    [Fact]
+    public void ABuiltInFunction_AndAnXmlTypeMethod_AreNotNamed()
+    {
+        var scan = QueryTextReferenceScanner.Scan(
+            "SELECT COUNT(*), ISNULL(t.a, 0), x.value('(/r)[1]', 'int'), t.doc.exist('/r') FROM dbo.T AS t CROSS APPLY t.doc.nodes('/r') AS n(x)");
+
+        Assert.True(scan.Parsed);
+        Assert.DoesNotContain(scan.References, r => r.Kind == ScannedReferenceKind.Function);
+    }
+
+    [Fact]
     public void ADerivedTableAlias_IsNotAView()
     {
         var names = Names("SELECT d.a FROM (SELECT a FROM dbo.T) AS d JOIN d2 ON 1 = 1 CROSS JOIN (VALUES (1)) AS d2(x)");
@@ -265,15 +287,22 @@ public sealed class QueryTextReferenceScannerTests
     }
 
     [Fact]
-    public void TheScanCache_ParsesEachTextOnce_AndStartsAgainWhenFull()
+    public void TheScanCache_ParsesEachTextOnce_AndWhenFullDropsOnlyTheScansNotUsedForAGeneration()
     {
         var cache = new QueryTextScanCache(capacity: 2);
-        var first = cache.GetOrScan("SELECT 1 FROM dbo.A");
-        Assert.Same(first, cache.GetOrScan("SELECT 1 FROM dbo.A"));
-        cache.GetOrScan("SELECT 1 FROM dbo.B");
+        var a = cache.GetOrScan("SELECT 1 FROM dbo.A");
+        Assert.Same(a, cache.GetOrScan("SELECT 1 FROM dbo.A"));
+        var b = cache.GetOrScan("SELECT 1 FROM dbo.B");
         Assert.Equal(2, cache.Count);
 
+        /* The current generation (A, B) is full: C starts a new one, and A and B are still held. */
         cache.GetOrScan("SELECT 1 FROM dbo.C");
-        Assert.Equal(1, cache.Count);
+        Assert.Equal(3, cache.Count);
+
+        /* A hit in the previous generation moves it up, so it outlives B when the generation turns over again. */
+        Assert.Same(a, cache.GetOrScan("SELECT 1 FROM dbo.A"));
+        cache.GetOrScan("SELECT 1 FROM dbo.D");
+        Assert.Same(a, cache.GetOrScan("SELECT 1 FROM dbo.A"));
+        Assert.NotSame(b, cache.GetOrScan("SELECT 1 FROM dbo.B"));
     }
 }
