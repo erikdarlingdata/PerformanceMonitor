@@ -71,6 +71,17 @@ internal static class ServerEntryRules
     }
 
     /// <summary>
+    /// The encryption option a stored mode builds, as <see cref="ServerConnection"/> builds it: a blank or unknown mode (an old or
+    /// hand-edited servers.json) is Mandatory, never a silent drop to an unencrypted connection (#9237).
+    /// </summary>
+    internal static SqlConnectionEncryptOption EncryptOptionFor(string? encryptMode) => encryptMode switch
+    {
+        "Optional" => SqlConnectionEncryptOption.Optional,
+        "Strict" => SqlConnectionEncryptOption.Strict,
+        _ => SqlConnectionEncryptOption.Mandatory
+    };
+
+    /// <summary>
     /// The connection test <c>--add-server</c> runs: opens the server with the entry's own credentials and reads the detection
     /// query, as the window's Test Connection does. Returns null when it connected, otherwise the failure text. The text is the
     /// driver's message, which never carries the password.
@@ -80,12 +91,7 @@ internal static class ServerEntryRules
     {
         try
         {
-            var encrypt = server.EncryptMode switch
-            {
-                "Mandatory" => SqlConnectionEncryptOption.Mandatory,
-                "Strict" => SqlConnectionEncryptOption.Strict,
-                _ => SqlConnectionEncryptOption.Optional
-            };
+            var encrypt = EncryptOptionFor(server.EncryptMode);
             var builder = BuildBaseConnectionBuilder(
                 server.ServerName, server.DatabaseName ?? string.Empty, server.TrustServerCertificate, encrypt,
                 server.ReadOnlyIntent, server.MultiSubnetFailover);

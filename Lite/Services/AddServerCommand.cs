@@ -48,6 +48,10 @@ internal static class AddServerCommand
     internal const int ExitAdded = 0;
     internal const int ExitRefused = 1;
 
+    private const string RunningLiteRefusal =
+        "Performance Monitor Lite is running. It keeps the server list in memory and writes it back, so a server added now would be lost. "
+        + "Run PerformanceMonitorLite.exe --stop, then --add-server again, then start Lite: it collects from the new server from that start.";
+
     /// <summary>One server to add, as read from JSON or flags and normalised.</summary>
     internal sealed record Entry(string Host, string? DisplayName, string AuthenticationType, string? Username, string? Password, string? Database);
 
@@ -97,7 +101,8 @@ internal static class AddServerCommand
 
             if (!name.StartsWith('-'))
             {
-                errorMessage = $"Unexpected argument '{arg}'. --add-server takes --host, --name, --auth, --username (--login) and --database.";
+                /* The position, never the text: a stray value can be a password typed in the wrong place. */
+                errorMessage = $"Unexpected argument {i + 1}. --add-server takes --host, --name, --auth, --username (--login) and --database, each with a value.";
                 break;
             }
 
@@ -170,6 +175,11 @@ internal static class AddServerCommand
             return ([new Entry(flags.Host.Trim(), NullIfBlank(flags.DisplayName), auth, NullIfBlank(flags.Username), password, NullIfBlank(flags.Database))], null);
         }
 
+        if (!inputRedirected)
+            return (null, "No server was added: stdin is not redirected, so there is no JSON array to read, and no flag names a server. "
+                + "There is no prompt (this program has no console of its own, so a shell and the program would both read the keys). "
+                + "Pipe a JSON array of servers on stdin, or name one server with --host.");
+
         string json;
         try
         {
@@ -191,7 +201,8 @@ internal static class AddServerCommand
         }
         catch (JsonException ex)
         {
-            return (null, $"stdin is not valid JSON ({ex.Message.Split('.')[0]}). It must be an array of servers.");
+            /* Only the position: the driver's own text quotes the input from the bad token to the end, and that can be a password. */
+            return (null, $"The JSON on stdin is not valid at line {(ex.LineNumber ?? 0) + 1}, byte {(ex.BytePositionInLine ?? 0) + 1}. It must be an array of servers.");
         }
 
         if (root.ValueKind != JsonValueKind.Array)
@@ -264,8 +275,7 @@ internal static class AddServerCommand
            a setting), so a server added to the file now would be lost, and it would not be collected until a restart anyway. */
         if (env.LiteIsRunning())
         {
-            error.WriteLine("Performance Monitor Lite is running. It keeps the server list in memory and writes it back, so a server added now would be lost. "
-                + "Run PerformanceMonitorLite.exe --stop, then --add-server again, then start Lite: it collects from the new server from that start.");
+            error.WriteLine(RunningLiteRefusal);
             return ExitRefused;
         }
 
@@ -326,6 +336,27 @@ internal static class AddServerCommand
                 return ExitRefused;
             }
 
+            if (existing is not null)
+            {
+                /* A saved password is written only for a server whose Id is a GUID, so the entry would be "updated" with no password stored. */
+                if (entry.AuthenticationType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal && !ServerCredentialIds.IsUsable(existing.Id))
+                {
+                    error.WriteLine($"{label}: the listed entry for this server has an Id that is not a GUID, so Lite stores no password for it and nothing was changed. "
+                        + "Remove the entry and add the server again to give it a normal Id.");
+                    return ExitRefused;
+                }
+
+                /* The entry's own settings are in a file any local account can change. The connection test below and the stored password
+                   would use them, so one this Windows account has not confirmed is refused here, before anything connects. */
+                var unconfirmed = UnconfirmedSettings(existing, manager.HostChangeIfSaved(existing));
+                if (unconfirmed.Count > 0)
+                {
+                    error.WriteLine($"{label}: the listed entry for this server holds {string.Join(", ", unconfirmed)} that this Windows account has not confirmed, so nothing was changed. "
+                        + "Confirm the setting in the Add Server window, or remove the entry and add the server again.");
+                    return ExitRefused;
+                }
+            }
+
             var server = existing ?? new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database };
             if (existing is null)
                 server.DisplayName = entry.DisplayName ?? entry.Host;
@@ -347,9 +378,21 @@ internal static class AddServerCommand
             planned.Add((entry, server, existing is not null));
         }
 
-        /* Everything passed: only now is anything written. */
+        /* The tests above take seconds each: a Lite started meanwhile would write the list back over this run. */
+        if (env.LiteIsRunning())
+        {
+            error.WriteLine(RunningLiteRefusal);
+            return ExitRefused;
+        }
+
+        /* Everything passed: only now is anything written. The manager saves the list and confirms the host before it writes the
+           credential, so a refused or failed credential write part way through would leave a partial result: the run undoes it. */
+        var undo = WriteUndo.Take(manager, Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName), planned.Select(p => p.Server).ToList());
+        var results = new List<string>();
+        var reached = 0;
         foreach (var (entry, server, exists) in planned)
         {
+            reached++;
             try
             {
                 if (exists)
@@ -365,17 +408,133 @@ internal static class AddServerCommand
             catch (Exception ex)
             {
                 error.WriteLine($"{ManagerLabel(server)}: {ex.Message}");
+                foreach (var line in undo.Restore(reached))
+                    error.WriteLine(line);
                 return ExitRefused;
             }
 
-            output.WriteLine($"{(exists ? "Updated" : "Added")} {server.DisplayName} ({server.ServerName}).");
+            results.Add($"{(exists ? "Updated" : "Added")} {server.DisplayName} ({server.ServerName}).");
         }
+
+        foreach (var line in results)
+            output.WriteLine(line);
 
         output.WriteLine($"Credentials were stored for the Windows account {env.AccountName}.");
         output.WriteLine($"Server list: {manager.ConfigFilePath}");
         output.WriteLine($"Host confirmation: {Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName)}");
         output.WriteLine("Start Lite to collect from these servers. A Lite that is already running does not see them until it is stopped and started again.");
         return ExitAdded;
+    }
+
+    /// <summary>
+    /// The settings a listed entry holds that this Windows account's host record does not confirm, which the Add Server window would ask
+    /// about: a Query Store replica, a utility database, a certificate trusted without a check, and encryption that is Optional (or
+    /// weaker than the confirmed one). Empty when <paramref name="change"/> is null (the record confirms the entry).
+    /// </summary>
+    internal static List<string> UnconfirmedSettings(ServerConnection server, ServerHostChange? change)
+    {
+        var names = new List<string>();
+        if (change is null)
+            return names;
+
+        var neverConfirmed = change.ConfirmedHost is null;
+        bool Asked(string setting) => change.Settings.Any(s => s.Name == setting);
+
+        if (change.ReplicaChanged || (neverConfirmed && !string.IsNullOrWhiteSpace(server.QueryStoreReplica)))
+            names.Add("a Query Store replica");
+        if (!string.IsNullOrWhiteSpace(server.UtilityDatabase) && (neverConfirmed || Asked(ServerHostBindings.UtilityDatabaseSetting)))
+            names.Add("a utility database");
+        if (server.TrustServerCertificate && (neverConfirmed || Asked(ServerHostBindings.CertificateSetting)))
+            names.Add("TrustServerCertificate");
+        if (neverConfirmed ? ServerHostBindings.EncryptRank(server.EncryptMode) == 0 : Asked(ServerHostBindings.EncryptionSetting))
+            names.Add("encryption that is Optional or weaker than the confirmed one");
+        return names;
+    }
+
+    /// <summary>
+    /// What the run holds before it writes: the server list file and the host record file as bytes (absent is remembered as absent)
+    /// and each listed server's saved credential. <see cref="Restore"/> puts them back.
+    /// </summary>
+    private sealed class WriteUndo
+    {
+        private readonly CredentialService _credentials;
+        private readonly (string Description, string Path, byte[]? Bytes)[] _files;
+        private readonly List<(int Index, ServerConnection Server, CredentialReadOutcome Outcome, (string Username, string Password)? Credential)> _saved = [];
+
+        private WriteUndo(CredentialService credentials, (string Description, string Path, byte[]? Bytes)[] files)
+        {
+            _credentials = credentials;
+            _files = files;
+        }
+
+        internal static WriteUndo Take(ServerManager manager, string hostRecordPath, List<ServerConnection> servers)
+        {
+            static byte[]? Bytes(string path) => File.Exists(path) ? File.ReadAllBytes(path) : null;
+            var undo = new WriteUndo(manager.CredentialService, [
+                ("the server list", manager.ConfigFilePath, Bytes(manager.ConfigFilePath)),
+                ("the host confirmation", hostRecordPath, Bytes(hostRecordPath))]);
+            for (var i = 0; i < servers.Count; i++)
+            {
+                if (!ServerCredentialIds.IsUsable(servers[i].Id))
+                    continue;
+                var outcome = manager.CredentialService.TryReadCredential(servers[i].Id, out var credential, out _);
+                undo._saved.Add((i, servers[i], outcome, credential));
+            }
+
+            return undo;
+        }
+
+        /// <summary>Puts the files back and the credentials of the first <paramref name="reached"/> servers; returns the lines to print.</summary>
+        internal List<string> Restore(int reached)
+        {
+            var problems = new List<string>();
+            foreach (var (description, path, bytes) in _files)
+            {
+                try
+                {
+                    if (bytes is null)
+                    {
+                        if (File.Exists(path))
+                            File.Delete(path);
+                    }
+                    else
+                    {
+                        File.WriteAllBytes(path, bytes);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    problems.Add($"{description} ({path}) could not be put back and may still hold the changes of this run.");
+                }
+            }
+
+            foreach (var (_, server, outcome, credential) in _saved.Where(saved => saved.Index < reached))
+            {
+                var name = ManagerLabel(server);
+                try
+                {
+                    var restored = outcome switch
+                    {
+                        CredentialReadOutcome.Found => _credentials.SaveCredential(server.Id, credential!.Value.Username, credential.Value.Password),
+                        CredentialReadOutcome.NotFound => _credentials.TryDeleteCredential(server.Id).Succeeded,
+                        _ => false
+                    };
+                    if (!restored)
+                        problems.Add($"the saved credential for {name} could not be put back and may hold the password of this run.");
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException)
+                {
+                    problems.Add($"the saved credential for {name} could not be put back and may hold the password of this run.");
+                }
+            }
+
+            return
+            [
+                problems.Count == 0
+                    ? "The server list, the host confirmation and the saved credentials were put back as they were before this run."
+                    : "This run could not put everything back: " + string.Join(" ", problems)
+            ];
+        }
     }
 
     private static string ManagerLabel(ServerConnection server) => ServerManager.NameForMessage(server);

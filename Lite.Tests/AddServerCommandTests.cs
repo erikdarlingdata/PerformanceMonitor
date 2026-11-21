@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Common;
@@ -62,16 +63,17 @@ public sealed class AddServerCommandTests : IDisposable
     }
 
     private async Task<Run> RunVerbAsync(
-        string[] args, string stdin, bool redirected = true, bool liteRunning = false, Func<ServerConnection, string?>? connect = null)
+        string[] args, string stdin, bool redirected = true, bool liteRunning = false, Func<ServerConnection, string?>? connect = null,
+        Func<bool>? liteRunningCheck = null, ICredentialStore? store = null)
     {
         var run = new Run();
         var machine = new AddServerCommand.Machine(
             () =>
             {
                 run.ManagerMade = true;
-                return new ServerManager(_root, _log, HostsFile, new CredentialService(_store));
+                return new ServerManager(_root, _log, HostsFile, new CredentialService(store ?? _store));
             },
-            () => liteRunning,
+            liteRunningCheck ?? (() => liteRunning),
             (server, user, password) =>
             {
                 run.Tested.Add(server.ServerName);
@@ -307,6 +309,244 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.DoesNotContain(_log.Lines, line => line.Contains(Secret, StringComparison.Ordinal));
         Assert.DoesNotContain(Secret, File.ReadAllText(ServersFile));
         Assert.DoesNotContain(Secret, File.ReadAllText(HostsFile));
+    }
+
+    [Fact]
+    public async Task ABadJsonLiteral_ReportsThePosition_NotTheInputAfterIt()
+    {
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"h","auth":"sql","username":"u","password":nextValue99!x}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.DoesNotContain("nextValue99", run.Err);
+        Assert.DoesNotContain("nextValue99", run.Out);
+        Assert.Contains("line 1", run.Err);
+        Assert.Empty(run.Tested);
+    }
+
+    [Fact]
+    public async Task AStrayArgument_IsNamedByItsPosition_NotItsValue()
+    {
+        var run = await RunVerbAsync(["--add-server", "--username", "monitor", "stray-value-77"], "");
+
+        Assert.Equal(1, run.Exit);
+        Assert.DoesNotContain("stray-value-77", run.Err);
+        Assert.Contains("argument 3", run.Err);
+    }
+
+    [Fact]
+    public async Task BareVerbAtAConsole_IsRefused_WithoutReadingTheKeyboard()
+    {
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"windows"}]""", redirected: false);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("not redirected", run.Err);
+        Assert.Empty(ServerNames());
+        Assert.Empty(run.Tested);
+        Assert.False(run.ManagerMade);
+    }
+
+    [Fact]
+    public async Task ALiteStartedDuringTheConnectionTests_RefusesTheWrite_AndChangesNothing()
+    {
+        var checks = 0;
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor","password":"first-value"}]""",
+            liteRunningCheck: () => ++checks > 1);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Equal(2, checks);
+        Assert.Equal(["sql01"], run.Tested);
+        Assert.Contains("Lite is running", run.Err);
+        Assert.Empty(ServerNames());
+        Assert.Empty(StoredKeys());
+        Assert.False(File.Exists(HostsFile));
+    }
+
+    /// <summary>Edits the first listed server in servers.json, as any local account can.</summary>
+    private void EditListedEntry(Action<JsonObject> edit)
+    {
+        var root = JsonNode.Parse(File.ReadAllText(ServersFile))!.AsObject();
+        edit(root["Servers"]!.AsArray()[0]!.AsObject());
+        File.WriteAllText(ServersFile, root.ToJsonString());
+    }
+
+    private async Task<string> AddSql01Async()
+    {
+        await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor","password":"first-value"}]""");
+        return Reload().GetAllServers().Single().Id;
+    }
+
+    [Theory]
+    [InlineData("QueryStoreReplica", "replica01", "Query Store replica")]
+    [InlineData("QueryStoreReplica", "np:replica01", "Query Store replica")]
+    [InlineData("UtilityDatabase", "utility", "utility database")]
+    [InlineData("TrustServerCertificate", true, "TrustServerCertificate")]
+    [InlineData("EncryptMode", "Optional", "encryption")]
+    public async Task AReAdd_OfAnEntryHoldingAnUnconfirmedSetting_IsRefused_AndChangesNothing(string property, object value, string named)
+    {
+        var id = await AddSql01Async();
+        EditListedEntry(entry => entry[property] = value is bool flag ? JsonValue.Create(flag) : JsonValue.Create((string)value));
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains(named, run.Err);
+        Assert.Contains("Add Server window", run.Err);
+        Assert.DoesNotContain("second-value", run.Err);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(id));
+    }
+
+    [Fact]
+    public async Task AReAdd_OfAnEntryWithSettingsThisUserConfirmed_GoesThrough()
+    {
+        var id = await AddSql01Async();
+        var manager = Reload();
+        var listed = manager.GetAllServers().Single();
+        listed.QueryStoreReplica = "replica01";
+        listed.UtilityDatabase = "utility";
+        listed.TrustServerCertificate = true;
+        listed.EncryptMode = "Optional";
+        manager.UpdateServerSettings(listed);
+        manager.ConfirmHost(listed);
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""");
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(["sql01"], run.Tested);
+        Assert.Equal(("monitor2", "second-value"), _store.GetCredential(id));
+    }
+
+    [Fact]
+    public async Task AReAdd_OfAnEntryWithBlankEncryption_GoesThrough_BecauseBlankIsMandatory()
+    {
+        var id = await AddSql01Async();
+        EditListedEntry(entry => entry["EncryptMode"] = "");
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""");
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(("monitor2", "second-value"), _store.GetCredential(id));
+    }
+
+    [Theory]
+    [InlineData("Mandatory", "Mandatory")]
+    [InlineData("Strict", "Strict")]
+    [InlineData("Optional", "Optional")]
+    [InlineData("", "Mandatory")]
+    [InlineData(null, "Mandatory")]
+    [InlineData("SomethingElse", "Mandatory")]
+    public void TheTestedEncryption_FailsClosed_ForABlankOrUnknownMode(string? mode, string expected)
+    {
+        var option = ServerEntryRules.EncryptOptionFor(mode);
+
+        Assert.Equal(Microsoft.Data.SqlClient.SqlConnectionEncryptOption.Parse(expected), option);
+    }
+
+    [Fact]
+    public async Task AReAdd_OfAnEntryWhoseIdIsNotAGuid_IsRefused_AndChangesNothing()
+    {
+        await AddSql01Async();
+        EditListedEntry(entry => entry["Id"] = "not-a-guid");
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+        var keysBefore = StoredKeys();
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("sql01", run.Err);
+        Assert.Contains("not a GUID", run.Err);
+        Assert.DoesNotContain("Updated", run.Out);
+        Assert.DoesNotContain("Credentials were stored", run.Out);
+        Assert.Empty(run.Tested);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(keysBefore, StoredKeys());
+    }
+
+    /// <summary>A store that refuses (or throws on) the save for one login. A refused update deletes the old entry first, the worst a store can do.</summary>
+    private sealed class RefusingStore(InMemoryCredentialStore inner, string username, bool throwInstead) : ICredentialStore
+    {
+        public bool SaveCredential(string serverId, string user, string password) => user == username ? Refuse(serverId) : inner.SaveCredential(serverId, user, password);
+        public CredentialSaveResult TrySaveCredential(string serverId, string user, string password) => inner.TrySaveCredential(serverId, user, password);
+        public CredentialSaveResult TryDeleteCredential(string serverId) => inner.TryDeleteCredential(serverId);
+        public (string Username, string Password)? GetCredential(string serverId) => inner.GetCredential(serverId);
+        public CredentialReadOutcome TryReadCredential(string serverId, out (string Username, string Password)? credential, out string? failure)
+            => inner.TryReadCredential(serverId, out credential, out failure);
+        public bool DeleteCredential(string serverId) => inner.DeleteCredential(serverId);
+        public bool CredentialExists(string serverId) => inner.CredentialExists(serverId);
+        public bool UpdateCredential(string serverId, string user, string password)
+            => user == username ? Refuse(serverId) : inner.UpdateCredential(serverId, user, password);
+        public IReadOnlyList<string> ListKeys(string keyPrefix) => inner.ListKeys(keyPrefix);
+
+        private bool Refuse(string serverId)
+        {
+            inner.DeleteCredential(serverId);
+            return throwInstead ? throw new InvalidOperationException("The credential store failed.") : false;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ACredentialFailureAtTheSecondOfTwoEntries_PutsBackTheListTheHostRecordAndTheCredentials(bool throws)
+    {
+        var existingId = await AddSql01Async();
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+        var keysBefore = StoredKeys();
+        var store = new RefusingStore(_store, "user2", throws);
+
+        var run = await RunVerbAsync(
+            ["--add-server"],
+            """[{"host":"sql02","auth":"sql","username":"user1","password":"value-one"},{"host":"sql03","auth":"sql","username":"user2","password":"value-two"}]""",
+            store: store);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("put back", run.Err);
+        Assert.DoesNotContain("Added", run.Out);
+        Assert.DoesNotContain("value-one", run.Err);
+        Assert.DoesNotContain("value-two", run.Err);
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+        Assert.Equal(keysBefore, StoredKeys());
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(existingId));
+    }
+
+    [Fact]
+    public async Task ACredentialFailureOnAReAdd_LeavesTheOldCredentialAsItWas()
+    {
+        var id = await AddSql01Async();
+        var serversBefore = File.ReadAllBytes(ServersFile);
+        var hostsBefore = File.ReadAllBytes(HostsFile);
+        var store = new RefusingStore(_store, "monitor2", throwInstead: false);
+
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor2","password":"second-value"}]""", store: store);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Equal(("monitor", "first-value"), _store.GetCredential(id));
+        Assert.Equal(serversBefore, File.ReadAllBytes(ServersFile));
+        Assert.Equal(hostsBefore, File.ReadAllBytes(HostsFile));
+    }
+
+    [Fact]
+    public async Task AFirstRunThatFails_LeavesNoServerListAndNoHostRecord()
+    {
+        var store = new RefusingStore(_store, "user1", throwInstead: false);
+
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql02","auth":"sql","username":"user1","password":"value-one"}]""", store: store);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Empty(ServerNames());
+        Assert.False(File.Exists(HostsFile));
+        Assert.Empty(StoredKeys());
     }
 
     [Fact]
