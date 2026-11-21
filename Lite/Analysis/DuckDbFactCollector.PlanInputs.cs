@@ -73,6 +73,9 @@ public partial class DuckDbFactCollector
         public int Timeouts;
         public int Faults;
         public int CacheHits;
+
+        /// <summary>#9195: pairs not judged because a plan fetch or the pair's compare failed within the last hour.</summary>
+        public int Skipped;
         public long FetchTicks;
     }
 
@@ -155,7 +158,7 @@ public partial class DuckDbFactCollector
             string.Create(CultureInfo.InvariantCulture,
                 $"Plan regression input check took {(long)elapsed.TotalMilliseconds} ms for {context.ServerName} (server {context.ServerId}): " +
                 $"{candidateCount} candidates, {budget.Fetches} fetches ({budget.PlansRead} plans, {budget.NoPlan} none, {budget.Timeouts} timeouts, " +
-                $"{budget.Faults} faults, {(long)Stopwatch.GetElapsedTime(0, budget.FetchTicks).TotalMilliseconds} ms), {budget.CacheHits} answered from an earlier pass, {unverified} unverified"));
+                $"{budget.Faults} faults, {(long)Stopwatch.GetElapsedTime(0, budget.FetchTicks).TotalMilliseconds} ms), {budget.CacheHits} answered from an earlier pass, {budget.Skipped} skipped after an earlier failure, {unverified} unverified"));
     }
 
     /// <summary>What the inputs check decided about one row: leave its query out, or keep it (checked or not) with its basis.</summary>
@@ -214,6 +217,19 @@ public partial class DuckDbFactCollector
         AnalysisContext context, PlanFetchBudget budget,
         string databaseName, long latestPlanId, long bestPlanId, CancellationToken overallToken)
     {
+        /* #9195: a plan whose fetch failed in the last hour, or a pair that compared unverified in it, is not tried again.
+           That uses no fetch and no time, and the candidate stays unverified, as one the budget never reached does. */
+        var pairKey = new PlanInputOutcomeCache.Key(context.ServerId, databaseName, latestPlanId, bestPlanId);
+        if (_planInputCache.IsSkipped(pairKey)
+            || _planInputCache.IsSkipped(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, latestPlanId))
+            || _planInputCache.IsSkipped(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, bestPlanId)))
+        {
+            budget.Skipped++;
+            AppLogger.Debug("DuckDbFactCollector", string.Create(CultureInfo.InvariantCulture,
+                $"Plan input fetch skipped after an earlier failure for plans {latestPlanId} and {bestPlanId} in {databaseName} on {context.ServerName} (server {context.ServerId})"));
+            return PlanInputOutcome.KeepUnverified;
+        }
+
         var latestXml = await FetchPlanForInputsAsync(context, budget, databaseName, latestPlanId, overallToken);
         if (latestXml is null) return PlanInputOutcome.KeepUnverified;
 
@@ -222,7 +238,9 @@ public partial class DuckDbFactCollector
 
         try
         {
-            return PlanInputComparison.JudgePlans(latestXml, bestXml);
+            var judged = PlanInputComparison.JudgePlans(latestXml, bestXml);
+            if (judged == PlanInputOutcome.KeepUnverified) _planInputCache.Skip(pairKey);
+            return judged;
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -235,6 +253,7 @@ public partial class DuckDbFactCollector
                     context, nameof(CollectPlanRegressionFactsAsync), record: false);
             }
 
+            _planInputCache.Skip(pairKey);
             return PlanInputOutcome.KeepUnverified;
         }
     }
@@ -270,6 +289,7 @@ public partial class DuckDbFactCollector
             {
                 result = "none";
                 budget.NoPlan++;
+                _planInputCache.Skip(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, planId));
                 return null;
             }
 
@@ -282,10 +302,14 @@ public partial class DuckDbFactCollector
         {
             /* One fetch's own timeout is an OperationCanceledException with the pass's token unfired: expected, so unverified
                and not logged as a fault. Anything else is a fault in the plan source. */
+            var skipPlan = true;
             if (ex is OperationCanceledException)
             {
                 result = "timeout";
                 budget.Timeouts++;
+
+                /* #9195: the pass's fetch time running out is the pass's limit, not this plan's: no skip entry. */
+                skipPlan = !overallToken.IsCancellationRequested;
             }
             else
             {
@@ -298,6 +322,7 @@ public partial class DuckDbFactCollector
                 }
             }
 
+            if (skipPlan) _planInputCache.Skip(new PlanInputOutcomeCache.PlanKey(context.ServerId, databaseName, planId));
             return null;
         }
         finally

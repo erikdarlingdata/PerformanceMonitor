@@ -22,7 +22,7 @@ namespace PerformanceMonitorLite.Analysis;
 /// <para>Only a conclusive outcome goes in: both plans were fetched and compared and the rule reached a drop, or a keep
 /// with a reason (<see cref="PlanInputOutcome.KeepSameValues"/>, <see cref="PlanInputOutcome.KeepStatisticsChanged"/>).
 /// A budget that ran out, a timeout, a missing plan, a fault and an uncomparable pair
-/// (<see cref="PlanInputOutcome.KeepUnverified"/>) are never stored, so the next pass fetches them again. That last one
+/// (<see cref="PlanInputOutcome.KeepUnverified"/>) are never stored as outcomes, so only the skip entries below keep them from being fetched again. That last one
 /// matters because the statement filter judges a plan within a time budget and withholds what it cannot judge in
 /// time: a plan read at a busy moment compares as unverified, and must not be remembered as that.</para>
 ///
@@ -32,6 +32,15 @@ namespace PerformanceMonitorLite.Analysis;
 /// restored, and Query Store can be cleared. An entry therefore expires after <see cref="Lifetime"/>, which bounds how long
 /// such a reuse can be answered from the old pair. The cache holds at most <see cref="MaxEntries"/> entries; past it the
 /// oldest is evicted.</para>
+///
+/// <para>Skip entries (#9195): the cache above is silent about a fetch that failed, so on a busy server the same slow
+/// or empty fetches used the pass's whole fetch budget every pass. A plan whose fetch timed out, came back with no plan
+/// or faulted, and a pair that compared unverified, are each remembered for <see cref="SkipLifetime"/>. While an entry
+/// is live the plan is not fetched (or the pair is not judged): that uses no budget and the candidate stays unverified,
+/// as an unreached one does. After the hour it is tried again. A skip entry says "do not try yet", never "the answer is
+/// unverified", so it is kept apart from the outcomes and a conclusive outcome never reads it. The pass's own
+/// cancellation and a spent budget are not failures of the plan and never make an entry. Skip entries are capped like
+/// the outcomes, at <see cref="MaxSkipEntries"/> per kind, oldest evicted.</para>
 ///
 /// <para>One instance per <see cref="DuckDbInitializer"/>, never a process static, like <see cref="BaselineCache"/>: the
 /// scheduler builds a fresh analysis service per pass, so the instance has to live with the store.</para>
@@ -44,6 +53,12 @@ public sealed class PlanInputOutcomeCache
     /// <summary>How long an entry answers for its pair, see the class remarks on a reused plan_id.</summary>
     internal static readonly TimeSpan Lifetime = TimeSpan.FromHours(6);
 
+    /// <summary>#9195: how long a failed fetch or an unverified compare is not tried again.</summary>
+    internal static readonly TimeSpan SkipLifetime = TimeSpan.FromHours(1);
+
+    /// <summary>#9195: skip entries kept per kind (plans, pairs).</summary>
+    internal const int MaxSkipEntries = 512;
+
     private static readonly ConditionalWeakTable<DuckDbInitializer, PlanInputOutcomeCache> s_byStore = new();
 
     /// <summary>The cache that belongs to <paramref name="duckDb"/>'s store.</summary>
@@ -51,10 +66,17 @@ public sealed class PlanInputOutcomeCache
 
     internal readonly record struct Key(int ServerId, string Database, long LatestPlanId, long BestPlanId);
 
+    /// <summary>One plan whose fetch failed, on the same server and database as its pairs.</summary>
+    internal readonly record struct PlanKey(int ServerId, string Database, long PlanId);
+
     private readonly record struct Entry(PlanInputOutcome Outcome, DateTime StoredUtc, long Sequence);
+
+    private readonly record struct SkipEntry(DateTime StoredUtc, long Sequence);
 
     private readonly object _gate = new();
     private readonly Dictionary<Key, Entry> _entries = [];
+    private readonly Dictionary<PlanKey, SkipEntry> _skippedPlans = [];
+    private readonly Dictionary<Key, SkipEntry> _skippedPairs = [];
     private readonly TimeProvider _time;
     private long _sequence;
 
@@ -117,5 +139,64 @@ public sealed class PlanInputOutcomeCache
                 _entries.Remove(oldest);
             }
         }
+    }
+
+    /// <summary>Skip entries held (plans and pairs), including any that expired and have not been asked for since.</summary>
+    internal int SkipCount
+    {
+        get { lock (_gate) return _skippedPlans.Count + _skippedPairs.Count; }
+    }
+
+    /// <summary>True while the plan's last failed fetch is under <see cref="SkipLifetime"/> old.</summary>
+    internal bool IsSkipped(PlanKey plan)
+    {
+        lock (_gate) return IsLive(_skippedPlans, plan);
+    }
+
+    /// <summary>True while the pair's last unverified compare is under <see cref="SkipLifetime"/> old.</summary>
+    internal bool IsSkipped(Key pair)
+    {
+        lock (_gate) return IsLive(_skippedPairs, pair);
+    }
+
+    /// <summary>Remembers that the plan's fetch timed out, found no plan or faulted.</summary>
+    internal void Skip(PlanKey plan)
+    {
+        lock (_gate) AddSkip(_skippedPlans, plan);
+    }
+
+    /// <summary>Remembers that the pair compared unverified.</summary>
+    internal void Skip(Key pair)
+    {
+        lock (_gate) AddSkip(_skippedPairs, pair);
+    }
+
+    private bool IsLive<TKey>(Dictionary<TKey, SkipEntry> entries, TKey key) where TKey : notnull
+    {
+        if (!entries.TryGetValue(key, out var entry)) return false;
+        if (_time.GetUtcNow().UtcDateTime - entry.StoredUtc < SkipLifetime) return true;
+
+        entries.Remove(key);
+        return false;
+    }
+
+    private void AddSkip<TKey>(Dictionary<TKey, SkipEntry> entries, TKey key) where TKey : notnull
+    {
+        entries[key] = new SkipEntry(_time.GetUtcNow().UtcDateTime, ++_sequence);
+        if (entries.Count <= MaxSkipEntries) return;
+
+        /* The same scan as the outcomes: run only on the add that overflows. */
+        var oldest = key;
+        var oldestSequence = long.MaxValue;
+        foreach (var (key2, entry) in entries)
+        {
+            if (entry.Sequence < oldestSequence)
+            {
+                oldestSequence = entry.Sequence;
+                oldest = key2;
+            }
+        }
+
+        entries.Remove(oldest);
     }
 }

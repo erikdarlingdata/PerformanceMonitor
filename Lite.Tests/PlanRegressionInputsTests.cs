@@ -792,54 +792,184 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
         Assert.Equal(firstPass.PlanRegressionOffenders, secondPass.PlanRegressionOffenders);
     }
 
+    private sealed class ManualTime : TimeProvider
+    {
+        private DateTimeOffset _now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
+    /// <summary>Makes a fetch fail the way <paramref name="failure"/> says, for the plans <paramref name="failing"/> accepts.</summary>
+    private static void Break(FixturePlanSource source, string failure, Func<long, bool> failing) =>
+        source.Behavior = (planId, _) =>
+        {
+            if (!failing(planId)) return Task.CompletedTask;
+            switch (failure)
+            {
+                case "timeout": throw new OperationCanceledException();
+                case "fault": throw new InvalidOperationException("the server is unreachable");
+                default: source.Remove(planId); return Task.CompletedTask;
+            }
+        };
+
     [Theory]
     [InlineData("timeout")]
     [InlineData("fault")]
     [InlineData("none")]
-    public async Task ATimeoutAFaultOrNoPlan_IsNotCached_TheNextPassFetchesAgain(string failure)
+    public async Task ATimeoutAFaultOrNoPlan_IsNotAnOutcome_ButIsNotFetchedAgainForAnHour(string failure)
     {
         var broken = new FixturePlanSource();
         broken.Add(CheapPlanId(ManifestsB), "7");
         broken.Add(CostlyPlanId(ManifestsB), "1");
-        broken.Behavior = failure switch
-        {
-            "timeout" => (_, _) => throw new OperationCanceledException(),
-            "fault" => (_, _) => throw new InvalidOperationException("the server is unreachable"),
-            _ => (planId, _) => { broken.Remove(planId); return Task.CompletedTask; },
-        };
+        Break(broken, failure, _ => true);
         await SeedRegressionAsync(ManifestsB, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
-        var cache = new PlanInputOutcomeCache();
+        var time = new ManualTime();
+        var cache = new PlanInputOutcomeCache(time);
 
         var (first, _) = await RunSharedAsync(broken, cache);
         Assert.Equal(1, first!.Metadata["inputs_unverified_count"]);
         Assert.Equal(0, cache.Count);
+        Assert.Single(broken.Fetched);
 
-        /* The server answers on the next pass: both plans are fetched and compared, and the values-only plan leaves. */
+        /* The server answers on the next pass, but the plan failed a moment ago: no fetch, and the candidate stays unverified. */
         var healthy = new FixturePlanSource();
         healthy.Add(CheapPlanId(ManifestsB), "7");
         healthy.Add(CostlyPlanId(ManifestsB), "1");
+        time.Advance(TimeSpan.FromMinutes(30));
         var (second, _) = await RunSharedAsync(healthy, cache);
 
-        Assert.Null(second);
+        Assert.Empty(healthy.Fetched);
+        Assert.Equal(1, second!.Metadata["inputs_unverified_count"]);
+
+        /* After the hour it is tried again: both plans are fetched and compared, and the values-only plan leaves. */
+        time.Advance(PlanInputOutcomeCache.SkipLifetime);
+        var (third, _) = await RunSharedAsync(healthy, cache);
+
+        Assert.Null(third);
         Assert.Equal([CostlyPlanId(ManifestsB), CheapPlanId(ManifestsB)], healthy.Fetched.ToArray());
     }
 
+    [Theory]
+    [InlineData("timeout")]
+    [InlineData("fault")]
+    [InlineData("none")]
+    public async Task AFailedPlan_UsesNoBudgetOnTheNextPass_SoTheBudgetReachesTheCandidatesItWouldHaveStarved(string failure)
+    {
+        /* Twenty candidates, the six worst fail on their second plan (two fetches each). Without a skip entry the next
+           pass spends those twelve fetches again and reaches fewer of the rest. */
+        const int queries = 20;
+        const int failingQueries = 6;
+        var source = new FixturePlanSource();
+        for (long q = 1; q <= queries; q++)
+        {
+            await SeedRegressionAsync(q, PlainText, factor: 3 + q);
+            source.Add(CheapPlanId(q), "7");
+            source.Add(CostlyPlanId(q), "7");
+        }
+
+        bool Fails(long planId) => planId / 10 > queries - failingQueries && planId % 10 == 1;
+        Break(source, failure, Fails);
+        var time = new ManualTime();
+        var cache = new PlanInputOutcomeCache(time);
+
+        var (first, _) = await RunSharedAsync(source, cache);
+        Assert.Equal(DuckDbFactCollector.MaxPlanInputFetches, source.Fetched.Count);
+        var judgedFirst = (DuckDbFactCollector.MaxPlanInputFetches - (failingQueries * 2)) / 2;
+        Assert.Equal(queries - judgedFirst, first!.Metadata["inputs_unverified_count"]);
+
+        source.Fetched.Clear();
+        time.Advance(TimeSpan.FromMinutes(30));
+        var (second, _) = await RunSharedAsync(source, cache);
+
+        /* No failing query's plan is fetched, and the twenty fetches all go to queries not judged before. */
+        Assert.DoesNotContain(source.Fetched, p => p / 10 > queries - failingQueries);
+        Assert.Equal(DuckDbFactCollector.MaxPlanInputFetches, source.Fetched.Count);
+        Assert.Equal(failingQueries, second!.Metadata["inputs_unverified_count"]);
+        Assert.Equal(queries, second.Metadata["offender_count"]);
+
+        /* After the hour the failing queries are tried again, and the server answers. */
+        source.Fetched.Clear();
+        time.Advance(PlanInputOutcomeCache.SkipLifetime);
+        source.Behavior = null;
+        for (var q = queries - failingQueries + 1; q <= queries; q++) source.Add(CheapPlanId(q), "7");
+        var (third, _) = await RunSharedAsync(source, cache);
+
+        Assert.Equal(failingQueries * 2, source.Fetched.Count);
+        Assert.Equal(0, third!.Metadata["inputs_unverified_count"]);
+    }
+
     [Fact]
-    public async Task APairThatComparedUnverified_IsNotCached_TheNextPassFetchesAgain()
+    public async Task APairThatComparedUnverified_IsNotAnOutcome_ButIsNotJudgedAgainForAnHour()
     {
         var source = new FixturePlanSource();
         await SeedRegressionAsync(ValuesOnlyQuery, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
         source.AddXml(CheapPlanId(ValuesOnlyQuery), Plan([("@a", "1")], null));
         source.AddXml(CostlyPlanId(ValuesOnlyQuery), Plan([("@a", "2")], null));
-        var cache = new PlanInputOutcomeCache();
+        var time = new ManualTime();
+        var cache = new PlanInputOutcomeCache(time);
 
         await RunSharedAsync(source, cache);
         Assert.Equal(2, source.Fetched.Count);
+        Assert.Equal(0, cache.Count);
 
-        var (fact, _) = await RunSharedAsync(source, cache);
+        time.Advance(TimeSpan.FromMinutes(30));
+        var (second, _) = await RunSharedAsync(source, cache);
+
+        Assert.Equal(2, source.Fetched.Count);
+        Assert.Equal(1, second!.Metadata["inputs_unverified_count"]);
+
+        time.Advance(PlanInputOutcomeCache.SkipLifetime);
+        var (third, _) = await RunSharedAsync(source, cache);
 
         Assert.Equal(4, source.Fetched.Count);
-        Assert.Equal(1, fact!.Metadata["inputs_unverified_count"]);
+        Assert.Equal(1, third!.Metadata["inputs_unverified_count"]);
+    }
+
+    [Fact]
+    public async Task ThePassesOwnCancellation_LeavesNoSkipEntry()
+    {
+        using var cancel = new CancellationTokenSource();
+        var source = new FixturePlanSource
+        {
+            Behavior = (_, _) =>
+            {
+                cancel.Cancel();
+                throw new OperationCanceledException(cancel.Token);
+            }
+        };
+        await SeedRegressionAsync(ManifestsB, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
+        var cache = new PlanInputOutcomeCache();
+        var pass = NewContext();
+        pass.CancellationToken = cancel.Token;
+
+        await Record.ExceptionAsync(() =>
+            new DuckDbFactCollector(_duckDb, queryStorePlanSource: source, planInputCache: cache).CollectFactsAsync(pass));
+
+        Assert.Single(source.Fetched);
+        Assert.Equal(0, cache.SkipCount);
+    }
+
+    [Fact]
+    public async Task APassWhoseBudgetRunsOut_LeavesNoSkipEntry_AndTheNextPassReachesTheRest()
+    {
+        var source = new FixturePlanSource();
+        const int queries = 14;
+        for (long q = 1; q <= queries; q++)
+        {
+            await SeedRegressionAsync(q, PlainText, factor: 3 + q);
+            source.Add(CheapPlanId(q), "7");
+            source.Add(CostlyPlanId(q), "7");
+        }
+
+        var cache = new PlanInputOutcomeCache();
+        await RunSharedAsync(source, cache);
+        Assert.Equal(0, cache.SkipCount);
+
+        source.Fetched.Clear();
+        var (second, _) = await RunSharedAsync(source, cache);
+
+        Assert.Equal(0, second!.Metadata["inputs_unverified_count"]);
+        Assert.Equal(8, source.Fetched.Count);
     }
 
     [Fact]
