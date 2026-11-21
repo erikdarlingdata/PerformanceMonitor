@@ -10705,16 +10705,19 @@ AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
     /// One aggregate's compression order: its own bucket column descending, the read order of every trend query, except
-    /// <see cref="QueryStoreStatsCorrectedHourlyView"/>, which orders by <c>query_hash</c> first (#8570). The Query Store reads behind the
+    /// <see cref="QueryStoreStatsCorrectedHourlyView"/> and <see cref="QueryStoreStatsCorrectedDailyView"/>, which order by <c>query_hash</c> first (#8570, #9284). The Query Store reads behind the
     /// fleet summary and the top list aggregate one query across days; ordered by hash, that query's hours share a compressed batch and the
     /// batch metadata on <c>query_hash</c> skips the rest. Measured on a seven-day rig store: 19,751 buffers to 4,956 for the Query Store
     /// statement, against 47 to 139 buffers for a one-hour server-wide trend read of one compressed day. A store compressed before this
-    /// order existed is moved to it by V279.
+    /// order existed is moved to it by V279. <see cref="QueryStoreStatsCorrectedDailyView"/> takes the same order (#9284): the fleet summary's
+    /// <c>mid</c> arm reads one hash over its compressed daily chunks, and without the hash in the order a chunk with no bloom filter
+    /// decompresses every batch. A store compressed before this order existed is moved to it by V294.
     /// </summary>
     public static string AggregateCompressionOrderByFor(string view)
     {
         var bucket = AggregateBucketColumnFor(AggregateCompressionTargetFor(view).CreateSql);
         return string.Equals(view, QueryStoreStatsCorrectedHourlyView, StringComparison.Ordinal)
+            || string.Equals(view, QueryStoreStatsCorrectedDailyView, StringComparison.Ordinal)
             ? $"query_hash, {bucket} DESC"
             : $"{bucket} DESC";
     }
