@@ -37,7 +37,7 @@ public sealed class McpObjectUsageTools
     /// <summary>The evidence of recent requests, so paging through one reply reads the window once.</summary>
     private static readonly ObjectUsageEvidenceCache s_cache = new();
 
-    [McpServerTool(Name = "get_object_usage"), Description("Which tables, indexed views, procedures and functions in ONE database were used over a long window (default 90 days), for deciding what is safe to decommission. Table and indexed view reads and writes are summed from the daily index/object stats snapshots per answering instance, with every counter reset inside the window (restart, database offline/online, restore) detected, use after it counted and last seen carried forward. Use between the last snapshot before a reset and the reset itself is lost: coverage.tables.blind_hours says how much time that is at most, and covered_days leaves it out. Procedure and function executions are summed from the stored Query Store rows. Rows are ordered decommission candidates first: 'Not used in window', then 'Write-only', then used objects. 'Not tracked' rows (memory-optimized tables) leave no trace in this evidence and are not candidates; caveat on a row says why. coverage says how many days the evidence ACTUALLY covers (short_of_window is true when it is less than asked), how many resets were crossed and which instances answered. Lite keeps about three months, so a longer window is cut there and the coverage says so. Lite keeps no object list: a procedure that never ran is NOT listed. Views that are not indexed are not covered, and only what Query Store captured counts as an execution.")]
+    [McpServerTool(Name = "get_object_usage"), Description("Which tables, indexed views, procedures and functions in ONE database were used over a long window (default 90 days), for deciding what is safe to decommission. Table and indexed view reads and writes are summed from the daily index/object stats snapshots per answering instance, with every counter reset inside the window (restart, database offline/online, restore) detected, use after it counted and last seen carried forward. Use between the last snapshot before a reset and the reset itself is lost: coverage.tables.blind_hours says how much time that is at most, and covered_days leaves it out. Procedure and function executions are summed from the stored Query Store rows; a module is a candidate only where a stored Query Store capture mode of ALL is known, since an unknown mode may be the default AUTO, which leaves rare statements out. Rows are ordered decommission candidates first: 'Not used in window', then 'Write-only', then used objects. 'Not tracked' rows (memory-optimized tables) leave no trace in this evidence and are not candidates; caveat on a row says why. coverage says how many days the evidence ACTUALLY covers (short_of_window is true when it is less than asked), how many resets were crossed and which instances answered. Lite keeps about three months, so a longer window is cut there and the coverage says so. Lite keeps no object list: a procedure that never ran is NOT listed. Views that are not indexed move only their base tables' counters, so their use is read from the stored Query Store statement text, parsed (names in comments and strings do not count): a view a statement names is 'Referenced', with referencing_executions, and coverage.views says how much text was looked at. Lite keeps no object list, so a view no statement named is NOT listed, and a listed view is a name statements read as a table that is not a known table (it could be a synonym). Only what Query Store captured counts.")]
     public static Task<string> GetObjectUsage(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -86,8 +86,9 @@ public sealed class McpObjectUsageTools
                 var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
                 var tables = await dataService.GetObjectUsageWindowAsync(resolved.ServerId, database, windowStart);
                 var executions = await dataService.GetObjectExecutionsAsync(resolved.ServerId, database, windowStart);
+                var references = await dataService.GetObjectReferencesAsync(resolved.ServerId, database, windowStart, executions);
 
-                if (tables.SnapshotCount == 0 && executions.Modules.Count == 0)
+                if (tables.SnapshotCount == 0 && executions.Modules.Count == 0 && references.References.Count == 0)
                 {
                     return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None)
                         ?? McpHelpers.Status(
@@ -98,7 +99,8 @@ public sealed class McpObjectUsageTools
                 }
 
                 evidence = new ObjectUsageEvidence(
-                    windowStart, nowUtc, [new ObjectUsageSide(resolved.DisplayName, tables, serverClock.ToUtc, executions, Inventory: null)]);
+                    windowStart, nowUtc,
+                    [new ObjectUsageSide(resolved.DisplayName, tables, serverClock.ToUtc, executions, Inventory: null, References: references)]);
                 cache?.Set(cacheKey, evidence);
             }
 

@@ -69,6 +69,7 @@ public static class CollectorCatalog
         AgentAlertsCollector.Instance,
         IdentityCapacityCollector.Instance,
         ObjectInventoryCollector.Instance,
+        ObjectDependenciesCollector.Instance,
         SchemaObjectsCollector.Instance,
         ColumnStatsCollector.Instance,
         PvsStatsCollector.Instance,

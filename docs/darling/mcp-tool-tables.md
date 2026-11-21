@@ -96,7 +96,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_memory_trend` | `collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats` |
 | `get_object_definition` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_indexes`<br>`collect.schema_constraints`<br>`collect.schema_triggers`<br>`collect.schema_capture_state`<br>`collect.column_stats`<br>`collect.column_stats_runs`<br>`collect.column_stats_state`<br>`config.config_collector_schedules`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
 | `get_object_locking` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`)<br>`collect.database_config` |
-| `get_object_usage` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`)<br>`collect.object_executions_daily`<br>`collect.object_executions_daily_databases`<br>`collect.object_inventory`<br>`collect.server_properties` |
+| `get_object_usage` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`)<br>`collect.object_executions_daily`<br>`collect.object_executions_daily_databases`<br>`collect.object_inventory`<br>`collect.object_references_daily`<br>`collect.object_references_daily_databases`<br>`collect.object_dependencies`<br>`collect.server_properties` |
 | `get_perfmon_stats` | `collect.perfmon_stats`<br>`collect.v_perfmon_stats` |
 | `get_perfmon_trend` | `collect.perfmon_stats`<br>`collect.v_perfmon_stats` |
 | `get_pg_autovacuum_health` | `collect.pg_autovacuum_stats`<br>`collect.pg_log_events` |

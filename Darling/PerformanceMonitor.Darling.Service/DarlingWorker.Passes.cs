@@ -1237,6 +1237,17 @@ public sealed partial class DarlingWorker
             _logger.LogWarning("Object executions daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
         }
 
+        /* #8784 part 2: the per-day summary of the names Query Store statements referenced, built from the same days and applying the
+           retention the pass above just applied, so it runs straight after it. Its own catch, so a failure here leaves the work above standing. */
+        try
+        {
+            await ObjectReferencesDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Object references daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
         /* #9110: the per-day successful job outcomes the Job History read's per-job average and last success read whole days from, built by collection_time against a watermark. It reads
            job_history, not the Query Store tables, so it has no dependence on the passes above; it sits here to run on the same hourly tick,
            with its own catch so a failure leaves their work standing. */
