@@ -921,6 +921,10 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // V290 (#9193): the query_stats summary's per-server floor table, the probe's newest sentinel. The rewind drops it, so a re-run of V290 creates it empty
         // and a server has no floor until a batch finds a hole. Safe on a store that never had it.
         new(290, "hasQueryStatsCollectionFloor", @"DROP TABLE IF EXISTS collect.query_stats_collection_floor;"),
+        // V291 (#9215): the covering (server_id, bucket DESC) index on the corrected hourly Query Store rollup, the probe's newest sentinel. The rewind drops it by name,
+        // found by catalog (it lives in the materialization's schema), and a no-op without it. The plain (server_id, bucket) index it replaced is not put back: a re-run of V291 builds the covering one again.
+        new(291, "hasQueryStoreServerCoveringIndex",
+            @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_server_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
     ];
 
     /// <summary>
