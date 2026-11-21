@@ -150,11 +150,18 @@ public static class ParquetCompaction
 
     public static long RowGroupBytesFor(string table) => IsDailyTable(table) ? DailyRowGroupBytes : 0;
 
-    /* On-disk parquet bytes per merge batch for a monthly table whose merge sorts by server (#9258). Measured with
-       tools/CompactionRepro on seeded monthly batches (SEE_MEASUREMENT). A batch's sort holds more of it than the
-       streaming copy, so the sorted monthly merge gets its own smaller budget instead of DefaultBatchInputBytes:
-       more _ptNNN parts, each sorted on its own and each holding one server per row group. */
-    public const long SortedBatchInputBytes = 64L * 1024 * 1024; /* 64 MiB */
+    /* On-disk parquet bytes per merge batch for a monthly table whose merge sorts by server (#9258). A batch's sort
+       holds more of it than the streaming copy, so the sorted monthly merge gets its own smaller budget instead of
+       DefaultBatchInputBytes: more _ptNNN parts, each sorted on its own and each holding one server per row group.
+       Measured with tools/CompactionRepro (measure-sorted-monthly.sh) on 22 seeded hourly files, sorted merge at the
+       512MB limit, peak working set (baseline about 60 MB included) and row groups that still mix servers:
+         - 60-column index_object_stats shape (655 MB on disk): 32 MiB 474 MB, 88 of 1628 mixed;
+           64 MiB 653 MB, 44 mixed; 100 MiB 647 MB, 32 mixed. Unsorted at 200 MB: 343 MB, every group mixed.
+         - 37-column procedure_stats shape with seven 200-byte texts (241 MB): 32 MiB 605 MB, 44 of 649 mixed;
+           64 MiB 623 MB, 20 mixed; 100 MiB 640 MB, 12 mixed. Unsorted at 200 MB: 304 MB, every group mixed.
+       32 MiB is the one budget that stays near 600 MB on both shapes, so no table is taken out of the sorted set.
+       The mixed groups left are the seams where a server's rows continue across two parts. */
+    public const long SortedBatchInputBytes = 32L * 1024 * 1024; /* 32 MiB */
 
     /* The per-batch input budget of a table's compaction merge when the caller has no override: the daily budget for
        a table merged per day (query_store_stats is both daily and sorted, and its day budget stays as measured in
