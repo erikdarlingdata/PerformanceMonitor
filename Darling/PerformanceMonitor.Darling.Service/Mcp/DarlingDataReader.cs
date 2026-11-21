@@ -2461,6 +2461,33 @@ internal static partial class DarlingDataReader
         )
         """;
 
+    /// <summary>#9280: the wide row's aggregate columns after the four group keys, shared by the one-statement wide pass and the per-winner seek.</summary>
+    private const string TopProceduresWideAggregates = """
+        MAX(sql_handle) AS sql_handle,
+        MAX(plan_handle) AS plan_handle,
+        CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+        CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+        CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+        CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+        CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+        CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+        CAST(SUM(delta_spills) AS bigint) AS total_spills,
+        MIN(min_worker_time) AS min_worker_time,
+        MAX(max_worker_time) AS max_worker_time,
+        MIN(min_elapsed_time) AS min_elapsed_time,
+        MAX(max_elapsed_time) AS max_elapsed_time,
+        MAX(last_execution_time) AS last_execution_time,
+        MAX(cached_time) AS cached_time,
+        MIN(min_logical_reads) AS min_logical_reads,
+        MAX(max_logical_reads) AS max_logical_reads,
+        MIN(min_physical_reads) AS min_physical_reads,
+        MAX(max_physical_reads) AS max_physical_reads,
+        MIN(min_logical_writes) AS min_logical_writes,
+        MAX(max_logical_writes) AS max_logical_writes,
+        MIN(min_spills) AS min_spills,
+        MAX(max_spills) AS max_spills
+        """;
+
     /// <summary>Pass 2 of <see cref="TopProceduresSql"/> and of <see cref="TopProceduresMidWinnersSql"/>: the wide row for the
     /// winners, from raw. On the mid route <c>win_object_type</c> does not exist, so the caller drops that one match line
     /// (<see cref="MidObjectTypeMatch"/>).</summary>
@@ -2475,29 +2502,7 @@ internal static partial class DarlingDataReader
             schema_name,
             object_name,
             object_type,
-            MAX(sql_handle) AS sql_handle,
-            MAX(plan_handle) AS plan_handle,
-            CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-            CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-            CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-            CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-            CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-            CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-            CAST(SUM(delta_spills) AS bigint) AS total_spills,
-            MIN(min_worker_time) AS min_worker_time,
-            MAX(max_worker_time) AS max_worker_time,
-            MIN(min_elapsed_time) AS min_elapsed_time,
-            MAX(max_elapsed_time) AS max_elapsed_time,
-            MAX(last_execution_time) AS last_execution_time,
-            MAX(cached_time) AS cached_time,
-            MIN(min_logical_reads) AS min_logical_reads,
-            MAX(max_logical_reads) AS max_logical_reads,
-            MIN(min_physical_reads) AS min_physical_reads,
-            MAX(max_physical_reads) AS max_physical_reads,
-            MIN(min_logical_writes) AS min_logical_writes,
-            MAX(max_logical_writes) AS max_logical_writes,
-            MIN(min_spills) AS min_spills,
-            MAX(max_spills) AS max_spills
+            {TopProceduresWideAggregates}
         FROM procedure_stats
         JOIN winners AS w
             ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
@@ -2513,6 +2518,97 @@ internal static partial class DarlingDataReader
         AND   {TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY database_name, schema_name, object_name, object_type
         ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        """;
+
+    /// <summary>The seek arm's name match: the same expression <see cref="ProcedureStatsNameIndex"/> keys, so each winner's rows are an index range.</summary>
+    internal const string MidSeekNameMatch = "AND " + DurationTrendRouting.ProcedureFullNameSql + " = COALESCE(NULLIF(w.win_schema_name, '') || '.', '') || w.win_object_name";
+
+    /// <summary>
+    /// #9280: <see cref="TopProceduresWideSql"/> for the mid route on a store that has <see cref="ProcedureStatsNameIndex"/>. The one-statement
+    /// wide pass joins the winners to every raw row of the server in the window and keeps the winners' rows, so its cost follows the
+    /// server's row count. Here each winner with a database and an object seeks its own rows through the index (a LATERAL, so each
+    /// winner is an index range), and a winner with a NULL in either keeps today's NULL-safe join. Same rows, same sums, same order:
+    /// the per-winner aggregate is the wide row's own group (the key's four columns are all matched).
+    /// </summary>
+    internal const string TopProceduresMidSeekWideSql = $"""
+        /* #9280: the winners' wide rows by index seek (see TopProceduresWideSql for the columns). */
+        SELECT
+            database_name,
+            schema_name,
+            object_name,
+            object_type,
+            sql_handle,
+            plan_handle,
+            total_executions,
+            total_cpu_us,
+            total_elapsed_us,
+            total_reads,
+            total_writes,
+            total_physical_reads,
+            total_spills,
+            min_worker_time,
+            max_worker_time,
+            min_elapsed_time,
+            max_elapsed_time,
+            last_execution_time,
+            cached_time,
+            min_logical_reads,
+            max_logical_reads,
+            min_physical_reads,
+            max_physical_reads,
+            min_logical_writes,
+            max_logical_writes,
+            min_spills,
+            max_spills
+        FROM (
+            SELECT s.*, w.rank_metric AS seek_rank_metric, w.rank_cpu AS seek_rank_cpu
+            FROM winners AS w
+            CROSS JOIN LATERAL (
+                SELECT
+                    database_name,
+                    schema_name,
+                    object_name,
+                    object_type,
+                    {TopProceduresWideAggregates}
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   database_name = w.win_database_name
+                {MidSeekNameMatch}
+                AND   schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND   object_name = w.win_object_name
+                AND   collection_time > $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+                AND   {TimescaleSupport.IntervalHonestSourceFilter}
+                GROUP BY database_name, schema_name, object_name, object_type
+            ) AS s
+            WHERE w.win_database_name IS NOT NULL
+            AND   w.win_object_name IS NOT NULL
+            UNION ALL
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                {TopProceduresWideAggregates},
+                MAX(w.rank_metric) AS seek_rank_metric,
+                MAX(w.rank_cpu) AS seek_rank_cpu
+            FROM procedure_stats
+            JOIN (SELECT * FROM winners WHERE win_database_name IS NULL OR win_object_name IS NULL) AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+            WHERE server_id = $1
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+        ) AS u
+        ORDER BY seek_rank_metric DESC NULLS LAST, seek_rank_cpu DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
@@ -2702,9 +2798,9 @@ internal static partial class DarlingDataReader
 
     /// <summary>#9147: the mid route's statement: <see cref="TopProceduresMidWinnersSql"/> over the mid's relation, then the raw
     /// wide pass matched on (database, schema, object), the key the rollup ranks. The query tag token is still in it.</summary>
-    internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid) =>
+    internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid, bool seek = false) =>
         TopRankings.Apply(TopProceduresMidWinnersSql, ranking, hourly: true).Replace(HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
-        + "\n" + TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal);
+        + "\n" + (seek ? TopProceduresMidSeekWideSql : TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal));
 
     /// <summary>#9147: the whole hours <c>[MidStart, MidEnd)</c> a raw top-procedures read takes from <c>Relation</c>.</summary>
     internal sealed record HourlyMid(string Relation, string View, DateTime MidStart, DateTime MidEnd);
