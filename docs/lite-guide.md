@@ -189,11 +189,11 @@ A headless Lite writes the same files as a Lite with a window. The logs are in `
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.6: non-blocking checkpoints and free block reuse. The hot store holds the most recent data, about 7 days. Each hour, Lite moves older data to Parquet. The hot store has a size limit of 512 MB. When the file reaches 512 MB, Lite writes all hot data to Parquet and deletes the file. It then creates a new small file and restores the configuration tables. Collection pauses for a short time while the reset runs. After the reset, Lite compacts the Parquet files into monthly archives, and collection continues during compaction.
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
-- Typical size: ~50–200 MB per server per week
+- Typical size: it depends on the number of servers, the number of collectors, and whether Query Store collection is on. The hot file does not grow past about 512 MB, because Lite resets it at that size. The Parquet archive grows with the 3 months of history that Lite keeps.
 
 For the full list of folders, see [Where Lite keeps its files](#where-lite-keeps-its-files). To remove a server or uninstall, see [Remove a server, uninstall, and delete the data](#remove-a-server-uninstall-and-delete-the-data). To back up Lite or move it to another PC, see [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc).
 
