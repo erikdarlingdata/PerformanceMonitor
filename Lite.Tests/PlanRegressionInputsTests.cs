@@ -90,6 +90,8 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
 
         public void AddXml(long planId, string planXml) => _plans[planId] = planXml;
 
+        public void Remove(long planId) => _plans.Remove(planId);
+
         public async Task<string?> FetchQueryStorePlanXmlAsync(
             int serverId, string databaseName, long planId, CancellationToken cancellationToken)
         {
@@ -755,5 +757,139 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
                 await cmd.ExecuteNonQueryAsync();
             }
         }
+    }
+
+    /* #9195: the judged plan pairs are kept across passes, so the same plans are not fetched from the monitored server
+       every pass. Each pass below is a new collector over one shared cache, as the scheduler's passes are. */
+
+    private async Task<(Fact? Fact, AnalysisContext Pass)> RunSharedAsync(FixturePlanSource source, PlanInputOutcomeCache cache)
+    {
+        var pass = NewContext();
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source, planInputCache: cache).CollectFactsAsync(pass))
+            .SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
+        return (fact, pass);
+    }
+
+    [Fact]
+    public async Task ASecondPassOverTheSameCandidates_MakesNoFetch_AndKeepsTheFactsAndTheOffenders()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        var cache = new PlanInputOutcomeCache();
+
+        var (first, firstPass) = await RunSharedAsync(source, cache);
+        var firstFetches = source.Fetched.Count;
+        Assert.True(firstFetches > 0);
+
+        var (second, secondPass) = await RunSharedAsync(source, cache);
+
+        Assert.Equal(firstFetches, source.Fetched.Count);
+        Assert.Equal(first!.Metadata["offender_count"], second!.Metadata["offender_count"]);
+        Assert.Equal(first.Metadata["cross_input_excluded_count"], second.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(first.Metadata["inputs_unverified_count"], second.Metadata["inputs_unverified_count"]);
+        Assert.Equal(first.Metadata["worst_input_basis"], second.Metadata["worst_input_basis"]);
+        Assert.Equal(first.Metadata["worst_query_id"], second.Metadata["worst_query_id"]);
+        Assert.Equal(firstPass.PlanRegressionOffenders, secondPass.PlanRegressionOffenders);
+    }
+
+    [Theory]
+    [InlineData("timeout")]
+    [InlineData("fault")]
+    [InlineData("none")]
+    public async Task ATimeoutAFaultOrNoPlan_IsNotCached_TheNextPassFetchesAgain(string failure)
+    {
+        var broken = new FixturePlanSource();
+        broken.Add(CheapPlanId(ManifestsB), "7");
+        broken.Add(CostlyPlanId(ManifestsB), "1");
+        broken.Behavior = failure switch
+        {
+            "timeout" => (_, _) => throw new OperationCanceledException(),
+            "fault" => (_, _) => throw new InvalidOperationException("the server is unreachable"),
+            _ => (planId, _) => { broken.Remove(planId); return Task.CompletedTask; },
+        };
+        await SeedRegressionAsync(ManifestsB, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
+        var cache = new PlanInputOutcomeCache();
+
+        var (first, _) = await RunSharedAsync(broken, cache);
+        Assert.Equal(1, first!.Metadata["inputs_unverified_count"]);
+        Assert.Equal(0, cache.Count);
+
+        /* The server answers on the next pass: both plans are fetched and compared, and the values-only plan leaves. */
+        var healthy = new FixturePlanSource();
+        healthy.Add(CheapPlanId(ManifestsB), "7");
+        healthy.Add(CostlyPlanId(ManifestsB), "1");
+        var (second, _) = await RunSharedAsync(healthy, cache);
+
+        Assert.Null(second);
+        Assert.Equal([CostlyPlanId(ManifestsB), CheapPlanId(ManifestsB)], healthy.Fetched.ToArray());
+    }
+
+    [Fact]
+    public async Task APairThatComparedUnverified_IsNotCached_TheNextPassFetchesAgain()
+    {
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(ValuesOnlyQuery, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
+        source.AddXml(CheapPlanId(ValuesOnlyQuery), Plan([("@a", "1")], null));
+        source.AddXml(CostlyPlanId(ValuesOnlyQuery), Plan([("@a", "2")], null));
+        var cache = new PlanInputOutcomeCache();
+
+        await RunSharedAsync(source, cache);
+        Assert.Equal(2, source.Fetched.Count);
+
+        var (fact, _) = await RunSharedAsync(source, cache);
+
+        Assert.Equal(4, source.Fetched.Count);
+        Assert.Equal(1, fact!.Metadata["inputs_unverified_count"]);
+    }
+
+    [Fact]
+    public async Task ANewPlanPairForTheSameQuery_IsFetched()
+    {
+        var source = new FixturePlanSource();
+        await SeedPlanAsync(ManifestsB, 83, "0xCHEAP83", PlainText, cpuUs: 100_000, firstIntervalId: 1, lastExec: PeriodStart.AddDays(-5));
+        await SeedPlanAsync(ManifestsB, 82, "0xTIED", PlainText, cpuUs: 3_000_000, firstIntervalId: 11, lastExec: PeriodEnd);
+        source.Add(83, "7");
+        source.Add(82, "7");
+        source.Add(84, "1");
+        var cache = new PlanInputOutcomeCache();
+
+        var (first, _) = await RunSharedAsync(source, cache);
+        Assert.Equal([82L, 83L], source.Fetched.ToArray());
+        Assert.Equal(0, first!.Metadata["inputs_unverified_count"]);
+
+        /* The query compiles a newer plan (the higher plan_id wins the tie, as in the tie test above) compiled for another value. */
+        await SeedPlanAsync(ManifestsB, 84, "0xTIED", PlainText, cpuUs: 3_000_000, firstIntervalId: 11, lastExec: PeriodEnd);
+        source.Fetched.Clear();
+
+        var (second, _) = await RunSharedAsync(source, cache);
+
+        Assert.Equal([84L, 83L], source.Fetched.ToArray());
+        Assert.Null(second);
+    }
+
+    [Fact]
+    public async Task CachedPairsUseNoFetchBudget_SoTheCandidatesPastTheBudgetAreJudgedOnTheNextPass()
+    {
+        var source = new FixturePlanSource();
+        const int queries = 14;
+        for (long q = 1; q <= queries; q++)
+        {
+            await SeedRegressionAsync(q, PlainText, factor: 3 + q);
+            source.Add(CheapPlanId(q), "7");
+            source.Add(CostlyPlanId(q), "7");
+        }
+
+        var cache = new PlanInputOutcomeCache();
+        var (first, _) = await RunSharedAsync(source, cache);
+        Assert.Equal(DuckDbFactCollector.MaxPlanInputFetches, source.Fetched.Count);
+        Assert.Equal(queries - (DuckDbFactCollector.MaxPlanInputFetches / 2), first!.Metadata["inputs_unverified_count"]);
+
+        source.Fetched.Clear();
+        var (second, _) = await RunSharedAsync(source, cache);
+
+        /* The ten judged queries cost nothing this time, so the budget reaches the other four (two plans each). */
+        Assert.Equal((queries - (DuckDbFactCollector.MaxPlanInputFetches / 2)) * 2, source.Fetched.Count);
+        Assert.Equal(0, second!.Metadata["inputs_unverified_count"]);
+        Assert.Equal(queries, second.Metadata["offender_count"]);
     }
 }
