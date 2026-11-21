@@ -168,8 +168,14 @@ public sealed class ViewerStoreHealthRefreshTests
             Assert.Equal((2, 2, 2), (tables, indexes, coverage));
             Assert.EndsWith(ReadAt(), tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
 
-            /* Past the lifetime a timer refresh reads the store again. */
+            /* #9224: past the lifetime a timer refresh shows the held rows and their own read time while a new read runs behind it, and the
+               refresh after that shows the new read. */
+            var forcedRead = ReadAt();
             now = now + DarlingStoreTableHealthCache.Lifetime + TimeSpan.FromSeconds(1);
+            await tab.RefreshAsync();
+            Assert.EndsWith(forcedRead, tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+            await held.WhenIdleAsync();
+            Assert.Equal((3, 3, 3), (tables, indexes, coverage));
             await tab.RefreshAsync();
             Assert.Equal((3, 3, 3), (tables, indexes, coverage));
             Assert.EndsWith(ReadAt(), tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
