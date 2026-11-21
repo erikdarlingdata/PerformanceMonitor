@@ -21,7 +21,7 @@ namespace Darling.Tests;
 public sealed class TempDbLogSpaceAlertTests
 {
     private static async Task<DateTime> DriveAsync(
-        AlertEngine engine, AlertEngineTests.Harness h, double? usedPercent, int samples, DateTime from, bool withHolder = true, string? holdup = "ACTIVE_TRANSACTION")
+        AlertEngine engine, AlertEngineTests.Harness h, double? usedPercent, int samples, DateTime from, bool withHolder = true, string? holdup = "ACTIVE_TRANSACTION", string? reuseWait = "ACTIVE_TRANSACTION")
     {
         var at = from;
         for (var i = 0; i < samples; i++)
@@ -35,7 +35,7 @@ public sealed class TempDbLogSpaceAlertTests
                 LogTotalMb = 1000,
                 LogUsedMb = usedPercent is { } p ? p * 10 : null,
                 LogUsedPercent = usedPercent,
-                LogReuseWaitDesc = "ACTIVE_TRANSACTION",
+                LogReuseWaitDesc = reuseWait,
                 LogTruncationHoldupReason = holdup,
                 HolderSessionId = withHolder ? 57 : null,
                 HolderLoginName = withHolder ? "etl_login" : null,
@@ -123,6 +123,73 @@ public sealed class TempDbLogSpaceAlertTests
         var offEngine = off.Build();
         await DriveAsync(offEngine, off, 99, AlertEngine.TempDbLogSpaceBreachSamples * 2, AlertEngineTests.Harness.SampleBase);
         Assert.DoesNotContain(off.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+    }
+
+    [Fact]
+    public async Task NothingHoldsTheLog_NeverFires_HoweverHighTheUsedPercent()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.TempDbLogSpaceEnabled = true;
+        var engine = h.Build();
+        await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples * 2, AlertEngineTests.Harness.SampleBase, withHolder: false, holdup: null, reuseWait: "NOTHING");
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+    }
+
+    [Fact]
+    public async Task NothingSampleBetweenBreaches_ResetsTheStreak()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.TempDbLogSpaceEnabled = true;
+        var engine = h.Build();
+        var at = await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples - 1, AlertEngineTests.Harness.SampleBase);
+        at = await DriveAsync(engine, h, 90, 1, at, withHolder: false, holdup: null, reuseWait: "NOTHING");
+        await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples - 1, at);
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+    }
+
+    [Fact]
+    public async Task ActiveTransactionWithAHolder_StillFires()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.TempDbLogSpaceEnabled = true;
+        var engine = h.Build();
+        await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples, AlertEngineTests.Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task AnUnknownReuseWait_StillFiresOnThePercent(string? reuseWait)
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.TempDbLogSpaceEnabled = true;
+        var engine = h.Build();
+        await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples, AlertEngineTests.Harness.SampleBase, withHolder: false, holdup: null, reuseWait: reuseWait);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+    }
+
+    [Fact]
+    public async Task NothingWithACapturedHolder_StillFires()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.TempDbLogSpaceEnabled = true;
+        var engine = h.Build();
+        await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples, AlertEngineTests.Harness.SampleBase, reuseWait: "NOTHING");
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+    }
+
+    [Fact]
+    public async Task AnOpenIncident_ResolvesOnANothingSampleWithNoHolder_EvenAtTheSamePercent()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.TempDbLogSpaceEnabled = true;
+        var engine = h.Build();
+        var at = await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceBreachSamples, AlertEngineTests.Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+        await DriveAsync(engine, h, 90, AlertEngine.TempDbLogSpaceClearSamples, at, withHolder: false, holdup: null, reuseWait: "NOTHING");
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == AlertEngine.TempDbLogSpacePersistenceMetric);
+        Assert.Equal("tempdb Log Space Resolved", resolution.Title);
     }
 
     [Fact]
