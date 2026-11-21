@@ -298,13 +298,24 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
     /// <summary>#8570: the deduped raw arm and its per-pair sums, shared by the one-relation and the daily-mid Query Store statements so the two
     /// cannot drift. Ends with the comma that precedes the <c>pairs</c> arm. $1 query_hash, $2/$3 window (start inclusive, end exclusive: an interval belongs to the window its
-    /// start falls in, so the interval that starts at $3 is the next window's, #9100), $4 the instant raw takes over.</summary>
-    private const string QueryStoreTailCtes = """
+    /// start falls in, so the interval that starts at $3 is the next window's, #9100), $4 the instant raw takes over.
+    /// <para>#9223: the raw tier has no index led by <c>query_hash</c> alone, so the interval-placed arm, one filter over every server's rows, read the
+    /// whole newest raw chunk (about 244k blocks on a busy store). With <paramref name="byServerIndex"/> the arm runs once per row of <c>servers</c>, with
+    /// <c>server_id = sv.server_id</c>, which is the leading key of <see cref="PgTableTuning.QueryStoreServerHashIndexName"/>, so on every supported
+    /// PostgreSQL the read is one index range per server and does not depend on PostgreSQL 18's index skip scan. The window function stays inside the
+    /// lateral and partitions by <c>server_id</c> as before, so each server's rows are numbered exactly as the one-filter shape numbers them and the
+    /// result is the same rows. Without the index (it is built at the next service start) the arm keeps its one-filter shape. The legacy arm below
+    /// has its own partial index and is the same in both.</para></summary>
+    private static string QueryStoreTailCtes(bool byServerIndex)
+    {
+        var open = byServerIndex ? "servers AS sv CROSS JOIN LATERAL (" : "(";
+        var serverBound = byServerIndex ? "server_id = sv.server_id AND " : "";
+        return $"""
         placed AS
         (
-            SELECT server_id, database_name, interval_start_time_utc AS point_time, execution_count, avg_duration_us, avg_cpu_time_us
-            FROM
-            (
+            SELECT identified.server_id, identified.database_name, identified.interval_start_time_utc AS point_time,
+                   identified.execution_count, identified.avg_duration_us, identified.avg_cpu_time_us
+            FROM {open}
                 SELECT server_id, database_name, interval_start_time_utc, execution_count, avg_duration_us, avg_cpu_time_us,
                        ROW_NUMBER() OVER
                        (
@@ -312,7 +323,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                            ORDER BY collection_time DESC, execution_count DESC
                        ) AS rn
                 FROM query_store_stats
-                WHERE query_hash = $1
+                WHERE {serverBound}query_hash = $1
                 AND   interval_start_time_utc >= $2
                 AND   interval_start_time_utc >= $4
                 AND   interval_start_time_utc < $3
@@ -320,7 +331,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 AND   collection_time <= $3 + interval '1 day'
                 AND   interval_start_time_utc IS NOT NULL
             ) AS identified
-            WHERE rn = 1
+            WHERE identified.rn = 1
 
             UNION ALL
 
@@ -343,6 +354,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             GROUP BY server_id, database_name
         ),
         """;
+    }
 
     /// <summary>
     /// The Query Store fleet statement (#7609), same row shape as <see cref="BuildSql"/>: server_name, display_name, database_name, executions,
@@ -355,7 +367,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// to the dedup partition because this read has no server filter. That arm is welded to its own <c>server_id = $1</c> filter, optional database
     /// filter and column list, so sharing it would mean reshaping the statement <c>get_query_store_duration_trend</c> runs (#7667).</para>
     /// </summary>
-    public static string BuildQueryStoreSql(bool useRollup)
+    public static string BuildQueryStoreSql(bool useRollup, bool byServerIndex = false)
     {
         var hourly = useRollup
             ? $"""
@@ -377,7 +389,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
         return $"""
         WITH {hourly}
-        {QueryStoreTailCtes}
+        {QueryStoreTailCtes(byServerIndex)}
         pairs AS
         (
             SELECT server_id, database_name,
@@ -431,7 +443,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// hourly <see cref="BuildMidSql"/> makes. On a compressed store each hourly arm is a ColumnarScan that decompresses a chunk to keep the
     /// rows of one hash, the cost the daily rollup (24 times fewer rows) takes out of the days between the edges.
     /// </summary>
-    public static string BuildQueryStoreMidSql()
+    public static string BuildQueryStoreMidSql(bool byServerIndex = false)
     {
         var hourlyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedHourlyView} AS f";
         var dailyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedDailyView} AS d";
@@ -498,7 +510,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 ORDER BY f.bucket DESC LIMIT 1
             ) AS lh ON true
         ),
-        {QueryStoreTailCtes}
+        {QueryStoreTailCtes(byServerIndex)}
         pairs AS
         (
             SELECT server_id, database_name,
@@ -585,9 +597,35 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         }
 
         var (rows, pairs) = await ReadFleetAsync(
-            postgres, qsMid is null ? BuildQueryStoreSql(qsRoute.UseRollup) : BuildQueryStoreMidSql(), QueryStoreSource, hash, qsStart, windowEnd,
+            postgres, await BuildQueryStoreStatementAsync(postgres, qsRoute.UseRollup, qsMid is not null, cancellationToken), QueryStoreSource, hash, qsStart, windowEnd,
             qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken, qsMid);
         return (qsRoute, rows, pairs);
+    }
+
+    /// <summary>
+    /// #9223: the Query Store statement the call runs: the daily-mid one when <paramref name="mid"/>, else the one-relation one, with the raw tail read per
+    /// server through <see cref="PgTableTuning.QueryStoreServerHashIndexName"/> when the service's tuning pass has built it, and in its one-filter shape when not.
+    /// </summary>
+    internal static async Task<string> BuildQueryStoreStatementAsync(NpgsqlDataSource postgres, bool useRollup, bool mid, CancellationToken cancellationToken)
+    {
+        var byServerIndex = await QueryStoreHashIndexIsReadyAsync(postgres, cancellationToken);
+        return mid ? BuildQueryStoreMidSql(byServerIndex) : BuildQueryStoreSql(useRollup, byServerIndex);
+    }
+
+    /// <summary>
+    /// #9223: whether <see cref="PgTableTuning.QueryStoreServerHashIndexName"/> exists on <c>collect.query_store_stats</c> and is valid. The service builds it at a
+    /// start (one build per start, so a store that is missing several large indexes gets it a start or two later), and an interrupted build can leave an invalid
+    /// one; until it is valid the tail keeps its one-filter shape, which is correct and only slower. One catalog row, read per call, so a build that finishes
+    /// while the service runs is used by the next call.
+    /// </summary>
+    internal static async Task<bool> QueryStoreHashIndexIsReadyAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(
+            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_index i ON i.indexrelid = c.oid "
+            + "WHERE n.nspname = 'collect' AND c.relname = $1 AND i.indisvalid)");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddText(command, PgTableTuning.QueryStoreServerHashIndexName);
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
     private static async Task<(List<FleetRow> Rows, int Pairs)> ReadFleetAsync(

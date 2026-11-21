@@ -327,6 +327,7 @@ public static class PgTableTuning
         ProcedureStatsNameIndex.IndexName,
         WaitStatsDailyCoverIndexName,
         CpuWindowCoverIndexName,
+        QueryStoreServerHashIndexName,
     };
 
     /// <summary>True for an index that shares the one-build-per-start budget.</summary>
@@ -457,6 +458,12 @@ public static class PgTableTuning
 
     /// <summary>#7147: the covering index for the Daily Summary's per-day wait sums, on a store where <c>collect.wait_stats</c> is a plain table.</summary>
     public const string WaitStatsDailyCoverIndexName = "idx_wait_stats_daily_cover";
+
+    /// <summary>
+    /// #9223: the narrow <c>(server_id, query_hash, collection_time DESC)</c> index on <c>collect.query_store_stats</c>, the twin of
+    /// <c>idx_query_stats_server_hash_time</c>. The Query Store fleet summary's raw tail reads it, one range per server.
+    /// </summary>
+    public const string QueryStoreServerHashIndexName = "idx_query_store_stats_server_hash_time";
 
     /// <summary>#9172: the covering index for the 24 hour CPU window, on <c>collect.cpu_utilization_stats</c> (a hypertable or a plain table).</summary>
     public const string CpuWindowCoverIndexName = "idx_cpu_utilization_stats_window_cover";
@@ -909,6 +916,22 @@ public static class PgTableTuning
            window only ever touches the two newest day chunks, which are uncompressed, so the compressed chunks cost the
            index nothing (their heaps are empty). */
         "CREATE INDEX IF NOT EXISTS " + CpuWindowCoverIndexName + " ON collect.cpu_utilization_stats (collection_time) INCLUDE (server_id, sqlserver_cpu_utilization)",
+        /* #9223: the Query Store fleet summary's raw tail (DarlingMcpQueryFleetSummaryTools.QueryStoreTailCtes) filters query_hash = one value
+           over the newest raw chunk. #4247 dropped idx_query_store_stats_query_hash (5.2-8.4% of WAL, 0 scans then), and no index with
+           query_hash in it was left on this table, so on a busy store the tail was a Parallel Seq Scan of the whole newest chunk (about
+           244k blocks for a window of about two hours). This is the mirror of the kept query_stats sibling above: server_id leads so the
+           fleet summary can run its tail once per server (a plain index range on every supported PostgreSQL, not only through PostgreSQL
+           18's skip scan), query_hash second, collection_time last. No INCLUDE list: the tail is a few hundred rows per call, so the heap
+           fetches are cheap, and a narrow index keeps the write cost down.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root for the whole build: reads proceed, every
+           INSERT queues. That is safe before collectors start and not while they write, which is also why QueryStoreBackgroundIndexes
+           builds nothing on a hypertable (CONCURRENTLY is refused, and the Query Store backfill writes backdated rows into older chunks,
+           so a per-chunk build would block it). The hourly pass never builds it: it warns once that the next start does. It shares the
+           one-build-per-start budget, last of the budget indexes, because it is the one that sorts every row of the uncompressed chunks
+           rather than testing a filter. Compressed chunks get an empty 8 KB index. A build that outruns SetupTimeoutSeconds rolls back
+           whole and the next start retries it, and the reader keeps its one-filter shape until the index is valid. */
+        "CREATE INDEX IF NOT EXISTS " + QueryStoreServerHashIndexName + " ON collect.query_store_stats (server_id, query_hash, collection_time DESC)",
         /* #9171: the dropped-database read behind the top-queries reads (QueryStoreBackfillState.LastSeenPerDatabaseSql: server_id and
            collection_time to filter, database_name to group) fetched the heap row of every snapshot row in the window, because the only
            index was (server_id, collection_time). With database_name INCLUDEd the read is an Index Only Scan with the same rows. Not
