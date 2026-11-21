@@ -78,6 +78,17 @@ internal static class DarlingQueryStoreAbortsReader
         ),
         """;
 
+    /// <summary><see cref="TablePrefix"/> as the top read's split (#9276, <see cref="DarlingDataReader.QueryStoreTopTableSplitSql"/>): two arms, each
+    /// with the <c>first_execution_time</c> floor that holds for its rows, for a store whose
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built. The same rows and parameters.</summary>
+    private static readonly string TableSplitPrefix = $$"""
+        WITH deduped AS (
+        {{QueryStoreIntervalWide.IntervalStartSplitSql(
+            "database_name, query_id, query_hash, execution_type_desc, execution_count, avg_duration_us, last_execution_time, 1 AS rn",
+            "            AND   ($5::text[] IS NULL OR database_name = ANY($5))")}}
+        ),
+        """;
+
     /// <summary>
     /// Everything from the per-query fold down. The averages are execution-weighted over the aborted rows only. A query with no
     /// aborted or exception run does not pass the HAVING, so a Regular-only query never appears. The page is cut before the text
@@ -164,6 +175,9 @@ internal static class DarlingQueryStoreAbortsReader
 
     internal static readonly string TableSql = TablePrefix + "\n" + Tail;
 
+    /// <summary><see cref="TableSql"/> over <see cref="TableSplitPrefix"/>, read when the NULL-start partial index is built (#9276).</summary>
+    internal static readonly string TableSplitSql = TableSplitPrefix + "\n" + Tail;
+
     /// <summary>
     /// Reads <paramref name="limit"/> rows. The caller asks for one more than it shows so a cut page is observed, not inferred.
     /// The interval table is tried first under <c>get_query_store_top</c>'s own gate (<see cref="DarlingDataReader.QueryStoreTopMayReadTableFor"/>
@@ -234,7 +248,10 @@ internal static class DarlingQueryStoreAbortsReader
             }
 
             gateDecided = true;
-            var sql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, TableSql, cancellationToken);
+            var splitBuilt = await QueryStoreBackgroundIndexes.IsBuiltAsync(
+                connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var sql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
+                connection, transaction, McpCommandDeadlines.ReadSeconds, splitBuilt ? TableSplitSql : TableSql, cancellationToken);
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
