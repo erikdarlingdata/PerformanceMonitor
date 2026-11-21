@@ -42,6 +42,7 @@ public class CollectionBackgroundService : BackgroundService
     private readonly RetentionService? _retentionService;
     private readonly AnalysisNotificationService? _notificationService;
     private readonly ILogger<CollectionBackgroundService>? _logger;
+    private readonly UsedDataReadRunLog _usedDataReadRun;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
     /* Archival starts at UtcNow so it does not fire on the very first cycle. */
@@ -218,6 +219,7 @@ public class CollectionBackgroundService : BackgroundService
         _retentionService = retentionService;
         _notificationService = notificationService;
         _logger = logger;
+        _usedDataReadRun = new UsedDataReadRunLog(logger);
     }
 
     /// <summary>
@@ -790,7 +792,14 @@ public class CollectionBackgroundService : BackgroundService
            reset point. The read waits only the UI's 100 ms budget, so a collection checkpoint can make it return null. A null read
            leaves only the file's own ceiling (twice the reset point) to decide, and the next tick reads again. */
         var fileMb = _duckDb?.GetDatabaseSizeMb() ?? 0;
-        var usedMb = _duckDb != null && fileMb >= HotStoreReset.Mb ? _duckDb.GetUsedDataSizeMb() : null;
+        double? usedMb = null;
+        if (_duckDb != null && fileMb >= HotStoreReset.Mb)
+        {
+            /* #9250: a failed read leaves a trace: the first of a run, a periodic count, and the recovery. */
+            var read = _duckDb.ReadUsedDataSize();
+            _usedDataReadRun.Record(read, fileMb, HotStoreReset);
+            usedMb = read.Mb;
+        }
         var sizeDue = _duckDb != null && HotStoreReset.IsReached(usedMb, fileMb);
 
         if (!timeDue && !sizeDue)
@@ -813,7 +822,12 @@ public class CollectionBackgroundService : BackgroundService
                     _logger?.LogInformation("Store file ({FileMb:F0} MB) reached twice the {Threshold:F0} MB reset point ({Source}), data {UsedMb} MB or not read. Archiving all data and resetting the database",
                         fileMb, HotStoreReset.Mb, HotStoreReset.Source, usedMb is { } u ? u.ToString("F0", CultureInfo.InvariantCulture) : "not read");
                 }
-                await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
+                /* #9250: the run ends only when the store was really reset. A deferred or failed reset leaves the
+                   same failing reads in place, so their run (and its count) continues on the next tick. */
+                if (await _archiveService.ArchiveAllAndResetAsync(cancellationToken))
+                {
+                    _usedDataReadRun.EndRunAfterReset();
+                }
             }
             else
             {
