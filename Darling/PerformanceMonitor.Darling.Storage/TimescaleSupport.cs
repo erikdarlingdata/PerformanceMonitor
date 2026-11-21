@@ -3960,21 +3960,21 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bu
 WITH NO DATA";
 
     /// <summary>
-    /// The two group indexes #4503 KEEPS on <see cref="CreateQueryStoreStatsCorrectedHourlySql"/>'s
-    /// materialization: <c>(server_id, bucket)</c> for every reader's server + time-range filter, and
-    /// <c>(server_name, bucket)</c> for a scoped composer read — not the same measured-131-scan reason as
+    /// The group index #4503 still KEEPS on <see cref="CreateQueryStoreStatsCorrectedHourlySql"/>'s
+    /// materialization: <c>(server_name, bucket)</c> for a scoped composer read — not the same measured-131-scan reason as
     /// the legacy hourly view above; this materialization's own <c>server_name</c> index showed 0 lifetime
     /// scans in the production catalog read, and is kept for the composer's scoped-panel reads instead.
     /// <c>database_name</c>'s group index is DROPPED even though
     /// <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> can filter on it (<c>rollupFilter</c>): that
     /// same read also filters <c>server_id = $1</c> plus the bucket range, so it is served by the
-    /// <c>(server_id, bucket)</c> index kept here (a composed panel filtering on <c>database_name</c> gets
+    /// <c>(server_id, bucket)</c> index (#9215: now the covering <see cref="QueryStoreCorrectedHourlyServerCoveringIndexName"/>, which
+    /// replaced the plain one so the trend read answers from the index; a composed panel filtering on <c>database_name</c> gets
     /// the same rows via that index, just without a secondary key on the dropped column) — and the
     /// production catalog showed ZERO lifetime scans of the real <c>database_name</c> index on this view's
     /// chunks. See the PR body's reader table.
     /// </summary>
     public static readonly string CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql =
-        KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_id", "server_name");
+        KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_name");
 
     /// <summary>The name of the (query_hash, bucket DESC) index on <see cref="QueryStoreStatsCorrectedHourlyView"/>'s materialization (#7609, V246).</summary>
     public const string QueryStoreCorrectedHourlyHashIndexName = "ix_qs_corrected_hourly_hash_bucket";
@@ -4021,6 +4021,90 @@ BEGIN
     END IF;
 
     EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %s (query_hash, bucket DESC)', v_mat_oid);
+END $$;";
+
+    /// <summary>The name of the covering (server_id, bucket DESC) index on <see cref="QueryStoreStatsCorrectedHourlyView"/>'s materialization (#9215, V291).</summary>
+    public const string QueryStoreCorrectedHourlyServerCoveringIndexName = "ix_qs_corrected_hourly_server_bucket";
+
+    /// <summary>The columns the rollup arm of <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> reads besides the server and the bucket.</summary>
+    private const string QueryStoreTrendIncludeColumns = "database_name, execution_count_sum, duration_us_weighted_sum";
+
+    /// <summary>
+    /// #9215 (V291): the one server index on the corrected hourly rollup's materialization,
+    /// <c>(server_id, bucket DESC) INCLUDE (database_name, execution_count_sum, duration_us_weighted_sum)</c>, under
+    /// <see cref="QueryStoreCorrectedHourlyServerCoveringIndexName"/>. The 7-day <c>get_query_store_duration_trend</c> read filters on the server and a
+    /// bucket range and sums two columns by bucket. On the newest, uncompressed chunks nothing led with <c>server_id</c> and carried those columns, so the
+    /// plain <c>(server_id, bucket)</c> index went to the heap once per row (the rows of one server are scattered across a chunk) or the planner read
+    /// the whole covering hash index and filtered by server. With the columns in the index the read answers from a range of it. The key is the plain
+    /// index's, so every reader the plain one served is served, and the plain one is dropped: the refresh writes one server index, not two.
+    ///
+    /// <para>One <c>DO</c> block, the same lock behaviour as <see cref="CreateQueryStoreCorrectedHourlyHashIndexSql"/> (#7609): a catalog read first,
+    /// <c>CREATE INDEX</c> only when the named index is missing (a plain <c>IF NOT EXISTS</c> would still take a ShareLock that conflicts with the
+    /// refresh), the V152 <c>lock_timeout</c> so the build waits out one refresh and then fails retryably (#7667), and a return before touching anything
+    /// on a store without TimescaleDB or without the view. The plain index, found by shape as <see cref="KeptIndexesSql(string, string)"/> finds it, is dropped
+    /// only after the covering one exists, so a reader always has a server index. A settled store (covering index there, no plain one) does a catalog
+    /// read with no lock request. Run by V291 on an upgraded store and by <see cref="QueryStoreRollupKeptIndexesSql"/> after the view is created and on
+    /// every convergence pass, so a fresh store lands the same index and a rebuilt view never keeps the plain one.</para>
+    /// </summary>
+    public static readonly string CreateQueryStoreCorrectedHourlyServerCoveringIndexSql = @"
+SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_mat_oid regclass;
+    v_has_covering boolean;
+    v_plain regclass;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT format(''%I.%I'', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+             FROM timescaledb_information.continuous_aggregates
+             WHERE view_schema = ''collect'' AND view_name = ''" + QueryStoreStatsCorrectedHourlyView + @"'''
+    INTO v_mat_oid;
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = v_mat_oid
+        AND   c.relname = '" + QueryStoreCorrectedHourlyServerCoveringIndexName + @"'
+        AND   i.indnatts > i.indnkeyatts
+    ) INTO v_has_covering;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+        JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+        WHERE i.indrelid = v_mat_oid
+        AND   i.indnatts = 2
+        AND   a1.attname = 'server_id'
+        AND   a2.attname = 'bucket'
+    ) AND v_has_covering THEN
+        RETURN;
+    END IF;
+
+    IF NOT v_has_covering THEN
+        EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyServerCoveringIndexName + @" ON %s (server_id, bucket DESC) INCLUDE (" + QueryStoreTrendIncludeColumns + @")', v_mat_oid);
+    END IF;
+
+    FOR v_plain IN
+        SELECT i.indexrelid::regclass
+        FROM pg_index i
+        JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+        JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+        WHERE i.indrelid = v_mat_oid
+        AND   i.indnatts = 2
+        AND   a1.attname = 'server_id'
+        AND   a2.attname = 'bucket'
+    LOOP
+        EXECUTE format('DROP INDEX %s', v_plain);
+    END LOOP;
 END $$;";
 
     /// <summary>The name of the covering (query_hash, bucket DESC) index on <see cref="QueryStatsIntervalHourlyView"/>'s materialization (#9149, V284).</summary>
@@ -14495,7 +14579,7 @@ END $$;";
     public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
-        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashCoveringIndexSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashCoveringIndexSql + "\n" + CreateQueryStoreCorrectedHourlyServerCoveringIndexSql,
         [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
         [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
         [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
