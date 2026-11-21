@@ -169,7 +169,7 @@ FROM
     FROM query_store_text AS t
     WHERE t.server_id = $1
     AND   ($2::text IS NULL OR t.database_name = $2)
-    AND   t.query_sql_text ILIKE '%' || $3 || '%' ESCAPE '\'
+    AND   t.query_sql_text ILIKE '%' || $3 || '%'
     ORDER BY t.database_name, t.query_id
     LIMIT $4
 ) AS m
@@ -223,7 +223,7 @@ known AS MATERIALIZED (
     FROM unnest($9::bytea[], $10::boolean[]) AS k(digest, matched)
 ),
 judged AS MATERIALIZED (
-    SELECT f.digest, COALESCE((d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\', FALSE) AS matched
+    SELECT f.digest, COALESCE((d.query_text || '') ILIKE '%' || $3 || '%', FALSE) AS matched
     FROM (SELECT DISTINCT s.query_text_digest AS digest
           FROM seen AS s
           WHERE NOT EXISTS (SELECT 1 FROM known AS k WHERE k.digest = s.query_text_digest)) AS f
@@ -272,7 +272,7 @@ ORDER BY kind, last_collected DESC, query_hash, database_name";
 WITH matched AS MATERIALIZED (
     SELECT digest
     FROM query_text_dim
-    WHERE query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+    WHERE query_text ILIKE '%' || $1 || '%'
 ),
 hits AS (
     SELECT DISTINCT ON (s.server_id, s.query_hash, s.database_name)
@@ -305,7 +305,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 WITH matched AS MATERIALIZED (
     SELECT digest
     FROM query_text_dim
-    WHERE query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+    WHERE query_text ILIKE '%' || $1 || '%'
 ),
 hits AS (
     SELECT DISTINCT ON (s.server_id, s.query_hash, s.database_name)
@@ -358,7 +358,7 @@ matched AS MATERIALIZED (
     CROSS JOIN LATERAL (SELECT 1 AS hit
                         FROM query_text_dim AS d
                         WHERE d.digest = f.digest
-                        AND   d.query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+                        AND   d.query_text ILIKE '%' || $1 || '%'
                         LIMIT 1) AS t
 ),
 hits AS (
@@ -496,7 +496,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     internal const string MatchedDigestsSql = @"
 SELECT digest
 FROM query_text_dim
-WHERE query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+WHERE query_text ILIKE '%' || $1 || '%'
 LIMIT $2";
 
     /// <summary>#7849: the sample read for a pattern that matched at most <see cref="ProbeDigestCap"/> texts, one span of the raw window (see

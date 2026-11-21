@@ -487,14 +487,14 @@ public sealed class CollectedDatabasesSqlTests
         Assert.Contains("SELECT DISTINCT database_name FROM v_database_size_stats WHERE server_id = $1", sql, StringComparison.Ordinal);
     }
 
-    /// <summary>#5314: the search read is the shared list narrowed by one <c>ILIKE</c> against $3 with a backslash escape, ahead of
+    /// <summary>#5314: the search read is the shared list narrowed by one <c>ILIKE</c> against $3 with the default backslash escape (no ESCAPE clause, #9236), ahead of
     /// the ORDER BY and the LIMIT, so the limit counts matches; the pattern builder escapes the three characters that mean
     /// something to LIKE.</summary>
     [Fact]
     public void NamesSearchLimitedSql_NarrowsBeforeTheLimit_WithOneEscapedPatternParameter()
     {
         var sql = CollectedDatabases.NamesSearchLimitedSql;
-        var like = sql.IndexOf("database_name ILIKE $3 ESCAPE '\\'", StringComparison.Ordinal);
+        var like = sql.IndexOf("database_name ILIKE $3", StringComparison.Ordinal);
         var order = sql.IndexOf("ORDER BY lower(database_name), database_name", StringComparison.Ordinal);
         var limit = sql.IndexOf("LIMIT $2", StringComparison.Ordinal);
         Assert.True(like > 0 && like < order && order < limit, sql);
