@@ -147,7 +147,12 @@ public sealed class AttentionEventsCompressionLiveTests
 
             var job = await ReadPolicyJobAsync(connection, ct);
             Assert.NotNull(job);
-            await ExecAsync(connection, $"CALL run_job({job!.JobId})", ct);
+
+            /* The job takes a capped number of chunks per run (#9267), so a backlog needs a few runs. */
+            for (var run = 0; run < uncompressedBefore && await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct) > 0; run++)
+            {
+                await ExecAsync(connection, $"CALL run_job({job!.JobId})", ct);
+            }
 
             Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct));
 
@@ -165,6 +170,133 @@ public sealed class AttentionEventsCompressionLiveTests
             {
                 Assert.True(rows == after[read], $"'{read}' returned different rows once the old chunks were compressed");
             }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9267: a store with a backlog of old chunks gets the policy with a first run an hour away (not at once, which on an upgrade
+    /// is the restart warm-up), and the job compresses at most the cap per run, so the backlog goes over several runs. The job is run
+    /// by hand as the scheduler would run it. Before #9267 the policy started at once, had no cap, and the first run compressed
+    /// every old chunk.
+    /// </summary>
+    [Fact]
+    public async Task ABacklogStore_GetsAPolicyThatStartsLater_AndEachRunCompressesAtMostTheCap()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct);
+        await using var connection = await OpenTimescaleStoreAsync(scratch, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.SpecifyKind(LiveClock.AnchoredEnd(), DateTimeKind.Unspecified);
+            await SeedAsync(connection, now, ct);
+            var floor = now.AddDays(-30);
+            var ceiling = now.AddHours(1);
+            var before = await ReadAllAsync(connection, "collect.attention_events", new[] { ServerA, ServerB }, floor, ceiling, ct);
+
+            await ConvergeAsync(connection, ct);
+
+            var cap = TimescaleSupport.AttentionEventsCompressionChunkCap;
+            var backlog = await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct);
+            Assert.True(backlog > cap, $"the fact needs more old chunks than one run may take ({backlog} old chunks, cap {cap})");
+
+            var job = await ReadPolicyJobAsync(connection, ct);
+            Assert.NotNull(job);
+            Assert.Equal(cap, job!.MaxChunksToCompress);
+            Assert.True(job.StartsLater, $"the first run must wait past the restart, but it is due at {job.NextStart}");
+
+            var runs = 0;
+            var compressed = 0L;
+            while (await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct) > 0)
+            {
+                Assert.True(runs < backlog, "the backlog did not drain");
+                await ExecAsync(connection, $"CALL run_job({job.JobId})", ct);
+                runs++;
+                var total = await ScalarAsync<long>(connection, CompressedCountSql, ct);
+                Assert.True(total - compressed <= cap, $"run {runs} compressed {total - compressed} chunks, past the cap of {cap}");
+                if (runs == 1)
+                {
+                    Assert.Equal(cap, total);
+                }
+
+                compressed = total;
+            }
+
+            Assert.Equal((backlog + cap - 1) / cap, runs);
+
+            var after = await ReadAllAsync(connection, "collect.attention_events", new[] { ServerA, ServerB }, floor, ceiling, ct);
+            foreach (var (read, rows) in before)
+            {
+                Assert.True(rows == after[read], $"'{read}' returned different rows once the backlog was compressed");
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9267, a store whose policy already exists (added in the #9216 shape: no cap, on its own schedule) and that already
+    /// compressed its backlog: the step adds the cap and nothing else. The schedule, <c>next_start</c> and <c>compress_after</c> stay,
+    /// the compressed chunks stay the same chunks, and a later job run compresses nothing more. A second pass issues no
+    /// <c>alter_job</c> (the job's catalog row is not rewritten).
+    /// </summary>
+    [Fact]
+    public async Task AStoreWhoseOldPolicyAlreadyCompressedItsBacklog_TakesTheCapAndNothingElseChanges()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct);
+        await using var connection = await OpenTimescaleStoreAsync(scratch, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.SpecifyKind(LiveClock.AnchoredEnd(), DateTimeKind.Unspecified);
+            await SeedAsync(connection, now, ct);
+
+            /* The policy as #9216 added it: the shared statement, no initial_start, no cap. The ENABLE comes from the step list. */
+            await ConvergeAsync(connection, ct);
+            await ExecAsync(connection, $"SELECT remove_compression_policy('collect.{TimescaleSupport.AttentionEventsTable}')", ct);
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql(TimescaleSupport.AttentionEventsTable), ct);
+
+            var old = await ReadPolicyJobAsync(connection, ct);
+            Assert.NotNull(old);
+            Assert.Null(old!.MaxChunksToCompress);
+            await ExecAsync(connection, $"CALL run_job({old.JobId})", ct);
+            Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct));
+            var compressedBefore = await ScalarAsync<string>(connection, CompressedNamesSql, ct);
+
+            var result = await AttentionStep().EnsureAsync(connection, NullLogger.Instance, ct);
+            Assert.Equal(1, result);
+
+            var job = await ReadPolicyJobAsync(connection, ct);
+            Assert.NotNull(job);
+            Assert.Equal(TimescaleSupport.AttentionEventsCompressionChunkCap, job!.MaxChunksToCompress);
+            Assert.Equal(old.JobId, job.JobId);
+            Assert.Equal(old.NextStart, job.NextStart);
+            Assert.Equal(old.FixedSchedule, job.FixedSchedule);
+            Assert.Equal(old.ScheduleSeconds, job.ScheduleSeconds);
+            Assert.Equal(old.CompressAfterSeconds, job.CompressAfterSeconds);
+
+            await ExecAsync(connection, $"CALL run_job({job.JobId})", ct);
+            Assert.Equal(compressedBefore, await ScalarAsync<string>(connection, CompressedNamesSql, ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) " + OldUncompressedChunksSql, ct));
+
+            /* A second pass finds the cap in place and rewrites nothing. */
+            var rowVersionSql = $"SELECT xmin::text FROM _timescaledb_catalog.bgw_job WHERE id = {job.JobId}";
+            var rowVersion = await ScalarAsync<string>(connection, rowVersionSql, ct);
+            Assert.Equal(1, await AttentionStep().EnsureAsync(connection, NullLogger.Instance, ct));
+            Assert.Equal(rowVersion, await ScalarAsync<string>(connection, rowVersionSql, ct));
 
             bodySucceeded = true;
         }
@@ -281,6 +413,12 @@ CROSS JOIN generate_series(1, 20) AS g(n)";
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    private const string CompressedCountSql =
+        "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events' AND is_compressed";
+
+    private const string CompressedNamesSql =
+        "SELECT string_agg(chunk_name, ',' ORDER BY chunk_name) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events' AND is_compressed";
+
     private const string OldUncompressedChunksSql =
         "FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events' "
         + "AND NOT is_compressed AND range_end <= now() - INTERVAL '1 day'";
@@ -336,7 +474,8 @@ CROSS JOIN generate_series(1, 20) AS g(n)";
 
     private sealed record HypertableState(bool IsHypertable, bool CompressionEnabled, string? SegmentBy);
 
-    private sealed record PolicyJob(int JobId, long ScheduleSeconds, long CompressAfterSeconds);
+    private sealed record PolicyJob(
+        int JobId, long ScheduleSeconds, long CompressAfterSeconds, bool FixedSchedule, string NextStart, bool StartsLater, int? MaxChunksToCompress);
 
     private static async Task<HypertableState> ReadHypertableAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -362,11 +501,17 @@ CROSS JOIN generate_series(1, 20) AS g(n)";
     {
         await using var command = new NpgsqlCommand(
             @"SELECT job_id, EXTRACT(EPOCH FROM schedule_interval)::bigint,
-                     EXTRACT(EPOCH FROM (config ->> 'compress_after')::interval)::bigint
+                     EXTRACT(EPOCH FROM (config ->> 'compress_after')::interval)::bigint,
+                     fixed_schedule, COALESCE(next_start::text, ''), COALESCE(next_start > now() + INTERVAL '30 minutes', false),
+                     (config ->> 'maxchunks_to_compress')::int
               FROM timescaledb_information.jobs
               WHERE proc_name = 'policy_compression' AND hypertable_schema = 'collect' AND hypertable_name = 'attention_events'", connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
-        return await reader.ReadAsync(ct) ? new PolicyJob(reader.GetInt32(0), reader.GetInt64(1), reader.GetInt64(2)) : null;
+        return await reader.ReadAsync(ct)
+            ? new PolicyJob(
+                reader.GetInt32(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetBoolean(3),
+                reader.GetString(4), reader.GetBoolean(5), reader.IsDBNull(6) ? null : reader.GetInt32(6))
+            : null;
     }
 
     private static async Task<IReadOnlySet<string>> ConvergedTablesAsync(NpgsqlConnection connection, CancellationToken ct) =>
