@@ -86,6 +86,7 @@ const sandbox = {
   localTime: String,
   hasInFlightReads: () => inFlight > 0,
   beginPageScope() {},
+  holdsRenamedServerRoute: () => false,
   readErrorCount: () => errors,
   isSessionExpired: () => false,
   onSessionExpired() {},
