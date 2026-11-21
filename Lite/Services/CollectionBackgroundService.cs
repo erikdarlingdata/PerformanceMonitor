@@ -796,7 +796,7 @@ public class CollectionBackgroundService : BackgroundService
             {
                 _logger?.LogInformation("Database size ({SizeMb:F0} MB) exceeds {Threshold} MB — archiving all data and resetting database",
                     _duckDb!.GetDatabaseSizeMb(), ArchiveSizeThresholdMb);
-                await _archiveService.ArchiveAllAndResetAsync();
+                await _archiveService.ArchiveAllAndResetAsync(cancellationToken);
             }
             else
             {
