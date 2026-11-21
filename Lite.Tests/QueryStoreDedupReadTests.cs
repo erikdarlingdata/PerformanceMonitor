@@ -1010,8 +1010,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var rankFilters = Regex.Matches(source, @"(?:WHERE|AND)\s+(?:qs\.)?rn = 1").Count;
 
         /* Five windows plus one aggregate: since #9195 the top-queries read picks the newest snapshot per interval with arg_max over the same
-           group (newest collection_time, then execution_count) instead of a ROW_NUMBER window, so it is no partition and no rn filter, and is
-           pinned just below. */
+           group (newest collection_time, then execution_count) instead of a ROW_NUMBER window, so it is no partition and no rn filter.
+           QueryStoreServerWideTopTests covers that dedup by behaviour. */
         Assert.Equal(5, partitions);
         /* Nine, not five: the comparison's two deduped CTEs are each consumed THREE times — once to pick the
            top 100 hashes, once by the value aggregate, and (#5381) once by the winner CTE that names the rows
@@ -1023,7 +1023,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
            latest snapshot's id is the only thing keeping an un-deduped row out of it (#1841). Counting rn filters does
            not see that join go, so it is pinned here. */
         Assert.Contains("INNER JOIN latest ON latest.latest_id = collection_id", source, StringComparison.Ordinal);
-        Assert.Contains("arg_max(collection_id, (collection_time, execution_count))", source, StringComparison.Ordinal);
 
         /* Every dedup orders by collection_time FIRST — "latest" is never decided by execution_count, which
            can sit still across a hundred re-collections of the same interval.

@@ -60,6 +60,12 @@ public sealed class QueryStoreServerWideTopTests : IDisposable
                 for (var i = 0; i < Intervals; i++)
                     for (var s = 0; s < Snapshots; s++)
                         rows.Add(new Snapshot(d, q, i, s, 10L * (s + 1) + ((d + q + i) % 7), 1000.0 + (d * 997) + (q * 131) + i, d % 2 == 1 ? "Primary" : null));
+
+        /* Two intervals are stored a second time at the SAME collection_time as their newest snapshot, inserted last. The newest snapshot is then
+           decided by execution_count: one extra row has the lower count (it must lose) and one the higher count (it must win), so neither the
+           insert order nor the collection_id can pick the right row. */
+        rows.Add(new Snapshot(0, 0, 0, Snapshots - 1, 3, 1000.0, null));
+        rows.Add(new Snapshot(1, 1, 1, Snapshots - 1, 900, 1000.0 + 997 + 131 + 1, "Primary"));
         return rows;
     }
 
@@ -101,7 +107,7 @@ public sealed class QueryStoreServerWideTopTests : IDisposable
         => Generate()
             .Where(r => database is null || r.Database == database)
             .GroupBy(r => (r.Db, r.Query, r.Interval))
-            .Select(g => g.OrderByDescending(r => r.Snap).First())
+            .Select(g => g.OrderByDescending(r => r.Snap).ThenByDescending(r => r.Executions).First())
             .GroupBy(r => (r.Database, r.Query, r.Role))
             .Select(g => (Database: g.Key.Database, Query: (long)g.Key.Query, Executions: g.Sum(r => r.Executions), Cost: g.Sum(r => r.Executions * r.DurationUs)))
             .OrderByDescending(g => g.Cost).ThenBy(g => g.Database, StringComparer.Ordinal).ThenBy(g => g.Query)
@@ -119,6 +125,27 @@ public sealed class QueryStoreServerWideTopTests : IDisposable
         Assert.Equal(expected, rows.Select(r => (r.DatabaseName, r.QueryId, r.TotalExecutions)).ToList());
         Assert.Contains(rows, r => r.ReplicaRole is null);
         Assert.Contains(rows, r => r.ReplicaRole == "Primary");
+    }
+
+    [Fact]
+    public async Task NewestSnapshot_IsTheLaterCollectionTime_AndTheGreaterExecutionCountOnATie()
+    {
+        var service = await SeedAsync();
+
+        var rows = await service.GetQueryStoreTopQueriesAsync(ServerId, 24, 1000, asOfUtc: _now);
+
+        var byGroup = rows.ToDictionary(r => (r.DatabaseName, r.QueryId));
+        var all = Generate();
+        /* db0 query 0, interval 0: the tied extra row (3) loses to the stored 30-something at the same time. db1 query 1, interval 1: the tied
+           extra row (900) wins. Every other interval contributes its last snapshot. */
+        foreach (var key in new[] { ("db0", 0L), ("db1", 1L) })
+        {
+            var expected = all.Where(r => r.Database == key.Item1 && r.Query == key.Item2)
+                .GroupBy(r => r.Interval)
+                .Sum(g => g.OrderByDescending(r => r.Snap).ThenByDescending(r => r.Executions).First().Executions);
+            Assert.Equal(expected, byGroup[key].TotalExecutions);
+        }
+        Assert.True(byGroup[("db1", 1L)].TotalExecutions >= 900, "the greater execution_count of a tied newest snapshot must win");
     }
 
     [Fact]
