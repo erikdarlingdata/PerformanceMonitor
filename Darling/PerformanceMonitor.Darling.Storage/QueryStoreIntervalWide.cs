@@ -790,7 +790,36 @@ SELECT EXISTS
         NpgsqlConnection connection, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds,
         CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(LongestIntervalSpanSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        var span = await ResolveTrustedLongestSpanAsync(connection, null, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+        return span is { } trusted ? EdgeMarginFor(trusted) : PurgeEdgeMargin;
+    }
+
+    /// <summary>
+    /// The server's longest Query Store interval length for a read of <paramref name="readStart"/> through <paramref name="end"/>
+    /// (#9225), or <see cref="IntervalSpanMargin"/> (a day, the longest an interval spans) whenever
+    /// <see cref="ResolveEdgeMarginAsync"/> would fall back to <see cref="PurgeEdgeMargin"/>: the same trust test, one statement. Never
+    /// longer than a day. It is the distance below a row's <c>last_execution_time</c> that its <c>first_execution_time</c> can sit, which
+    /// is what the plan-regression read's live floor needs: both times fall inside one interval, so no interval of the server holds them
+    /// further apart than its length. Where the length cannot be trusted (an interval-length change on the server that the captures did
+    /// not see, a database with no capture) the floor keeps a whole day, so a row of a longer interval is read, never dropped. The
+    /// trust test lists databases from the wide table, so it vouches only for days that table still holds: the plan-regression caller
+    /// does not ask for a day older than <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>.
+    /// <paramref name="transaction"/> is the read's own transaction, when it has one.
+    /// </summary>
+    public static async Task<TimeSpan> ResolveLongestIntervalSpanAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var span = await ResolveTrustedLongestSpanAsync(connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+        return span is { } trusted && trusted < IntervalSpanMargin ? trusted : IntervalSpanMargin;
+    }
+
+    /// <summary>The longest interval length <see cref="LongestIntervalSpanSql"/> reports, or null when it cannot be trusted (the fallbacks the edge margin and the live floor share).</summary>
+    private static async Task<TimeSpan?> ResolveTrustedLongestSpanAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(LongestIntervalSpanSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
@@ -800,15 +829,15 @@ SELECT EXISTS
             || reader.GetInt64(1) == 0 || reader.GetInt64(2) != 0
             || reader.GetBoolean(4))
         {
-            return PurgeEdgeMargin;
+            return null;
         }
 
         if (reader.GetDateTime(3) > DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) - IntervalSpanMargin)
         {
-            return PurgeEdgeMargin;
+            return null;
         }
 
-        return EdgeMarginFor(TimeSpan.FromMinutes(reader.GetInt64(0)));
+        return TimeSpan.FromMinutes(reader.GetInt64(0));
     }
 
     /// <summary>
