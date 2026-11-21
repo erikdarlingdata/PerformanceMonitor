@@ -503,7 +503,7 @@ AND   metric_name = $2" + extraFilter
                    special characters escaped) by AlertContextSerializer.BuildDedupKeyLikePattern
                    rather than hand-concatenated here — see its doc comment for why. NULL context_json
                    rows fail the match either way. */
-                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = _commandTimeoutSeconds };
+                + (dedupKey is null ? "" : "\nAND   context_json LIKE $3"), connection) { CommandTimeout = _commandTimeoutSeconds };
             command.Parameters.AddWithValue(sid.Value);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)
