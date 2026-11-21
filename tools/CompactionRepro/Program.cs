@@ -30,7 +30,7 @@ using PerformanceMonitorLite.Services;
  * fake it. Use --profile-only to get just the profile and skip the merge.
  *
  * Tuning knobs (defaults = ParquetCompaction's non-table-specific defaults):
- *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: 4GB
+ *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: the table's production limit
  *   --threads <int>        DuckDB threads per merge connection. Default: 2
  *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: ParquetCompaction.DefaultRowGroupSize (2048)
  *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
@@ -95,7 +95,9 @@ if (!string.IsNullOrEmpty(sourceFile) && !File.Exists(sourceFile))
 }
 
 var table = GetArg(args, "--table", "query_snapshots");
-var memoryLimit = GetArg(args, "--memory-limit", ParquetCompaction.DefaultMemoryLimit);
+/* Absent means null, so MergeBatchToFile picks the table's production limit (512MB for the sorted merge). */
+var memoryLimitArg = GetArg(args, "--memory-limit", "");
+string? memoryLimit = memoryLimitArg.Length > 0 ? memoryLimitArg : null;
 var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.ThreadsFor(table).ToString()));
 var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
 var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
@@ -164,7 +166,7 @@ if (sweep)
 }
 else
 {
-    Console.WriteLine($"Settings: memory_limit={memoryLimit}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
+    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
 }
 if (mergeFiles.Count == 0)
     Console.WriteLine($"Splitting source into {numFiles} chunks");
@@ -238,7 +240,7 @@ try
        given config. Never throws — a merge OOM is caught and returned as
        Ok=false so a sweep can carry on to the next config. */
     (bool Ok, double StartMb, double PeakMb, double Sec, int Batches, string? Fail, List<string> Outputs)
-        RunOneConfig(int rgs, long batchBytes, string memLimit, int thr, bool verbose)
+        RunOneConfig(int rgs, long batchBytes, string? memLimit, int thr, bool verbose)
     {
         var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBytes);
         if (verbose)
