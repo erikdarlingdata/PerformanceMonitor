@@ -103,13 +103,26 @@ GROUP BY f.server_id, f.database_name";
         await using (var q = new NpgsqlCommand("SELECT count(*), count(*) FILTER (WHERE is_compressed) FROM timescaledb_information.chunks WHERE hypertable_name LIKE '_materialized_hypertable_%'", c))
         await using (var r = await q.ExecuteReaderAsync(ct)) { await r.ReadAsync(ct); outp.AppendLine($"M chunks={r.GetInt64(0)} compressed={r.GetInt64(1)} servers={servers} groups={groups}"); }
         await using (var q = new NpgsqlCommand(@"SELECT string_agg(format('%s heap=%s toast=%s idx=%s batches=%s', t.relname, pg_relation_size(t.oid)/8192, coalesce(pg_relation_size(t.reltoastrelid)/8192, 0), pg_indexes_size(t.oid)/8192, t.reltuples::bigint), ' ; ')
-                FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '_timescaledb_internal' AND t.relname LIKE 'compress_hyper_%' AND t.relkind = 'r'", c))
+                FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '_timescaledb_internal' AND t.relname LIKE '%hyper%chunk' AND t.relkind = 'r' AND t.reltuples > 0", c))
         { outp.AppendLine("M compressed " + await q.ExecuteScalarAsync(ct)); }
-        await using (var q = new NpgsqlCommand(@"SELECT string_agg(indexdef, ' ; ') FROM pg_indexes WHERE schemaname = '_timescaledb_internal' AND tablename LIKE 'compress_hyper_%'", c))
+        await using (var q = new NpgsqlCommand(@"SELECT string_agg(substr(indexdef, 1, 220), ' ; ') FROM pg_indexes WHERE schemaname = '_timescaledb_internal' AND tablename LIKE '%hyper%chunk'", c))
         { outp.AppendLine("M compidx " + await q.ExecuteScalarAsync(ct)); }
         await Exec(c, "SET enable_seqscan = off", ct);
         outp.AppendLine("M noseq current " + await Explain(c, Current, start, dStart, ct));
         outp.AppendLine("M noseq perserver " + await Explain(c, PerServer, start, dStart, ct));
+        await using (var tp = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) " + PerServer, c) { CommandTimeout = 600 })
+        {
+            tp.Parameters.AddWithValue(NpgsqlDbType.Text, Hash);
+            tp.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+            tp.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(dStart, DateTimeKind.Unspecified));
+            await using var rd = await tp.ExecuteReaderAsync(ct);
+            while (await rd.ReadAsync(ct))
+            {
+                var line = rd.GetString(0);
+                if (line.Contains("Scan") || line.Contains("Cond") || line.Contains("Buffers") || line.Contains("Batches") || line.Contains("Filter") || line.Contains("Removed"))
+                    outp.AppendLine("M plan " + line.Trim());
+            }
+        }
         await Exec(c, "RESET enable_seqscan", ct);
         for (var round = 1; round <= 2; round++)
         {

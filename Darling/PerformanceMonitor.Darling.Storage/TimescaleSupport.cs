@@ -8084,13 +8084,13 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
 
     /// <summary>A chunk whose last vacuum (manual or automatic) is younger than this is left alone (#9274), so a vacuum that could set no
     /// page because an old snapshot was open is retried at most once an hour.</summary>
-    public const string RollupVacuumMinAge = "1 hour";
+    public static readonly TimeSpan RollupVacuumMinAge = TimeSpan.FromHours(1);
 
     /// <summary>
     /// The uncompressed chunks of the <c>collect</c> rollups that lag on the visibility map (#9274): under
     /// <see cref="RollupVacuumAllVisibleFloorPercent"/> percent of their pages all-visible, at least <see cref="RollupVacuumMinPages"/> pages,
     /// no insert since the last vacuum (so autovacuum's insert trigger will not come back for them) and a last vacuum at least
-    /// <see cref="RollupVacuumMinAge"/> old. A chunk whose stats were reset (no vacuum on record) counts as old. Compressed chunks are
+    /// <see cref="RollupVacuumMinAge"/> old (<c>$1</c>, so a test can ask for none). A chunk whose stats were reset (no vacuum on record) counts as old. Compressed chunks are
     /// never listed: their heap is empty and the compression policy has rewritten them. One catalog read, no row on a settled store.
     /// Worst lag first, at most <see cref="RollupVacuumMaxChunksPerPass"/>.
     /// </summary>
@@ -8106,7 +8106,7 @@ AND   NOT ch.is_compressed
 AND   c.relpages >= {RollupVacuumMinPages}
 AND   c.relallvisible::bigint * 100 < c.relpages::bigint * {RollupVacuumAllVisibleFloorPercent}
 AND   st.n_ins_since_vacuum = 0
-AND   coalesce(greatest(st.last_vacuum, st.last_autovacuum), '-infinity'::timestamptz) < now() - INTERVAL '{RollupVacuumMinAge}'
+AND   coalesce(greatest(st.last_vacuum, st.last_autovacuum), '-infinity'::timestamptz) < now() - $1::interval
 ORDER BY (c.relpages - c.relallvisible) DESC
 LIMIT {RollupVacuumMaxChunksPerPass}";
 
@@ -8121,7 +8121,7 @@ LIMIT {RollupVacuumMaxChunksPerPass}";
     /// Returns how many chunks it vacuumed.
     /// </summary>
     public static async Task<int> EnsureRollupChunkVisibilityAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default, TimeSpan? minVacuumAge = null)
     {
         if (connection is null)
         {
@@ -8132,6 +8132,7 @@ LIMIT {RollupVacuumMaxChunksPerPass}";
         try
         {
             using var probe = new NpgsqlCommand(RollupChunkVisibilityLagSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            probe.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Interval, minVacuumAge ?? RollupVacuumMinAge);
             await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
