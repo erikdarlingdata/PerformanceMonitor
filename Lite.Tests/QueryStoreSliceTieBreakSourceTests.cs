@@ -50,7 +50,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     /// </summary>
     private static readonly (string Path, int Sites)[] DedupSites =
     [
-        (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 6),
+        (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 5), // one site is now the arg_max pick (#9195)
         (Path.Combine("Lite", "Analysis", "DrillDownCollector.Queries.cs"), 1),
         (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.QueryPerf.cs"), 1),
         /* #8784: get_object_usage sums module executions over the stored Query Store rows, newest snapshot per interval. */
