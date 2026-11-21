@@ -361,7 +361,8 @@ public sealed partial class DarlingWorker : BackgroundService
     /// are on the steps. The two that are worth an operator's attention: the compression ENABLE statements
     /// (<c>ALTER TABLE ... SET (timescaledb.compress ...)</c>, inside
     /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/> and
-    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) take an ACCESS EXCLUSIVE lock even
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/> and
+    /// <see cref="TimescaleSupport.EnsureAttentionEventsCompressionAsync"/>) take an ACCESS EXCLUSIVE lock even
     /// when they change nothing, so since #3817 each is issued only for a table whose compression settings
     /// differ from what the product wants, and a converged store's pass issues none. collection_log's waits at
     /// most <see cref="TimescaleSupport.HourlyDdlLockTimeout"/> for its lock (#4951). The summary
@@ -385,7 +386,12 @@ public sealed partial class DarlingWorker : BackgroundService
         new("collection_log hypertable", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             async (connection, logger, ct) => await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct) ? 1 : 0),
 
-        /* #1778: AFTER both compression steps, so it covers collection_log in the same pass. Selects only
+        /* #9216: attention_events is a hypertable (#8967) in the catalog but off the compression grid, so the sweep above never
+           reaches it either. Its settings and policy, the ALTER only when the settings differ and with a bounded lock wait. */
+        new("attention_events compression", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await TimescaleSupport.EnsureAttentionEventsCompressionAsync(connection, logger, ct) ? 1 : 0),
+
+        /* #1778: AFTER all the compression steps, so it covers collection_log and attention_events in the same pass. Selects only
            policies whose cadence or phase DIFFERS — no rows, no DDL, on a converged store. */
         new("compression schedule converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergeCompressionScheduleAsync(connection, logger, ct)),

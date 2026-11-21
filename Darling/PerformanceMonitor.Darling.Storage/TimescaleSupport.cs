@@ -160,17 +160,17 @@ public static partial class TimescaleSupport
     /// <summary>
     /// The tables on the hypertable GRID — the shared collector catalog less the entries that declare
     /// <see cref="ICollectorSchemaInfo.StaysPlainTable"/> (the small tables, #5640) and less the entries that declare
-    /// <see cref="ICollectorSchemaInfo.CompressionDeferred"/> (the attention table, #8967: a hypertable with no compression policy,
-    /// phase slot or worker). Compression, the phase order and the worker sizing read this list. Pinned by test so scope can never
+    /// <see cref="ICollectorSchemaInfo.CompressionOffGrid"/> (the attention table, #8967: a hypertable with no phase slot or worker,
+    /// whose compression <see cref="EnsureAttentionEventsCompressionAsync"/> adds, #9216). Compression, the phase order and the worker sizing read this list. Pinned by test so scope can never
     /// silently widen to the registry/config/analysis tables (see the class remarks for why those stay plain) nor silently narrow:
     /// <c>AttentionPlainTableTests</c> lists the opt-outs and the deferrals.
     /// </summary>
     public static IReadOnlyList<ICollectorSchemaInfo> HypertableTables { get; } =
-        CollectorCatalog.All.Where(c => !c.StaysPlainTable && !c.CompressionDeferred).ToArray();
+        CollectorCatalog.All.Where(c => !c.StaysPlainTable && !c.CompressionOffGrid).ToArray();
 
     /// <summary>
-    /// Every table <see cref="ConvertToHypertablesAsync"/> converts: <see cref="HypertableTables"/> plus the compression-deferred
-    /// ones (#8967), which are hypertables that carry no policy.
+    /// Every table <see cref="ConvertToHypertablesAsync"/> converts: <see cref="HypertableTables"/> plus the off-grid
+    /// ones (#8967), which are hypertables that have no phase slot.
     /// </summary>
     public static IReadOnlyList<ICollectorSchemaInfo> ConvertedTables { get; } =
         CollectorCatalog.All.Where(c => !c.StaysPlainTable).ToArray();
@@ -180,8 +180,10 @@ public static partial class TimescaleSupport
     /// (<see cref="HypertableTables"/>) PLUS <c>collection_log</c>, which is a hypertable (converted by the
     /// V23 migration) but lives OUTSIDE the catalog. Worker sizing derives from THIS so it is not under-sized
     /// by one background-worker slot for collection_log's compression policy. The <c>+ 1</c> must move if
-    /// another non-catalog table is ever converted (pinned by test). A compression-deferred table (#8967) is
-    /// a hypertable too but has no policy job, so it adds no slot and is not counted here.
+    /// another non-catalog table is ever converted (pinned by test). An off-grid table (#8967, the attention table) is
+    /// a hypertable too and its policy job (#9216) is not counted here: the worker headroom
+    /// (<c>DarlingManagedPostgres.WorkerSlotHeadroom</c>) covers the one job, and counting it would move the compression band and the
+    /// managed configuration every store was sized with.
     /// </summary>
     public static int HypertableCount => HypertableTables.Count + 1;
 
@@ -360,10 +362,25 @@ public static partial class TimescaleSupport
     /// </summary>
     public const string PerfmonStatsSegmentBy = CompressionSegmentByColumn + ", counter_name";
 
+    /// <summary>The collector table the Client Timeouts (attention) collector writes (the bare name, as
+    /// <c>hypertable_name</c> spells it).</summary>
+    public const string AttentionEventsTable = "attention_events";
+
+    /// <summary>
+    /// attention_events's segmentby (#9216): by event kind as well as by server. Every read of it asks for one server, a
+    /// time range and ONE <c>event_kind</c> by equality: the per-run counter rows (a few per minute, the 7-day baseline and
+    /// the window counts) or the sampled ring-buffer events (the bulk, with their statement text, for the top lists). With
+    /// <c>server_id</c> alone the 7-day baseline decompressed the sampled events of the whole range to keep the counter rows.
+    /// Spelled with ", " for the reason <see cref="CollectionLogSegmentBy"/> gives. The orderby is not set, so it stays what
+    /// the table already had (<c>collection_time DESC</c>).
+    /// </summary>
+    public const string AttentionEventsSegmentBy = CompressionSegmentByColumn + ", event_kind";
+
     /// <summary>
     /// The segmentby the enable statement sets for <paramref name="table"/> and the convergence read compares
     /// against: <see cref="CollectionLogSegmentBy"/> for collection_log, <see cref="PerfmonStatsSegmentBy"/> for
-    /// perfmon_stats (#5574), <see cref="CompressionSegmentByColumn"/> for every other table. Keyed by the bare
+    /// perfmon_stats (#5574), <see cref="AttentionEventsSegmentBy"/> for attention_events (#9216),
+    /// <see cref="CompressionSegmentByColumn"/> for every other table. Keyed by the bare
     /// name, which is how <see cref="CollectionLogTable"/>, <see cref="PerfmonStatsTable"/> and the read's
     /// <c>hypertable_name</c> spell it; a schema-qualified name (<c>collect.collection_log</c>) is matched by
     /// its last part, so a statement built from that spelling sets the value the read compares against. One lookup
@@ -375,6 +392,11 @@ public static partial class TimescaleSupport
         if (bare.Equals(CollectionLogTable, StringComparison.Ordinal))
         {
             return CollectionLogSegmentBy;
+        }
+
+        if (bare.Equals(AttentionEventsTable, StringComparison.Ordinal))
+        {
+            return AttentionEventsSegmentBy;
         }
 
         return bare.Equals(PerfmonStatsTable, StringComparison.Ordinal) ? PerfmonStatsSegmentBy : CompressionSegmentByColumn;
@@ -14750,6 +14772,91 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
 
         logger?.LogInformation("TimescaleDB: collection_log is a hypertable with a {Days}d compression policy", CompressAfterDays);
         return true;
+    }
+
+    /// <summary>Whether <c>collect.attention_events</c> is a hypertable now: false on a store without TimescaleDB, and on a
+    /// store whose attention table is still plain (its heap was over <see cref="AttentionConversionMaxHeapBytes"/>, or the swap
+    /// has not run), where neither compression statement can work.</summary>
+    private const string AttentionEventsIsHypertableSql =
+        "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = '" + AttentionEventsTable + "')";
+
+    /// <summary>
+    /// Compression for <c>collect.attention_events</c> (#9216): the compression settings (segmentby
+    /// <see cref="AttentionEventsSegmentBy"/>) and the compression policy at <see cref="CompressAfterDays"/>, in the
+    /// convergence pass. The table is a hypertable since V277 (#8967) but is in no compression list:
+    /// <see cref="ApplyCompressionPolicyAsync"/> walks <see cref="HypertableTables"/>, which leaves out the entries that declare
+    /// <see cref="ICollectorSchemaInfo.CompressionOffGrid"/>, so a store ran with every daily chunk uncompressed until retention
+    /// dropped it. This is <see cref="EnsureCollectionLogHypertableAsync"/>'s settings and policy steps for a table the compression
+    /// grid does not own: it joins no phase slot, so the job takes TimescaleDB's own start time and the band, the worker sizing and
+    /// <see cref="HypertableCount"/> do not move. The converge of the compression schedule still keeps its cadence and its
+    /// <c>compress_after</c> (it keys on the table being owned, not on a phase).
+    ///
+    /// <para>Nothing updates or deletes an attention row outside retention (<c>drop_chunks</c> on a hypertable), so compressed
+    /// chunks are never rewritten by a writer. The legacy copy (#8967) only inserts, and a chunk takes inserts after it is
+    /// compressed.</para>
+    ///
+    /// <para>The ALTER takes an ACCESS EXCLUSIVE lock even when it changes nothing (#3817), so it runs only when the settings
+    /// differ, in its own transaction, waiting at most <see cref="HourlyDdlLockTimeout"/> (#4951): a busy lock ends the pass
+    /// before the policy step and the next pass does both. A settings change that fails for another reason still lets the
+    /// policy step run, as it does for collection_log. A table that is not a hypertable is left alone without a line; the
+    /// conversion step names why.</para>
+    ///
+    /// <para>Returns true only when the table is a hypertable with the settings and the policy in place.</para>
+    /// </summary>
+    public static async Task<bool> EnsureAttentionEventsCompressionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using var probe = new NpgsqlCommand(AttentionEventsIsHypertableSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return false;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not read whether attention_events is a hypertable, so its compression is left for the next pass (#9216): {Message}", ex.Message);
+            return false;
+        }
+
+        var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
+        var settingsFailed = false;
+        if (converged is null || !converged.Contains(AttentionEventsTable))
+        {
+            var outcome = await TryRunBoundedDdlAsync(
+                connection, new[] { EnableCompressionSql(AttentionEventsTable) }, logger,
+                "attention_events's compression settings", cancellationToken);
+            switch (outcome)
+            {
+                /* The table is busy, and the policy step could queue behind the same lock: the next pass does both. */
+                case BoundedDdlOutcome.LockBusy:
+                    return false;
+
+                case BoundedDdlOutcome.Failed:
+                    settingsFailed = true;
+                    break;
+            }
+        }
+
+        try
+        {
+            using var policy = new NpgsqlCommand(AddCompressionPolicySql(AttentionEventsTable), connection) { CommandTimeout = SetupTimeoutSeconds };
+            await policy.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "attention_events's compression policy could not be added; a policy that already exists keeps running, and the next pass tries again: {Message}",
+                ex.Message);
+            return false;
+        }
+
+        return !settingsFailed;
     }
 
     /// <summary>

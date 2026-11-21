@@ -205,14 +205,14 @@ public interface ICollectorSchemaInfo
 
     /// <summary>
     /// True when this collector's table becomes a TimescaleDB hypertable (<c>TimescaleSupport.ConvertToHypertablesAsync</c>) but
-    /// joins no part of the compression grid: no compression policy, no phase slot, no worker (#8967). False for every other
-    /// definition. A deferred table is NOT in <c>TimescaleSupport.HypertableTables</c>, so <c>HypertableCount</c>, the phase order and
-    /// the worker sizing do not move. The reason is that the saving from compressing it is unmeasured, and a copy of old rows into an
-    /// already compressed chunk would complicate the copy. A later change that measures it takes the table out of this state and
-    /// gives it a slot at the end of the phase order. Only meaningful with <see cref="StaysPlainTable"/> false. A default interface
-    /// implementation, the choice <see cref="StaysPlainTable"/> made.
+    /// joins no part of the compression grid: no phase slot and no count in the worker sizing (#8967). False for every other
+    /// definition. Such a table is NOT in <c>TimescaleSupport.HypertableTables</c>, so <c>HypertableCount</c>, the phase order and
+    /// the worker sizing do not move. Its compression settings and policy come from a step of their own (the attention table's is
+    /// <c>TimescaleSupport.EnsureAttentionEventsCompressionAsync</c>, #9216), so the walk of the grid never reaches it. A table
+    /// takes a slot at the end of the phase order only by a grid decision (#3035, #3044, #3107). Only meaningful with
+    /// <see cref="StaysPlainTable"/> false. A default interface implementation, the choice <see cref="StaysPlainTable"/> made.
     /// </summary>
-    bool CompressionDeferred => false;
+    bool CompressionOffGrid => false;
 
     /// <summary>
     /// True when only Darling stores and schedules this collector: Lite creates no table for it, lists no schedule row and never

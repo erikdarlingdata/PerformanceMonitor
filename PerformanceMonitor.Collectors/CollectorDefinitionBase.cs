@@ -65,8 +65,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
        definition cannot override the interface's default through the class type. See ICollectorSchemaInfo.StaysPlainTable. */
     public virtual bool StaysPlainTable => false;
 
-    /* Declared here as well as on the interface, the StaysPlainTable pair and for the same reason. See ICollectorSchemaInfo.CompressionDeferred. */
-    public virtual bool CompressionDeferred => false;
+    /* Declared here as well as on the interface, the StaysPlainTable pair and for the same reason. See ICollectorSchemaInfo.CompressionOffGrid. */
+    public virtual bool CompressionOffGrid => false;
 
     /* Declared here as well as on the interface, the StaysPlainTable pair and for the same reason. See ICollectorSchemaInfo.IsDarlingOnly. */
     public virtual bool IsDarlingOnly => false;
