@@ -615,6 +615,14 @@ public class ArchiveService
         if (deleted > 0)
             _duckDb.BumpArchiveViewGeneration();
 
+        /* #9241: rows of a table whose query text lives in the dimension just left the hot store, so a text no hot row references
+           any more can go. Only here, under the write lock the caller holds: a collector's batch that reuses a digest is
+           excluded by the dimension's own semaphore, which the cleanup takes. A failure never fails the archive. */
+        if (deleted > 0 && LiteTextDimensions.IsDiverted(table))
+        {
+            TextDimensionWriter.TryRemoveUnreferenced(writeConnection, _logger, $"archiving {table}");
+        }
+
         return deleted;
     }
 

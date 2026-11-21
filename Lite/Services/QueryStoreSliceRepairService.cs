@@ -727,6 +727,10 @@ HAVING COUNT(*) > 1";
             }
 
             transaction.Commit();
+
+            /* #9241: the collapse removed hot rows, so a query text no hot row references any more can leave the dimension. Under
+               the write lock this block holds, and a failure never fails the repair. */
+            TextDimensionWriter.TryRemoveUnreferenced(connection, _logger, "the Query Store slice repair");
             progress?.Report($"Hot store: {CountText.Plural(survey.HotRowsRemoved, "row")} removed from {CountText.Plural(survey.HotGroups, "split interval")}.");
         }
 

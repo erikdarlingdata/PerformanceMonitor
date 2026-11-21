@@ -11,6 +11,7 @@ using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using DuckDB.NET.Data;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -22,8 +23,8 @@ namespace PerformanceMonitorLite.Services;
 ///
 /// <para><b>One dimension row per digest.</b> The dimension has no key (Lite avoids ART indexes), so the anti-join in the publish
 /// statement is the only thing that keeps a digest unique, and two connections that publish the same new text at once would each
-/// find it missing and each add it. Every collector writes under the store's shared read lock, so two servers' collectors, or
-/// query_stats and Query Store, can do exactly that. A semaphore per dimension table serialises the publish: the second writer
+/// find it missing and each add it. A collector's write holds no store lock (the Query Store backfill holds the shared read lock),
+/// so two servers' collectors, or query_stats and Query Store, can do exactly that. A semaphore per dimension table serialises the publish: the second writer
 /// begins its transaction after the first has committed, so it sees the text. A duplicate digest would multiply rows in every
 /// <c>vh_</c> read.</para>
 /// </summary>
@@ -162,6 +163,68 @@ WHERE NOT EXISTS (SELECT 1 FROM {d.DimTable} AS e WHERE e.digest = s.dg)");
             {
                 l.Release();
             }
+        }
+    }
+
+    /// <summary>
+    /// Deletes the dimension rows no table references any more and returns how many went (#9241). A text stays in the dimension
+    /// after its last hot row is archived or collapsed, so this is what lets the dimension shrink with the hot store.
+    ///
+    /// <para><b>The caller holds the store's WRITE lock.</b> That is what excludes a read-lock holder (the Query Store backfill),
+    /// but a collector's write holds no store lock, so the write lock alone does not exclude it. The dimension semaphore does:
+    /// <see cref="Publish"/> takes it before its transaction begins and keeps it through the commit, and this takes it for the
+    /// DELETE, in the same sorted order. A publish that already found a digest in the dimension has then committed its fact rows
+    /// before the DELETE looks for references, and one that starts after finds the row gone and adds it again. Without it, a
+    /// batch that reuses a digest whose last row was just archived would commit a row whose text this DELETE had removed.
+    /// There is no cycle: a publisher holds the semaphore and never waits for a store lock, and this takes the semaphore under
+    /// the write lock, which waits for readers that are themselves only waiting for the semaphore.</para>
+    ///
+    /// <para>Throws on a failure, having deleted nothing: the caller decides whether that matters.</para>
+    /// </summary>
+    internal static long RemoveUnreferenced(DuckDBConnection connection)
+    {
+        long removed = 0;
+        foreach (var dimTable in LiteTextDimensions.All.Select(d => d.DimTable).Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal))
+        {
+            /* One NOT EXISTS per referencing column, ANDed: each plans as an anti-join on the digest. */
+            var unreferenced = string.Join(" AND ", LiteTextDimensions.All
+                .Where(d => d.DimTable == dimTable)
+                .Select(d => $"NOT EXISTS (SELECT 1 FROM {d.Table} AS f WHERE f.{d.DigestColumn} = d.digest)")
+                .Distinct(StringComparer.Ordinal));
+            var gate = s_locks.GetOrAdd(dimTable, _ => new SemaphoreSlim(1, 1));
+            gate.Wait();
+            try
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = $"DELETE FROM {dimTable} AS d WHERE {unreferenced}";
+                removed += Convert.ToInt64(command.ExecuteNonQuery());
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        return removed;
+    }
+
+    /// <summary>
+    /// <see cref="RemoveUnreferenced"/> for a maintenance step that must not fail on it: logs the rows removed in one line, and a
+    /// failure as a warning, because an unused text left in the dimension costs space only and the next pass removes it. The caller
+    /// holds the store's write lock. Returns the rows removed, 0 after a failure.
+    /// </summary>
+    internal static long TryRemoveUnreferenced(DuckDBConnection connection, ILogger? logger, string after)
+    {
+        try
+        {
+            var removed = RemoveUnreferenced(connection);
+            logger?.LogInformation("Removed {Rows} unused query texts from the text table after {Step}", removed, after);
+            return removed;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Could not remove unused query texts from the text table after {Step}; they stay until the next pass", after);
+            return 0;
         }
     }
 
