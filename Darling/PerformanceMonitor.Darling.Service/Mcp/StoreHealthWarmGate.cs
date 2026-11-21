@@ -64,7 +64,7 @@ public sealed class StoreHealthWarmGate
                 {
                     /* The host is stopping before its pass started. */
                 }
-            });
+            }, stoppingToken);
             return _tail;
         }
     }
