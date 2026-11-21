@@ -703,8 +703,7 @@ WITH plan_agg AS
         AND   l.last_execution_time >= $2::timestamp
         AND   l.collection_time >= $5::timestamp
         AND   l.first_execution_time >= $4::timestamp
-"";
-
+";
 
     private const string PlanRegressionDailyTail = @"        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
         -- (an open day is built partially; a whole day's watermark is its next midnight), so the live half is the rest.
