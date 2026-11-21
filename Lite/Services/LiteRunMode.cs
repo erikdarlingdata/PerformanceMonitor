@@ -71,6 +71,21 @@ public sealed record LiteStartupPlan(bool Headless, bool Stop, bool PrintMcpToke
     public const int ExitInitFailed = 3;
 
     /// <summary>
+    /// #9197: the single-instance mutex could not be created or opened and no other instance is running, so nothing will ever
+    /// open. Both start modes end with <see cref="ExitInitFailed"/>, so a scheduled task sees a failure and its restart-on-failure
+    /// can fire. A start with a window first shows <paramref name="showDialog"/> with the reason, once, because the person at
+    /// the screen has no other way to learn why Lite closed. A headless start shows nothing: its reason goes to the log.
+    /// </summary>
+    /// <returns>The exit code for the start.</returns>
+    public int ExitCodeAfterOwnershipFailure(string reason, Action<string> showDialog)
+    {
+        if (!Headless)
+            showDialog(reason);
+
+        return ExitInitFailed;
+    }
+
+    /// <summary>
     /// What a failed initialization does. A start with a window shows the error dialog and stays open, so the person at the
     /// screen can read it. A headless start has no one to read a dialog, and a process that stays up with no listener would hold
     /// the single-instance mutex for good: <c>--stop</c> would find nobody, a second <c>--headless</c> start would exit, and a
@@ -332,6 +347,32 @@ public static class StopCommand
     {
         if (!Directory.Exists(logDirectory))
             return false;
+
+        AppLogger.FlushTo(logDirectory);
+        return true;
+    }
+}
+
+/// <summary>
+/// #9197: writes a failed start's reason to the Lite log before <see cref="AppLogger.Initialize"/> has run, which is when the
+/// single-instance check fails. Unlike <c>--stop</c>, which starts nothing and never creates the data folder, a failed start
+/// is worth a log folder: without one the failure is invisible to a scheduled task that only sees an exit code.
+/// </summary>
+public static class StartFailureLog
+{
+    /// <summary>Logs the reason at Error, and writes it with everything else buffered so far to <paramref name="logDirectory"/>.</summary>
+    /// <returns>True when the lines were written.</returns>
+    public static bool Write(string reason, string logDirectory)
+    {
+        AppLogger.Error("SingleInstance", $"Start failed: {reason}");
+        try
+        {
+            Directory.CreateDirectory(logDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
 
         AppLogger.FlushTo(logDirectory);
         return true;

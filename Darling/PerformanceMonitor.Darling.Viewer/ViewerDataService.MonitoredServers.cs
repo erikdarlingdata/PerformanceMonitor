@@ -315,7 +315,7 @@ GROUP BY s.server_id";
             var byId = servers.GroupBy(x => x.ServerId).ToDictionary(g => g.Key, g => g.First());
             await using var command = _dataSource.CreateCommand(SameMachineSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 if (byId.TryGetValue(reader.GetInt32(0), out var server))
@@ -368,7 +368,7 @@ GROUP BY s.server_id";
             var readsWebOrExpress = known >= AwsRdsWebOrExpressStoreSchemaVersion;
             await using var command = _dataSource.CreateCommand(readsWebOrExpress ? AwsRdsKindServersSql : AwsRdsServersSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 if (byId.TryGetValue(reader.GetInt32(0), out var matches))
@@ -427,7 +427,7 @@ GROUP BY s.server_id";
 
         await using var command = _dataSource.CreateCommand(ManagedServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverName = reader.GetString(1);
@@ -465,7 +465,7 @@ GROUP BY s.server_id";
         {
             await using var command = _dataSource.CreateCommand(ConfigSeededSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            var result = await command.ExecuteScalarAsync(cancellationToken);
+            var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             return result is true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -497,7 +497,7 @@ GROUP BY s.server_id";
 
         await using var command = _dataSource.CreateCommand(MonitoredServersSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             servers.Add(ReadMonitoredServerRowNoSecret(reader));
@@ -517,14 +517,14 @@ GROUP BY s.server_id";
             await using var noSecretCommand = _dataSource.CreateCommand(MonitoredServerByIdNoSecretSql);
             noSecretCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             noSecretCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            await using var noSecretReader = await noSecretCommand.ExecuteReaderAsync(cancellationToken);
+            await using var noSecretReader = await noSecretCommand.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             return await noSecretReader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(noSecretReader) : null;
         }
 
         await using var command = _dataSource.CreateCommand(MonitoredServerByIdSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRow(reader) : null;
     }
 
@@ -546,7 +546,7 @@ GROUP BY s.server_id";
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = readOnlyIntent });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = isPostgres });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = port });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(reader) : null;
     }
 
@@ -555,7 +555,7 @@ GROUP BY s.server_id";
     {
         await using var command = _dataSource.CreateCommand(MonitoredServersCountSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is null or DBNull ? 0 : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
@@ -585,7 +585,7 @@ GROUP BY s.server_id";
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         /* The row an edit rewrites is not a claimant of its own address. A refusal throws out of this block and
@@ -692,7 +692,7 @@ WHERE server_id = $1";
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });
             AddNullableText(command, row.EncryptedPassword);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (!await reader.ReadAsync(cancellationToken))
             {
                 /* No stored row: the upsert inserts, which is a new registration. */
@@ -821,7 +821,7 @@ WHERE server_id = $1";
             var candidateKey = StorageKeyOf(candidate);
             await using var definitions = new NpgsqlCommand(MonitoredServersSelectSql, connection, transaction);
             definitions.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            await using var reader = await definitions.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await definitions.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 var existing = ReadMonitoredServerRowNoSecret(reader);
@@ -854,7 +854,7 @@ WHERE server_id = $1";
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         if (await TakeIdentityLockAndFindClaimantAsync(connection, transaction, row, null, cancellationToken) is not null)
         {
@@ -896,7 +896,7 @@ WHERE server_id = $1";
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         /* A claimed address returns without committing: the transaction's disposal rolls back, which releases the
@@ -926,7 +926,7 @@ WHERE server_id = $1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             occupant = await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(reader) : null;
         }
 
@@ -972,7 +972,7 @@ WHERE server_id = $1";
     /// its old tags or schedule back.</summary>
     public async Task DeleteMonitoredServerAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql }.Concat(QueryTagSchema.ClearForServerSqls).Concat(CollectorScheduleSql.ClearForServerSqls))
         {

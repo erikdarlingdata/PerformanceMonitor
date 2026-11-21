@@ -156,7 +156,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstSampleTime, double SqlCpu, double? OtherCpu, double? TotalCpu)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)

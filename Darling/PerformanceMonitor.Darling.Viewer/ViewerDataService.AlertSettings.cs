@@ -256,7 +256,7 @@ ON CONFLICT (id) DO UPDATE SET
     {
         await using var command = _dataSource.CreateCommand(AlertSettingsSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         return await reader.ReadAsync(cancellationToken) ? ReadAlertSettingsRow(reader) : null;
     }
 

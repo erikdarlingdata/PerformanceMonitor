@@ -63,4 +63,14 @@ public sealed class AboutVersionTextTests
         var text = AboutVersionText.ForAssembly(typeof(AboutVersionText).Assembly);
         Assert.StartsWith("Version 3.", text);
     }
+
+    /// <summary>#9203: the web dashboard's build line is the service's own assembly version, in the words the Viewer's About uses for it.</summary>
+    [Fact]
+    public void The_web_build_line_is_the_service_assembly_version_in_the_about_wording()
+    {
+        var service = typeof(PerformanceMonitor.Darling.Service.DarlingCliCommands).Assembly;
+        var web = PerformanceMonitor.Darling.Service.DarlingCliCommands.BuildText();
+        Assert.Equal(AboutVersionText.ForAssembly(service), web);
+        Assert.StartsWith("Version " + PerformanceMonitor.Darling.Service.DarlingCliCommands.ProductVersion(), web);
+    }
 }

@@ -86,7 +86,7 @@ internal sealed class DarlingFrontDoorWebProxy
     private static readonly TimeSpan StoreFlagsKeep = TimeSpan.FromSeconds(30);
 
     /// <summary>What a store's <c>/api/session</c> said about how it takes changes. A null is a flag the store did not report.</summary>
-    private readonly record struct StoreFlags(bool? AdminWritesOff, bool? ManagedStore);
+    private readonly record struct StoreFlags(bool? AdminWritesOff, bool? ManagedStore, string? Build = null);
 
     internal DarlingFrontDoorWebProxy(
         IFrontDoorDirectory directory, DarlingFrontDoorWebSession session, TimeSpan peerTimeout, ILogger logger, TimeProvider? time = null,
@@ -230,6 +230,7 @@ internal sealed class DarlingFrontDoorWebProxy
             ["managed_store"] = false,
             ["admin_writes_off"] = false,
             ["front_door"] = true,
+            ["build"] = DarlingCliCommands.BuildText(),
         });
     }
 
@@ -239,8 +240,8 @@ internal sealed class DarlingFrontDoorWebProxy
 
     /// <summary>The store list with each store's health, and, where the store said so, its <c>admin_writes_off</c> and <c>managed_store</c>: the
     /// page takes both from the store in use, as it does from the store's own <c>/api/session</c> when it is not behind a front door, so a
-    /// store running with Admin writes off draws no Admin write controls and names the right switch. A store that is down or did not say has
-    /// no such key.</summary>
+    /// store running with Admin writes off draws no Admin write controls and names the right switch. Each entry also carries the store's
+    /// <c>service_build</c> (#9203) when it said one. A store that is down or did not say has no such key.</summary>
     private async Task StoresAsync(HttpContext context)
     {
         var states = _directory.Stores;
@@ -266,6 +267,12 @@ internal sealed class DarlingFrontDoorWebProxy
             if (flags[i].ManagedStore is { } managed)
             {
                 entry["managed_store"] = managed;
+            }
+
+            /* #9203: the store's own build, so a mixed-version setup shows. A store that did not say has no key, not "unknown". */
+            if (flags[i].Build is { } build)
+            {
+                entry["service_build"] = build;
             }
 
             stores.Add(entry);
@@ -313,7 +320,7 @@ internal sealed class DarlingFrontDoorWebProxy
                     using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linked.Token).ConfigureAwait(false));
                     if (document.RootElement.ValueKind == JsonValueKind.Object)
                     {
-                        flags = new StoreFlags(BoolOf(document.RootElement, "admin_writes_off"), BoolOf(document.RootElement, "managed_store"));
+                        flags = new StoreFlags(BoolOf(document.RootElement, "admin_writes_off"), BoolOf(document.RootElement, "managed_store"), BuildOf(document.RootElement));
                     }
                 }
 
@@ -329,6 +336,12 @@ internal sealed class DarlingFrontDoorWebProxy
         _storeFlags[store.Name] = (now, flags);
         return flags;
     }
+
+    /* The store's own `build` text from its /api/session, trimmed. Null when the store did not say (an older build) or said nothing. */
+    private static string? BuildOf(JsonElement root)
+        => root.TryGetProperty("build", out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
+            ? value.GetString()!.Trim()
+            : null;
 
     private static bool? BoolOf(JsonElement root, string name)
         => root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;

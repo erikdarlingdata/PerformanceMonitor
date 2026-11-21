@@ -254,7 +254,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(LatchTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
@@ -281,7 +281,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(LatchSnapshotSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* #3653 A7: the stored interval decides whether the two deltas are readable. 0 is the calculator's
@@ -311,7 +311,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(SpinlockTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
@@ -338,7 +338,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(SpinlockSnapshotSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* #3653 A7 — the same three-state read as the latch snapshot. */

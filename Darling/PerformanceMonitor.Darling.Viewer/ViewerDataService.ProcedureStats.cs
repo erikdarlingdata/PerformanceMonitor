@@ -286,7 +286,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
             command.Parameters.Add(databases.ExcludeParameter());
             AddHourlyCeilingParameter(command, ceiling);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 rows.Add(new ViewerProcedureStatsRow
@@ -356,7 +356,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(databases.ExcludeParameter());
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerProcedureStatsRow
@@ -418,7 +418,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(ProcedureStatsRunFactsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return CollectorRunFacts.None;
@@ -605,7 +605,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ProcedureStatsComparisonItem

@@ -120,7 +120,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(QueryStatsHistorySql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddItemWindowParameters(command, serverId, databaseName, queryHash, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerQueryStatsHistoryRow
@@ -259,7 +259,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = objectName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerProcedureStatsHistoryRow
@@ -344,7 +344,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ordered[0].CollectionTime, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ordered[^1].CollectionTime, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             runs.Add(new ViewerProcedureHistoryIdleRuns.Run(reader.GetDateTime(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1)));
@@ -457,7 +457,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerQueryStoreHistoryRow

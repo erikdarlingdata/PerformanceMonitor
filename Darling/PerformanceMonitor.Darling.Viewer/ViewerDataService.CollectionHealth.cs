@@ -337,7 +337,7 @@ public sealed partial class ViewerDataService
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 items.Add(new CollectionCaveatRow
@@ -499,7 +499,7 @@ public sealed partial class ViewerDataService
                 TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified),
             });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 items.Add(MapHealthRow(reader));
@@ -545,7 +545,7 @@ public sealed partial class ViewerDataService
                 TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified),
             });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 /* Ordinals 0, 4, 5 and 6 of the statement: collector_name, avg_duration_ms, max_duration_ms, p95_duration_ms. */
@@ -618,7 +618,7 @@ LIMIT 1";
                 /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
                 TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified),
             });
-            var value = await command.ExecuteScalarAsync(cancellationToken);
+            var value = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
             ApplyReadSource(rows, value as string);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -747,6 +747,8 @@ LIMIT 1";
     /// the others still waiting on it.</summary>
     private async Task<Dictionary<int, List<CollectorHealthRow>>> FetchFleetCollectionHealthByServerAsync()
     {
+        /* #9194: shared work, so it does not take the ambient token of whichever tab load started it. */
+        ViewerReadScope.Clear();
         /* #4999: the fleet's schedule rows, read once before the health statement's reader opens; each server's
            rows are stamped with the interval its collectors are scheduled at on THAT server, so the Overview cards
            and the status bar band them as the server's own Collection Health tab does. */
@@ -1065,7 +1067,7 @@ LIMIT 1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = CollectorDurationBucketMinutes(startUtc, endUtc) });
 
         var items = new List<CollectorDurationBucket>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* MAX and AVG read type-agnostically (an integer column's AVG is numeric); COUNT is bigint. The WHERE keeps NULL durations out,
@@ -1159,7 +1161,7 @@ LIMIT 1";
         });
 
         var items = new List<ManualPurgeRunRecord>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ManualPurgeRunRecord(
@@ -1177,7 +1179,7 @@ LIMIT 1";
     private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var items = new List<CollectionLogRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectionLogRow
