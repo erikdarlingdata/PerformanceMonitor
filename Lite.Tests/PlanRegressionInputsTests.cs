@@ -873,14 +873,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
         pass.InteractiveRead = true;
         pass.InteractiveFetches = new InteractivePlanFetchAllowance(3, TimeSpan.FromMilliseconds(400));
 
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source, planInputCache: cache).CollectFactsAsync(pass))
             .Single(f => f.Key == "PLAN_REGRESSION");
-        var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
 
-        /* The first fetch is cut at what the clock allows, well inside the 5 s a fetch may otherwise take. Its pair fails, and the
-           pairs after it find the clock spent, so they never fetch. All three stay unverified. */
-        Assert.True(elapsed < TimeSpan.FromSeconds(4), $"the read took {elapsed}");
+        /* The first fetch is cut at what the clock allows (400 ms here), not at the 5 s a fetch may otherwise take. Its pair fails, and
+           the pairs after it find the clock spent, so they never fetch. All three stay unverified. No assert is made on the read's own
+           time, so load cannot fail it. A fetch not cut to the clock would run its full 5 s, and the plan would then be set aside for
+           the hour as a fault of its own, which the last assert catches. */
         Assert.Single(source.Fetched);
         Assert.Equal(3, Convert.ToInt32(fact.Metadata["inputs_unverified_count"]));
         /* The clock cut that fetch, not a fault of the plan, so the plan is not set aside for the hour. */
