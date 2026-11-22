@@ -119,6 +119,32 @@ public sealed class RollupChunkVisibilityLiveTests
         return state;
     }
 
+    /// <summary>How long a test lets the horizon settle after it closed its own snapshot. A VACUUM's horizon also counts backends the test does not own
+    /// (for example a TimescaleDB launcher scan of <c>pg_database</c>, or an autovacuum worker, while other tests create scratch databases), so the pass that follows
+    /// the release can find the horizon held for a moment.</summary>
+    private static readonly TimeSpan HorizonWait = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Runs the step until a pass counts a chunk, for at most <see cref="HorizonWait"/>, and returns how many chunks it counted in all. A pass that marked
+    /// no page counts nothing and the chunk stays listed, so a retry is the step's own next hourly pass. Used only after the test closed its snapshot: the
+    /// pinned pass keeps one call and asserts 0.
+    /// </summary>
+    private static async Task<int> PassUntilCountedAsync(NpgsqlConnection c, ILogger? log, CancellationToken ct, Func<Func<TimeSpan>>? clock = null)
+    {
+        var counted = 0;
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            counted += await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, log, TimeSpan.Zero, clock?.Invoke(), ct);
+            if (counted > 0 || waited.Elapsed >= HorizonWait)
+            {
+                return counted;
+            }
+
+            await Task.Delay(250, ct);
+        }
+    }
+
     /// <summary>How many chunks the step's catalog read lists right now, with no minimum age.</summary>
     private static async Task<int> LaggingAsync(NpgsqlConnection c, CancellationToken ct)
     {
@@ -279,7 +305,7 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.Equal(0, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, cancellationToken: ct));
             Assert.Equal(0, (await DailyChunkAsync(c, ct)).AllVisible);
 
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(1, await PassUntilCountedAsync(c, null, ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             Assert.Equal(0, await HeapFetchesAsync(c, from, to, ct));
@@ -357,7 +383,7 @@ public sealed class RollupChunkVisibilityLiveTests
                 await tx.CommitAsync(ct);
             }
 
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(1, await PassUntilCountedAsync(c, null, ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             Assert.Equal(delayBefore, await ShowAsync(c, "vacuum_cost_delay", ct));
@@ -392,7 +418,7 @@ public sealed class RollupChunkVisibilityLiveTests
             /* The budget has time for the first vacuum and none after it. */
             var asked = 0;
             TimeSpan Clock() => asked++ == 0 ? TimeSpan.Zero : TimescaleSupport.RollupVacuumStepBudget;
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, Clock, ct));
+            Assert.Equal(1, await PassUntilCountedAsync(c, null, ct, () => { asked = 0; return Clock; }));
             var left = await LaggingAsync(c, ct);
             Assert.True(left >= lagging - 1 && left >= 1, $"{lagging} chunk(s) lagged and {left} still do after a one-vacuum pass");
 
@@ -400,7 +426,7 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.Equal(left, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
             for (var pass = 0; pass < 3 && await LaggingAsync(c, ct) > 0; pass++)
             {
-                Assert.True(await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct) > 0);
+                Assert.True(await PassUntilCountedAsync(c, null, ct) > 0);
             }
 
             Assert.Equal(0, await LaggingAsync(c, ct));
@@ -451,7 +477,7 @@ public sealed class RollupChunkVisibilityLiveTests
                 await Scalar<bool>(c, $"SELECT range_end < now() - interval '3 days' FROM timescaledb_information.chunks WHERE format('%I.%I', chunk_schema, chunk_name) = '{(await DailyChunkAsync(c, ct)).Name}'", ct),
                 "the seeded chunk's range ends inside a 3-day window, so it cannot be past it");
             Assert.Equal(1, await LaggingAsync(c, ct));
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(1, await PassUntilCountedAsync(c, null, ct));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
             bodySucceeded = true;
@@ -512,7 +538,7 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.Equal(stuck.LastVacuum, after.LastVacuum);
 
             /* The owner's step still takes the chunk. */
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, null, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(1, await PassUntilCountedAsync(c, null, ct));
             bodySucceeded = true;
         }
         finally
@@ -562,7 +588,7 @@ public sealed class RollupChunkVisibilityLiveTests
             await release!();
             release = null;
             var open = new CapturingTestLogger();
-            Assert.Equal(1, await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, open, TimeSpan.Zero, cancellationToken: ct));
+            Assert.Equal(1, await PassUntilCountedAsync(c, open, ct));
             Assert.Equal(1, open.CountAtLevel(LogLevel.Information));
             var settled = await DailyChunkAsync(c, ct);
             Assert.Equal(settled.Pages, settled.AllVisible);
