@@ -406,7 +406,7 @@ public sealed class DarlingMetricsHostTests : IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "darling-metrics-tls-" + Guid.NewGuid().ToString("N"));
 
-        public TlsFixture(bool usable = true)
+        public TlsFixture(bool usable = true, bool dnsNameOnly = false)
         {
             Directory.CreateDirectory(_dir);
             var pfx = Path.Combine(_dir, "web.pfx");
@@ -418,7 +418,10 @@ public sealed class DarlingMetricsHostTests : IDisposable
                 var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 var san = new SubjectAlternativeNameBuilder();
                 san.AddDnsName("localhost");
-                san.AddIpAddress(IPAddress.Loopback);
+                if (!dnsNameOnly)
+                {
+                    san.AddIpAddress(IPAddress.Loopback);
+                }
                 request.CertificateExtensions.Add(san.Build());
                 using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
                 File.WriteAllBytes(pfx, cert.Export(X509ContentType.Pkcs12, "hunter2"));
@@ -480,6 +483,51 @@ public sealed class DarlingMetricsHostTests : IDisposable
 
         Assert.True(host.IsListening);
         Assert.DoesNotContain(logger.Lines, l => l.Text.Contains("not loopback", StringComparison.Ordinal));
+    }
+
+    /// <summary>#9326: the metrics port has no Host allowlist, so a certificate whose names are all DNS names works when a scraper
+    /// reaches the port by that name. The start logs no warning about the bind address missing from the certificate.</summary>
+    [Fact]
+    public async Task DnsNameOnlyCertificate_OnTheDefaultListen_ServesHttpsWithoutAWarning()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var fixture = new TlsFixture(dnsNameOnly: true);
+        var port = DarlingHealthHostTests.FreePort();
+        var logger = new CapturingLogger();
+        await using var host = NewHost(logger, MetricsOn(port, FileToken, before: fixture.WebBlock));
+
+        await host.StartAsync(ct);
+
+        Assert.True(host.IsListening);
+        Assert.DoesNotContain(logger.Lines, l => l.Level >= LogLevel.Warning);
+
+        using var handler = new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, _, _, _) => true };
+        using var client = new HttpClient(handler);
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://127.0.0.1:{port}/metrics");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", GoodToken);
+        using var response = await client.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await host.StopAsync(ct);
+    }
+
+    /// <summary>#9326: a certificate on a wide bind with an empty allowFrom removes the plain-HTTP part of the warning and keeps the
+    /// allowFrom part: one Warning line, and it does not say the token crosses the network unencrypted.</summary>
+    [Fact]
+    public async Task WebCertificate_WideListenWithEmptyAllowFrom_WarnsAboutAllowFromOnly()
+    {
+        using var fixture = new TlsFixture();
+        var logger = new CapturingLogger();
+        await using var host = NewHost(
+            logger, MetricsOn(DarlingHealthHostTests.FreePort(), FileToken, listen: "0.0.0.0", before: fixture.WebBlock));
+
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(host.IsListening);
+        var warning = Assert.Single(logger.Lines, l => l.Level == LogLevel.Warning);
+        Assert.Contains("metrics.allowFrom", warning.Text, StringComparison.Ordinal);
+        Assert.Contains("token alone", warning.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("unencrypted", warning.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("plain HTTP", warning.Text, StringComparison.Ordinal);
     }
 
     /// <summary>#9326: a web.network.tls block that cannot be loaded keeps the metrics port off, with one Critical line naming the
