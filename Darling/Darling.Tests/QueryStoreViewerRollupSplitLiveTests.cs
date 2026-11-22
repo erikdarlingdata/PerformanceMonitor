@@ -352,7 +352,7 @@ ANALYZE {Wide};", ct);
         Assert.Equal(before.Lines, after.Lines);
         Assert.Equal(beforeOne.Lines, afterOne.Lines);
         /* The store has no health captures, so the edge margin is the full 26 hours. */
-        Assert.Contains("edge margin fell back to 26 h, one arm, index not built", before.Source, StringComparison.Ordinal);
-        Assert.Contains("edge margin fell back to 26 h, split arms", after.Source, StringComparison.Ordinal);
+        Assert.Contains("edge margin fell back to 26 h, span fell back to 24 h, one arm, index not built", before.Source, StringComparison.Ordinal);
+        Assert.Contains("edge margin fell back to 26 h, span fell back to 24 h, split arms", after.Source, StringComparison.Ordinal);
     }
 }

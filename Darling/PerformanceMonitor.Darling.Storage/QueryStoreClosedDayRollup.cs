@@ -417,6 +417,19 @@ SET clutter_built_at = built_at
 WHERE server_id = $1
   AND day_utc = $2;";
 
+    /// <summary>#9287: whether the day's clutter rows come from its newest build: its row exists, is not removed, and says so. Read before
+    /// <see cref="ClaimDaySql"/> moves <c>built_at</c>. $1 server_id, $2 day.</summary>
+    public const string HasClutterFromBuildSql = @"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM collect.query_store_closed_day_built AS b
+    WHERE b.server_id = $1
+      AND b.day_utc = $2
+      AND NOT b.removed
+      AND b.clutter_built_at = b.built_at
+);";
+
     /// <summary>Records how many interval rows the build read. $1 server_id, $2 day, $3 source_rows.</summary>
     public const string RecordSourceRowsSql = @"
 UPDATE collect.query_store_closed_day_built
@@ -537,10 +550,11 @@ WHERE NOT b.rebuild_needed
     /// days follow. $1 now, $2 retention days, $3 <see cref="CloseAfter"/>, $4 the cap. Servers are the
     /// enabled ones with an interval-table coverage claim, and a server's days start the day after its <c>filled_since</c>. Days run
     /// from the first day wholly inside retention (<see cref="FirstWholeDay"/>) through the newest closed day, above the server's newest removed day. A day is due when
-    /// it has no built row or its row is marked, or (#9148) its clutter rows do not come from its newest build.
+    /// it has no built row or its row is marked, or (#9148) its clutter rows do not come from its newest build. <c>clutter_only</c> is true
+    /// for a day due for that last reason alone: <see cref="PlanBuildsAsync"/> builds it only when raw holds the day whole.
     /// </summary>
     public static readonly string PlanSql = $@"
-SELECT s.server_id, d.day
+SELECT s.server_id, d.day, (b.server_id IS NOT NULL AND NOT b.rebuild_needed) AS clutter_only
 FROM
 (
     SELECT c.server_id, c.filled_since
@@ -995,6 +1009,7 @@ ORDER BY b.day_utc;";
         ArgumentNullException.ThrowIfNull(connection);
 
         var builds = new List<Build>();
+        var clutterOnly = new List<bool>();
         await using var command = new NpgsqlCommand(PlanSql, connection) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
@@ -1004,6 +1019,7 @@ ORDER BY b.day_utc;";
         while (await reader.ReadAsync(cancellationToken))
         {
             builds.Add(new Build(reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
+            clutterOnly.Add(reader.GetBoolean(2));
         }
 
         await reader.CloseAsync();
@@ -1011,10 +1027,29 @@ ORDER BY b.day_utc;";
         /* #9287: a day the purge may already have thinned (MayBeThinned) is never built, or rebuilt, from the interval table. A never-built one
            stays with the interval table. A built one keeps its rollup: its rebuild mark is cleared, so the reader keeps serving it. */
         var plan = new List<Build>(builds.Count);
-        foreach (var build in builds)
+        var floors = new Dictionary<int, DateTime?>();
+        for (var i = 0; i < builds.Count; i++)
         {
+            var build = builds[i];
             if (!MayBeThinned(build.Day, nowUtc, retentionDays))
             {
+                /* #9287: a built day due only because its clutter rows are not from its newest build is rebuilt only when raw holds the day
+                   whole. Otherwise the build would take no clutter from raw and the day's clutter would stay unserved, so it would be due
+                   again every tick. The floor is read once per server per tick. */
+                if (clutterOnly[i])
+                {
+                    if (!floors.TryGetValue(build.ServerId, out var floor))
+                    {
+                        floor = await ReadFloorAsync(connection, null, StatsFloorSql, build.ServerId, cancellationToken);
+                        floors[build.ServerId] = floor;
+                    }
+
+                    if (!StatsHoldDayWhole(floor, build.Day))
+                    {
+                        continue;
+                    }
+                }
+
                 plan.Add(build);
                 continue;
             }
@@ -1118,6 +1153,15 @@ WHERE s.server_id = $1;";
             await timeout.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* Read before the claim: the claim sets built_at, and the clutter rows are the previous build's only while this still holds. */
+        bool hadClutter;
+        await using (var had = new NpgsqlCommand(HasClutterFromBuildSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            had.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            had.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            hadClutter = await had.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
         await using (var claim = new NpgsqlCommand(ClaimDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             claim.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -1130,9 +1174,13 @@ WHERE s.server_id = $1;";
             }
         }
 
-        /* #9287: raw query_store_stats is purged sooner than the rollups. A day it no longer holds whole keeps the clutter rows an
-           earlier build took from it (none, for a day never built), and only the grid and the slicer are built again. */
-        var keepClutter = !StatsHoldDayWhole(await ReadFloorAsync(connection, transaction, StatsFloorSql, serverId, cancellationToken), day);
+        /* #9287: raw query_store_stats is purged sooner than the rollups. A day it no longer holds whole keeps the clutter rows its previous
+           build took from raw whole (and the stamp that says so), and only the grid and the slicer are built again. A day with no such rows
+           (never built, built before the clutter rollups, or its clutter not from its previous build) gets no clutter and no stamp, so it
+           stays unserved and the clutter route reads raw for it. */
+        var rawWhole = StatsHoldDayWhole(await ReadFloorAsync(connection, transaction, StatsFloorSql, serverId, cancellationToken), day);
+        var keepClutter = !rawWhole && hadClutter;
+        var buildClutter = rawWhole;
         await DeleteDayAsync(connection, transaction, serverId, day, cancellationToken, keepClutter);
 
         long sourceRows;
@@ -1154,7 +1202,7 @@ WHERE s.server_id = $1;";
            and rebuilds the day the way a late interval row does. */
         foreach (var sql in keepClutter
             ? new[] { RecordClutterBuiltSql }
-            : new[] { BuildClutterPlanDaySql, BuildClutterCollectionsDaySql, RecordClutterBuiltSql })
+            : buildClutter ? new[] { BuildClutterPlanDaySql, BuildClutterCollectionsDaySql, RecordClutterBuiltSql } : Array.Empty<string>())
         {
             await using var clutter = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             clutter.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });

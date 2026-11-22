@@ -341,6 +341,85 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
             MarkedSql + " AND day_utc = @day", ct, ("server_id", A), ("day", lateDay)));
     }
 
+    /// <summary>
+    /// #9287: a day's clutter rollup is served only when it was built from raw that held the day whole. Raw's oldest row is inside the day after
+    /// D, and D was never built, so its build takes no clutter from raw and must not stamp an empty rollup as built: the route reads raw for
+    /// D, the reply is the raw one, and the next tick neither builds D again nor plans it.
+    /// </summary>
+    [Fact]
+    public async Task ANeverBuiltDayRawNoLongerHoldsWhole_IsNotServedAsEmptyClutter_AndIsNotBuiltAgainEveryTick()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedServerAsync(store, A, E.AddDays(-10), 10, 4, 30, true, ct);
+        var fleet = new[] { A };
+        var w = new Window("reaches before the oldest raw row", E.AddDays(-10), E, null);
+        var d = E.AddDays(-9);
+        var dayKey = DateOnly.FromDateTime(d);
+        Assert.False(QueryStoreClosedDayRollup.MayBeThinned(dayKey, QueryStoreClosedDayRollupLiveTests.TickNow, Retention), "the day is in the margin zone, so the test proves nothing");
+
+        /* Raw's oldest row is a minute into the day after D: D and the day after it are not whole, the day after that is. */
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+            "DELETE FROM collect.query_store_stats WHERE server_id = @server_id AND collection_time < @cut", ct, ("server_id", A), ("cut", E.AddDays(-8).AddMinutes(1)));
+        Assert.False(QueryStoreClosedDayRollup.StatsHoldDayWhole(E.AddDays(-8).AddMinutes(1), dayKey), "raw holds the day whole, so the test proves nothing");
+        Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
+            "SELECT count(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey)));
+
+        await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct);
+
+        Assert.True(await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
+            "SELECT count(*) FROM collect.query_store_grid_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey)) > 0, "the day's grid rollup was not built");
+        Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
+            "SELECT count(*) FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey)));
+        Assert.False(Covers(await RouteAsync(store, fleet, w, ct), d), "the clutter route serves a day that was never built from whole raw");
+        Assert.Equal(Lines(await ReadRawAsync(store, fleet, w, ct)), Lines(await ReadAsync(store, fleet, w, ct)));
+
+        var builtAt = await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection,
+            "SELECT built_at FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey));
+        var next = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, QueryStoreClosedDayRollupLiveTests.TickNow.AddHours(1), Retention, NullLogger.Instance, ct);
+        Assert.Equal(0, next.Failed);
+        Assert.Equal(0, next.Built);
+        Assert.Equal(builtAt, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection,
+            "SELECT built_at FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey)));
+    }
+
+    /// <summary>
+    /// #9287: a marked day whose clutter rows came from its previous build, with raw's oldest row inside the day after it, keeps those rows when
+    /// it is built again and is still served as clutter, as collected.
+    /// </summary>
+    [Fact]
+    public async Task AMarkedDayWithClutterFromItsPreviousBuild_KeepsItWhenRawNoLongerHoldsTheDayWhole()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedServerAsync(store, A, E.AddDays(-10), 10, 4, 30, true, ct);
+        await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct);
+        var fleet = new[] { A };
+        var w = new Window("reaches before the oldest raw row", E.AddDays(-10), E, null);
+        var d = E.AddDays(-9);
+        var dayKey = DateOnly.FromDateTime(d);
+        var whole = Lines(await ReadAsync(store, fleet, w, ct));
+        Assert.True(Covers(await RouteAsync(store, fleet, w, ct), d), "the day is not served before the test starts");
+        var clutterRows = await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
+            "SELECT count(*) FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey));
+        Assert.True(clutterRows > 0, "the day has no clutter rows to keep");
+
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+            "DELETE FROM collect.query_store_stats WHERE server_id = @server_id AND collection_time < @cut", ct, ("server_id", A), ("cut", E.AddDays(-8).AddMinutes(1)));
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+            "UPDATE collect.query_store_closed_day_built SET rebuild_needed = true WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey));
+
+        var tick = await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct, QueryStoreClosedDayRollupLiveTests.TickNow.AddHours(1));
+
+        Assert.Equal(1, tick.Built);
+        Assert.Equal(clutterRows, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
+            "SELECT count(*) FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey)));
+        Assert.True(Covers(await RouteAsync(store, fleet, w, ct), d), "the day is no longer served as clutter");
+        Assert.Equal(whole, Lines(await ReadAsync(store, fleet, w, ct)));
+    }
+
     [Fact]
     public async Task ARawDayThatRetentionDropped_IsStillServedFromTheRollupAsCollected_WhetherRawNowStartsAtMidnightOrInsideADay()
     {
