@@ -355,7 +355,7 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
         await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
         await SeedServerAsync(store, A, E.AddDays(-10), 10, 4, 30, true, ct);
         var fleet = new[] { A };
-        var w = new Window("reaches before the oldest raw row", E.AddDays(-10), E, null);
+        var w = new Window("reaches before the oldest raw row", E.AddDays(-10).AddHours(-1), E, null);
         var d = E.AddDays(-9);
         var dayKey = DateOnly.FromDateTime(d);
         Assert.False(QueryStoreClosedDayRollup.MayBeThinned(dayKey, QueryStoreClosedDayRollupLiveTests.TickNow, Retention), "the day is in the margin zone, so the test proves nothing");
@@ -398,7 +398,7 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
         await SeedServerAsync(store, A, E.AddDays(-10), 10, 4, 30, true, ct);
         await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct);
         var fleet = new[] { A };
-        var w = new Window("reaches before the oldest raw row", E.AddDays(-10), E, null);
+        var w = new Window("reaches before the oldest raw row", E.AddDays(-10).AddHours(-1), E, null);
         var d = E.AddDays(-9);
         var dayKey = DateOnly.FromDateTime(d);
         var whole = Lines(await ReadAsync(store, fleet, w, ct));
