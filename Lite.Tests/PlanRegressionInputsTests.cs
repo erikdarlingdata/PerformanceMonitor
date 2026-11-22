@@ -896,7 +896,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
 
         var (background, backgroundPass) = await RunSharedAsync(source, cache);
         var fetches = source.Fetched.Count;
-        Assert.True(fetches > 0);
+        /* The background pass keeps its own budget: the three pairs need eight fetches, more than an interactive call's three. */
+        Assert.Equal(8, fetches);
         Assert.True(cache.Count > 0);
 
         var (interactive, interactivePass) = await RunSharedAsync(source, cache, interactive: true);
@@ -921,7 +922,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
     }
 
     [Fact]
-    public async Task TheFactsRead_AndTheCompareRead_EachMakeAtMostThreeFetches_WhereTheBackgroundCallDoesNot()
+    public async Task TheFactsRead_AndTheCompareRead_EachMakeAtMostThreeFetches_AndTheCompareSharesOneAllowanceAcrossItsTwoWindows()
     {
         var source = new FixturePlanSource();
         await SeedIssueCasesAsync(source);
@@ -939,11 +940,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
             ServerId, ServerName, PeriodEnd.AddHours(-hoursBack), PeriodEnd, PeriodEnd.AddHours(-hoursBack), PeriodEnd, interactive: true);
         Assert.Equal(3, source.Fetched.Count - before);
         Assert.NotEmpty(interactive.ComparisonFacts);
-
-        var background = new AnalysisService(_duckDb, new ServiceFetcher(source)) { MinimumDataHours = 0 };
-        before = source.Fetched.Count;
-        await background.ComparePeriodsAsync(ServerId, ServerName, PeriodEnd.AddHours(-hoursBack), PeriodEnd, PeriodEnd.AddHours(-hoursBack), PeriodEnd);
-        Assert.True(source.Fetched.Count - before > 3);
     }
 
     private sealed class ManualTime : TimeProvider
