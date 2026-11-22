@@ -454,6 +454,8 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         await DarlingPersonalTokenSignIn.DrainPendingAsync(Settings(), rig.OwnerSource, rig.Snapshot, pending, rig.Logger, TestContext.Current.CancellationToken);
 
         Assert.Equal(0, pending.Count);
+        /* The snapshot the failing one stood in for reloads on its own tick, and then shows the revoke. */
+        await rig.Snapshot.RefreshAsync(rig.OwnerSource, rig.Logger, TestContext.Current.CancellationToken);
         Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
     }
 
