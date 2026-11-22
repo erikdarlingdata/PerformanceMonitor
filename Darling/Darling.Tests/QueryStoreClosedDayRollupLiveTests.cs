@@ -216,6 +216,7 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
     /// the reader's freshness tests compare with.</summary>
     internal static async Task<QueryStoreClosedDayRollup.TickResult> TickAsync(Store store, int retentionDays, CancellationToken ct, DateTime? now = null, int? rawRetentionDays = null)
     {
+        QueryStoreClosedDayRollup.SetReadClockForTests(store.Connection.Database, now ?? TickNow, retentionDays);
         var result = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, now ?? TickNow, retentionDays, rawRetentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
         Assert.Equal(0, result.HoursFailed);
@@ -654,9 +655,9 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         await TickAsync(store, KeepEverything, ct);
         AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after the build");
 
-        /* Retention shorter than the 30-day window: the first day kept is the retention edge's date plus the margin. */
+        /* Retention shorter than the 30-day window: the first day kept is the retention edge's own date (#9287). */
         const int shortRetention = 20;
-        var firstKept = DateOnly.FromDateTime(TickNow.AddDays(-shortRetention)).AddDays(QueryStoreClosedDayRollup.GcMarginDays);
+        var firstKept = DateOnly.FromDateTime(TickNow.AddDays(-shortRetention));
         var lowered = await TickAsync(store, shortRetention, ct);
         Assert.True(lowered.DaysRemoved > 0, "lowering retention removed no day");
         Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
@@ -677,6 +678,170 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         Assert.Equal(0, raised.Built);
         Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(firstKept.ToDateTime(TimeOnly.MinValue), DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
         AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after retention was raised");
+    }
+
+    /// <summary>#9287: the retention edge the edge-day tests use: ten days before the tick's clock, at midnight.</summary>
+    private static readonly DateTime EdgeDay = TickNow.AddDays(-10);
+
+    private const string IntervalSumSql = "SELECT COALESCE(SUM(execution_count), 0)::bigint FROM collect.query_store_interval_wide WHERE server_id = @server_id AND COALESCE(interval_start_time_utc, collection_time) >= @from AND COALESCE(interval_start_time_utc, collection_time) < @to";
+    private const string RollupSumSql = "SELECT COALESCE(SUM(execution_count), 0)::bigint FROM collect.query_store_grid_daily WHERE server_id = @server_id AND day_utc = @day";
+
+    /// <summary>Gives <paramref name="day"/>'s rows from the first twenty queries a <c>first_execution_time</c> 25 hours before the day, as a
+    /// row with no interval start can have, so a purge on <c>first_execution_time</c> reaches them while the day is still inside retention.</summary>
+    private static Task KeyEarlyAsync(Store store, DateTime day, CancellationToken ct) => ExecuteAsync(store.Connection,
+        "UPDATE collect.query_store_interval_wide SET first_execution_time = @day - interval '25 hours' WHERE server_id = @server_id AND interval_start_time_utc >= @day AND interval_start_time_utc < @day + interval '1 day' AND query_id < 1020", ct,
+        ("server_id", ServerId), ("day", day));
+
+    /// <summary>The purge on <c>first_execution_time</c>: every row keyed before <paramref name="edge"/> goes.</summary>
+    private static Task PurgeBelowAsync(Store store, DateTime edge, CancellationToken ct) => ExecuteAsync(store.Connection,
+        "DELETE FROM collect.query_store_interval_wide WHERE server_id = @server_id AND first_execution_time < @edge", ct,
+        ("server_id", ServerId), ("edge", edge));
+
+    /// <summary>
+    /// #9287: a built day one or two days inside the retention edge stays served from its rollup after the purge has dropped the raw rows
+    /// it keyed below the edge. The read answers with the day's as-collected totals. The old margin removed such a day from the rollups.
+    /// </summary>
+    [Fact]
+    public async Task ABuiltDayNearTheRetentionEdge_StaysServedFromItsRollup_AfterThePurgeDroppedItsEarlyKeyedRows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 edge-day live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        var nearEdge = EdgeDay.AddDays(1);
+        await KeyEarlyAsync(store, nearEdge, ct);
+        var collected = await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", EdgeDay), ("to", DataEnd));
+
+        await TickAsync(store, KeepEverything, ct);
+        var collectedForTheDay = await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", nearEdge), ("to", nearEdge.AddDays(1)));
+        Assert.Equal(collectedForTheDay, await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", DateOnly.FromDateTime(nearEdge))));
+
+        await PurgeBelowAsync(store, EdgeDay, ct);
+        var raw = await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", EdgeDay), ("to", DataEnd));
+        Assert.True(raw < collected, "the purge dropped no row of the day, so the test proves nothing");
+
+        /* The next tick removes nothing of the day and builds nothing of it again. */
+        await TickAsync(store, 10, ct);
+        var served = await ServedAsync(store, EdgeDay, DataEnd, ct);
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(EdgeDay, DataEnd), served);
+        /* The rollup still holds the day as collected, though the interval table no longer does. */
+        Assert.Equal(collectedForTheDay, await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", DateOnly.FromDateTime(nearEdge))));
+    }
+
+    /// <summary>#9287: a rollup day past the retention edge that the cleanup has not removed yet is never taken by a read.</summary>
+    [Fact]
+    public async Task ARollupDayPastTheRetentionEdge_IsNeverServed_WhenTheCleanupHasNotRunYet()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 edge-day live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        await TickAsync(store, KeepEverything, ct);
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(DataEnd.AddDays(-30), DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
+
+        /* The same rollup rows, read at a clock whose ten-day retention starts at the edge: no GC ran, and the days before it are not taken. */
+        QueryStoreClosedDayRollup.SetReadClockForTests(store.Connection.Database, TickNow, 10);
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(EdgeDay, DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
+
+        /* An edge that falls inside a day leaves that day out as well: only whole days inside retention are served. */
+        QueryStoreClosedDayRollup.SetReadClockForTests(store.Connection.Database, TickNow.AddHours(5), 10);
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(EdgeDay.AddDays(1), DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
+    }
+
+    /// <summary>#9287: the cleanup keeps a day wholly inside retention that the old four-day margin removed, and removes a day wholly past the edge.</summary>
+    [Fact]
+    public async Task TheCleanup_KeepsADayWhollyInsideRetention_AndRemovesADayWhollyPastTheEdge()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 edge-day live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        await TickAsync(store, KeepEverything, ct);
+        var removed = await TickAsync(store, 10, ct);
+        Assert.True(removed.DaysRemoved > 0, "lowering retention removed no day");
+
+        var edge = DateOnly.FromDateTime(EdgeDay);
+        Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_grid_daily WHERE server_id = @server_id AND day_utc < @edge", ct, ("server_id", ServerId), ("edge", edge)));
+        for (var offset = 0; offset < 4; offset++)
+        {
+            Assert.True(await ScalarAsync<long>(store.Connection,
+                "SELECT COUNT(*) FROM collect.query_store_grid_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", ServerId), ("day", edge.AddDays(offset))) > 0,
+                $"the day {offset} day(s) inside the edge was removed");
+        }
+
+        Assert.Equal(edge.AddDays(-1).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync<string>(store.Connection,
+            "SELECT CAST(max(day_utc) AS text) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND removed", ct, ("server_id", ServerId)));
+    }
+
+    /// <summary>
+    /// #9287: a built day the purge may already have thinned (<see cref="QueryStoreClosedDayRollup.MayBeThinned"/>) is never rebuilt from the
+    /// interval table, whatever the oldest row the table holds says. The purge dropped the rows keyed before the day, the oldest row left
+    /// sits two hours before the day starts (which a floor test would call a whole day), and a rebuild mark is set. The tick keeps the
+    /// rollup as collected, clears the mark, and the read still takes the day from it. A day never built stays with the interval table.
+    /// </summary>
+    [Fact]
+    public async Task ABuiltDayInTheMarginZone_IsNeverRebuiltThinner_WhateverTheOldestRowSays_AndANeverBuiltOneIsNotBuilt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 edge-day live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        var day = EdgeDay.AddDays(1);
+        var dayKey = DateOnly.FromDateTime(day);
+        Assert.True(QueryStoreClosedDayRollup.MayBeThinned(dayKey, TickNow, 10), "the day is outside the margin zone, so the test proves nothing");
+        await KeyEarlyAsync(store, day, ct);
+        await TickAsync(store, KeepEverything, ct);
+        var built = await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", dayKey));
+
+        /* The day was built while it was well inside retention. The purge takes its early-keyed rows and leaves the table's oldest row two hours before the day starts. */
+        await PurgeBelowAsync(store, day.AddHours(-2), ct);
+        Assert.True(await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", day), ("to", day.AddDays(1))) < built, "the purge dropped no row of the day");
+        var oldest = await ScalarAsync<DateTime>(store.Connection, "SELECT MIN(first_execution_time) FROM collect.query_store_interval_wide WHERE server_id = @server_id", ct, ("server_id", ServerId));
+        Assert.True(oldest >= day.AddHours(-2) && oldest < day, $"the oldest row is at {oldest:O}, not just before the day");
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET rebuild_needed = true WHERE server_id = @server_id AND day_utc = @day", ct,
+            ("server_id", ServerId), ("day", dayKey));
+        /* A day in the zone with no built row at all. */
+        var neverBuilt = DateOnly.FromDateTime(EdgeDay);
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", ServerId), ("day", neverBuilt));
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_grid_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", ServerId), ("day", neverBuilt));
+
+        await TickAsync(store, 10, ct);
+
+        Assert.Equal(built, await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", dayKey)));
+        Assert.False(await ScalarAsync<bool>(store.Connection,
+            "SELECT rebuild_needed FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", ServerId), ("day", dayKey)));
+        Assert.Equal(0L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", ServerId), ("day", neverBuilt)));
+        var served = await ServedAsync(store, EdgeDay, DataEnd, ct);
+        Assert.True(served is { } run && run.Start <= day && run.End > day, "the day is no longer served from its rollup");
+        var source = QueryStoreClosedDayRollup.DescribeSource(day, day.AddDays(2), served, QueryStoreClosedDayRollup.SourceReason.Served,
+            QueryStoreClosedDayRollup.HoldsEdgeDays(store.Connection, served));
+        Assert.Contains(QueryStoreClosedDayRollup.EdgeDaysNote, source.Describe(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#9287: a day outside the margin zone is rebuilt as before, and a run of such days alone does not say "edge days".</summary>
+    [Fact]
+    public async Task ABuiltDayOutsideTheMarginZone_IsRebuiltFromTheIntervalTable_AndItsRunSaysNothingOfEdgeDays()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 edge-day live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+
+        var day = EdgeDay.AddDays(3);
+        var dayKey = DateOnly.FromDateTime(day);
+        Assert.False(QueryStoreClosedDayRollup.MayBeThinned(dayKey, TickNow, 10), "the day is inside the margin zone, so the test proves nothing");
+        await TickAsync(store, 10, ct);
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_interval_wide WHERE server_id = @server_id AND interval_start_time_utc >= @day AND interval_start_time_utc < @day + interval '1 day' AND execution_count > 0 AND (query_id % 2) = 0", ct,
+            ("server_id", ServerId), ("day", day));
+        var remaining = await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", day), ("to", day.AddDays(1)));
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_built SET rebuild_needed = true WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", ServerId), ("day", dayKey));
+
+        await TickAsync(store, 10, ct);
+
+        Assert.Equal(remaining, await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", dayKey)));
+        var served = await ServedAsync(store, day, DataEnd, ct);
+        Assert.False(QueryStoreClosedDayRollup.HoldsEdgeDays(store.Connection, served));
     }
 
     /// <summary>
