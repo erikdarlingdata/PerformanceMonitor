@@ -85,6 +85,7 @@ To remove the service, run `uninstall-darling.ps1` from the install folder. The 
 | [Performance impact](docs/performance-impact.md) | Load on monitored servers, and local resources for Lite |
 | [Troubleshooting](docs/troubleshooting.md) | Common problems for Lite and Darling |
 | [Building from source](docs/building-from-source.md) | Folder structure and build commands |
+| [Code map](docs/CODEMAP.md) | Where each part of the code lives and which files to open first, for new contributors |
 | [Support and sponsorship](docs/support.md) | Commercial support tiers and sponsorship |
 | [Third-party components](docs/third-party-components.md) | Third-party components and their licenses |
 | [Changelog](CHANGELOG.md) | Changes in each release |
