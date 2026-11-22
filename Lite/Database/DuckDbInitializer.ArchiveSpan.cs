@@ -56,7 +56,7 @@ public partial class DuckDbInitializer
         var started = tally is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            return await ReadArchiveSpanAsync(table, timeColumn, cancellationToken, limiter, open);
+            return await ReadArchiveSpanAsync(table, timeColumn, limiter, open, cancellationToken);
         }
         finally
         {
@@ -65,8 +65,8 @@ public partial class DuckDbInitializer
     }
 
     private async Task<ArchiveSpan?> ReadArchiveSpanAsync(
-        string table, string timeColumn, CancellationToken cancellationToken,
-        ArchiveReadLimiter? limiter, Func<ReadPhaseTimer?, CancellationToken, Task<LockedConnection>>? open)
+        string table, string timeColumn,
+        ArchiveReadLimiter? limiter, Func<ReadPhaseTimer?, CancellationToken, Task<LockedConnection>>? open, CancellationToken cancellationToken)
     {
         if (ArchiveViewDedups(table))
         {
