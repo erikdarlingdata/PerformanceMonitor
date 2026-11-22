@@ -760,7 +760,7 @@
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.140.0, )",
+          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.154.0, )",
           "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
@@ -833,9 +833,9 @@
       },
       "Microsoft.SqlServer.TransactSql.ScriptDom": {
         "type": "CentralTransitive",
-        "requested": "[180.140.0, )",
-        "resolved": "180.140.0",
-        "contentHash": "qdSHJPR3t2mqLcYQ31E9hBhQfuHo34jOtMEOrCKHBNuV+IShlLfDR8/tDzXR7MeI2ZhlZ+8wCVRMACifoAepAA=="
+        "requested": "[180.154.0, )",
+        "resolved": "180.154.0",
+        "contentHash": "epYZJ+0ZSx/u1KZwF8e8wfqPO3KS67EijVJi+EgveLuQaU3a4GRNP5R6kOUrGBv8K+kDpAtCcGBjn5c9NwWW6A=="
       }
     },
     "net10.0-windows7.0/win-arm64": {
