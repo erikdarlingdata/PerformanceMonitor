@@ -267,9 +267,12 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
                    run must happen: a missing extension fails here, it does not skip. */
                 var ensured = await StoreStatementStats.EnsureAsync(connection, "config", Array.Empty<string>(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
                 Assert.Equal(StoreStatementStats.SetupOutcome.Ready, ensured);
-                for (var i = 0; i < 3; i++)
+                /* Run many times, like the history statement below (#9296): another live class forces evictions on this shared
+                   cluster, and the extension drops the least-used entries first, so a statement that ran 3 times was gone from
+                   the table when the bundle read it. 25 runs of 0.1 s still rank it first by total time in this database. */
+                for (var i = 0; i < 25; i++)
                 {
-                    await using var statement = new NpgsqlCommand($"SELECT '{ServerOne}' AS {DbOne}, '{RemovedServer}' AS lit_col, pg_sleep(0.3)", connection);
+                    await using var statement = new NpgsqlCommand($"SELECT '{ServerOne}' AS {DbOne}, '{RemovedServer}' AS lit_col, pg_sleep(0.1)", connection);
                     await statement.ExecuteNonQueryAsync(ct);
                 }
 
