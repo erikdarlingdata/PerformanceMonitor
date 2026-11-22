@@ -916,4 +916,167 @@ public sealed class QueryTagMapBuilderLiveTests
 
         return (int)method.Invoke(null, sentinels)!;
     }
+
+    /* #9308: the extend cursor survives a service start. A key whose sightings are gone leaves the map only at a REBUILD (an
+       extend never deletes), so whether a fresh builder kept or dropped it says which path its first pass took. */
+    private static async Task<int> MapWithAKeyThatOnlyARebuildWouldDropAsync(Env env)
+    {
+        int tag = await NewTagAsync(env, "Reports");
+        await NewRuleAsync(env, tag, "application", "Report*");
+        await SightAsync(env, HashSightings("0xAA", "Report"), HashSightings("0xBB", "Report"));
+        Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source)));
+        Assert.Equal(2, (await MapAsync(env)).Count);
+
+        /* Retention removes 0xAA's sightings after the last pass. */
+        await ExecAsync(env, "DELETE FROM collect.query_tag_sightings WHERE key = '0xAA'");
+        return tag;
+    }
+
+    [Fact]
+    public async Task AFreshBuilderOverACurrentMap_ExtendsFromTheStoredCursor_AndPicksUpASightingWrittenAfterTheLastPass()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            await SightAsync(env, HashSightings("0xCC", "Report"));
+
+            /* A new process: no in-memory cursor. */
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source)));
+
+            Assert.Equal(new[] { $"hash|0xAA|{tag}|rule", $"hash|0xBB|{tag}|rule", $"hash|0xCC|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AFreshBuilder_RebuildsWhenTheStoredCursorWasBuiltAtAnOlderRulesVersion()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            var stored = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+            await QueryTagMapStore.UpsertMapAsync(env.Store, Server, Array.Empty<QueryTagMapRow>(), env.Ct, stored with { RulesVersion = stored.RulesVersion - 1 });
+
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source)));
+
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AFreshBuilder_RebuildsWhenBuiltVersionIsBehindRulesVersion()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+
+            /* Any tag write bumps rules_version, so the map is behind and every server rebuilds. */
+            await NewTagAsync(env, "Other");
+            Assert.NotEqual(
+                await ScalarAsync(env, "SELECT rules_version FROM config.query_tag_state"),
+                await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source)));
+
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AFreshBuilder_RebuildsWhenTheStoredCursorIsOverADayOld_AndExtendsWhenItIsJustUnderOne()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            var stored = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+            DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);
+
+            await QueryTagMapStore.UpsertMapAsync(
+                env.Store, Server, Array.Empty<QueryTagMapRow>(), env.Ct, stored with { Since = clock - QueryTagMapBuilder.MaxStoredCursorAge + TimeSpan.FromMinutes(5) });
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source)));
+            Assert.Equal(2, (await MapAsync(env)).Count);
+
+            await QueryTagMapStore.UpsertMapAsync(
+                env.Store, Server, Array.Empty<QueryTagMapRow>(), env.Ct, stored with { Since = clock - QueryTagMapBuilder.MaxStoredCursorAge - TimeSpan.FromMinutes(5) });
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source)));
+
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AFreshBuilder_ExtendsFromACursorTheLastExtendMoved_NotFromTheRebuildsCursor()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            var afterRebuild = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+
+            var first = new QueryTagMapBuilder(env.Source);
+            Assert.True(await PassAsync(env, first));
+            await SightAsync(env, HashSightings("0xCC", "Report"));
+            Assert.True(await PassAsync(env, first));
+
+            var afterExtends = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+            Assert.True(afterExtends.Since > afterRebuild.Since);
+            Assert.Equal(afterRebuild.RulesVersion, afterExtends.RulesVersion);
+            Assert.Equal(new[] { $"hash|0xAA|{tag}|rule", $"hash|0xBB|{tag}|rule", $"hash|0xCC|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AMapWriteThatRollsBack_LeavesTheStoredCursorWhereItWas_ForARebuildAndForAnExtend()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await NewTagAsync(env, "Reports");
+            var original = new QueryTagMapStoredCursor(1, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), "hash", "0xAA");
+            await QueryTagMapStore.UpsertMapAsync(env.Store, Server, Array.Empty<QueryTagMapRow>(), env.Ct, original);
+            var moved = original with { RulesVersion = 2, Since = original.Since.AddHours(1), AfterKey = "0xZZ" };
+
+            /* The second row names a tag that does not exist, so the write fails inside its transaction. */
+            var bad = new[]
+            {
+                new QueryTagMapRow("hash", "0xBB", tag, "rule", null, "application", "Report"),
+                new QueryTagMapRow("hash", "0xCC", tag + 1000, "rule", null, "application", "Report"),
+            };
+
+            await Assert.ThrowsAsync<PostgresException>(() => QueryTagMapStore.ReplaceMapAsync(env.Store, Server, bad, env.Ct, moved));
+            Assert.Equal(original, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+
+            await Assert.ThrowsAsync<PostgresException>(() => QueryTagMapStore.UpsertMapAsync(env.Store, Server, bad, env.Ct, moved));
+            Assert.Equal(original, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+            Assert.Empty(await MapAsync(env));
+
+            /* And a write that succeeds moves it. */
+            await QueryTagMapStore.UpsertMapAsync(env.Store, Server, bad.Take(1).ToList(), env.Ct, moved);
+            Assert.Equal(moved, await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+        });
+    }
+
+    [Fact]
+    public async Task ARebuildAllPass_DropsTheStoredCursorOfAServerOutsideThePass_SoItRebuildsWhenItReturns()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int other = 7302;
+            int tagA = await NewTagAsync(env, "SetA");
+            int tagB = await NewTagAsync(env, "SetB");
+            int ruleId = await NewRuleAsync(env, tagA, "application", "Report*");
+            await SightAsync(env, HashSightings("0x01", "Report"));
+            await SightOnAsync(env, other, HashSightings("0x02", "Report"));
+            Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(new[] { Server, other }, env.Ct));
+            Assert.NotNull(await QueryTagMapStore.ReadCursorAsync(env.Store, other, env.Ct));
+
+            /* The rule changes while the other server is out of the pass. */
+            await ExecAsync(env, $"UPDATE config.query_tag_rules SET tag_id = {tagB} WHERE id = {ruleId}");
+            Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(new[] { Server }, env.Ct));
+
+            Assert.Null(await QueryTagMapStore.ReadCursorAsync(env.Store, other, env.Ct));
+            Assert.NotNull(await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct));
+
+            /* A new process, rules unchanged since: the returning server has no stored cursor, so it rebuilds under set B. */
+            Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(new[] { Server, other }, env.Ct));
+            Assert.Equal($"0x02|{tagB}", await MapOfAsync(env, other));
+        });
+    }
 }
