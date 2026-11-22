@@ -412,7 +412,7 @@ public static class PayloadDimensions
     /// holds a stale-but-live stamp is refreshing it, or a transaction that rolls back leaves it stale for the next cycle,
     /// far inside the GC's margin. The stamp insert takes a key share lock on the dimension row through the foreign key, so the
     /// adopt step tests the row with <c>FOR KEY SHARE SKIP LOCKED</c> and leaves one a GC batch holds, which would otherwise wait on
-    /// it and deadlock (#9304); the GC adopts that row's stamp itself on its next pass. The GC cannot be the holder of a row a live digest owns: it only reaches stamps older
+    /// it and deadlock (#9304); the GC adopts that row's stamp itself on its next pass. The stamp test sits behind <c>OFFSET 0</c>, so the planner cannot push the locking test below it and lock the wide row of every wanted digest: only a digest with no stamp row is locked (#9304). The GC cannot be the holder of a row a live digest owns: it only reaches stamps older
     /// than the dimension cutoff of <c>DarlingRetention.ComputeDimensionCutoff</c>, at least the guard plus one day behind. A skipped row
     /// correctly counts as present. A stamp row that does not exist yet is inserted with <c>DO NOTHING</c>, which takes no
     /// lock either.</para>
@@ -443,10 +443,12 @@ public static class PayloadDimensions
             $"    RETURNING 1),\n" +
             $"adopted AS (\n" +
             $"    INSERT INTO {seen} ({DigestColumn}, {LastSeenColumn})\n" +
-            $"    SELECT w.{DigestColumn}, $2 FROM want w\n" +
-            $"    WHERE NOT EXISTS (SELECT 1 FROM {seen} s WHERE s.{DigestColumn} = w.{DigestColumn})\n" +
-            $"    AND   EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = w.{DigestColumn} FOR KEY SHARE SKIP LOCKED)\n" +
-            $"    ORDER BY w.{DigestColumn}\n" +
+            $"    SELECT m.{DigestColumn}, $2\n" +
+            $"    FROM (SELECT w.{DigestColumn} FROM want w\n" +
+            $"          WHERE NOT EXISTS (SELECT 1 FROM {seen} s WHERE s.{DigestColumn} = w.{DigestColumn})\n" +
+            $"          OFFSET 0) AS m\n" +
+            $"    WHERE EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = m.{DigestColumn} FOR KEY SHARE SKIP LOCKED)\n" +
+            $"    ORDER BY m.{DigestColumn}\n" +
             $"    ON CONFLICT ({DigestColumn}) DO NOTHING\n" +
             $"    RETURNING 1),\n" +
             $"widened AS (\n" +
