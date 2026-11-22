@@ -1223,6 +1223,9 @@ public sealed class QueryTagMapBuilderLiveTests
             int ruleId = await NewRuleAsync(env, tagA, "application", "Report*");
             await SightAsync(env, HashSightings("0x01", "Report"));
             await SightOnAsync(env, other, HashSightings("0x02", "Report"));
+
+            /* Sighted long ago, so the next extend's two-minute overlap does not re-resolve it: only a rebuild can retag it. */
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = last_seen - interval '1 hour'");
             var both = new[] { Server, other };
             var builder = new QueryTagMapBuilder(env.Source);
             Assert.True(await builder.RunMapPassAsync(both, env.Ct));
