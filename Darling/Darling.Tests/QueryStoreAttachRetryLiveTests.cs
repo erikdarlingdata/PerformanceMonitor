@@ -26,6 +26,9 @@ namespace Darling.Tests;
 /// sleep: the hook runs before every attempt, so a writer is started before an attempt and committed before a later one.
 /// The table is a small three-leaf list-partitioned one in its own database, the lock_timeout is 200 ms and the backoff is zero.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to
+   CREATE and DROP its own database through ScratchPostgres and works entirely inside it, so it cannot race
+   live collection. */
 public sealed class QueryStoreAttachRetryLiveTests
 {
     private const string Parent = "public.t9313";
