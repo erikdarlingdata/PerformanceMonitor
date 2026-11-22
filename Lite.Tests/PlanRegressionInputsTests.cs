@@ -767,9 +767,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
     /* #9195: the judged plan pairs are kept across passes, so the same plans are not fetched from the monitored server
        every pass. Each pass below is a new collector over one shared cache, as the scheduler's passes are. */
 
-    private async Task<(Fact? Fact, AnalysisContext Pass)> RunSharedAsync(FixturePlanSource source, PlanInputOutcomeCache cache)
+    private async Task<(Fact? Fact, AnalysisContext Pass)> RunSharedAsync(
+        FixturePlanSource source, PlanInputOutcomeCache cache, bool interactive = false)
     {
         var pass = NewContext();
+        pass.InteractiveRead = interactive;
         var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source, planInputCache: cache).CollectFactsAsync(pass))
             .SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
         return (fact, pass);
@@ -795,6 +797,96 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
         Assert.Equal(first.Metadata["worst_input_basis"], second.Metadata["worst_input_basis"]);
         Assert.Equal(first.Metadata["worst_query_id"], second.Metadata["worst_query_id"]);
         Assert.Equal(firstPass.PlanRegressionOffenders, secondPass.PlanRegressionOffenders);
+    }
+
+    /* #9195: an interactive read (get_analysis_facts, compare_analysis) fetches no plan. It answers from the outcomes a
+       background pass cached, and a candidate with no cached answer stays in the fact, counted unverified. */
+
+    [Fact]
+    public async Task AnInteractiveRead_OverAnEmptyCache_MakesNoFetch_AndKeepsTheUncachedCandidatesUnverified()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+
+        var (fact, pass) = await RunSharedAsync(source, new PlanInputOutcomeCache(), interactive: true);
+
+        Assert.Empty(source.Fetched);
+        /* The two false alarms the read alone decides (a recompile statement, a plan that only returns more) are still left
+           out. The three that need their plans stay, none of them checked. */
+        Assert.Equal(2, Convert.ToInt32(fact!.Metadata["cross_input_excluded_count"]));
+        Assert.Equal(3, Convert.ToInt32(fact.Metadata["offender_count"]));
+        Assert.Equal(3, Convert.ToInt32(fact.Metadata["inputs_unverified_count"]));
+        Assert.Equal(3, pass.PlanRegressionOffenders!.Count);
+    }
+
+    [Fact]
+    public async Task ABackgroundPass_StillFetches_AndFillsTheCacheAnInteractiveReadAnswersFrom()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        var cache = new PlanInputOutcomeCache();
+
+        var (background, backgroundPass) = await RunSharedAsync(source, cache);
+        var fetches = source.Fetched.Count;
+        Assert.True(fetches > 0);
+        Assert.True(cache.Count > 0);
+
+        var (interactive, interactivePass) = await RunSharedAsync(source, cache, interactive: true);
+
+        Assert.Equal(fetches, source.Fetched.Count);
+        Assert.Equal(background!.Metadata["offender_count"], interactive!.Metadata["offender_count"]);
+        Assert.Equal(background.Metadata["cross_input_excluded_count"], interactive.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(background.Metadata["inputs_unverified_count"], interactive.Metadata["inputs_unverified_count"]);
+        Assert.Equal(background.Metadata["worst_input_basis"], interactive.Metadata["worst_input_basis"]);
+        Assert.Equal(background.Metadata["worst_query_id"], interactive.Metadata["worst_query_id"]);
+        Assert.Equal(backgroundPass.PlanRegressionOffenders, interactivePass.PlanRegressionOffenders);
+    }
+
+    [Fact]
+    public async Task AnInteractiveRead_DoesNotSpendOrFillTheCache_SoTheNextBackgroundPassStillFetches()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        var cache = new PlanInputOutcomeCache();
+
+        await RunSharedAsync(source, cache, interactive: true);
+        Assert.Equal(0, cache.Count);
+
+        var (fact, _) = await RunSharedAsync(source, cache);
+
+        Assert.NotEmpty(source.Fetched);
+        Assert.Equal(0, Convert.ToInt32(fact!.Metadata["inputs_unverified_count"]));
+    }
+
+    /// <summary>The plan source handed to an <see cref="AnalysisService"/>, which takes it as its plan fetcher.</summary>
+    private sealed class ServiceFetcher(FixturePlanSource source) : IPlanFetcher, IQueryStorePlanSource
+    {
+        public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+
+        public Task<string?> FetchQueryStorePlanXmlAsync(int serverId, string databaseName, long planId, CancellationToken cancellationToken) =>
+            source.FetchQueryStorePlanXmlAsync(serverId, databaseName, planId, cancellationToken);
+    }
+
+    [Fact]
+    public async Task TheFactsRead_AndTheCompareRead_FetchNoPlan_WhereTheBackgroundCallDoes()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        var service = new AnalysisService(_duckDb, new ServiceFetcher(source)) { MinimumDataHours = 0 };
+        var hoursBack = 4;
+
+        var (facts, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack, PeriodEnd);
+        Assert.Empty(source.Fetched);
+        Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
+
+        var interactive = await service.ComparePeriodsAsync(
+            ServerId, ServerName, PeriodStart.AddHours(-4), PeriodStart, PeriodStart, PeriodEnd, interactive: true);
+        Assert.Empty(source.Fetched);
+        Assert.NotEmpty(interactive.ComparisonFacts);
+
+        await service.ComparePeriodsAsync(ServerId, ServerName, PeriodStart.AddHours(-4), PeriodStart, PeriodStart, PeriodEnd);
+        Assert.NotEmpty(source.Fetched);
     }
 
     private sealed class ManualTime : TimeProvider

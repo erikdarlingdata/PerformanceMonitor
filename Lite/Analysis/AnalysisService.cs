@@ -633,7 +633,9 @@ public class AnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            /* #9195: get_analysis_facts is an interactive read. The plan check answers from what the background pass cached and fetches no plan. */
+            InteractiveRead = true
         };
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
@@ -719,12 +721,19 @@ public class AnalysisService
     /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
     /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
     /// the facts did not make.</para>
+    ///
+    /// <para>#9195: <paramref name="interactive"/> is true for <c>compare_analysis</c>, a read someone is waiting on: both windows'
+    /// plan checks then answer from the outcomes a background pass cached and fetch no plan. The config-change attribution
+    /// inside the pass leaves it false, so the pass keeps fetching.</para>
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "The token stays where it was: callers pass it positionally, and a bool ahead of it would turn that " +
+                        "argument into a compile error at each of them. Appending the flag is the edit that cannot rebind a call.")]
     public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool interactive = false)
     {
         var baselineContext = new AnalysisContext
         {
@@ -732,7 +741,8 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            InteractiveRead = interactive
         };
 
         var comparisonContext = new AnalysisContext
@@ -741,7 +751,8 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            InteractiveRead = interactive
         };
         baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
