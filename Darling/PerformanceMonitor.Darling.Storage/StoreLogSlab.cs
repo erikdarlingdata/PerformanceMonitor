@@ -75,9 +75,12 @@ public static class StoreLogSlab
 
     /// <summary>The text of a read that is safe to classify, and how many bytes it accounts for.</summary>
     /// <param name="Text">Complete lines only, decoded UTF-8.</param>
-    /// <param name="BytesConsumed">Exactly the bytes <paramref name="Text"/> came from, which is what the
-    /// marker advances by.</param>
-    public readonly record struct Slab(string Text, int BytesConsumed);
+    /// <param name="BytesConsumed">What the marker advances by. It is exactly the bytes <paramref name="Text"/>
+    /// came from, except for a line longer than one read (#9314), where <paramref name="Text"/> is only the line's
+    /// first bytes and this is the whole line through its newline.</param>
+    /// <param name="Cut">True when <paramref name="Text"/>'s last line is only the start of a longer line (#9314), so
+    /// the classifier treats that line as cut text. False for every slab that ends on a line end.</param>
+    public readonly record struct Slab(string Text, int BytesConsumed, bool Cut = false);
 
     /// <summary>
     /// Trims a raw read to its last complete line and decodes it.
@@ -109,6 +112,43 @@ public static class StoreLogSlab
 
         var complete = bytes[..(last + 1)];
         return new Slab(Utf8Replacing.GetString(complete), complete.Length);
+    }
+
+    /// <summary>
+    /// A finished line longer than one read (#9314): <paramref name="slab"/> is the first
+    /// <see cref="MaxBytesPerRead"/> bytes of it, with no newline inside, and <paramref name="lineBytes"/> is the line's
+    /// whole length through its newline. The text is the slab cut to whole UTF-8 characters, so the classifier counts
+    /// and classifies the line by its start, and the marker advances by the whole line.
+    ///
+    /// <para>A slab that ends inside a multi-byte character loses that character's leading bytes rather than decoding
+    /// to a replacement character, so the cut never splits one. The classifier caps a retained sample at
+    /// <see cref="StoreLogClassifier.MaxSampleLength"/> and already treats a sample the cap cut as cut, so a cut line is
+    /// marked the way every long line is.</para>
+    /// </summary>
+    public static Slab TrimLongLine(ReadOnlySpan<byte> slab, int lineBytes)
+    {
+        var whole = slab[..Utf8WholePrefixLength(slab)];
+        return new Slab(Utf8Replacing.GetString(whole), lineBytes, Cut: true);
+    }
+
+    /// <summary>The length of the longest prefix of <paramref name="bytes"/> that ends on a UTF-8 character boundary:
+    /// a trailing lead byte whose continuation bytes are not all there is left off.</summary>
+    internal static int Utf8WholePrefixLength(ReadOnlySpan<byte> bytes)
+    {
+        /* A character is at most 4 bytes, so the lead byte of an unfinished one is within the last 3. */
+        for (var back = 1; back <= 3 && back <= bytes.Length; back++)
+        {
+            var b = bytes[^back];
+            if ((b & 0xC0) == 0x80)
+            {
+                continue;
+            }
+
+            var needed = b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1;
+            return needed > back ? bytes.Length - back : bytes.Length;
+        }
+
+        return bytes.Length;
     }
 
     /// <summary>UTF-8 with the replacement fallback — see <see cref="TrimToLastNewline"/> for why a decode

@@ -2067,7 +2067,7 @@ public class StoreLogClassifierTests
         var sweep = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreLogSweep.cs");
 
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(sweep, "SHOW lc_messages"));
-        Assert.Contains("StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget)", sweep, StringComparison.Ordinal);
+        Assert.Contains("StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget, lastLineCut: slab.Cut)", sweep, StringComparison.Ordinal);
         Assert.Contains("StoreLogClassifier.IsEnglishLcMessages(value as string)", sweep, StringComparison.Ordinal);
         Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException)", sweep[sweep.IndexOf("SHOW lc_messages", StringComparison.Ordinal)..], StringComparison.Ordinal);
     }

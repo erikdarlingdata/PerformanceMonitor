@@ -556,7 +556,7 @@ public static class StoreLogClassifier
     /// classified, because a fixture legitimately ends that way and dropping it would make the pin's own
     /// last case silently untested.</para>
     /// </summary>
-    public static Census Classify(string? slab, bool detailInEnglish = true, CaptureBudget? budget = null)
+    public static Census Classify(string? slab, bool detailInEnglish = true, CaptureBudget? budget = null, bool lastLineCut = false)
     {
         var entries = new List<Entry>();
         var lines = 0;
@@ -574,7 +574,7 @@ public static class StoreLogClassifier
             string? currentMessage = null;
             var currentRaw = new StringBuilder();
 
-            void Flush()
+            void Flush(bool cut = false)
             {
                 if (currentSeverity is null || currentMessage is null)
                 {
@@ -586,7 +586,7 @@ public static class StoreLogClassifier
                 var raw = currentRaw.ToString();
                 if (retained)
                 {
-                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw, detailInEnglish: detailInEnglish);
+                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw, cut: cut, detailInEnglish: detailInEnglish);
                 }
 
                 entries.Add(new Entry(
@@ -654,7 +654,8 @@ public static class StoreLogClassifier
                 }
             }
 
-            Flush();
+            /* The entry still open here holds the slab's last line, so it is the one a cut line can leave unfinished. */
+            Flush(lastLineCut);
         }
 
         return new Census(
