@@ -638,6 +638,8 @@ public class AnalysisService
             InteractiveRead = true
         };
         var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        /* #9195: the read lock wait of every store read this call makes, for the slow-read line. */
+        using var lockWaits = ReadLockWaitTally.Begin();
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
         var scopeTime = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted);
@@ -658,7 +660,7 @@ public class AnalysisService
                 facts.AddRange(anomalies);
                 detectorTime = System.Diagnostics.Stopwatch.GetElapsedTime(detectorStarted);
             }
-            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime);
+            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime, lockWaits);
             if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
@@ -673,20 +675,21 @@ public class AnalysisService
     }
 
     /// <summary>
-    /// #9195: one Information line when the facts read took over <see cref="CollectorPassTimer.SlowPassThreshold"/>, with the time
+    /// #9195: one Information line when the facts read took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>, with the time
     /// split between its steps. The "Fact collection took" line times the fact pass alone, and a field read ran about 2 s longer
     /// than that pass: this line says whether the rest went to the secondary replica read, the anomaly detector or neither
     /// (the scope and the other small steps before the pass). Scoring runs after the line and is in memory.
     /// </summary>
     private static void ReportSlowFactsRead(
-        string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector)
+        string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector, ReadLockWaitTally lockWaits)
     {
-        if (total <= CollectorPassTimer.SlowPassThreshold) return;
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
 
         static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
         AppLogger.Info("AnalysisService",
             $"Analysis facts read took {Ms(total)} ms for {serverName} (server {serverId}): secondary replica scope {Ms(scope)} ms, " +
-            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, other {Ms(total - scope - pass - detector)} ms");
+            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, other {Ms(total - scope - pass - detector)} ms, " +
+            $"{lockWaits.DescribeLockWait()} (inside those)");
     }
 
     /// <summary>

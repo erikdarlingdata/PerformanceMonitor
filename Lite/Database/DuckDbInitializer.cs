@@ -262,6 +262,9 @@ public partial class DuckDbInitializer : IDisposable
     {
         /* Counted as this initializer's waiting reader from the ask to the hold (#8490). */
         Interlocked.Increment(ref _waitingReaders);
+        /* #9195: the wait is added to the MCP call's tally when one is open. Outside a call this is one null check. */
+        var tally = ReadLockWaitTally.Current;
+        var waitStarted = tally is null ? 0 : Stopwatch.GetTimestamp();
         try
         {
             return AcquireReadLockCore(holderMember, holderFile, cancellationToken);
@@ -269,6 +272,7 @@ public partial class DuckDbInitializer : IDisposable
         finally
         {
             Interlocked.Decrement(ref _waitingReaders);
+            tally?.RecordAcquire(Stopwatch.GetTimestamp() - waitStarted);
         }
     }
 
