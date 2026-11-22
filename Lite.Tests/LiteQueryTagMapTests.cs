@@ -865,4 +865,126 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         cmd.Parameters.Add(new DuckDBParameter { Value = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc) });
         Assert.Equal("2026-01-02 03:04:05", Convert.ToString(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
     }
+
+    /* #9308: the extend cursor survives a restart. A key whose sightings are gone leaves the map only at a REBUILD (an extend
+       never deletes), so whether a fresh cursor dictionary kept or dropped it says which path its first pass took. */
+    private async Task<int> MapWithAKeyThatOnlyARebuildWouldDropAsync()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        Sight(Snapshot(HashA, "SELECT * FROM Orders"), Snapshot(HashB, "SELECT * FROM Orders"));
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+        Assert.Equal(2, (await MapAsync()).Count);
+
+        /* Retention removes A's sightings after the last pass. */
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var delete = connection.CreateCommand();
+        delete.CommandText = $"DELETE FROM query_tag_sightings WHERE key = '{HashA}'";
+        await delete.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        return tag;
+    }
+
+    private async Task StoreCursorAsync(Func<long, QueryTagMapCursor, string> edit)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        string text;
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT state_value FROM collector_state WHERE server_id = 7 AND collector_name = 'query_tag_map'";
+            text = (string)(await read.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+        }
+
+        var (version, cursor) = QueryTagMapCursor.TryDecode(text)!.Value;
+        using var write = connection.CreateCommand();
+        write.CommandText = "UPDATE collector_state SET state_value = $1 WHERE server_id = 7 AND collector_name = 'query_tag_map'";
+        write.Parameters.Add(new DuckDBParameter { Value = edit(version, cursor) });
+        await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_ExtendsFromTheStoredCursor_AndPicksUpASightingWrittenAfterTheLastPass()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+
+        var pass = await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.False(pass.Rebuilt);
+        Assert.Equal(new[] { HashA, HashB, "0x00000000000000CC" }, (await MapAsync()).Select(r => r.Key).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_RebuildsWhenTheStoredCursorWasBuiltAtAnOlderRulesVersion()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreCursorAsync((version, cursor) => cursor.Encode(version - 1));
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_RebuildsWhenBuiltVersionIsBehindRulesVersion()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await _service.CreateQueryTagAsync("Other", null);
+        var state = await _service.GetQueryTagStateAsync();
+        Assert.NotEqual(state.RulesVersion, state.BuiltVersion);
+
+        var pass = await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.True(pass.Rebuilt);
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AFreshCursorSet_RebuildsWhenTheStoredCursorIsOverADayOld_AndExtendsWhenItIsJustUnderOne()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+
+        await StoreCursorAsync((version, cursor) => (cursor with { Since = DateTime.UtcNow - QueryTagMapCursor.MaxStoredAge + TimeSpan.FromMinutes(5) }).Encode(version));
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+        Assert.Equal(2, (await MapAsync()).Count);
+
+        await StoreCursorAsync((version, cursor) => (cursor with { Since = DateTime.UtcNow - QueryTagMapCursor.MaxStoredAge - TimeSpan.FromMinutes(5) }).Encode(version));
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AFailureAfterTheMapWrite_RollsBackTheMapAndTheStoredCursorTogether()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors);
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+
+        /* Between the pass's read and its write the cursor table goes away, so the cursor statement fails after the map rows went in. */
+        _service.AfterQueryTagMapReadForTests = () => Exec("ALTER TABLE collector_state RENAME TO collector_state_hidden");
+        try
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => _service.BuildQueryTagMapAsync(cursors));
+        }
+        finally
+        {
+            _service.AfterQueryTagMapReadForTests = null;
+            Exec("ALTER TABLE collector_state_hidden RENAME TO collector_state");
+        }
+
+        Assert.DoesNotContain("0x00000000000000CC", (await MapAsync()).Select(r => r.Key));
+        Assert.Equal(2, (await MapAsync()).Count);
+    }
+
+    private void Exec(string sql)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
 }

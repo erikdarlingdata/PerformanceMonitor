@@ -22,7 +22,7 @@ namespace PerformanceMonitorLite.Services;
 public sealed record QueryTagMapPass(bool Rebuilt, int KeysResolved, int KeysTagged);
 
 /// <summary>
-/// One server's extend cursor, held in memory by the caller (nothing is stored). Keys are read strictly after
+/// One server's extend cursor, held in memory by the caller (#9308: a copy is stored in <c>collector_state</c> with the rules version it was built at). Keys are read strictly after
 /// (<see cref="Since"/>, <see cref="AfterKind"/>, <see cref="AfterKey"/>) in (last_seen, key_kind, key) order. After a pass that
 /// finished under the cap it is the pass clock minus <see cref="Overlap"/> with empty kind and key; after a pass that hit the
 /// cap it is the last key read, so the next pass continues after it.
@@ -34,6 +34,31 @@ public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string 
 
     /// <summary>A server with no cursor (a fresh process) starts from the epoch.</summary>
     public static QueryTagMapCursor Epoch { get; } = new(DateTime.UnixEpoch, string.Empty, string.Empty);
+
+    /// <summary>#9308: the oldest stored cursor a fresh process extends from. An older one rebuilds.</summary>
+    public static readonly TimeSpan MaxStoredAge = TimeSpan.FromHours(24);
+
+    private sealed record Wire(long V, long T, string K, string Key);
+
+    /// <summary>#9308: the stored text of this cursor, with the <c>rules_version</c> the map was built at.</summary>
+    public string Encode(long rulesVersion) =>
+        System.Text.Json.JsonSerializer.Serialize(new Wire(rulesVersion, DateTime.SpecifyKind(Since, DateTimeKind.Utc).Ticks, AfterKind, AfterKey));
+
+    /// <summary>The cursor and rules version in stored text, or null when it does not read back.</summary>
+    public static (long RulesVersion, QueryTagMapCursor Cursor)? TryDecode(string text)
+    {
+        try
+        {
+            var wire = System.Text.Json.JsonSerializer.Deserialize<Wire>(text);
+            return wire is { K: not null, Key: not null }
+                ? (wire.V, new QueryTagMapCursor(new DateTime(wire.T, DateTimeKind.Utc), wire.K, wire.Key))
+                : null;
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
 }
 
 public partial class LocalDataService
@@ -88,6 +113,12 @@ public partial class LocalDataService
 
             rebuild = rulesVersion > builtVersion;
 
+            /* #9308: a server with no in-memory cursor (a fresh process) extends from the cursor the last process stored when
+               the map is current, instead of rebuilding. Nothing is stored for a caller that passes no cursors. */
+            var stored = cursors is not null && !rebuild && builtVersion == rulesVersion
+                ? await ReadStoredQueryTagMapCursorsAsync(readConnection, rulesVersion, clock)
+                : new Dictionary<int, QueryTagMapCursor>();
+
             var tags = await ReadQueryTagsAsync(readConnection);
             tagIds = tags.Select(t => (long)t.Id).ToHashSet();
             var names = new TagNameList(tags.Select(t => new KeyValuePair<string, long>(t.Name, t.Id)));
@@ -95,7 +126,7 @@ public partial class LocalDataService
             var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
             rebuiltServers = new HashSet<int>();
             List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> sightings;
-            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, keyCap, rebuild, clock, rebuiltServers);
+            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, stored, keyCap, rebuild, clock, rebuiltServers);
 
             resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
             removed = new List<(int ServerId, string Kind, string Key)>();
@@ -148,6 +179,13 @@ public partial class LocalDataService
 
             await UpsertMapRowsAsync(connection, resolved);
 
+            /* #9308: the cursors commit in the transaction of the map write they describe, so a stored cursor is never ahead of the
+               map. A rebuild-all drops every stored cursor first, which also drops the ones of servers with no sightings left. */
+            if (cursors is not null)
+            {
+                await StoreQueryTagMapCursorsAsync(connection, nextCursors, rulesVersion, rebuild);
+            }
+
             if (rebuild)
             {
                 using var built = connection.CreateCommand();
@@ -198,7 +236,9 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
     /// minus <see cref="QueryTagMapCursor.Overlap"/>.
     /// </summary>
     private static async Task<(List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> Rows, Dictionary<int, QueryTagMapCursor> Next)>
-        ReadQuerySightingsAsync(LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers)
+        ReadQuerySightingsAsync(
+            LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, IReadOnlyDictionary<int, QueryTagMapCursor> stored,
+            int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers)
     {
         var serverIds = new List<int>();
         using (var servers = connection.CreateCommand())
@@ -218,7 +258,7 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             /* A server with no cursor (a fresh process, a newly listed server) gets ONE full rebuild, not an epoch drain
                paged by the cap; its cursor is then the pass clock minus the overlap. */
             var cursor = QueryTagMapCursor.Epoch;
-            var serverRebuild = rebuild || cursors is null || !cursors.TryGetValue(serverId, out cursor!);
+            var serverRebuild = rebuild || cursors is null || !(cursors.TryGetValue(serverId, out cursor!) || stored.TryGetValue(serverId, out cursor!));
             if (serverRebuild)
             {
                 rebuiltServers.Add(serverId);
@@ -280,6 +320,52 @@ ORDER BY c.ls, c.key_kind, c.key, s.database_name, s.application_name, s.login_n
         }
 
         return (rows, next);
+    }
+
+    /// <summary>
+    /// #9308: the stored cursors a fresh process may extend from. A row counts when it was built at the current
+    /// <paramref name="rulesVersion"/> and is under <see cref="QueryTagMapCursor.MaxStoredAge"/> old.
+    /// </summary>
+    private static async Task<Dictionary<int, QueryTagMapCursor>> ReadStoredQueryTagMapCursorsAsync(LockedConnection connection, long rulesVersion, DateTime clock)
+    {
+        var usable = new Dictionary<int, QueryTagMapCursor>();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT server_id, state_value FROM collector_state WHERE collector_name = 'query_tag_map' AND state_key = 'cursor'";
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (QueryTagMapCursor.TryDecode(reader.GetString(1)) is { } decoded
+                && decoded.RulesVersion == rulesVersion
+                && clock - decoded.Cursor.Since < QueryTagMapCursor.MaxStoredAge)
+            {
+                usable[reader.GetInt32(0)] = decoded.Cursor;
+            }
+        }
+
+        return usable;
+    }
+
+    private static async Task StoreQueryTagMapCursorsAsync(LockedConnection connection, Dictionary<int, QueryTagMapCursor> next, long rulesVersion, bool rebuild)
+    {
+        if (rebuild)
+        {
+            using var clear = connection.CreateCommand();
+            clear.CommandText = "DELETE FROM collector_state WHERE collector_name = 'query_tag_map' AND state_key = 'cursor'";
+            await clear.ExecuteNonQueryAsync();
+        }
+
+        foreach (var (serverId, cursor) in next)
+        {
+            using var save = connection.CreateCommand();
+            save.CommandText = @"
+INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, 'query_tag_map', 'cursor', $2, $3)
+ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = excluded.state_value, updated_at = excluded.updated_at";
+            save.Parameters.Add(new DuckDBParameter { Value = serverId });
+            save.Parameters.Add(new DuckDBParameter { Value = cursor.Encode(rulesVersion) });
+            save.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+            await save.ExecuteNonQueryAsync();
+        }
     }
 
     /// <summary>Splits <c>database.schema.name</c> (<see cref="QueryTagObject.Qualified"/>) back into an object. The name is
