@@ -196,8 +196,8 @@ public sealed partial class DarlingCollectorRunner
                baseline alone, and a COPY that failed under its row loop advanced only the rows it reached. A COPY that fails
                stores nothing, so putting them all back loses nothing: query_stats diverts its text and plans, so its COPY
                always runs inside the write's transaction, and a fault there never leaves the server committed. A fault
-               after the COPY (the dimension flush or the commit, phase Unknown) keeps the advanced baselines, as it always
-               did. */
+               after the COPY is handled where it happens (#9302): one before the commit rolls the baselines back there, and the
+               commit's own fault (phase Unknown) keeps the advanced baselines, because the server may have committed. */
             (rows as IBaselineRollback)?.RollBackBaselines();
             throw;
         }
@@ -658,6 +658,13 @@ public sealed partial class DarlingCollectorRunner
         }
 
         var fenceSucceeded = false;
+
+        /* #9302: where a fault leaves the write. A fault after the COPY finished and before the commit is sent rolls the
+           transaction back, so it stored nothing and the baselines the batch advanced go back (the catch below). The COPY's
+           own faults stay with the stamped-phase arms (a start-phase fault is re-attempted with the rows it already holds, so
+           its baselines must not move here). The commit's own fault is ambiguous, because the server may have committed. */
+        var copyFinished = false;
+        var commitSent = false;
         try
         {
             /* Only the diverting collectors, Query Store (#3953) and the ledger's query_stats batches (#4605) need a
@@ -783,6 +790,8 @@ public sealed partial class DarlingCollectorRunner
                 CollectorFaultCopyPhase.Stamp(ex, copyPhase);
                 throw;
             }
+
+            copyFinished = true;
 
             if (transaction is not null)
             {
@@ -929,12 +938,23 @@ public sealed partial class DarlingCollectorRunner
                         ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
                 }
 
+                commitSent = true;
                 await transaction.CommitAsync(cancellationToken);
             }
 
             /* Last statement: reaching it means the commit was acknowledged. Any exit before it leaves the write's
                outcome unknown, and the fence poisons the server. */
             fenceSucceeded = true;
+        }
+        catch when (copyFinished && !commitSent)
+        {
+            /* #9302: the dimension flush, the ledger, the summary or a totals write faulted (a flush timeout after a restart
+               was the field's case). The transaction rolls back with the COPY in it, so none of this interval's rows were stored
+               while their baselines had already moved, and the executions between the two snapshots were lost. Put the baselines
+               back, as the COPY-phase arm in WriteBatchAsync does, so the next cycle's delta covers both intervals. A Query
+               Store step that fails behind its savepoint never reaches here: it is swallowed and the transaction commits. */
+            (rows as IBaselineRollback)?.RollBackBaselines();
+            throw;
         }
         finally
         {
