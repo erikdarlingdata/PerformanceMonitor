@@ -30,26 +30,27 @@ WITH deduped AS
     -- silent. Same reasoning, same key as the read side (#1845).
     -- execution_type_desc is correctly absent: the WHERE pins it to 'Regular', so it is constant here.
     -- #9195: no query_text here, or in the two grouping steps below: it is read once, for the candidates, in `texts`.
-    -- #9195: one hash aggregate that takes each interval's newest row with arg_max, not ROW_NUMBER() over the window of every row of
-    -- the 14 days (the window sorted them all, the larger part of this statement's time over an archive). The key is the window's
-    -- ORDER BY: collection_time, then execution_count (a NULL count below every count, as DESC puts it last, so COALESCE to -1),
-    -- then collection_id, which is unique, so the row it picks is the row rn = 1 kept.
     SELECT
         database_name,
         query_id,
         plan_id,
         replica_role,
-        arg_max(query_plan_hash, (collection_time, COALESCE(execution_count, -1), collection_id)) AS query_plan_hash,
-        arg_max(execution_count, (collection_time, COALESCE(execution_count, -1), collection_id)) AS execution_count,
-        arg_max(avg_cpu_time_us, (collection_time, COALESCE(execution_count, -1), collection_id)) AS avg_cpu_time_us,
-        arg_max(avg_duration_us, (collection_time, COALESCE(execution_count, -1), collection_id)) AS avg_duration_us,
+        query_plan_hash,
+        execution_count,
+        avg_cpu_time_us,
+        avg_duration_us,
         -- #5631: appended to the dedup's columns; feeds rows per call below.
-        arg_max(avg_rowcount, (collection_time, COALESCE(execution_count, -1), collection_id)) AS avg_rowcount,
-        arg_max(last_execution_time, (collection_time, COALESCE(execution_count, -1), collection_id)) AS last_execution_time,
-        arg_max(is_forced_plan, (collection_time, COALESCE(execution_count, -1), collection_id)) AS is_forced_plan,
-        arg_max(force_failure_count, (collection_time, COALESCE(execution_count, -1), collection_id)) AS force_failure_count,
+        avg_rowcount,
+        last_execution_time,
+        is_forced_plan,
+        force_failure_count,
         -- #9195: the row's key, carried so the candidates' text is read by it after the gates (`texts` below).
-        arg_max(collection_id, (collection_time, COALESCE(execution_count, -1), collection_id)) AS collection_id
+        collection_id,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+            ORDER BY collection_time DESC, execution_count DESC, collection_id DESC
+        ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
@@ -58,7 +59,6 @@ WITH deduped AS
     -- instant ranks the plans that instant had; the dedup keeps each interval's newest row collected by then.
     AND   collection_time <= $3
     /*SEC*/
-    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
 ),
 plan_agg AS
 (
@@ -86,6 +86,7 @@ plan_agg AS
              ELSE SUM(avg_rowcount * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
         END AS rows_per_exec
     FROM deduped
+    WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, replica_role
 ),
 plan_dedup AS
