@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Collectors;
 /// <see cref="DatabaseScopeFilter.ScopeOwner"/>, because the statement alone would be filled from this collector's own scope row.</para>
 ///
 /// <para><b>Which objects.</b> Procedures (T-SQL and CLR), scalar and table-valued functions (T-SQL and CLR) and views, user objects only
-/// (<c>is_ms_shipped = 0</c>). Views are listed for the view usage read that follows; the usage tool reports modules from it. Tables are not
+/// (<c>is_ms_shipped = 0</c>). The usage tool lists the modules and views from it (#8784 part 2). Tables are not
 /// listed here: <c>index_object_stats</c> already holds every table.</para>
 ///
 /// <para><b>Load.</b> One catalog read per database per day, bounded by <see cref="MaxRowsPerDatabase"/>. A plain table on every store
