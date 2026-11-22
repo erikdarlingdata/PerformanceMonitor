@@ -51,7 +51,7 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            var result = await new LocalDataService(_duckDb).BuildQueryTagMapAsync(_queryTagMapCursors);
+            var result = await new LocalDataService(_duckDb).BuildQueryTagMapAsync(_queryTagMapCursors, serviceAge: _sinceStart.Elapsed, ageBackoffUntil: _queryTagAgeBackoffs);
             if (result.KeysResolved > 0)
             {
                 AppLogger.Debug("QueryTags", $"Tag map {(result.Rebuilt ? "rebuilt" : "extended")}: {result.KeysResolved} keys resolved, {result.KeysTagged} tagged");
@@ -98,4 +98,10 @@ public partial class RemoteCollectorService
     }
 
     private readonly Dictionary<int, QueryTagMapCursor> _queryTagMapCursors = new();
+
+    /// <summary>#9308: servers whose age-picked rebuild failed, and when the age rule may pick them again.</summary>
+    private readonly Dictionary<int, DateTime> _queryTagAgeBackoffs = new();
+
+    /// <summary>#9308: how long this service has run; the staggered tag-map rebuild waits out its startup grace.</summary>
+    private readonly System.Diagnostics.Stopwatch _sinceStart = System.Diagnostics.Stopwatch.StartNew();
 }
