@@ -887,6 +887,41 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
     }
 
     [Fact]
+    public async Task AnInteractiveRead_WhoseClockIsAllButSpent_MakesNoFetch_AndTheCandidatesStayUnverified()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        source.Behavior = (_, token) => Task.Delay(TimeSpan.FromSeconds(30), token);
+        var cache = new PlanInputOutcomeCache();
+        var pass = NewContext();
+        pass.InteractiveRead = true;
+        /* #9312: 20 ms is less than a fetch needs to run. The first attempt starts the clock, so this holds with no wait. */
+        pass.InteractiveFetches = new InteractivePlanFetchAllowance(3, TimeSpan.FromMilliseconds(20));
+
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source, planInputCache: cache).CollectFactsAsync(pass))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+
+        /* No fetch is granted, so none is made and none is counted as a failed one. The slow-check line that names the cause logs only
+           past one second, which this pass never reaches, so the made-no-fetch assert stands for "unreached" here. */
+        Assert.Empty(source.Fetched);
+        Assert.Equal(3, Convert.ToInt32(fact.Metadata["inputs_unverified_count"]));
+        Assert.Equal(3, pass.InteractiveFetches.Left);
+        Assert.Equal(0, pass.InteractiveFetches.Fetches);
+        Assert.Equal(0, cache.SkipCount);
+    }
+
+    [Fact]
+    public void AnAllowanceWithLessThanTheMinimumTimeLeft_GrantsNoFetch_AndKeepsItsCount()
+    {
+        var allowance = new InteractivePlanFetchAllowance(3, InteractivePlanFetchAllowance.MinimumFetchTime / 2);
+
+        Assert.False(allowance.TryTake(out var remaining));
+        Assert.True(remaining < InteractivePlanFetchAllowance.MinimumFetchTime);
+        Assert.Equal(3, allowance.Left);
+        Assert.Equal(0, allowance.Fetches);
+    }
+
+    [Fact]
     public async Task ABackgroundPass_StillFetches_AndFillsTheCacheAnInteractiveReadAnswersFrom()
     {
         var source = new FixturePlanSource();

@@ -17,6 +17,9 @@ public sealed class InteractivePlanFetchAllowance
     /// <summary>The wall clock for all of one interactive call's plan fetches together.</summary>
     public static readonly TimeSpan DefaultTotalTime = TimeSpan.FromSeconds(3);
 
+    /// <summary>A fetch granted with less than this left would be cut off at once and logged as a failed fetch, so the pair counts as not reached instead.</summary>
+    public static readonly TimeSpan MinimumFetchTime = TimeSpan.FromMilliseconds(50);
+
     private readonly TimeSpan _total;
     private long _started;
 
@@ -42,7 +45,7 @@ public sealed class InteractivePlanFetchAllowance
     {
         if (_started == 0) _started = Stopwatch.GetTimestamp();
         remaining = _total - Stopwatch.GetElapsedTime(_started);
-        if (Left <= 0 || remaining <= TimeSpan.Zero) return false;
+        if (Left <= 0 || remaining < MinimumFetchTime) return false;
 
         Left--;
         Fetches++;
