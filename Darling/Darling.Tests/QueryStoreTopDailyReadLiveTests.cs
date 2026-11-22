@@ -249,6 +249,21 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         NpgsqlDataSource source, DateTime start, DateTime end, string? db, string? outcome, string? module, CancellationToken ct) =>
         await DarlingDataReader.GetQueryStoreTopWithReachAsync(source, ServerId, start, end, Top, db, outcome, module, ct);
 
+    /// <summary>#9310: a read answered by the daily statement names it in the scope with the days it read from the summary.</summary>
+    [Fact]
+    public async Task TheDailyStatement_IsNamedInTheReadScope_WithItsDays()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            using var scope = ReadScope.Open(null);
+            var read = await RouteAsync(source, End.AddHours(-72), End, null, null, null, ct);
+
+            Assert.Equal(2, read.DailyDaysUsed);
+            Assert.Equal(ReadScope.SourceIntervalTable, scope.Scope.Source);
+            Assert.Equal("daily table, 2 days", scope.Scope.SourceReason);
+        });
+    }
+
     public static IEnumerable<object?[]> Cells()
     {
         foreach (var hours in new[] { 72, 168 })
