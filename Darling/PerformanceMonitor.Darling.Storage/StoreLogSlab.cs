@@ -78,7 +78,9 @@ public static class StoreLogSlab
     /// <param name="BytesConsumed">What the marker advances by. It is exactly the bytes <paramref name="Text"/>
     /// came from, except for a line longer than one read (#9314), where <paramref name="Text"/> is only the line's
     /// first bytes and this is the whole line through its newline.</param>
-    public readonly record struct Slab(string Text, int BytesConsumed);
+    /// <param name="Cut">True when <paramref name="Text"/>'s last line is only the start of a longer line (#9314), so
+    /// the classifier treats that line as cut text. False for every slab that ends on a line end.</param>
+    public readonly record struct Slab(string Text, int BytesConsumed, bool Cut = false);
 
     /// <summary>
     /// Trims a raw read to its last complete line and decodes it.
@@ -126,7 +128,7 @@ public static class StoreLogSlab
     public static Slab TrimLongLine(ReadOnlySpan<byte> slab, int lineBytes)
     {
         var whole = slab[..Utf8WholePrefixLength(slab)];
-        return new Slab(Utf8Replacing.GetString(whole), lineBytes);
+        return new Slab(Utf8Replacing.GetString(whole), lineBytes, Cut: true);
     }
 
     /// <summary>The length of the longest prefix of <paramref name="bytes"/> that ends on a UTF-8 character boundary:

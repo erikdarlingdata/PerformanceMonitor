@@ -96,6 +96,33 @@ public sealed class StoreLogLongLine9314LiveTests
         });
     }
 
+    /// <summary>
+    /// The prefix of a long line is handed to the classifier as cut text. A Japanese syntax error opens with its quoted
+    /// token and ends with the words after it, so a read that stops inside the token holds an unfinished quoted part:
+    /// that part is withheld from its opening quote on, and the literal inside it is not stored.
+    /// </summary>
+    [Fact]
+    public async Task ThePrefixOfALongTokenFirstSyntaxError_IsWithheldFromItsOpeningQuote_NotStoredAsTheSample()
+    {
+        await WithStoreAsync(async (connection, _, ct) =>
+        {
+            const string leak = "Leak9314Literal";
+            var line = "2026-11-17 16:00:01.000 UTC [7] ERROR:  \"'" + leak + " "
+                + new string('x', StoreLogSlab.MaxBytesPerRead + 300_000)
+                + "'\"またはその近辺で構文エラー(40文字目)\n";
+            var file = Join(NormalLine(1), line, NormalLine(2), NormalLine(3));
+            var source = new GrowingLogFiles { Bytes = file };
+
+            var capture = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, source, ct));
+
+            Assert.Equal(file.Length, await MarkerAsync(connection, ct));
+            var group = Assert.Single(capture.Census.Groups, g => string.Equals(g.Severity, "ERROR", StringComparison.Ordinal));
+            Assert.DoesNotContain(leak, group.MessageText, StringComparison.Ordinal);
+            Assert.DoesNotContain(leak, group.SampleLine, StringComparison.Ordinal);
+            Assert.Contains(StoreLogClassifier.WithheldStatement, group.SampleLine, StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task ALineLongerThanOneRead_ThatIsStillBeingWritten_Waits_AndIsReadOnceItsNewlineArrives_AndTheAnswerNamesTheStall()
     {

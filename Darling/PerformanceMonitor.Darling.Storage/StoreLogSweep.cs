@@ -688,7 +688,7 @@ FROM config.store_log_read_marker AS m";
             slab = StoreLogSlab.TrimLongLine(body.Span, (int)(lineEnd - offset));
         }
 
-        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget));
+        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget, lastLineCut: slab.Cut));
     }
 
     /// <summary>Scans on from <paramref name="from"/> for the first newline, <see cref="LongLineScanChunkBytes"/> at a
