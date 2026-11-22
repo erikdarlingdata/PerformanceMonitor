@@ -228,6 +228,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// </summary>
     internal async Task DrainPersonalRevokesAsync(PersonalTokenSettings? settings, CancellationToken cancellationToken)
     {
+        _pendingPersonalRevokes.SaveIfDirty();
         if (_personalSnapshot is null || _ownerSource is null)
         {
             return;
@@ -3690,6 +3691,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             await StopServerAsync(cancellationToken);
         }
 
+        _pendingPersonalRevokes.SaveIfDirty();
         await base.StopAsync(cancellationToken);
     }
 }

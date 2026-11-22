@@ -244,13 +244,13 @@ Each revoked token records a reason code and who revoked it. `revoked_by_owner` 
 
 While the revoke waits in the queue, the token check refuses that person's tokens as revoked. A full revoke refuses every token of that person. An operator-only revoke refuses only their operator tokens. This holds even when the store can be read but not written (a failover to a read-only node, or a full disk).
 
-The web supervisor tick drains the queue. Each entry leaves it only after its revoke commits, and the snapshot is refreshed after the pass. The drain does not need the web dashboard to be up. A drain pass stops at the first store failure and tries again next tick.
+The web supervisor tick drains the queue. Each entry leaves it only after its revoke commits. An entry that revoked no rows leaves at once. An entry that revoked rows stays until the snapshot refresh after the pass succeeds, so the token check keeps refusing that person until the snapshot shows the revoke. If the refresh fails, the entry stays for the next tick, and the revoke runs again with no effect. The snapshot is refreshed after the pass. The drain does not need the web dashboard to be up. A drain pass stops at the first store failure and tries again next tick.
 
 A later sign-in by the same person merges into the one entry. The broader revoke wins (all tokens over operator-only), and at equal breadth the later reason replaces the earlier. A later sign-in of the same person that does not lower the seat drops that person's queued revoke.
 
-The queue survives a restart. The service saves it to `personal-token-pending-revokes.json` in its log folder on every change. It writes a temp file and renames it over the old one. The service loads the file before the web and MCP listeners serve. The file holds owner keys, the operator-only flag and reason codes. It holds no token and no secret.
+The queue survives a restart. The service saves it to `personal-token-pending-revokes.json` in the folder that holds the service's keys, the same folder as the log-hash key. That folder is kept across a restart on every install form, and the service checks it the way it checks the key files. If the folder fails those checks, the service keeps the queue in memory only and logs one warning. The service saves the file on every change. It writes a temp file, flushes it to disk, and renames it over the old one. If a save fails, the service logs one warning and tries again on every supervisor tick, and once more when the web host stops, until a save works. The service loads the file before the web and MCP listeners serve. The file holds owner keys, the operator-only flag and reason codes. It holds no token and no secret.
 
-If the file cannot be read, the service logs one warning and starts with an empty queue.
+If the file cannot be read for any reason, or is larger than 4 MB, the service logs one warning and starts with an empty queue. A damaged file never stops the service from starting.
 
 The queue holds at most 10,000 people. Past that, the newest entry is dropped with one warning. With the feature off, nothing drains, and the queue is kept. A person who signs in only through a front door never triggers a revoke, because the front door serves no personal tokens.
 
