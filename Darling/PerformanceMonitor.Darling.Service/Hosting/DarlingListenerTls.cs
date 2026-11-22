@@ -33,6 +33,8 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// lapses").</param>
 /// <param name="Client">What connects to the listener, for "every browser will report a name mismatch".</param>
 /// <param name="Reach">The verb for how a client gets to the listener ("browse to it by IP").</param>
+/// <param name="RefusalTail">How a refusal ends: what the listener does instead of exposing itself. The web and MCP listeners bind
+/// loopback-only, the metrics port binds nothing.</param>
 /// <param name="CleartextLead">The opening clause of the cleartext warning, up to and including "in the clear". It
 /// names what crosses the segment, which is the one place the two listeners say different things: the dashboard's
 /// token and the session cookie it mints, the MCP endpoint's token and every tool result.</param>
@@ -42,6 +44,7 @@ internal sealed record ListenerTlsLabels(
     string Endpoint,
     string Client,
     string Reach,
+    string RefusalTail,
     string CleartextLead)
 {
     /// <summary>The web dashboard's words, exactly as the web host's own TLS block logged them (#2562).</summary>
@@ -51,6 +54,7 @@ internal sealed record ListenerTlsLabels(
         Endpoint: "dashboard",
         Client: "browser",
         Reach: "browse",
+        RefusalTail: "binding loopback-only",
         CleartextLead: "Web dashboard is LAN-exposed WITHOUT TLS — the access token and its session cookie cross the segment in the clear");
 
     /// <summary>The MCP endpoint's words (#5288).</summary>
@@ -60,6 +64,7 @@ internal sealed record ListenerTlsLabels(
         Endpoint: "MCP endpoint",
         Client: "client",
         Reach: "connect",
+        RefusalTail: "binding loopback-only",
         CleartextLead: "MCP server is LAN-exposed WITHOUT TLS: the bearer token and every tool result cross the segment in the clear");
 
     /// <summary>
@@ -73,6 +78,7 @@ internal sealed record ListenerTlsLabels(
         Endpoint: "metrics port",
         Client: "scraper",
         Reach: "scrape",
+        RefusalTail: "the metrics port stays off",
         CleartextLead: "Metrics port is bound off loopback WITHOUT TLS: the token in the Authorization header crosses the network in the clear");
 }
 
@@ -198,8 +204,8 @@ internal static class DarlingListenerTls
 
             case DarlingWebTls.TlsShape.Invalid:
                 logger.LogCritical(
-                    "{Surface} TLS is misconfigured ({Problem}) — refusing to expose; binding loopback-only.",
-                    labels.Surface, plan.Problem);
+                    "{Surface} TLS is misconfigured ({Problem}) — refusing to expose; {RefusalTail}.",
+                    labels.Surface, plan.Problem, labels.RefusalTail);
                 return new ListenerTlsOutcome(Expose: false, Certificate: null, plan.Shape);
 
             default:
@@ -293,8 +299,8 @@ internal static class DarlingListenerTls
                 loaded.Value.Dispose();
                 loaded = null;
                 logger.LogCritical(
-                    "{Surface} TLS certificate cannot be used ({Refusal}) — refusing to expose; binding loopback-only.",
-                    labels.Surface, lifetime.Refusal);
+                    "{Surface} TLS certificate cannot be used ({Refusal}) — refusing to expose; {RefusalTail}.",
+                    labels.Surface, lifetime.Refusal, labels.RefusalTail);
                 return new ListenerTlsOutcome(Expose: false, Certificate: null, plan.Shape);
             }
 
@@ -345,8 +351,8 @@ internal static class DarlingListenerTls
             certState.PublishLoadRefusal(ex.Message);
 
             logger.LogCritical(ex, 
-                "{Surface} TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
-                labels.Surface, ex.Message);
+                "{Surface} TLS certificate could not be loaded ({Message}) — refusing to expose; {RefusalTail}.",
+                labels.Surface, ex.Message, labels.RefusalTail);
             return new ListenerTlsOutcome(Expose: false, Certificate: null, plan.Shape);
         }
     }
