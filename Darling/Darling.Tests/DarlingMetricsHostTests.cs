@@ -497,7 +497,12 @@ public sealed class DarlingMetricsHostTests : IDisposable
 
         Assert.False(host.IsListening);
         Assert.Null(host.Services);
-        Assert.Contains(logger.Lines, l => l.Level == LogLevel.Critical && l.Text.Contains("web.network.tls", StringComparison.Ordinal));
+        /* One Critical line, and it says what happens to this port: the shared TLS path's refusal ends "binding loopback-only" for web and MCP,
+           which is not what the metrics port does. */
+        var critical = Assert.Single(logger.Lines, l => l.Level == LogLevel.Critical);
+        Assert.Contains("web.network.tls", critical.Text, StringComparison.Ordinal);
+        Assert.Contains("the metrics port stays off", critical.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("loopback-only", critical.Text, StringComparison.Ordinal);
         if (!PortIsFree(port))
         {
             Assert.Skip($"Port {port} is in use on this machine, so a refused connect cannot be checked.");
