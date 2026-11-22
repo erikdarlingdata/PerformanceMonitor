@@ -35,7 +35,7 @@ using PerformanceMonitorLite.Services;
  *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: ParquetCompaction.DefaultRowGroupSize (2048)
  *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
  *                          ParquetCompaction.RowGroupBytesFor (#5393: the daily table's byte bound)
- *   (--threads defaults to ParquetCompaction.ThreadsFor(--table) when not given.)
+ *   (--threads defaults to ParquetCompaction.ThreadsFor(--table, sortedAttempt) when not given: 1 for a sorted table.)
  *   --max-batch-mb <int>   Per-batch on-disk input budget (MB). Default: the table's ParquetCompaction.BatchInputBytesFor
  *   --table <name>         Table name (drives exclude-column logic). Default: query_snapshots
  *
@@ -103,7 +103,7 @@ var table = GetArg(args, "--table", "query_snapshots");
 /* Absent means null, so MergeBatchToFile picks the table's production limit (512MB for the sorted merge). */
 var memoryLimitArg = GetArg(args, "--memory-limit", "");
 string? memoryLimit = memoryLimitArg.Length > 0 ? memoryLimitArg : null;
-var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.ThreadsFor(table).ToString()));
+var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.ThreadsFor(table, sortedAttempt: ParquetCompaction.ServerOrderByFor(table) is not null).ToString()));
 var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
 var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
 var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;

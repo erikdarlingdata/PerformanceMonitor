@@ -28,6 +28,13 @@ public static class ParquetCompaction
     /* Memory limit of a sorted merge's connection (ServerOrderedTables, #9255) when the caller passes none. */
     public const string SortedMergeMemoryLimit = "512MB";
     public const int DefaultThreads = 2;
+
+    /* Threads of a sorted merge's first attempt (#9320). The 512MB limit holds the sort's rows, one buffer per
+       thread, and an on-disk byte budget does not bound rows per thread: field files hold 2 to 4 times more rows
+       per on-disk MB than the seeded ones the budget was measured on (a monthly perfmon_stats file is 1.16M rows in
+       8 MB). On two threads 6 of 7 sorted monthly merges of one install ran out of memory and fell back to the
+       unsorted order, whose row groups all mix servers. One thread finished all 7. */
+    public const int SortedMergeThreads = 1;
     public const int DefaultRowGroupSize = ArchiveRowGroupSize;
 
     /* Row-group size for every parquet COPY that writes a file the archive views read (#5381).
@@ -136,6 +143,11 @@ public static class ParquetCompaction
     /* Threads for a daily table's merge: one thread roughly halves the row-group buffers in flight (24x
        plans, 6.5 MB: 2.0 GB on two threads, 1.3 GB on one) at about twice the time. */
     public static int ThreadsFor(string table) => IsDailyTable(table) ? 1 : DefaultThreads;
+
+    /* Threads of a merge attempt: the sorted attempt runs on SortedMergeThreads (#9320), the unsorted merge, the
+       unsorted fallback and the sliced export's merge keep ThreadsFor(table). */
+    public static int ThreadsFor(string table, bool sortedAttempt) =>
+        sortedAttempt ? SortedMergeThreads : ThreadsFor(table);
 
     /* ROW_GROUP_SIZE_BYTES of a daily table's merge output (#5393): a row group is flushed once its uncompressed
        bytes reach this, whatever its row count. The writer buffers about one row group of plan text, so this, not
@@ -328,7 +340,7 @@ public static class ParquetCompaction
            it spill, which cut its peak from over three times the unsorted
            merge's to two to three times (see ServerOrderedTables). If that merge hits
            the ceiling anyway, the batch is rerun unsorted at 4GB.
-         - threads = 2: fewer per-thread row-group buffers in flight.
+         - threads = 2: fewer per-thread row-group buffers in flight. The sorted attempt runs on one (#9320).
          - preserve_insertion_order = false: lets DuckDB stream.
        The memoryLimit/threads/rowGroupSize parameters let tools/CompactionRepro
        sweep them (null memoryLimit means the table's default); production passes
@@ -339,7 +351,7 @@ public static class ParquetCompaction
         string outputPath,
         string spillDirSql,
         string? memoryLimit = null,
-        int threads = DefaultThreads,
+        int? threads = null,
         int rowGroupSize = DefaultRowGroupSize,
         long? rowGroupBytes = null,
         Action<string, int, string>? onSortFallback = null)
@@ -348,7 +360,7 @@ public static class ParquetCompaction
         try
         {
             RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
-                threads, rowGroupSize, rowGroupBytes, orderBy);
+                threads ?? ThreadsFor(table, sortedAttempt: orderBy is not null), rowGroupSize, rowGroupBytes, orderBy);
         }
         catch (DuckDBException ex) when (orderBy is not null && IsOutOfMemoryOrTempSpace(ex))
         {
@@ -363,7 +375,7 @@ public static class ParquetCompaction
 
             onSortFallback?.Invoke(table, sourcePaths.Count, ex.Message);
             RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
-                threads, rowGroupSize, rowGroupBytes, orderBy: null);
+                threads ?? ThreadsFor(table), rowGroupSize, rowGroupBytes, orderBy: null);
         }
     }
 
