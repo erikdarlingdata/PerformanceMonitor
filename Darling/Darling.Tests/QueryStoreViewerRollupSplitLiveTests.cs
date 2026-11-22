@@ -336,7 +336,7 @@ ANALYZE {Wide};", ct);
             Assert.True(read.Plan is { UseTable: true, Source.RollupDays.Count: > 0 }, "the read did not take rollup days, so the comparison would prove nothing");
             Assert.True(read.Rows.Count > 0);
             return (read.Rows.Select(r => string.Join("|", r.DatabaseName, r.QueryId, r.PlanId, r.ExecutionTypeDesc, r.TotalExecutions, r.AvgDurationMs, r.AvgCpuTimeMs, Convert.ToString(r.FirstExecutionTime, CultureInfo.InvariantCulture), Convert.ToString(r.LastExecutionTime, CultureInfo.InvariantCulture))).ToList(),
-                read.Plan!.Source!.Describe());
+                read.Plan!.Value.Source!.Describe());
         }
 
         Assert.False(await QueryStoreBackgroundIndexes.IsBuiltAsync(
