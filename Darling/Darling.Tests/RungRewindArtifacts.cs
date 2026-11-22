@@ -913,7 +913,7 @@ DROP TABLE IF EXISTS collect.query_stats_host_hourly_built;"),
         new(288, "hasCollectionLogWatermarkCovering", @"DROP INDEX IF EXISTS collect.idx_collection_log_watermark;
 CREATE INDEX idx_collection_log_watermark ON collect.collection_log (server_id, collector_name, collection_time DESC);"),
         // V289 (#9173): the hourly Query Store clutter rollups' three tables and the hour heartbeat column on the tick table. The three tables are the
-        // probe's newest sentinel. The rewind drops them and the column, so a re-run of V289 creates them empty and the service builds the hours again.
+        // probe's newest sentinel until V290 (#9193) went on top. The rewind drops them and the column, so a re-run of V289 creates them empty and the service builds the hours again.
         new(289, "hasQueryStoreClutterHourly", @"DROP TABLE IF EXISTS collect.query_store_clutter_plan_hourly;
 DROP TABLE IF EXISTS collect.query_store_clutter_collections_hourly;
 DROP TABLE IF EXISTS collect.query_store_clutter_hour_built;
@@ -939,11 +939,18 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // V295 (#9225): the plan regression block tables, the probe's sentinel under V296's. The rewind drops both, so a re-run of V295 creates them empty and the builder
         // sums the blocks again from the daily rows. Safe on a store that never had them.
         new(295, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
-        // V296 (#9280): the hourly Query Store summary table and the ledger's top_built_seq column. The table's index is the probe's newest sentinel and goes with the
-        // table. The rewind drops both, so a re-run of V296 builds them again. Safe on a store that never had them.
+        // V296 (#9280): the hourly Query Store summary table and the ledger's top_built_seq column. The table's index is the probe's sentinel under V297's (#8784 part 2) and goes
+        // with the table. The rewind drops both, so a re-run of V296 builds them again. Safe on a store that never had them.
         new(296, "hasQueryStoreTopHourly",
             @"DROP TABLE IF EXISTS collect.query_store_top_hourly;
 ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS top_built_seq;"),
+        // V297 (#8784 part 2): the dependency list and the per-day referenced-names summary. The pair object_dependencies and
+        // object_references_daily_databases is the probe's newest sentinel. The rewind drops all four tables, so a re-run of V297 creates them
+        // empty, the collector captures the list again and the service builds the days again. Safe on a store that never had them.
+        new(297, "hasObjectReferences", @"DROP TABLE IF EXISTS collect.object_dependencies;
+DROP TABLE IF EXISTS collect.object_references_daily;
+DROP TABLE IF EXISTS collect.object_references_daily_built;
+DROP TABLE IF EXISTS collect.object_references_daily_databases;"),
     ];
 
     /// <summary>

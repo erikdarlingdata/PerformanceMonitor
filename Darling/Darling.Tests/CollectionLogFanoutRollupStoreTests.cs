@@ -334,8 +334,8 @@ public class CollectionLogFanoutRollupStoreTests
             .Select(f => System.IO.Path.GetFileNameWithoutExtension(f))
             .ToList();
 
-        /* 9 since #8784: object_inventory reuses the index and object stats enumeration. */
-        Assert.Equal(9, enumerating.Count);
+        /* 9 since #8784: object_inventory reuses the index and object stats enumeration. 10 since #8784 part 2: object_dependencies does too. */
+        Assert.Equal(10, enumerating.Count);
 
         foreach (var typeName in enumerating)
         {
