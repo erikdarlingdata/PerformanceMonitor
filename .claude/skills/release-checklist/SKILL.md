@@ -66,6 +66,10 @@ Cross-reference `README.md` against the changelog and ensure all user-facing cha
 
 Do NOT add internal/implementation changes — only user-facing features and behavior.
 
+### 2c. Refresh the code map
+
+Run `python tools/codemap/codemap.py` and commit `docs/codemap.json`, `docs/CODEMAP.md` and `docs/codemap.html` if they changed. The script fails when `tools/codemap/areas.json` lists a file or folder that no longer exists. Fix that list, then run it again.
+
 ### 3. Upgrade Scripts — Schema Change Audit (conditional)
 
 Applies ONLY when `install/` or `upgrades/` changed since the last release. The frozen Dashboard in the zip reads this schema, so its schema discipline still holds when it IS touched:
