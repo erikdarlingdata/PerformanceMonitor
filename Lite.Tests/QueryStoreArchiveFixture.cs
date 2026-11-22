@@ -34,7 +34,7 @@ SELECT e,
        'Db' || lpad(((e % {databases}) + 1)::VARCHAR, 2, '0') AS db,
        (100000 + e)::BIGINT AS query_id,
        (500000 + e)::BIGINT AS plan_id,
-       '/* q' || e || ' */ SELECT ' || repeat('t' || (e % 97) || '.col' || (e % 31) || ', ', 8 + (e * 37) % 220) || '1 FROM dbo.tbl' || e || ' AS t' || (e % 97) AS txt
+       '/* q' || e || ' */ SELECT ' || (SELECT string_agg('t' || (e % 97) || '.c_' || md5(e::VARCHAR || '-' || k::VARCHAR), ', ') FROM range(3 + (e * 37) % 40) r(k)) || ' FROM dbo.tbl' || e || ' AS t' || (e % 97) AS txt
 FROM range({maxEntities}) t(e)", cancellationToken);
 
         long total = 0;

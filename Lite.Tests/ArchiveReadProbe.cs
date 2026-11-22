@@ -111,15 +111,57 @@ public sealed class ArchiveReadProbe
                 Line($"TOP {hours}h: {string.Join(" ", times)}");
             }
 
-            for (var i = 0; i < 3; i++)
+            foreach (var (name, sql) in new[] { ("REG before", QueryStoreArchiveReadReferences.RegressionCostSqlBefore), ("REG after", DuckDbFactCollector.PlanRegressionCostSql) })
             {
-                var sw = Stopwatch.StartNew();
-                await RunAsync(data, DuckDbFactCollector.PlanRegressionCostSql, now.AddHours(-4).AddDays(-14), now, 3);
-                Line($"REG 4h run{i}: {sw.Elapsed.TotalSeconds:F2}s");
+                var times = new List<string>();
+                var n = 0;
+                for (var i = 0; i < 3; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    n = await RunAsync(data, sql, now.AddHours(-4).AddDays(-14), now, 3);
+                    times.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                }
+
+                Line($"{name} 4h: {string.Join(" ", times)} rows {n}");
             }
 
-            await ProfileAsync(data, "TOP24", LocalDataService.QueryStoreTopSql("", "", "", 250), now.AddHours(-24), now, 3, dir);
-            await ProfileAsync(data, "TOP168", LocalDataService.QueryStoreTopSql("", "", "", 250), now.AddHours(-168), now, 3, dir);
+            foreach (var hours in new[] { 24, 168 })
+            {
+                var start = now.AddHours(-hours);
+                var top = await data.GetQueryStoreTopQueriesAsync(1, hours, 250);
+                var keys = top.Select(r => (r.DatabaseName, r.QueryId)).ToList();
+                Dictionary<(string, long), (long, DateTime)>? oldRows = null;
+                Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>? newRows = null;
+                var ot = new List<string>();
+                var nt = new List<string>();
+                for (var i = 0; i < 3; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    oldRows = await OldLatestAsync(data, keys);
+                    ot.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                    sw.Restart();
+                    using (var c = await data.OpenConnectionAsync())
+                    {
+                        newRows = await LocalDataService.ReadQueryStoreLatestRowsAsync(c, 1, keys, "v_query_store_stats", start.AddDays(-1));
+                    }
+
+                    nt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                }
+
+                var same = oldRows!.Count == newRows!.Count && oldRows.All(kv => newRows.TryGetValue(kv.Key, out var v) && v.CollectionId == kv.Value.Item1 && v.CollectionTime == kv.Value.Item2);
+                Line($"LATEST {hours}h keys {keys.Count} before: {string.Join(" ", ot)} after: {string.Join(" ", nt)} same {same}");
+                var tt = new List<string>();
+                for (var i = 0; i < 3; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    using var c = await data.OpenConnectionAsync();
+                    await LocalDataService.ReadQueryStoreTextByRowAsync(c, 1, newRows.Values);
+                    tt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                }
+
+                Line($"TEXTBYROW {hours}h: {string.Join(" ", tt)}");
+            }
+
             await ProfileAsync(data, "REG4", DuckDbFactCollector.PlanRegressionCostSql, now.AddHours(-4).AddDays(-14), now, 3, dir);
         }
         finally
@@ -127,6 +169,32 @@ public sealed class ArchiveReadProbe
             initializer.Dispose();
             File.WriteAllText(outPath, _out.ToString());
         }
+    }
+
+    private static async Task<Dictionary<(string, long), (long, DateTime)>> OldLatestAsync(LocalDataService data, List<(string DatabaseName, long QueryId)> keys)
+    {
+        var result = new Dictionary<(string, long), (long, DateTime)>();
+        using var c = await data.OpenConnectionAsync();
+        for (var i = 0; i < keys.Count; i += 100)
+        {
+            var slice = keys.Skip(i).Take(100).ToList();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = QueryStoreArchiveReadReferences.LatestRowsSqlBefore(slice.Count);
+            cmd.Parameters.Add(new DuckDBParameter { Value = 1 });
+            foreach (var (db, q) in slice)
+            {
+                cmd.Parameters.Add(new DuckDBParameter { Value = db });
+                cmd.Parameters.Add(new DuckDBParameter { Value = q });
+            }
+
+            using var r = await cmd.ExecuteReaderAsync();
+            while (await r.ReadAsync())
+            {
+                result[(r.GetString(0), r.GetInt64(1))] = (r.GetInt64(2), r.GetDateTime(3));
+            }
+        }
+
+        return result;
     }
 
     private static async Task<long> ScalarAsync(LockedConnection c, string sql)
