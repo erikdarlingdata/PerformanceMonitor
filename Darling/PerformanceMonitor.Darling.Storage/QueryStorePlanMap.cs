@@ -161,6 +161,16 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
     /// deadline, and un-guarding it would re-write every legacy row on every cycle until the first touch
     /// landed.</para>
     ///
+    /// <para><b>The two dimension steps never wait on a row lock (#9304).</b> <c>dim_touch</c> (the stamp row of
+    /// <c>query_plan_dim_seen</c>) and <c>dim_wide_touch</c> (the dimension row's own <c>last_seen</c>, for an older build)
+    /// each choose their rows with <c>FOR UPDATE SKIP LOCKED</c>, as <see cref="PayloadDimensions.TouchSql"/> does. The
+    /// dimension GC locks the dimension row first and the stamp row in its cascade, and this statement reaches the stamp
+    /// row first, so a plan seen again while a GC batch held its dimension row would otherwise wait on it while the GC
+    /// waited on the stamp row, a deadlock (40P01) that rolls back the whole cycle. A skipped row is one the GC already
+    /// holds, so the plan is at the GC's cutoff and the touch could not keep it. <c>dim_adopt</c> gives a plan whose
+    /// dimension row has no stamp row (a dimension row written with the insert trigger off, such as a restore) one, as
+    /// <see cref="PayloadDimensions.TouchSql"/>'s adopt step does, so the GC's judgement of it starts from this touch.</para>
+    ///
     /// <para>The CTE is ordered by the map's primary key for the #1801 reason on <see cref="UpsertSql"/> —
     /// this is the one statement in the design that touches many rows across two tables on every cycle of
     /// every server, so it is the most likely place for an unordered-batch deadlock to form. Being precise
@@ -194,15 +204,33 @@ map_touch AS (
 dim_touch AS (
     UPDATE collect.query_plan_dim_seen AS d
     SET last_seen = $5::timestamp
-    WHERE d.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
-      AND d.last_seen < $5::timestamp - " + QueryStoreLivenessTouchGuard.GuardInterval + @"
+    WHERE d.digest IN (
+        SELECT s.digest FROM collect.query_plan_dim_seen AS s
+        WHERE s.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
+          AND s.last_seen < $5::timestamp - " + QueryStoreLivenessTouchGuard.GuardInterval + @"
+        ORDER BY s.digest
+        FOR UPDATE SKIP LOCKED)
     RETURNING d.digest
+),
+dim_adopt AS (
+    INSERT INTO collect.query_plan_dim_seen (digest, last_seen)
+    SELECT w.digest, $5::timestamp
+    FROM (SELECT DISTINCT digest FROM map_touch WHERE digest IS NOT NULL) AS w
+    WHERE EXISTS (SELECT 1 FROM collect.query_plan_dim AS d WHERE d.digest = w.digest)
+      AND NOT EXISTS (SELECT 1 FROM collect.query_plan_dim_seen AS s WHERE s.digest = w.digest)
+    ORDER BY w.digest
+    ON CONFLICT (digest) DO NOTHING
+    RETURNING digest
 ),
 dim_wide_touch AS (
     UPDATE collect.query_plan_dim AS d
     SET last_seen = $5::timestamp
-    WHERE d.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
-      AND d.last_seen < $5::timestamp - " + PayloadDimensionSeen.WideRowRefreshInterval + @"
+    WHERE d.digest IN (
+        SELECT w.digest FROM collect.query_plan_dim AS w
+        WHERE w.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
+          AND w.last_seen < $5::timestamp - " + PayloadDimensionSeen.WideRowRefreshInterval + @"
+        ORDER BY w.digest
+        FOR UPDATE SKIP LOCKED)
     RETURNING d.digest
 )
 SELECT

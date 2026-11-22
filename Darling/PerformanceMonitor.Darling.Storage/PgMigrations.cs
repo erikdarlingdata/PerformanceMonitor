@@ -11431,6 +11431,17 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     internal const int V293CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
 
     /// <summary>
+    /// V298's command timeout (seconds), #9304: six times the default bound, equal to <see cref="V281CommandTimeoutSeconds"/>, so
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> stays as it is.
+    ///
+    /// <para><b>Why this rung needs its own.</b> V298 is silent for its whole run and has V281's shape for both dimension tables: the backfill reads the
+    /// main heap of each dimension (about 18 GB on the largest store, often read cold), the foreign key validation then reads both sides again, and the
+    /// primary key sorts about 27M digests. The default 300 s bound limits the rung's total time, and a rung that runs out of time rolls back and fails
+    /// the start on every start.</para>
+    /// </summary>
+    internal const int V298CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
     /// The rungs that run under a longer command timeout than <see cref="MigrationCommandTimeoutSeconds"/>, by
     /// version, with the bound each one runs under (seconds). The applier reads this for every rung it applies
     /// (<see cref="RungCommandTimeoutSeconds"/>).
@@ -11445,6 +11456,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     {
         [281] = V281CommandTimeoutSeconds,
         [293] = V293CommandTimeoutSeconds,
+        [298] = V298CommandTimeoutSeconds,
     };
 
     /// <summary>

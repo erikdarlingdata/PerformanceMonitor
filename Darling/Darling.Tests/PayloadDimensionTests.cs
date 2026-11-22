@@ -430,7 +430,7 @@ public sealed class PayloadDimensionTests
 
         /* ON CONFLICT is the entire dedup mechanism: the second and every later sighting of the same
            content writes no new row. */
-        Assert.Contains("ON CONFLICT (digest) DO NOTHING", sql, StringComparison.Ordinal);
+        Assert.Contains("ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen", sql, StringComparison.Ordinal);
 
         /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the then-indexed
            last_seen column), tested on the stamp table since V298 (#9304). Without it, every referenced dim row
@@ -451,7 +451,8 @@ public sealed class PayloadDimensionTests
             "    WHERE s.digest = u.digest\n" +
             "    AND   s.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
-            "ON CONFLICT (digest) DO NOTHING",
+            "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
+            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - interval '24 hours'",
             sql);
 
         /* #4249: the pre-filter is a plain MVCC read (no lock) that keeps an already-fresh digest from
@@ -476,7 +477,8 @@ public sealed class PayloadDimensionTests
             "    WHERE s.digest = u.digest\n" +
             "    AND   s.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
-            "ON CONFLICT (digest) DO NOTHING",
+            "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - interval '24 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
 
         /* #2171: compressContent false routes the plan dim through the TEXT branch - query_plan_xml
@@ -491,7 +493,8 @@ public sealed class PayloadDimensionTests
             "    WHERE s.digest = u.digest\n" +
             "    AND   s.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
-            "ON CONFLICT (digest) DO NOTHING",
+            "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - interval '24 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false));
 
         /* Explicit true is byte-identical to the default - the parameter cannot drift the gzip shape. */

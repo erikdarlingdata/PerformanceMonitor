@@ -334,10 +334,20 @@ public static class PayloadDimensions
     /// <see cref="PayloadDimensionSeen"/> row, and <see cref="TouchSql"/> refreshes it, so an unchanged text or plan is
     /// not rewritten (and a text's trigrams are not added to the GIN index again). The <c>WHERE NOT EXISTS</c> pre-filter
     /// reads the stamp table: a digest whose stamp is inside the <see cref="LastSeenRefreshGuardHours"/> window never
-    /// reaches the insert. A digest that passes it but already exists conflicts and writes nothing, and
-    /// <c>DO NOTHING</c> takes no row lock (the #4249 cost of the old <c>DO UPDATE</c> arm, which locked every conflicting
-    /// row before it tested its <c>WHERE</c>). A new dimension row's stamp row is written by the insert trigger
-    /// (<see cref="PayloadDimensionSeen.TriggerSql"/>), at the same collection timestamp.</para>
+    /// reaches the insert, so the conflict arm runs at most once per guard window for a digest.</para>
+    ///
+    /// <para><b>The conflict arm LOCKS the conflicting row, on purpose.</b> It is <c>DO UPDATE ... WHERE</c>, whose
+    /// <c>WHERE</c> is true only when the dimension row's own <c>last_seen</c> is more than
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/> behind, and every GC candidate is. Taking the row lock is what
+    /// keeps a digest this batch is about to reference from being retired under it: a GC batch that reaches the row later
+    /// waits for this transaction, re-reads the row's new <c>last_seen</c> and skips it. With <c>DO NOTHING</c>, which takes
+    /// no lock, this order loses the content: the wide row is live (nothing happens), the GC locks it, <see cref="TouchSql"/>
+    /// skips it (<c>SKIP LOCKED</c>) and stamps the stamp row, the writer commits its fact rows, and the GC's cascade
+    /// deletes the stamp, leaving the fact rows with no content. The wide row is locked before the stamp row, the same order
+    /// as the GC (wide row in the <c>DELETE</c>, stamp in the cascade), so this adds no deadlock. The #4249 cost of the old
+    /// arm, a lock on every conflicting row, stays small: the pre-filter keeps a fresh digest from reaching the arm. A new
+    /// dimension row's stamp row is written by the insert trigger (<see cref="PayloadDimensionSeen.TriggerSql"/>), at the
+    /// same collection timestamp.</para>
     ///
     /// <para>Callers MUST pass digest-deduplicated arrays, and in digest ORDER: dedup makes a batch conflict-free with
     /// itself, the order makes it conflict-free with its siblings (two sessions that insert two shared digests in
@@ -358,7 +368,8 @@ public static class PayloadDimensions
             $"    WHERE s.{DigestColumn} = u.digest\n" +
             $"    AND   s.{LastSeenColumn} >= $3 - {LastSeenRefreshGuardInterval})\n" +
             $"ORDER BY u.digest\n" +
-            $"ON CONFLICT ({DigestColumn}) DO NOTHING";
+            $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
+            $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {PayloadDimensionSeen.WideRowRefreshInterval}";
 
         if (compressContent && string.Equals(dimTable, CompressedContentDimTable, StringComparison.Ordinal))
         {

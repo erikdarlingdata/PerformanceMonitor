@@ -541,8 +541,8 @@ public sealed class MigrationDataMovingRungCensusPins
             + "index. V281's shape for the same kind of table (a backfill of a narrow table from every row of a wide one, loaded before the "
             + "constraints), so the rung also puts a statement trigger on each dimension and its function body names an INSERT into the seen "
             + "table from the transition table, which is the function text and not a statement the rung runs. The backfill reads the "
-            + "dimension's main heap only, never its TOAST. The floor value is V281's, taken as the same shape: the rung's own timing is "
-            + "measured separately and is not part of this declaration."),
+            + "dimension's main heap only, never its TOAST. It runs under V298CommandTimeoutSeconds (1,800 s, equal to V281's), because it is silent and reads about 18 GB of main heap on "
+            + "the largest store, so the lock-wait budget is unchanged. The rung's own timing is measured separately and is not part of this declaration."),
     ];
 
     /// <summary>

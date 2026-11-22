@@ -281,6 +281,43 @@ public sealed class PayloadDimensionSeenLiveTests
 
     // ---- helpers ----
 
+    private const string PlanMapDatabase = "plan-map-db";
+
+    /// <summary>One run of the shipped upsert statement for one payload, in the text branch, so the same call serves both dimensions.</summary>
+    private static async Task UpsertAsync(
+        NpgsqlConnection connection, string dimTable, string payload, DateTime now, CancellationToken ct, NpgsqlTransaction? transaction = null)
+    {
+        await using var command = new NpgsqlCommand(PayloadDimensions.UpsertSql(dimTable, compressContent: false), connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = new[] { PayloadDimensions.Digest(payload) } });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = new[] { payload } });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>A plan dimension row with its stamp row (both at <paramref name="stamp"/>) and a plan map row for it, as a plan the
+    /// Query Store collector has seen. The map row is older than the touch guard. Returns the digest.</summary>
+    private static async Task<byte[]> PlanMapRowAsync(NpgsqlConnection connection, long planId, string payload, DateTime stamp, CancellationToken ct)
+    {
+        var digest = await InsertAsync(connection, PayloadDimensions.QueryPlanDimTable, payload, stamp, ct);
+        await ExecuteAsync(
+            connection,
+            "INSERT INTO collect.query_store_plan_map (server_id, database_name, plan_id, digest, plan_hash, last_seen) VALUES (1, $1, $2, $3, '0xAA', $4)",
+            ct, PlanMapDatabase, planId, Bytea(digest), stamp);
+        return digest;
+    }
+
+    private static async Task ExecuteInAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken ct, params object[] parameters)
+    {
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.Add(parameter is NpgsqlParameter typed ? typed : new NpgsqlParameter { Value = parameter });
+        }
+
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static DateTime WholeSecondNow()
     {
         var now = DateTime.UtcNow;
@@ -357,6 +394,166 @@ public sealed class PayloadDimensionSeenLiveTests
         command.Parameters.Add(Bytea(digest));
         var value = await command.ExecuteScalarAsync(ct);
         return value is DateTime stamp ? DateTime.SpecifyKind(stamp, DateTimeKind.Unspecified) : null;
+    }
+
+    [Theory]
+    [InlineData(PayloadDimensions.QueryTextDimTable)]
+    [InlineData(PayloadDimensions.QueryPlanDimTable)]
+    public async Task AnUpsertThatLocksAStaleWideRow_KeepsItThroughAGcBatchThatStartsAfterIt(string dimTable)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var writer = await OpenAsync(scratch, ct);
+        await using var gc = await OpenAsync(scratch, ct);
+        await using var watcher = await OpenAsync(scratch, ct);
+
+        /* A GC candidate: both stamps one hour behind the smallest cutoff the GC is given. The writer references it again, and the
+           stamp is stale, so the upsert's pre-filter lets it through to the conflict arm. */
+        var now = WholeSecondNow();
+        var cutoff = now.AddHours(-PayloadDimensionSeen.OlderBuildCutoffHours);
+        var candidate = await InsertAsync(writer, dimTable, "upsert-lock-1", cutoff.AddHours(-1), ct);
+        await ExecuteAsync(gc, "SET lock_timeout = '120s'", ct);
+
+        bool waited;
+        IReadOnlyList<DateTime> retired;
+        await using (var transaction = await writer.BeginTransactionAsync(ct))
+        {
+            /* The writer's order: the upsert, then the refresh, then the fact rows and the commit. The GC batch starts after the
+               upsert. The conflict arm holds the wide row, so the batch waits for the commit. */
+            await UpsertAsync(writer, dimTable, "upsert-lock-1", now, ct, transaction);
+            var batch = GcAsync(gc, dimTable, cutoff, cap: 1000, cursor: null, ct);
+            waited = await WaitsOnALockHeldByAsync(watcher, gc.ProcessID, writer.ProcessID, batch, ct);
+            Assert.Empty(await TouchAsync(writer, dimTable, new[] { candidate }, now, ct, transaction));
+            await transaction.CommitAsync(ct);
+            retired = await batch;
+        }
+
+        Assert.True(waited, "the GC finished, or ran for a minute, without waiting on the wide row the upsert held");
+        Assert.Empty(retired);
+        Assert.Equal(new[] { Hex(candidate) }, (await DigestsAsync(writer, dimTable, ct)).Select(Hex).ToArray());
+        Assert.Equal(new[] { Hex(candidate) }, (await StampDigestsAsync(writer, dimTable, ct)).Select(Hex).ToArray());
+        Assert.Equal(now, await StampAsync(writer, dimTable, candidate, ct));
+        Assert.Equal(now, (await WideRowAsync(writer, dimTable, candidate, ct)).LastSeen);
+    }
+
+    [Fact]
+    public async Task ThePlanMapTouch_NeverWaitsOnARowAnotherTransactionHolds_AndStampsTheRowsItCanTake()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var toucher = await OpenAsync(scratch, ct);
+        await using var holder = await OpenAsync(scratch, ct);
+
+        /* A touch that waits for a lock fails here, on the toucher's own lock_timeout, instead of holding the test host. */
+        await ExecuteAsync(toucher, "SET lock_timeout = '3s'", ct);
+
+        var now = WholeSecondNow();
+        var old = now.AddHours(-(PayloadDimensionSeen.WideRowRefreshHours + 2));
+        var heldWide = await PlanMapRowAsync(toucher, 1, "held-wide", old, ct);
+        var heldStamp = await PlanMapRowAsync(toucher, 2, "held-stamp", old, ct);
+        var heldWideBefore = await WideRowAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldWide, ct);
+        var heldStampBefore = await StampAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldStamp, ct);
+
+        /* The first plan's dimension row is held, as a GC batch holds it. The touch returns, stamps the plan's stamp row and leaves
+           the held wide row as it was. */
+        await using (var transaction = await holder.BeginTransactionAsync(ct))
+        {
+            await ExecuteInAsync(holder, transaction, $"SELECT 1 FROM collect.{PayloadDimensions.QueryPlanDimTable} WHERE digest = $1 FOR UPDATE", ct, Bytea(heldWide));
+            await QueryStoreFetchProbe.TouchAndProbePlansAsync(toucher, 1, PlanMapDatabase, new (long, string?)[] { (1L, "0xAA") }, now, 30, ct);
+            Assert.Equal(now, await StampAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldWide, ct));
+            await transaction.RollbackAsync(ct);
+        }
+
+        Assert.Equal(heldWideBefore, await WideRowAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldWide, ct));
+
+        /* The second plan's stamp row is held. The touch returns, rewrites the wide row and leaves the held stamp as it was. */
+        await using (var transaction = await holder.BeginTransactionAsync(ct))
+        {
+            await ExecuteInAsync(holder, transaction, $"SELECT 1 FROM {PayloadDimensionSeen.TableName(PayloadDimensions.QueryPlanDimTable)} WHERE digest = $1 FOR UPDATE", ct, Bytea(heldStamp));
+            await QueryStoreFetchProbe.TouchAndProbePlansAsync(toucher, 1, PlanMapDatabase, new (long, string?)[] { (2L, "0xAA") }, now, 30, ct);
+            Assert.Equal(heldStampBefore, await StampAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldStamp, ct));
+            await transaction.RollbackAsync(ct);
+        }
+
+        Assert.Equal(now, (await WideRowAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldStamp, ct)).LastSeen);
+    }
+
+    [Fact]
+    public async Task ThePlanMapTouch_RewritesTheWideRowOnlyPastTheWideInterval_AndGivesAMissingStampOne()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+
+        var now = WholeSecondNow();
+        var staleStamp = now.AddHours(-(QueryStoreLivenessTouchGuard.GuardHours + 1));
+        Assert.True(QueryStoreLivenessTouchGuard.GuardHours + 1 < PayloadDimensionSeen.WideRowRefreshHours - 2);
+        var inside = await PlanMapRowAsync(connection, 1, "inside", now.AddHours(-(PayloadDimensionSeen.WideRowRefreshHours - 2)), ct);
+        var past = await PlanMapRowAsync(connection, 2, "past", now.AddHours(-(PayloadDimensionSeen.WideRowRefreshHours + 2)), ct);
+        var unstamped = await PlanMapRowAsync(connection, 3, "unstamped", now.AddHours(-(PayloadDimensionSeen.WideRowRefreshHours - 2)), ct);
+        foreach (var digest in new[] { inside, past, unstamped })
+        {
+            await ExecuteAsync(connection, $"UPDATE {PayloadDimensionSeen.TableName(PayloadDimensions.QueryPlanDimTable)} SET last_seen = $1 WHERE digest = $2", ct, staleStamp, Bytea(digest));
+        }
+
+        await ExecuteAsync(connection, $"DELETE FROM {PayloadDimensionSeen.TableName(PayloadDimensions.QueryPlanDimTable)} WHERE digest = $1", ct, Bytea(unstamped));
+        var insideBefore = await WideRowAsync(connection, PayloadDimensions.QueryPlanDimTable, inside, ct);
+        var unstampedBefore = await WideRowAsync(connection, PayloadDimensions.QueryPlanDimTable, unstamped, ct);
+
+        await QueryStoreFetchProbe.TouchAndProbePlansAsync(
+            connection, 1, PlanMapDatabase, new (long, string?)[] { (1L, "0xAA"), (2L, "0xAA"), (3L, "0xAA") }, now, 30, ct);
+
+        /* Inside the wide interval: the stamp moved, the wide row was not written. Past it: both moved. */
+        Assert.Equal(now, await StampAsync(connection, PayloadDimensions.QueryPlanDimTable, inside, ct));
+        Assert.Equal(insideBefore, await WideRowAsync(connection, PayloadDimensions.QueryPlanDimTable, inside, ct));
+        Assert.Equal(now, await StampAsync(connection, PayloadDimensions.QueryPlanDimTable, past, ct));
+        Assert.Equal(now, (await WideRowAsync(connection, PayloadDimensions.QueryPlanDimTable, past, ct)).LastSeen);
+
+        /* The digest with no stamp row has one now, and its wide row, inside the interval, was not written. */
+        Assert.Equal(now, await StampAsync(connection, PayloadDimensions.QueryPlanDimTable, unstamped, ct));
+        Assert.Equal(unstampedBefore, await WideRowAsync(connection, PayloadDimensions.QueryPlanDimTable, unstamped, ct));
+    }
+
+    [Theory]
+    [InlineData(PayloadDimensions.QueryTextDimTable)]
+    [InlineData(PayloadDimensions.QueryPlanDimTable)]
+    public async Task TheRetentionPass_AdoptsMissingStamps_RetiresByStamp_AndKeepsAFreshRow(string dimTable)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+
+        var now = WholeSecondNow();
+        var ancient = now.AddDays(-400);
+        var ancientStamped = await InsertAsync(connection, dimTable, "ret-ancient", ancient, ct);
+        var ancientUnstamped = await InsertAsync(connection, dimTable, "ret-ancient-unstamped", ancient, ct);
+        var freshUnstamped = await InsertAsync(connection, dimTable, "ret-fresh-unstamped", now.AddHours(-1), ct);
+        var fresh = await InsertAsync(connection, dimTable, "ret-fresh", now.AddHours(-1), ct);
+
+        /* Two dimension rows written with the trigger off: no stamp row. */
+        foreach (var digest in new[] { ancientUnstamped, freshUnstamped })
+        {
+            await ExecuteAsync(connection, $"DELETE FROM {PayloadDimensionSeen.TableName(dimTable)} WHERE digest = $1", ct, Bytea(digest));
+        }
+
+        Assert.Equal(2, (await StampDigestsAsync(connection, dimTable, ct)).Count);
+
+        var csb = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
+        await using var postgres = NpgsqlDataSource.Create(csb.ConnectionString);
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, logger: null, ct, retentionDaysFor: _ => 30);
+
+        /* The stamped ancient row and the adopted ancient row (adopted with its own stamp, then retired by it) are gone, the
+           stamp rows with them. The fresh row and the adopted fresh row stay, and the adopted one has its stamp. */
+        var left = new[] { fresh, freshUnstamped }.Select(Hex).Order().ToArray();
+        Assert.Equal(left, (await DigestsAsync(connection, dimTable, ct)).Select(Hex).Order().ToArray());
+        Assert.Equal(left, (await StampDigestsAsync(connection, dimTable, ct)).Select(Hex).Order().ToArray());
+        Assert.Equal(now.AddHours(-1), await StampAsync(connection, dimTable, freshUnstamped, ct));
+        Assert.Null(await StampAsync(connection, dimTable, ancientStamped, ct));
+        Assert.Null(await StampAsync(connection, dimTable, ancientUnstamped, ct));
     }
 
     private sealed record WideRow(string Ctid, string Xmin, DateTime LastSeen);

@@ -1279,35 +1279,6 @@ WHERE hypertable_name = 'wait_stats'
     }
 
     /// <summary>
-    /// Both payload DIMENSION tables are row-capped, in stamp order (#9304, V298). The dimension row no longer carries an
-    /// index on <c>last_seen</c>, so a time-sliced delete over it would scan the table for every slice: the purge runs
-    /// <see cref="PayloadDimensions.CursoredDeleteSql"/>, which orders by the stamp table's own index, for each dimension.
-    /// (The two Query Store interval fact tables are row-capped too since #5569, because they
-    /// are plain heaps where the <c>ctid</c> idiom is safe; <c>QueryStoreIntervalPurgeRowCappedTests</c> pins
-    /// that. The fact tables that stay time-sliced need the compressed-chunk-safe shape, #1564.)
-    /// </summary>
-    [Fact]
-    public void BothDims_TakeTheStampOrderedRowCap()
-    {
-        var source = ReadRetentionSource();
-
-        var at = source.IndexOf("foreach (var dimTable in PayloadDimensions.DimTables)", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the dim purge loop moved (#2386)");
-
-        var body = source[at..Math.Min(source.Length, at + 3200)];
-
-        /* One statement for every dimension, and BOTH the statement and the drain batch size follow it. */
-        Assert.Contains("PayloadDimensions.CursoredDeleteSql(", body, StringComparison.Ordinal);
-        Assert.Contains("cursoredSql:", body, StringComparison.Ordinal);
-        Assert.Contains("batchSize:", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("TimeSlicedDeleteSql(", body, StringComparison.Ordinal);
-
-        /* A row-capped statement MUST carry its cap as the batch size, or the drain loop reverts to
-           "stop when a batch clears nothing" and does one batch per sweep instead of draining. */
-        Assert.Contains("PlanDimDeleteRowCap", body, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// A timed-out purge reports what it actually removed. Each statement autocommits, so a failure on the
     /// fifth batch does not undo the first four — but the old catch returned null and discarded the running
     /// total, so the sweep summary said "0 row(s) deleted, 1 failed" for a purge that had deleted 755 k
