@@ -537,6 +537,73 @@ public sealed class PayloadDimensionSeenLiveTests
         Assert.Null(await StampAsync(toucher, PayloadDimensions.QueryPlanDimTable, digest, ct));
     }
 
+    [Theory]
+    [InlineData(PayloadDimensions.QueryTextDimTable)]
+    [InlineData(PayloadDimensions.QueryPlanDimTable)]
+    public async Task ARefreshOfAStampedRow_LeavesItsWideRowUnlocked_ForAnotherTransaction(string dimTable)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var toucher = await OpenAsync(scratch, ct);
+        await using var other = await OpenAsync(scratch, ct);
+
+        /* The stamp is past the guard, so the digest is wanted and its stamp is refreshed. The wide row is fresh, so the refresh
+           leaves it alone. */
+        var now = WholeSecondNow();
+        var digest = await InsertAsync(toucher, dimTable, "locks-only-unstamped", now, ct);
+        await ExecuteAsync(
+            toucher,
+            $"UPDATE collect.{PayloadDimensionSeen.SeenName(dimTable)} SET last_seen = $2 WHERE digest = $1",
+            ct, Bytea(digest), now.AddHours(-(PayloadDimensions.LastSeenRefreshGuardHours + 1)));
+
+        await using (var transaction = await toucher.BeginTransactionAsync(ct))
+        {
+            Assert.Empty(await TouchAsync(toucher, dimTable, new[] { digest }, now, ct, transaction));
+            await AssertWideRowUnlockedAsync(other, dimTable, digest, ct);
+            await transaction.RollbackAsync(ct);
+        }
+    }
+
+    [Fact]
+    public async Task ThePlanMapTouchOfAStampedRow_LeavesItsWideRowUnlocked_ForAnotherTransaction()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var toucher = await OpenAsync(scratch, ct);
+        await using var other = await OpenAsync(scratch, ct);
+
+        /* The map row is past its guard and the stamp is stale, so the touch refreshes the stamp. The wide row is fresh, so the touch
+           leaves it alone. */
+        var now = WholeSecondNow();
+        var digest = await PlanMapRowAsync(toucher, 1, "locks-only-unstamped", now.AddHours(-(PayloadDimensionSeen.WideRowRefreshHours + 2)), ct);
+        await ExecuteAsync(toucher, $"UPDATE collect.{PayloadDimensions.QueryPlanDimTable} SET last_seen = $2 WHERE digest = $1", ct, Bytea(digest), now);
+
+        await using (var transaction = await toucher.BeginTransactionAsync(ct))
+        {
+            await QueryStoreFetchProbe.TouchAndProbePlansAsync(toucher, 1, PlanMapDatabase, new (long, string?)[] { (1L, "0xAA") }, now, 30, ct);
+            Assert.Equal(now, await StampAsync(toucher, PayloadDimensions.QueryPlanDimTable, digest, ct));
+            await AssertWideRowUnlockedAsync(other, PayloadDimensions.QueryPlanDimTable, digest, ct);
+            await transaction.RollbackAsync(ct);
+        }
+    }
+
+    /// <summary>Takes the wide row's lock for update without waiting. A touch that still holds a key share lock on it fails this with 55P03.</summary>
+    private static async Task AssertWideRowUnlockedAsync(NpgsqlConnection other, string dimTable, byte[] digest, CancellationToken ct)
+    {
+        try
+        {
+            await using var transaction = await other.BeginTransactionAsync(ct);
+            await ExecuteInAsync(other, transaction, $"SELECT 1 FROM collect.{dimTable} WHERE digest = $1 FOR UPDATE NOWAIT", ct, Bytea(digest));
+            await transaction.RollbackAsync(ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+        {
+            Assert.Fail("the touch holds a lock on a wide row it did not write (55P03)");
+        }
+    }
+
     [Fact]
     public async Task ThePlanMapTouch_RewritesTheWideRowOnlyPastTheWideInterval_AndGivesAMissingStampOne()
     {
