@@ -932,13 +932,18 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // V293 (#9277): the partial counter-row index on collect.attention_events. It is the probe's newest sentinel until V294 (#9284) went on top, found by the index's name. The rewind drops it by name, so a re-run of V293
         // builds it again. Safe on a store that never had it.
         new(293, "hasAttentionCountIndex", @"DROP INDEX IF EXISTS collect.idx_attention_events_count_time;"),
-        // V294 (#9284): the view-and-time index on the aggregate compression order history. It is the probe's newest sentinel, found by the index's name. The rewind drops it, so a re-run of V294
+        // V294 (#9284): the view-and-time index on the aggregate compression order history. It is the probe's newest sentinel until V295 (#9225) and V296 (#9280) went on top, found by the index's name. The rewind drops it, so a re-run of V294
         // makes it again and moves the daily Query Store rollup's order if it is compressed. The history table stays (V279's). Safe on a store that never had it.
         new(294, "hasAggregateCompressionOrderHistoryIndex",
             @"DROP INDEX IF EXISTS collect.ix_aggregate_compression_order_history_view;"),
-        // V295 (#9225): the plan regression block tables, the probe's newest sentinel. The rewind drops both, so a re-run of V295 creates them empty and the builder
+        // V295 (#9225): the plan regression block tables, the probe's sentinel under V296's. The rewind drops both, so a re-run of V295 creates them empty and the builder
         // sums the blocks again from the daily rows. Safe on a store that never had them.
         new(295, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
+        // V296 (#9280): the hourly Query Store summary table and the ledger's top_built_seq column. The table's index is the probe's newest sentinel and goes with the
+        // table. The rewind drops both, so a re-run of V296 builds them again. Safe on a store that never had them.
+        new(296, "hasQueryStoreTopHourly",
+            @"DROP TABLE IF EXISTS collect.query_store_top_hourly;
+ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS top_built_seq;"),
     ];
 
     /// <summary>

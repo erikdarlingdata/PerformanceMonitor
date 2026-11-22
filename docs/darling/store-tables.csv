@@ -174,6 +174,7 @@ query_store_text,collected,yes,Query Store statement text
 query_store_text_seen,internal,no,liveness stamp of each Query Store statement text
 query_store_top_daily,derived,derived,per-day top Query Store statements
 query_store_top_daily_built,internal,no,which days are built
+query_store_top_hourly,derived,derived,per-hour top Query Store statements
 query_store_watermarks,internal,no,Query Store read progress
 query_store_watermarks_coverage,internal,no,Query Store read coverage
 query_tag_sightings,derived,derived,tag map built from collected rows
