@@ -21,19 +21,27 @@ public sealed class LockedConnection : IDisposable, IAsyncDisposable
 {
     private readonly DuckDBConnection _connection;
     private readonly IDisposable _lock;
+    private readonly Action? _commandCreated;
     private bool _disposed;
 
-    public LockedConnection(DuckDBConnection connection, IDisposable @lock)
+    /// <param name="commandCreated">Test seam (#9195): called once per command this connection creates, so a test can count the
+    /// statements a read issues without timing it. Null in the shipped app.</param>
+    public LockedConnection(DuckDBConnection connection, IDisposable @lock, Action? commandCreated = null)
     {
         _connection = connection;
         _lock = @lock;
+        _commandCreated = commandCreated;
     }
 
     /// <summary>
     /// Creates a command on the underlying connection.
     /// This is the only method callers need — all 50 call sites use CreateCommand() exclusively.
     /// </summary>
-    public DuckDBCommand CreateCommand() => _connection.CreateCommand();
+    public DuckDBCommand CreateCommand()
+    {
+        _commandCreated?.Invoke();
+        return _connection.CreateCommand();
+    }
 
     public void Dispose()
     {
