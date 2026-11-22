@@ -153,9 +153,11 @@ public partial class DuckDbFactCollector
         var judgements = new Dictionary<int, PlanInputJudgement>();
         var outcomes = new Dictionary<(string Database, long Latest, long Best), PairJudgement>();
         var causes = new int[PlanUnverifiedCauseCount];
-        /* #9195: an interactive read has no fetch budget. It answers from the outcomes an earlier background pass cached, and a
-           candidate with no cached answer stays unverified, the same as one a spent budget never reached. */
+        /* #9195: an interactive read has no per-pass budget. It answers from the outcomes an earlier pass cached, and for a pair with
+           none it draws on the call's allowance (3 fetches, 3 s, shared by every context of the call, see FetchPlanForInputsAsync).
+           A candidate the allowance does not reach stays unverified, the same as one a spent budget never reached. */
         var budget = new PlanFetchBudget { Left = context.InteractiveRead ? 0 : MaxPlanInputFetches };
+        if (context.InteractiveRead) context.InteractiveFetches ??= new InteractivePlanFetchAllowance();
         var started = Stopwatch.GetTimestamp();
 
         using var overall = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
@@ -357,12 +359,28 @@ public partial class DuckDbFactCollector
         AnalysisContext context, PlanFetchBudget budget,
         string databaseName, long planId, CancellationToken overallToken)
     {
-        if (budget.Left <= 0 || overallToken.IsCancellationRequested) return new PlanFetch(null, Tried: false);
-        budget.Left--;
+        var fetchLimit = PlanInputFetchTimeout;
+        var allowance = context.InteractiveRead ? context.InteractiveFetches : null;
+        if (overallToken.IsCancellationRequested) return new PlanFetch(null, Tried: false);
+        if (context.InteractiveRead)
+        {
+            /* #9195: an interactive read's fetches come from the call's allowance, and none outlives what is left of its time. */
+            if (allowance is null || !allowance.TryTake(out var remaining)) return new PlanFetch(null, Tried: false);
+            if (remaining < fetchLimit) fetchLimit = remaining;
+        }
+        else if (budget.Left <= 0)
+        {
+            return new PlanFetch(null, Tried: false);
+        }
+        else
+        {
+            budget.Left--;
+        }
+
         budget.Fetches++;
 
         using var one = CancellationTokenSource.CreateLinkedTokenSource(overallToken);
-        one.CancelAfter(PlanInputFetchTimeout);
+        one.CancelAfter(fetchLimit);
 
         /* #9195: each fetch's time and how it ended goes to the Debug log with the plan's size in characters, never its text. */
         var started = Stopwatch.GetTimestamp();
@@ -401,6 +419,9 @@ public partial class DuckDbFactCollector
 
                 /* #9195: the pass's fetch time running out is the pass's limit, not this plan's: no skip entry. */
                 skipPlan = !overallToken.IsCancellationRequested;
+
+                /* #9195: an interactive call's allowance can cut a fetch short of PlanInputFetchTimeout. That is the call's limit too. */
+                if (fetchLimit < PlanInputFetchTimeout) skipPlan = false;
             }
             else
             {
@@ -420,6 +441,7 @@ public partial class DuckDbFactCollector
         {
             var elapsedTicks = Stopwatch.GetTimestamp() - started;
             budget.FetchTicks += elapsedTicks;
+            allowance?.RecordFetchTime(Stopwatch.GetElapsedTime(0, elapsedTicks));
             AppLogger.Debug("DuckDbFactCollector", string.Create(CultureInfo.InvariantCulture,
                 $"Plan input fetch {result} in {(long)Stopwatch.GetElapsedTime(0, elapsedTicks).TotalMilliseconds} ms ({chars} characters) for plan {planId} in {databaseName} on {context.ServerName} (server {context.ServerId})"));
         }
