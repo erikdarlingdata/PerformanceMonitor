@@ -55,6 +55,16 @@ internal sealed class PersonalTokenPendingRevokes
     private bool _overflowReported;
     private bool _saveFailureLogged;
 
+    // RED-RUN SHIMS (removed before the fix commit): the old behaviour behind the new names.
+    internal const long MaxStateFileBytes = 4 * 1024 * 1024;
+
+    internal void SaveIfDirty()
+    {
+    }
+
+    internal static PersonalTokenPendingRevokes ForConfig(DarlingConfig config, string configPath, ILogger? logger) =>
+        new(stateFile: Path.Combine(DarlingFileLoggerProvider.DefaultLogDirectory(), StateFileName), logger: logger);
+
     /// <summary>The role value of an operator token, the only role an operator-only revoke takes.</summary>
     private const string OperatorRole = "operator";
 

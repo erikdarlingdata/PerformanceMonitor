@@ -570,4 +570,101 @@ public sealed class DarlingPersonalTokenSnapshotTests
         Assert.Equal(2, rig.Log.CountAtLevel(LogLevel.Information));
         Assert.Equal(2, rig.Log.CountAtLevel(LogLevel.Warning));
     }
+
+    [Fact]
+    public void PendingRevokes_ForConfig_SavesInTheKeyFolder_AndANewQueueFromTheSameConfigLoadsIt()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var configPath = Path.Combine(folder, "darling.json");
+            var config = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}}");
+            var keys = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
+
+            var first = PersonalTokenPendingRevokes.ForConfig(config, configPath, new CapturingTestLogger());
+            first.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+
+            Assert.True(File.Exists(Path.Combine(keys, PersonalTokenPendingRevokes.StateFileName)));
+            var second = PersonalTokenPendingRevokes.ForConfig(config, configPath, new CapturingTestLogger());
+            Assert.Equal("alice", Assert.Single(second.Snapshot()).OwnerKey);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AFailedSave_IsWrittenByTheNextSaveIfDirty_OnceTheFileCanBeWritten()
+    {
+        var folder = TempFolder();
+        try
+        {
+            /* The folder the file belongs in is a plain file, so the first save cannot create it. */
+            var blocker = Path.Combine(folder, "state");
+            File.WriteAllText(blocker, "in the way");
+            var file = Path.Combine(blocker, "queue.json");
+            var log = new CapturingTestLogger();
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            queue.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+            queue.SaveIfDirty();
+            Assert.False(File.Exists(file));
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+
+            File.Delete(blocker);
+            queue.SaveIfDirty();
+
+            Assert.Equal("alice", Assert.Single(new PersonalTokenPendingRevokes(stateFile: file).Snapshot()).OwnerKey);
+            Assert.True(queue.Refuses("alice", "reader"));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AFileWithARepeatedKey_StartsEmptyWithOneWarning_AndDoesNotThrow()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var file = Path.Combine(folder, "queue.json");
+            File.WriteAllText(file, "{\"entries\":[],\"entries\":[{\"owner_key\":\"alice\",\"operator_only\":false,\"reason\":\"x\"}]}");
+            var log = new CapturingTestLogger();
+
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            Assert.Equal(0, queue.Count);
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AFileOverTheSizeLimit_StartsEmptyWithOneWarning_WithoutBeingParsed()
+    {
+        var folder = TempFolder();
+        try
+        {
+            /* Valid JSON with one entry: parsed, it would load that entry. The padding takes it past the limit. */
+            var file = Path.Combine(folder, "queue.json");
+            File.WriteAllText(file, "{\"entries\":[{\"owner_key\":\"alice\",\"operator_only\":false,\"reason\":\"x\"}]}"
+                + new string(' ', (int)PersonalTokenPendingRevokes.MaxStateFileBytes));
+            var log = new CapturingTestLogger();
+
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            Assert.Equal(0, queue.Count);
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
 }
