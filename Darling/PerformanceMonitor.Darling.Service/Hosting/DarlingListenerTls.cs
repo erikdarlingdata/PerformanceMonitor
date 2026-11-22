@@ -61,6 +61,19 @@ internal sealed record ListenerTlsLabels(
         Client: "client",
         Reach: "connect",
         CleartextLead: "MCP server is LAN-exposed WITHOUT TLS: the bearer token and every tool result cross the segment in the clear");
+
+    /// <summary>
+    /// The metrics port's words (#9326). It serves the web certificate, so <see cref="Section"/> stays <c>"web"</c> and every
+    /// message names the <c>web.network.tls</c> block the operator edits. The cleartext lead is never logged: the host skips
+    /// <see cref="DarlingListenerTls.Resolve"/> when the block is not set and warns about plain HTTP itself.
+    /// </summary>
+    internal static ListenerTlsLabels Metrics { get; } = new(
+        Section: "web",
+        Surface: "Metrics port",
+        Endpoint: "metrics port",
+        Client: "scraper",
+        Reach: "scrape",
+        CleartextLead: "Metrics port is bound off loopback WITHOUT TLS: the token in the Authorization header crosses the network in the clear");
 }
 
 /// <summary>
