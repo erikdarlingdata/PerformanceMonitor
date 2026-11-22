@@ -401,7 +401,7 @@ public static class ParquetCompaction
 
     /* Tests only: called with each merge attempt's output path, whether it sorts, and the thread count its pragma sets
        (#9320). Null in production, so the attempt pays one null check. */
-    internal static Action<string, bool, int>? MergeAttemptObservedForTests;
+    internal static Action<string, bool, int>? MergeAttemptObservedForTests { get; set; }
 
     private static void RunMerge(
         string table,
