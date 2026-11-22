@@ -637,22 +637,29 @@ public class AnalysisService
             /* #9195: get_analysis_facts is an interactive read. The plan check answers from what the background pass cached and fetches no plan. */
             InteractiveRead = true
         };
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
+        var scopeTime = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted);
 
         try
         {
+            var passStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             var facts = await _collector.CollectFactsAsync(context);
+            var passTime = System.Diagnostics.Stopwatch.GetElapsedTime(passStarted);
+            var detectorTime = TimeSpan.Zero;
             if (context.ObservedDurationMs > 0)
             {
                 /* Same detector, same context, same position as the pass (#3691). A collector that
                    observed the window but emitted no fact does not short-circuit this: the detector reads
                    the store on its own and its facts are part of what this read shows. */
+                var detectorStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
                 facts.AddRange(anomalies);
+                detectorTime = System.Diagnostics.Stopwatch.GetElapsedTime(detectorStarted);
             }
-            if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
-            _scorer.ScoreAll(facts);
+            if (facts.Count > 0) _scorer.ScoreAll(facts);
+            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -662,6 +669,22 @@ public class AnalysisService
             AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
             return ([], null, CollectionCaveatState.From(context));
         }
+    }
+
+    /// <summary>
+    /// #9195: one Information line when the facts read took over <see cref="CollectorPassTimer.SlowPassThreshold"/>, with the time
+    /// split between its steps. The "Fact collection took" line times the fact pass alone, and a field read ran about 2 s longer
+    /// than that pass: this line says whether the rest went to the secondary replica read, the anomaly detector or the scorer.
+    /// </summary>
+    private static void ReportSlowFactsRead(
+        string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector)
+    {
+        if (total <= CollectorPassTimer.SlowPassThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        AppLogger.Info("AnalysisService",
+            $"Analysis facts read took {Ms(total)} ms for {serverName} (server {serverId}): secondary replica scope {Ms(scope)} ms, " +
+            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, scoring and the rest {Ms(total - scope - pass - detector)} ms");
     }
 
     /// <summary>
