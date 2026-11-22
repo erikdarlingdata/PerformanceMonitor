@@ -3799,9 +3799,11 @@ internal static partial class DarlingDataReader
         {
             var table = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databases, executionType, moduleName, tags, cancellationToken);
-            if (table is var (tableRows, tablePlan, dailyDays, dailySpan))
+            if (table is var (tableRows, tablePlan, dailyDays, dailySpan, tableSource))
             {
-                ReadScope.NoteSource(ReadScope.SourceIntervalTable);
+                /* #9310: the statement that answered, so a slow read names its SQL (the hourly-edges and the whole-window
+                   statements both open WITH parts AS). */
+                ReadScope.NoteSource(tableSource.Source, tableSource.Reason);
                 ReadScope.NoteRows(tableRows.Count);
                 return new QueryStoreTopRead(tableRows, tablePlan, dailyDays, dailySpan);
             }
@@ -3869,7 +3871,7 @@ internal static partial class DarlingDataReader
     /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
     /// and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
-    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan, int DailyDays, (DateOnly Start, DateOnly EndExclusive)? DailySpan)?> TryGetQueryStoreTopFromTableAsync(
+    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan, int DailyDays, (DateOnly Start, DateOnly EndExclusive)? DailySpan, (string Source, string Reason) Statement)?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
         string? executionType, string? moduleName, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
@@ -3978,7 +3980,13 @@ internal static partial class DarlingDataReader
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
 
-            return (rows, plan, dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0, dailySpan);
+            var spanDays = dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0;
+            var statement = hourly is not null
+                ? (ReadScope.SourceHourlyEdges, $"{hourly.SummaryHours.Count} summary hours, {spanDays} days")
+                : dailySpan is not null ? (ReadScope.SourceIntervalTable, $"daily table, {spanDays} days")
+                : splitBuilt ? (ReadScope.SourceIntervalTable, "split arms")
+                : (ReadScope.SourceIntervalTable, "whole window");
+            return (rows, plan, spanDays, dailySpan, statement);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
