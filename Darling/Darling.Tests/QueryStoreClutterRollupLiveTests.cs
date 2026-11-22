@@ -342,7 +342,7 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
     }
 
     [Fact]
-    public async Task ARawDayThatRetentionDropped_IsNotServedFromTheRollup_WhetherRawNowStartsAtMidnightOrInsideADay()
+    public async Task ARawDayThatRetentionDropped_IsStillServedFromTheRollupAsCollected_WhetherRawNowStartsAtMidnightOrInsideADay()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
         var ct = TestContext.Current.CancellationToken;
@@ -355,21 +355,22 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
         var whole = Lines(await ReadAsync(store, fleet, w, ct));
         Assert.Equal(E.AddDays(-10), (await RouteAsync(store, fleet, w, ct))!.Value.Start);
 
-        /* raw's oldest row is now a day's first instant: whole days from there are the rollup's */
+        /* #9287: raw's oldest row is now a day's first instant. The built days before it are still the rollup's, as collected, until the
+           day itself is past retention. Raw alone now answers with less. */
         await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
             "DELETE FROM collect.query_store_stats WHERE server_id = @server_id AND collection_time < @cut", ct, ("server_id", A), ("cut", E.AddDays(-8)));
         var atMidnight = Lines(await ReadRawAsync(store, fleet, w, ct));
         Assert.NotEqual(whole, atMidnight);
-        Assert.Equal(E.AddDays(-8), (await RouteAsync(store, fleet, w, ct))!.Value.Start);
-        Assert.Equal(atMidnight, Lines(await ReadAsync(store, fleet, w, ct)));
+        Assert.Equal(E.AddDays(-10), (await RouteAsync(store, fleet, w, ct))!.Value.Start);
+        Assert.Equal(whole, Lines(await ReadAsync(store, fleet, w, ct)));
 
-        /* raw's oldest row is inside a day: that day is not whole in raw, so it is not the rollup's either */
+        /* raw's oldest row is inside a day: the answer from the rollup does not change either */
         await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
             "DELETE FROM collect.query_store_stats WHERE server_id = @server_id AND collection_time < @cut", ct, ("server_id", A), ("cut", E.AddDays(-8).AddMinutes(1)));
         var insideDay = Lines(await ReadRawAsync(store, fleet, w, ct));
         Assert.NotEqual(atMidnight, insideDay);
-        Assert.Equal(E.AddDays(-7), (await RouteAsync(store, fleet, w, ct))!.Value.Start);
-        Assert.Equal(insideDay, Lines(await ReadAsync(store, fleet, w, ct)));
+        Assert.Equal(E.AddDays(-10), (await RouteAsync(store, fleet, w, ct))!.Value.Start);
+        Assert.Equal(whole, Lines(await ReadAsync(store, fleet, w, ct)));
     }
 
     [Fact]

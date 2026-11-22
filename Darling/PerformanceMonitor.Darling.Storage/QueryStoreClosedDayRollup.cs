@@ -258,14 +258,14 @@ ALTER TABLE collect.query_store_closed_day_built ADD COLUMN IF NOT EXISTS clutte
     /// <summary>
     /// #9287: whether the interval table still holds <paramref name="day"/> whole, from the server's oldest interval
     /// (<see cref="QueryStoreIntervalWide.PlainTableFloorSql"/>): the day is whole when it is on or after the first whole day at or
-    /// after that floor. A server with no interval has no whole day. A built day that fails this is served from its rollup as collected
+    /// after that floor. No floor means nothing was purged, so the day is whole. A built day that fails this is served from its rollup as collected
     /// and is never built again from the thinner table.
     /// </summary>
     public static bool RawHoldsDayWhole(DateTime? floor, DateOnly day)
     {
         if (floor is not { } f)
         {
-            return false;
+            return true;
         }
 
         var firstWhole = DateOnly.FromDateTime(f);
