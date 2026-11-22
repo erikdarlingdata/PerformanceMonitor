@@ -410,7 +410,9 @@ public static class PayloadDimensions
     /// insert (<see cref="UpsertSql"/>), the Query Store plan map's <c>dim_touch</c> and the GC's cascade, and a waiting
     /// refresh would turn that into a deadlock that rolls back a whole batch. Skipping a locked row is safe because whoever
     /// holds a stale-but-live stamp is refreshing it, or a transaction that rolls back leaves it stale for the next cycle,
-    /// far inside the GC's margin. The GC cannot be the holder of a row a live digest owns: it only reaches stamps older
+    /// far inside the GC's margin. The stamp insert takes a key share lock on the dimension row through the foreign key, so the
+    /// adopt step tests the row with <c>FOR KEY SHARE SKIP LOCKED</c> and leaves one a GC batch holds, which would otherwise wait on
+    /// it and deadlock (#9304); the GC adopts that row's stamp itself on its next pass. The GC cannot be the holder of a row a live digest owns: it only reaches stamps older
     /// than the dimension cutoff of <c>DarlingRetention.ComputeDimensionCutoff</c>, at least the guard plus one day behind. A skipped row
     /// correctly counts as present. A stamp row that does not exist yet is inserted with <c>DO NOTHING</c>, which takes no
     /// lock either.</para>
@@ -443,6 +445,7 @@ public static class PayloadDimensions
             $"    INSERT INTO {seen} ({DigestColumn}, {LastSeenColumn})\n" +
             $"    SELECT w.{DigestColumn}, $2 FROM want w\n" +
             $"    WHERE NOT EXISTS (SELECT 1 FROM {seen} s WHERE s.{DigestColumn} = w.{DigestColumn})\n" +
+            $"    AND   EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = w.{DigestColumn} FOR KEY SHARE SKIP LOCKED)\n" +
             $"    ORDER BY w.{DigestColumn}\n" +
             $"    ON CONFLICT ({DigestColumn}) DO NOTHING\n" +
             $"    RETURNING 1),\n" +

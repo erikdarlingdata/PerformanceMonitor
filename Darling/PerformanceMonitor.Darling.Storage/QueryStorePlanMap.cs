@@ -169,7 +169,10 @@ WHERE EXCLUDED.last_seen >= query_store_plan_map.last_seen";
     /// waited on the stamp row, a deadlock (40P01) that rolls back the whole cycle. A skipped row is one the GC already
     /// holds, so the plan is at the GC's cutoff and the touch could not keep it. <c>dim_adopt</c> gives a plan whose
     /// dimension row has no stamp row (a dimension row written with the insert trigger off, such as a restore) one, as
-    /// <see cref="PayloadDimensions.TouchSql"/>'s adopt step does, so the GC's judgement of it starts from this touch.</para>
+    /// <see cref="PayloadDimensions.TouchSql"/>'s adopt step does, so the GC's judgement of it starts from this touch. The
+    /// stamp insert takes a key share lock on the dimension row through the foreign key, so <c>dim_adopt</c> tests the row with
+    /// <c>FOR KEY SHARE SKIP LOCKED</c> and leaves a row a GC batch holds, which would otherwise wait on it and deadlock (#9304).
+    /// The GC adopts that row's stamp itself on its next pass.</para>
     ///
     /// <para>The CTE is ordered by the map's primary key for the #1801 reason on <see cref="UpsertSql"/> —
     /// this is the one statement in the design that touches many rows across two tables on every cycle of
@@ -216,7 +219,7 @@ dim_adopt AS (
     INSERT INTO collect.query_plan_dim_seen (digest, last_seen)
     SELECT w.digest, $5::timestamp
     FROM (SELECT DISTINCT digest FROM map_touch WHERE digest IS NOT NULL) AS w
-    WHERE EXISTS (SELECT 1 FROM collect.query_plan_dim AS d WHERE d.digest = w.digest)
+    WHERE EXISTS (SELECT 1 FROM collect.query_plan_dim AS d WHERE d.digest = w.digest FOR KEY SHARE SKIP LOCKED)
       AND NOT EXISTS (SELECT 1 FROM collect.query_plan_dim_seen AS s WHERE s.digest = w.digest)
     ORDER BY w.digest
     ON CONFLICT (digest) DO NOTHING
