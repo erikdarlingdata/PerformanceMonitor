@@ -13,6 +13,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -57,6 +58,10 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
 
     private readonly object _deadSync = new();
     private readonly Dictionary<string, DateTimeOffset> _deadLogged = new(StringComparer.Ordinal);
+
+    /// <summary>The sign-in revokes still waiting for the store (#9325). While an owner has one queued, <see cref="Check"/> refuses that
+    /// owner's tokens as revoked (operator tokens only for an operator-only entry), so a revoke the store has not taken yet binds at once.</summary>
+    internal PersonalTokenPendingRevokes? Pending { get; init; }
 
     /// <summary>Production: loads and writes through <see cref="PersonalTokenStore"/> on the published owner connection.</summary>
     public DarlingPersonalTokenSnapshot()
@@ -187,6 +192,7 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
         }
 
         if (found.Row.RevokedAt is not null || found.Row.ExpiresAt <= now
+            || Pending?.Refuses(found.Row.OwnerKey, found.Row.Role) == true
             || (maxLifetimeDays is { } days && found.Row.CreatedAt.AddDays(days) <= now))
         {
             return new PersonalTokenCheck(PersonalTokenOutcome.Dead, found.Row);

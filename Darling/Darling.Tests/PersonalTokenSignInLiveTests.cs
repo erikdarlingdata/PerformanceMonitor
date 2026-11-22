@@ -608,7 +608,8 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
 
         Assert.True(done);
         var expiry = DateTimeOffset.Parse(
-            (await rig.ScalarAsync($"SELECT expires_at FROM config.mcp_personal_token WHERE token_id = '{made.Id}'"))!, System.Globalization.CultureInfo.InvariantCulture);
+            (await rig.ScalarAsync($"SELECT expires_at FROM config.mcp_personal_token WHERE token_id = '{made.Id}'"))!, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal);
         Assert.True(expiry < DateTimeOffset.UtcNow.AddDays(5).AddMinutes(1), "the expiry is cut to five days from creation");
         Assert.Equal("1", await rig.ScalarAsync(
             $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_expiry_cut' AND actor = 'config' AND detail::text LIKE '%{made.Id}%'"));
