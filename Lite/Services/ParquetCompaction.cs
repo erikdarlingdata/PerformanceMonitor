@@ -29,11 +29,11 @@ public static class ParquetCompaction
     public const string SortedMergeMemoryLimit = "512MB";
     public const int DefaultThreads = 2;
 
-    /* Threads of a sorted merge's first attempt (#9320). The 512MB limit holds the sort's rows, one buffer per
-       thread, and an on-disk byte budget does not bound rows per thread: field files hold 2 to 4 times more rows
-       per on-disk MB than the seeded ones the budget was measured on (a monthly perfmon_stats file is 1.16M rows in
-       8 MB). On two threads 6 of 7 sorted monthly merges of one install ran out of memory and fell back to the
-       unsorted order, whose row groups all mix servers. One thread finished all 7. */
+    /* Threads of a sorted merge's first attempt (#9320). On one install 7 sorted monthly merges ran out of
+       memory at 512MB on two threads and fell back to the unsorted order, whose row groups all mix servers. On
+       copies of those files one thread finished all 7, at a peak RSS of 139 to 537 MB. Generated files of the same
+       row counts did not reproduce the failure on two threads, so the trigger is in the real files' values, not
+       their size or row order. */
     public const int SortedMergeThreads = 1;
     public const int DefaultRowGroupSize = ArchiveRowGroupSize;
 
