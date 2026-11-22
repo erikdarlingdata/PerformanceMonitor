@@ -882,7 +882,7 @@ public sealed partial class ViewerDataService
             return (QueryStoreTopRollupKeysSql, QueryStoreTopRollupByKeysSql);
         }
 
-        var slackSql = QueryStoreIntervalWide.EdgeMarginSqlFor(longestSpan + QueryStoreIntervalWide.IntervalStartSlack);
+        var slackSql = QueryStoreIntervalWide.EdgeMarginSqlFor(TimeSpan.Zero);
         return (QueryStoreTopRollupSplitKeysSqlFor(slackSql), QueryStoreTopRollupSplitByKeysSqlFor(slackSql));
     }
 
