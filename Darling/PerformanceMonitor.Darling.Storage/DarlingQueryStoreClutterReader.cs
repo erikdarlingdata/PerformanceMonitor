@@ -607,9 +607,11 @@ public static class DarlingQueryStoreClutterReader
     /// <summary>
     /// #9148: the whole UTC days every server of the read can take from the clutter rollups, or null to read raw alone: a store below
     /// <see cref="QueryStoreClosedDayRollup.ClutterVersion"/>, a server with no served run in the window, or no run common to all of them.
-    /// Each server's run is its served clutter days (built, not marked, heartbeat fresh), cut to the days its raw rows still reach whole:
-    /// the raw tier is purged sooner than the rollups, and a day raw no longer holds must not come from the rollup, which would answer
-    /// more than raw does. The window is <c>(start, end]</c>, so a start at midnight leaves its own day out.
+    /// Each server's run is its served clutter days (built, not marked, heartbeat fresh), clipped to the days wholly inside retention
+    /// on the store's clock (#9287, <see cref="QueryStoreClosedDayRollup.ServedClutterDaysSql"/>). It is not cut to the days raw still
+    /// holds whole: a built day answers as collected, so a day whose raw rows the purge already dropped still comes from its rollup,
+    /// until the day itself is past the retention edge. The same day read from raw alone (a missing rollup, or the fault fallback) can
+    /// lack those rows. The window is <c>(start, end]</c>, so a start at midnight leaves its own day out.
     /// </summary>
     internal static async Task<QueryStoreClosedDayRollup.ServedDays?> ResolveClosedDaysAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
@@ -641,21 +643,7 @@ public static class DarlingQueryStoreClutterReader
                 return null;
             }
 
-            await using var floorCommand = new NpgsqlCommand(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats), connection)
-            {
-                CommandTimeout = StorageCommandDeadlines.McpReadSeconds,
-            };
-            floorCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-            AddTimestamp(floorCommand, startUtc);
-            AddTimestamp(floorCommand, endUtc);
-            if (await floorCommand.ExecuteScalarAsync(cancellationToken) is not DateTime floor)
-            {
-                return null;
-            }
-
-            var firstWhole = floor.TimeOfDay == TimeSpan.Zero ? floor.Date : floor.Date.AddDays(1);
-            var start = run.Start > firstWhole ? run.Start : firstWhole;
-            commonStart = start > commonStart ? start : commonStart;
+            commonStart = run.Start > commonStart ? run.Start : commonStart;
             commonEnd = run.End < commonEnd ? run.End : commonEnd;
         }
 
@@ -667,7 +655,8 @@ public static class DarlingQueryStoreClutterReader
     /// <see cref="ResolveClosedDaysAsync"/>'s rule (a run of built, unmarked days common to every server). Around them, each server's whole hours
     /// that are built and unmarked, in an unbroken run that joins the days at both ends, extend the served range, and the range is the one every
     /// server holds. With no common run of days the longest run of hours every server holds is the whole range. A server whose hour heartbeat is not
-    /// fresh serves no hour. Hours are cut, as days are, to what raw still holds whole.
+    /// fresh serves no hour. Days are clipped to retention and not cut to raw (#9287, see <see cref="ResolveClosedDaysAsync"/>). Hours are cut to
+    /// what raw still holds whole: the hourly rollup has no edge-day exception.
     /// </summary>
     internal static async Task<ClutterRoute?> ResolveClutterRouteAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
@@ -715,13 +704,6 @@ public static class DarlingQueryStoreClutterReader
             if (await floorCommand.ExecuteScalarAsync(cancellationToken) is not DateTime floor)
             {
                 return null;
-            }
-
-            var firstWholeDay = floor.TimeOfDay == TimeSpan.Zero ? floor.Date : floor.Date.AddDays(1);
-            if (days is { } run)
-            {
-                var from = run.Start > firstWholeDay ? run.Start : firstWholeDay;
-                days = from < run.End ? new QueryStoreClosedDayRollup.ServedDays(from, run.End) : null;
             }
 
             var lowestHour = QueryStoreClutterHourly.CeilHour(floor);
