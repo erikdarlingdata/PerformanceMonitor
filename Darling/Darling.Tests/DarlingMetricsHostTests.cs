@@ -14,6 +14,8 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -370,8 +372,10 @@ public sealed class DarlingMetricsHostTests : IDisposable
         Assert.Single(logger.Lines, l => l.Level == LogLevel.Information);
     }
 
+    /// <summary>#9326: allowFrom limits who can connect, not what crosses the network, so a plain-HTTP bind off loopback warns
+    /// about the token whatever allowFrom holds. The warning does not say allowFrom is empty, because it is not.</summary>
     [Fact]
-    public async Task WideListen_WithAllowFrom_DoesNotWarn()
+    public async Task WideListen_WithAllowFrom_WarnsThatTheTokenCrossesUnencrypted()
     {
         var logger = new CapturingLogger();
         await using var host = NewHost(logger, MetricsOn(DarlingHealthHostTests.FreePort(), FileToken, listen: "0.0.0.0", allowFrom: "10.0.0.0/8"));
@@ -379,7 +383,128 @@ public sealed class DarlingMetricsHostTests : IDisposable
         await host.StartAsync(TestContext.Current.CancellationToken);
 
         Assert.True(host.IsListening);
+        var warning = Assert.Single(logger.Lines, l => l.Level == LogLevel.Warning);
+        Assert.Contains("plain HTTP", warning.Text, StringComparison.Ordinal);
+        Assert.Contains("unencrypted", warning.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("allowFrom is empty", warning.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>#9326: a loopback bind never warns about plain HTTP, with or without allowFrom.</summary>
+    [Fact]
+    public async Task LoopbackListen_WithAllowFrom_GivesNoWarning()
+    {
+        var logger = new CapturingLogger();
+        await using var host = NewHost(logger, MetricsOn(DarlingHealthHostTests.FreePort(), FileToken, listen: "127.0.0.1", allowFrom: "10.0.0.0/8"));
+
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(host.IsListening);
         Assert.DoesNotContain(logger.Lines, l => l.Level >= LogLevel.Warning);
+    }
+
+    private sealed class TlsFixture : IDisposable
+    {
+        private readonly string _dir = Path.Combine(Path.GetTempPath(), "darling-metrics-tls-" + Guid.NewGuid().ToString("N"));
+
+        public TlsFixture(bool usable = true)
+        {
+            Directory.CreateDirectory(_dir);
+            var pfx = Path.Combine(_dir, "web.pfx");
+            var secret = Path.Combine(_dir, "web.secret");
+            File.WriteAllText(secret, "hunter2");
+            if (usable)
+            {
+                using var rsa = RSA.Create(2048);
+                var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                var san = new SubjectAlternativeNameBuilder();
+                san.AddDnsName("localhost");
+                san.AddIpAddress(IPAddress.Loopback);
+                request.CertificateExtensions.Add(san.Build());
+                using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+                File.WriteAllBytes(pfx, cert.Export(X509ContentType.Pkcs12, "hunter2"));
+            }
+
+            WebBlock = "\"web\":{\"network\":{\"tls\":{\"pfxPath\":" + Quote(pfx) + ",\"pfxPassword\":" + Quote("file:" + secret) + "}}},";
+        }
+
+        /// <summary>The <c>web</c> block that names this certificate, ready to pass as <c>before</c> to <c>MetricsOn</c>.</summary>
+        public string WebBlock { get; }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>#9326: with web.network.tls set, the metrics port serves HTTPS with that certificate, the start line says https, and a
+    /// plain-HTTP request to the port does not reach /metrics.</summary>
+    [Fact]
+    public async Task WebCertificate_MetricsPortServesHttps_NotPlainHttp()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var fixture = new TlsFixture();
+        var port = DarlingHealthHostTests.FreePort();
+        var logger = new CapturingLogger();
+        await using var host = NewHost(logger, MetricsOn(port, FileToken, before: fixture.WebBlock));
+
+        await host.StartAsync(ct);
+
+        Assert.True(host.IsListening);
+        Assert.Contains(logger.Lines, l => l.Level == LogLevel.Information && l.Text.Contains($"https://127.0.0.1:{port}", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, l => l.Text.Contains("http://127.0.0.1", StringComparison.Ordinal));
+
+        using var handler = new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, _, _, _) => true };
+        using var client = new HttpClient(handler);
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://127.0.0.1:{port}/metrics");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", GoodToken);
+        using var response = await client.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("darling_metrics_last_refresh_success", await response.Content.ReadAsStringAsync(ct), StringComparison.Ordinal);
+
+        using var plain = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}/metrics");
+        plain.Headers.Authorization = new AuthenticationHeaderValue("Bearer", GoodToken);
+        await Assert.ThrowsAnyAsync<HttpRequestException>(async () => await client.SendAsync(plain, ct));
+        await host.StopAsync(ct);
+    }
+
+    /// <summary>#9326: HTTPS removes the plain-HTTP warning. A wide bind with allowFrom and a certificate starts clean.</summary>
+    [Fact]
+    public async Task WebCertificate_WideListenWithAllowFrom_GivesNoBindWarning()
+    {
+        using var fixture = new TlsFixture();
+        var logger = new CapturingLogger();
+        await using var host = NewHost(
+            logger, MetricsOn(DarlingHealthHostTests.FreePort(), FileToken, listen: "0.0.0.0", allowFrom: "10.0.0.0/8", before: fixture.WebBlock));
+
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(host.IsListening);
+        Assert.DoesNotContain(logger.Lines, l => l.Text.Contains("not loopback", StringComparison.Ordinal));
+    }
+
+    /// <summary>#9326: a web.network.tls block that cannot be loaded keeps the metrics port off, with one Critical line naming the
+    /// block. The operator asked for TLS, so the port does not fall back to plain HTTP.</summary>
+    [Fact]
+    public async Task WebCertificateThatCannotBeLoaded_KeepsThePortOff()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var fixture = new TlsFixture(usable: false);
+        var port = DarlingHealthHostTests.FreePort();
+        var logger = new CapturingLogger();
+        await using var host = NewHost(logger, MetricsOn(port, FileToken, before: fixture.WebBlock));
+
+        await host.StartAsync(ct);
+
+        Assert.False(host.IsListening);
+        Assert.Null(host.Services);
+        Assert.Contains(logger.Lines, l => l.Level == LogLevel.Critical && l.Text.Contains("web.network.tls", StringComparison.Ordinal));
+        if (!PortIsFree(port))
+        {
+            Assert.Skip($"Port {port} is in use on this machine, so a refused connect cannot be checked.");
+        }
+
+        using var tcp = new TcpClient();
+        await Assert.ThrowsAnyAsync<SocketException>(async () => await tcp.ConnectAsync(IPAddress.Loopback, port, ct));
     }
 
     [Theory]
