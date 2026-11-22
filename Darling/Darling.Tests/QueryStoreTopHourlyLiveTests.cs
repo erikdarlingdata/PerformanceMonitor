@@ -175,7 +175,8 @@ CREATE TRIGGER trg_fail_9280 BEFORE INSERT ON collect.query_store_top_hourly FOR
             Assert.Equal(rows + 1, await ComposeStampLiveSupport.CountAsync(connection, stamp, ct));
             Assert.Equal(0, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE hour = TIMESTAMP '{At(hour)}' AND built_seq IS DISTINCT FROM late_seq", ct));
             Assert.True(await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE hour = TIMESTAMP '{At(hour)}' AND top_built_seq IS NOT DISTINCT FROM late_seq", ct) == 0);
-            Assert.Equal(0, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_top_hourly WHERE hour = TIMESTAMP '{At(hour)}'", ct));
+            /* The savepoint took the failed delete and insert back: the hour still holds its old top rows, without the late row, and the NULL ledger value says not to trust them. */
+            Assert.Equal(0, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_top_hourly WHERE hour = TIMESTAMP '{At(hour)}' AND query_hash = 'hashX'", ct));
 
             /* Once the failure is gone the top-only pass fills the hour. */
             await ComposeStampLiveSupport.ExecAsync(connection, "DROP TRIGGER trg_fail_9280 ON collect.query_store_top_hourly", ct);
