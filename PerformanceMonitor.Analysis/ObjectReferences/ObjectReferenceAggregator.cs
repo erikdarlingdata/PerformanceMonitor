@@ -164,6 +164,8 @@ public sealed class ObjectReferenceAggregator
     /* Keyed by the statement database exactly (Query Store's own name for it) and the parts as written folded by FoldName. */
     private readonly Dictionary<(string Db, string RefDb, string Schema, string Name, bool IsFunction), Accumulator> _references = new();
     private readonly Dictionary<string, long[]> _databases = new(StringComparer.Ordinal);
+    /* The fallback names of each statement database, de-duplicated once (ignoring case, the first spelling kept). */
+    private readonly Dictionary<string, string[]> _distinctFallbackNames = new(StringComparer.Ordinal);
 
     /// <summary>The one case fold names are merged and keyed by: <see cref="string.ToLowerInvariant()"/>.</summary>
     public static string FoldName(string name)
@@ -208,17 +210,15 @@ public sealed class ObjectReferenceAggregator
         if (!scan.Parsed)
         {
             counts[2]++;
-            if (_fallbackNames?.Invoke(databaseName) is { Count: > 0 } names)
+            if (DistinctFallbackNames(databaseName) is { Length: > 0 } names)
             {
                 /* The text is split into words once (kept by the cache across days), and a view name made of word characters, which is
                    nearly every one, is a set lookup (#8784 review): searching the text once per view cost the text's length times the
                    database's views. A name with any other character (a space, a dot) is still searched for in the text. */
                 var words = scan.Words ?? SqlWholeWordMatcher.Words(text);
-                var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var name in names)
                 {
-                    if (matched.Add(name)
-                        && (SqlWholeWordMatcher.IsWord(name) ? words.Contains(name) : SqlWholeWordMatcher.Contains(text, name)))
+                    if (SqlWholeWordMatcher.IsWord(name) ? words.Contains(name) : SqlWholeWordMatcher.Contains(text, name))
                     {
                         Accumulate(databaseName, "", "", name, false, executions, lastExecution, textMatched: true);
                     }
@@ -240,6 +240,34 @@ public sealed class ObjectReferenceAggregator
                 : r.Database;
             Accumulate(databaseName, referencedDatabase, r.Schema ?? "", r.Name, r.Kind == ScannedReferenceKind.Function, executions, lastExecution, false);
         }
+    }
+
+    /// <summary>The database's fallback names with a repeated name (the same view in two schemas, or in another case) kept once, built on
+    /// the first unparsed statement of the database and reused for the rest, so no statement builds a set of its own.</summary>
+    private string[]? DistinctFallbackNames(string databaseName)
+    {
+        if (_fallbackNames is null)
+        {
+            return null;
+        }
+
+        if (!_distinctFallbackNames.TryGetValue(databaseName, out var distinct))
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var list = new List<string>();
+            foreach (var name in _fallbackNames(databaseName) ?? Array.Empty<string>())
+            {
+                if (seen.Add(name))
+                {
+                    list.Add(name);
+                }
+            }
+
+            distinct = list.ToArray();
+            _distinctFallbackNames.Add(databaseName, distinct);
+        }
+
+        return distinct;
     }
 
     /// <summary>The names referenced, one row per (statement database, referenced database, schema, name, kind).</summary>
