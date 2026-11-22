@@ -81,7 +81,7 @@ public sealed class ReadLockWaitLogTests : IDisposable
         var releaseWriter = new ManualResetEventSlim(false);
         var writer = Task.Run(() =>
         {
-            using var write = _duckDb.AcquireWriteLock();
+            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(60));
             writerHasIt.Set();
             releaseWriter.Wait(TimeSpan.FromSeconds(60));
         });
@@ -146,7 +146,7 @@ public sealed class ReadLockWaitLogTests : IDisposable
     [Fact]
     public async Task FastQueryStoreTopRead_LogsNothing()
     {
-        ReadLockWaitTally.SlowReadThreshold = TimeSpan.FromHours(1);
+        ReadLockWaitTally.SlowReadThreshold = TimeSpan.MaxValue;
         AppLogger.DrainBufferedLines();
 
         await QueryStoreTop();
@@ -173,7 +173,7 @@ public sealed class ReadLockWaitLogTests : IDisposable
     [Fact]
     public async Task FastFactsRead_LogsNothing()
     {
-        ReadLockWaitTally.SlowReadThreshold = TimeSpan.FromHours(1);
+        ReadLockWaitTally.SlowReadThreshold = TimeSpan.MaxValue;
         AppLogger.DrainBufferedLines();
 
         await FactsRead();
