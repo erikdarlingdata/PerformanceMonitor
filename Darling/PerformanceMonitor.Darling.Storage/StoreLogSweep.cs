@@ -366,12 +366,18 @@ FROM config.store_log_read_marker AS m";
            capture row's totals and the marker move together), so a budget that cancels mid-way keeps every slab it
            finished, and each slab's text is classified and released before the next is read. */
         var clock = Stopwatch.StartNew();
-        var byteBudget = new ByteBudget(MaxBytesPerCapture);
+        var byteBudget = new ByteBudget(MaxBytesPerCapture, clock);
         var slabsRead = 0;
         var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups, StoreLogClassifier.CaptureBudget Budget)>();
 
         foreach (var candidate in candidates)
         {
+            if (byteBudget.Remaining <= 0)
+            {
+                /* The capture's bytes are spent, on earlier files' slabs or on the scan past a long line: this file waits for the next capture. */
+                break;
+            }
+
             var resume = StoreLogSlab.ResolveResume(candidate.StoredOffset, candidate.StoredLastSize, candidate.SizeBytes);
             if (!resume.HasWork)
             {
@@ -609,11 +615,15 @@ FROM config.store_log_read_marker AS m";
         return rows;
     }
 
-    /// <summary>The bytes one capture may still read (#9314): its slabs and the scans past a line longer than one slab
-    /// both draw on it, so the capture's total stays at <see cref="MaxBytesPerCapture"/>.</summary>
-    private sealed class ByteBudget(long remaining)
+    /// <summary>The bytes one capture may still read (#9314): every slab, the first of a file included, and every scan
+    /// chunk past a line longer than one slab draw on it, and a slab is read no longer than what is left, so the capture's
+    /// total stays at <see cref="MaxBytesPerCapture"/>. A scan also stops once the capture's time budget
+    /// (<see cref="ReadOnBudget"/>) is spent, as it does when the bytes are.</summary>
+    private sealed class ByteBudget(long remaining, Stopwatch clock)
     {
         public long Remaining { get; set; } = remaining;
+
+        public bool ScanMayContinue => Remaining > 0 && clock.Elapsed < ReadOnBudget;
     }
 
     /// <summary>How much of a long line one scan read holds (#9314).</summary>
@@ -626,8 +636,8 @@ FROM config.store_log_read_marker AS m";
     /// <para><b>A line longer than one slab (#9314).</b> A full slab with no newline in it is either a line the server is
     /// still writing, which waits as it always did (no newline before the end of the file), or a finished line. A
     /// finished line is handed on by its first bytes and the marker moves past its newline, found by scanning on in
-    /// chunks. The scan draws on <paramref name="byteBudget"/>: if the capture's budget runs out first, the marker moves
-    /// to where the scan stopped, so it moves forward on every capture whatever the line's length.</para>
+    /// chunks. The scan draws on <paramref name="byteBudget"/>: if the capture's bytes or time run out first, the marker
+    /// moves to where the scan stopped, so it moves forward on every capture whatever the line's length.</para>
     ///
     /// <para><b>A marker inside a line.</b> That stop leaves the marker mid-line, and a marker whose preceding byte is not
     /// a newline is mid-line (a marker otherwise only ever lands after a newline, or at the start of a file). The read
@@ -645,7 +655,7 @@ FROM config.store_log_read_marker AS m";
         CancellationToken cancellationToken)
     {
         var probe = offset > 0 ? 1 : 0;
-        var length = (int)Math.Min(StoreLogSlab.MaxBytesPerRead, candidate.SizeBytes - offset);
+        var length = (int)Math.Min(Math.Min(StoreLogSlab.MaxBytesPerRead, candidate.SizeBytes - offset), byteBudget.Remaining);
         var raw = await ReadRangeAsync(connection, files, candidate.LogFile, offset - probe, length + probe, cancellationToken);
         byteBudget.Remaining -= Math.Max(0, raw.Length - probe);
         if (raw.Length <= probe)
@@ -692,7 +702,7 @@ FROM config.store_log_read_marker AS m";
     }
 
     /// <summary>Scans on from <paramref name="from"/> for the first newline, <see cref="LongLineScanChunkBytes"/> at a
-    /// time and keeping none of it, until the file ends or <paramref name="byteBudget"/> is spent (#9314). Returns the
+    /// time and keeping none of it, until the file ends or <paramref name="byteBudget"/> is spent, in bytes or in time (#9314). Returns the
     /// offset just past the newline with Found true, or the offset the scan stopped at with Found false.</summary>
     private static async Task<(long Offset, bool Found)> ScanForNewlineAsync(
         NpgsqlConnection connection,
@@ -703,7 +713,7 @@ FROM config.store_log_read_marker AS m";
         CancellationToken cancellationToken)
     {
         var at = from;
-        while (at < candidate.SizeBytes && byteBudget.Remaining > 0)
+        while (at < candidate.SizeBytes && byteBudget.ScanMayContinue)
         {
             var length = (int)Math.Min(LongLineScanChunkBytes, Math.Min(candidate.SizeBytes - at, byteBudget.Remaining));
             var chunk = await ReadRangeAsync(connection, files, candidate.LogFile, at, length, cancellationToken);

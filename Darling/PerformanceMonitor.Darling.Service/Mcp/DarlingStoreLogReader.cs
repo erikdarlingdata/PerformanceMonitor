@@ -87,10 +87,15 @@ SELECT
     max(w.capture_time)                                             AS last_capture_at,
     (SELECT p.bytes_pending FROM newest AS p)                       AS bytes_pending,
     coalesce(array_agg(DISTINCT w.log_file ORDER BY w.log_file), '{}'::text[]) AS log_files,
-    /* #9314: the newest capture's own bytes read, and when any resume marker last moved. A capture that read 0 bytes
-       with bytes pending is a marker that is not moving. */
+    /* #9314: the newest capture's own bytes read, and when the marker last moved. Two captures in a row that read 0
+       bytes with bytes pending are a marker that is not moving: one is a heartbeat over a short line still being
+       written. The time is the newest capture that read bytes at or before the window's end, so a window that ends
+       before a later reading capture does not report that later time. */
     (SELECT p.bytes_read FROM newest AS p)                          AS newest_bytes_read,
-    (SELECT max(m.updated_at) FROM config.store_log_read_marker AS m) AS marker_last_moved_at
+    (SELECT max(c.capture_time) FROM collect.store_log_captures AS c WHERE c.bytes_read > 0 AND c.capture_time <= $2) AS marker_last_moved_at,
+    (SELECT sum(t.bytes_read)::bigint FROM
+        (SELECT x.capture_time, sum(x.bytes_read) AS bytes_read FROM windowed AS x GROUP BY x.capture_time ORDER BY x.capture_time DESC LIMIT 1 OFFSET 1) AS t
+    ) AS previous_bytes_read
 FROM windowed AS w";
 
     /// <summary>
@@ -240,10 +245,13 @@ LIMIT $3";
         [JsonPropertyName("marker_last_moved_at"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? MarkerLastMovedAt { get; init; }
 
-        /// <summary>True when the newest capture read 0 bytes while bytes are pending (#9314): the marker has not moved, so
-        /// the log is not being read past it. That is not the backlog <see cref="BytesPending"/> alone describes, which later
+        /// <summary>Bytes the capture before the newest in the window read (#9314). Null when the window holds one capture.</summary>
+        [JsonIgnore] public long? PreviousCaptureBytesRead { get; init; }
+
+        /// <summary>True when the newest two captures both read 0 bytes while bytes are pending (#9314): the marker has not moved, so
+        /// the log is not being read past it. One such capture is not enough, since a heartbeat over a short line at the end of the file reads nothing too. That is not the backlog <see cref="BytesPending"/> alone describes, which later
         /// captures read down.</summary>
-        [JsonIgnore] public bool MarkerStalled => BytesPending > 0 && NewestCaptureBytesRead == 0;
+        [JsonIgnore] public bool MarkerStalled => BytesPending > 0 && NewestCaptureBytesRead == 0 && PreviousCaptureBytesRead == 0;
 
         /// <summary>Captures that discarded a resume marker because the weekday ring truncated the file
         /// underneath it.</summary>
@@ -740,6 +748,7 @@ WHERE e.sample_line IS NOT NULL";
             LogFiles = reader.IsDBNull(11) ? [] : reader.GetFieldValue<string[]>(11),
             NewestCaptureBytesRead = reader.IsDBNull(12) ? null : reader.GetInt64(12),
             MarkerLastMovedAt = reader.IsDBNull(13) ? null : Iso(reader.GetDateTime(13)),
+            PreviousCaptureBytesRead = reader.IsDBNull(14) ? null : reader.GetInt64(14),
         };
     }
 

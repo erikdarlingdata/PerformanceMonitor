@@ -67,6 +67,18 @@ public sealed class StoreLogLongLine9314LiveTests
             Task.FromResult(Bytes.AsSpan((int)offset, (int)Math.Min(length, Bytes.Length - offset)).ToArray());
     }
 
+    private sealed class SeveralLogFiles(params (string Name, byte[] Bytes)[] files) : StoreLogSweep.IStoreLogFiles
+    {
+        public Task<IReadOnlyList<(string Name, long Size)>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<(string Name, long Size)>>(files.Select(f => (f.Name, (long)f.Bytes.Length)).ToList());
+
+        public Task<byte[]> ReadAsync(string file, long offset, int length, CancellationToken cancellationToken)
+        {
+            var bytes = files.Single(f => f.Name == file).Bytes;
+            return Task.FromResult(bytes.AsSpan((int)offset, (int)Math.Min(length, bytes.Length - offset)).ToArray());
+        }
+    }
+
     private static async Task<long> MarkerAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var marker = new NpgsqlCommand("SELECT byte_offset FROM config.store_log_read_marker WHERE log_file = $1", connection);
@@ -142,7 +154,13 @@ public sealed class StoreLogLongLine9314LiveTests
             Assert.Equal(0, again.BytesRead);
             Assert.Equal(head.Length, await MarkerAsync(connection, ct));
 
-            /* The newest capture read nothing while bytes are pending: the answer says the marker is not moving, and since when. */
+            /* One capture that read nothing after one that read is not a stall: a heartbeat over a short line at the end of a file reads nothing too. */
+            var oneZero = await DarlingStoreLogReader.GetCaptureSummaryAsync(postgres, start.AddMinutes(-1), DateTime.UtcNow, 3, ct);
+            Assert.False(oneZero.MarkerStalled);
+
+            Assert.Single(await StoreLogSweep.SweepAsync(connection, start.AddMinutes(90), null, source, ct));
+
+            /* Two in a row read nothing while bytes are pending: the answer says the marker is not moving, and since when. */
             var stalled = await DarlingStoreLogReader.GetCaptureSummaryAsync(postgres, start.AddMinutes(-1), DateTime.UtcNow, 3, ct);
             Assert.True(stalled.MarkerStalled);
             Assert.Equal(0, stalled.NewestCaptureBytesRead);
@@ -161,6 +179,49 @@ public sealed class StoreLogLongLine9314LiveTests
 
             var level = await DarlingStoreLogReader.GetCaptureSummaryAsync(postgres, start.AddMinutes(-1), DateTime.UtcNow.AddMinutes(1), 3, ct);
             Assert.False(level.MarkerStalled);
+        });
+    }
+
+    [Fact]
+    public async Task AsOfWindowEndingBeforeALaterReadingCapture_ReportsTheInWindowTimeTheMarkerLastMoved()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            var source = new GrowingLogFiles { Bytes = Join(NormalLine(1)) };
+            var first = DateTime.UtcNow.AddHours(-6);
+            Assert.Single(await StoreLogSweep.SweepAsync(connection, first, null, source, ct));
+            source.Bytes = Join(NormalLine(1), NormalLine(2));
+            Assert.Single(await StoreLogSweep.SweepAsync(connection, first.AddHours(3), null, source, ct));
+
+            var narrow = await DarlingStoreLogReader.GetCaptureSummaryAsync(postgres, first.AddMinutes(-1), first.AddMinutes(30), 3, ct);
+            var wide = await DarlingStoreLogReader.GetCaptureSummaryAsync(postgres, first.AddMinutes(-1), DateTime.UtcNow, 3, ct);
+
+            Assert.NotNull(narrow.MarkerLastMovedAt);
+            Assert.Equal(narrow.LastCaptureAt, narrow.MarkerLastMovedAt);
+            Assert.NotEqual(wide.MarkerLastMovedAt, narrow.MarkerLastMovedAt);
+        });
+    }
+
+    [Fact]
+    public async Task ACaptureOverSeveralFiles_OneHoldingALongLine_ReadsAtMostTheCapturesByteBudget_AndLeavesTheOtherFilesForTheNextCapture()
+    {
+        await WithStoreAsync(async (connection, _, ct) =>
+        {
+            var normal = new StringBuilder();
+            for (var i = 0; normal.Length < 5 * 1024 * 1024; i++)
+            {
+                normal.Append(NormalLine(i));
+            }
+
+            var other = Encoding.UTF8.GetBytes(normal.ToString());
+            var longFile = Join(LongLineWithoutNewline((int)StoreLogSweep.MaxBytesPerCapture - 200_000), "
+", NormalLine(2));
+            var source = new SeveralLogFiles(("postgresql-Mon.log", longFile), ("postgresql-Tue.log", other), ("postgresql-Wed.log", other), ("postgresql-Thu.log", other));
+
+            var captures = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, source, ct);
+
+            Assert.True(captures.Sum(c => c.BytesRead) > 0);
+            Assert.True(captures.Sum(c => c.BytesRead) <= StoreLogSweep.MaxBytesPerCapture, "every slab and every scan chunk draws on the one byte budget.");
         });
     }
 
@@ -230,7 +291,7 @@ public sealed class StoreLogLongLine9314LiveTests
     [Fact]
     public void TheNote_NamesAStalledMarker_OnlyWhenTheNewestCaptureReadNothingWhileBytesArePending()
     {
-        string NoteFor(long pending, long? newestBytesRead, string? movedAt) => DarlingStoreLogReader.BuildNote(new DarlingStoreLogReader.StoreLogReport
+        string NoteFor(long pending, long? newestBytesRead, string? movedAt, long? previousBytesRead = 0) => DarlingStoreLogReader.BuildNote(new DarlingStoreLogReader.StoreLogReport
         {
             WindowHours = 3,
             Captures = new DarlingStoreLogReader.CaptureSummary
@@ -240,6 +301,7 @@ public sealed class StoreLogLongLine9314LiveTests
                 EntriesRead = 10,
                 BytesPending = pending,
                 NewestCaptureBytesRead = newestBytesRead,
+                PreviousCaptureBytesRead = previousBytesRead,
                 MarkerLastMovedAt = movedAt,
             },
         });
@@ -249,6 +311,9 @@ public sealed class StoreLogLongLine9314LiveTests
         Assert.DoesNotContain("the next capture reads them", stalled, StringComparison.Ordinal);
 
         Assert.Contains("has not moved in the latest capture", NoteFor(9_000, 0, null), StringComparison.Ordinal);
+
+        var heartbeat = NoteFor(9_000, 0, "2026-11-17T16:40:03Z", previousBytesRead: 4_194_000);
+        Assert.DoesNotContain("has not moved", heartbeat, StringComparison.Ordinal);
 
         var backlog = NoteFor(9_000, 4_194_000, "2026-11-17T16:40:03Z");
         Assert.Contains("the next capture reads them", backlog, StringComparison.Ordinal);
