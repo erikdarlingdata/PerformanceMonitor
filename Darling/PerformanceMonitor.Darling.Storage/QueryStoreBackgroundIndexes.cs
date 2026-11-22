@@ -707,7 +707,7 @@ ORDER BY c.relname;";
                 connection,
                 $"CREATE INDEX IF NOT EXISTS {indexShortName} ON ONLY {spec.TableName} {spec.IndexDefinition};",
                 new LockAttempt("CREATE INDEX ON ONLY", spec.TableName, 1, 1),
-                spec.IndexName, logger, plan, cancellationToken, new[] { spec.TableName }).ConfigureAwait(false);
+                spec.IndexName, logger, plan, new[] { spec.TableName }, cancellationToken).ConfigureAwait(false);
         }
 
         var leaves = new List<(string Leaf, string Suffix, bool Attached)>();
@@ -778,8 +778,7 @@ ORDER BY c.relname;";
                 {
                     await ExecuteWithLockRetryAsync(
                         connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};",
-                        new LockAttempt("ATTACH PARTITION", leaf, 1, 1), spec.IndexName, logger, plan, cancellationToken,
-                        new[] { leaf, childQualified, spec.IndexName }).ConfigureAwait(false);
+                        new LockAttempt("ATTACH PARTITION", leaf, 1, 1), spec.IndexName, logger, plan, new[] { leaf, childQualified, spec.IndexName }, cancellationToken).ConfigureAwait(false);
                     built++;
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
@@ -811,8 +810,7 @@ ORDER BY c.relname;";
             {
                 await ExecuteWithLockRetryAsync(
                     connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};",
-                    new LockAttempt("ATTACH PARTITION", leaf, 1, 2), spec.IndexName, logger, plan, cancellationToken,
-                    new[] { leaf, childQualified, spec.IndexName }).ConfigureAwait(false);
+                    new LockAttempt("ATTACH PARTITION", leaf, 1, 2), spec.IndexName, logger, plan, new[] { leaf, childQualified, spec.IndexName }, cancellationToken).ConfigureAwait(false);
                 built++;
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
@@ -871,7 +869,7 @@ ORDER BY c.relname;";
        error goes out as it is. The last attempt's 55P03 goes out too, for the caller to turn into "leave this leaf for later". */
     private static async Task ExecuteWithLockRetryAsync(
         NpgsqlConnection connection, string sql, LockAttempt first, string indexName, ILogger logger, LockRetryPlan plan,
-        CancellationToken cancellationToken, string[] lockTargets)
+        string[] lockTargets, CancellationToken cancellationToken)
     {
         for (var attempt = 1; ; attempt++)
         {
