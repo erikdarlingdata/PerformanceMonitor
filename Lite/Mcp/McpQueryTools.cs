@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -534,10 +535,13 @@ public sealed class McpQueryTools
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* #9195: the call's read lock wait and phases, for the slow-read line the finally block writes. */
+        using var lockWaits = ReadLockWaitTally.Begin();
+        var phases = new ReadPhaseSplit();
         try
         {
             /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
-            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            var tagScope = await phases.TimeAsync("tag scope", () => dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag));
             if (tagScope.Unknown)
             {
                 return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
@@ -563,13 +567,13 @@ public sealed class McpQueryTools
             var requestedStart = nowUtc.AddHours(-hours_back);
             /* Read for top + 1 queries: the extra row is the observed signal that the window held more queries than top, and the first
                top are the same rows in the same order. */
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(
+            var rows = await phases.TimeAsync("top read", () => dataService.GetQueryStoreTopQueriesAsync(
                 resolved.ServerId, hours_back, top + 1,
                 databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
                 asOfUtc: windowEnd,
                 executionType: execution_type,
                 moduleName: module_name,
-                tags: tagScope);
+                tags: tagScope));
             var moreThanTop = rows.Count > top;
             if (moreThanTop) rows = rows.GetRange(0, top);
 
@@ -578,7 +582,7 @@ public sealed class McpQueryTools
                has no rollup fallback (the only one that keeps query_id/plan_id would approach raw's own size),
                so the honest move is to report what was served rather than echo what was asked for. Deliberately
                unfiltered: the floor is a property of the tier, not narrowed by database/execution_type/module. */
-            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc);
+            var floor = await phases.TimeAsync("window floor", () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc));
             var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
@@ -685,8 +689,8 @@ public sealed class McpQueryTools
             var topPayload = System.Text.Json.Nodes.JsonNode.Parse(topJson)!.AsObject();
 
             /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
-            if (await McpRuntimePrecondition.QueryStoreErrorNoteAsync(
-                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName)) is { } storeErrorNote)
+            if (await phases.TimeAsync("database state", () => McpRuntimePrecondition.QueryStoreErrorNoteAsync(
+                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName))) is { } storeErrorNote)
             {
                 topPayload[McpRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
@@ -700,6 +704,26 @@ public sealed class McpQueryTools
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
+        finally
+        {
+            ReportSlowQueryStoreTopRead(resolved.DisplayName, resolved.ServerId, phases, lockWaits);
+        }
+    }
+
+    /// <summary>
+    /// #9195: one Information line when a <c>get_query_store_top</c> call took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
+    /// the way the facts read says it. The line gives the time of each phase in the order it ran, the wait for the store's read
+    /// lock added up over every connection the call opened, and the time the archive span reads took. The lock wait and the
+    /// archive span are inside the phases, not beside them, and "other" is what no phase accounts for (the empty-answer checks).
+    /// </summary>
+    private static void ReportSlowQueryStoreTopRead(string serverName, int serverId, ReadPhaseSplit phases, ReadLockWaitTally lockWaits)
+    {
+        var total = phases.Total;
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        AppLogger.Info("McpQueryTools",
+            $"Query Store top read took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}): " +
+            $"{lockWaits.DescribeLockWait()}, archive span {(long)lockWaits.ArchiveSpan.TotalMilliseconds} ms (both inside the phases), {phases.Describe(total)}");
     }
 
     /// <summary>
