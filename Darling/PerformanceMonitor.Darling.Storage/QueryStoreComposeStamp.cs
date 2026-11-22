@@ -788,6 +788,9 @@ WHERE b.hour = $1
 DELETE FROM collect.query_store_top_hourly
 WHERE hour < $1;";
 
+    /// <summary>The savepoint the top-hourly insert of a full build runs under (#9280).</summary>
+    private const string TopSavepoint = "top_hourly_build";
+
     /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
@@ -962,11 +965,11 @@ WHERE collection_time >= $1
     /// therefore stays stale. <c>hash_built_seq</c> (V221, #6800) is written with the same value as <c>built_seq</c>: the hash-hourly rows
     /// were built in the same pass from the same rows. A build that sets <c>built_seq</c> only (a service host that predates V221) leaves
     /// <c>hash_built_seq</c> behind, so the pair reads as stale for the hash-hourly table and <see cref="PlanSql"/> rebuilds it. <c>top_built_seq</c> (V296, #9280)
-    /// is written with the same value too: the top-hourly rows were built in the same pass, from the same wide rows.
+    /// is written with the same value when the top-hourly rows built in the same pass ($5 true) and left NULL when their insert failed (the savepoint in <see cref="BuildHourAsync"/>), so the top-only path builds them later.
     /// </summary>
     public const string UpsertBuiltSql = @"
 INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, fleet_built_seq, top_built_seq, built_at, source_rows, stamp_rows)
-SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
+SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), CASE WHEN $5 THEN COALESCE(l.late_seq, 0) END, $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
 FROM
 (
     SELECT u.server_id FROM unnest($3::integer[]) AS u (server_id)
@@ -1463,7 +1466,7 @@ WHERE hour < $1;";
     /// </summary>
     public static async Task<long?> BuildHourAsync(
         NpgsqlConnection connection, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken, Func<Task>? beforeCommit = null,
-        int statementTimeoutSeconds = BuildStatementTimeoutSeconds, Action<NpgsqlCommand>? commandCreated = null)
+        int statementTimeoutSeconds = BuildStatementTimeoutSeconds, Action<NpgsqlCommand>? commandCreated = null, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentOutOfRangeException.ThrowIfLessThan(statementTimeoutSeconds, 1);
@@ -1558,17 +1561,33 @@ WHERE hour < $1;";
             await insertFleet.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        /* V296 (#9280): the top-hourly rows of the same hour, from the wide rows, in this transaction. top_built_seq below is the late_seq read in step 1. */
-        await using (var deleteTop = NewCommand(DeleteTopHourSql))
+        /* V296 (#9280): the top-hourly rows of the same hour, from the wide rows, in this transaction, inside a savepoint. The stamp insert already runs
+           close to its statement timeout on a large store, so a top insert that fails (a timeout above all) must not fail the hour the stamp, hash-hourly
+           and fleet rows came from. On failure the savepoint is rolled back, the hour commits without top rows, and top_built_seq stays NULL, so the
+           top-only path builds them later. A cancellation is not swallowed. top_built_seq below is the late_seq read in step 1. */
+        var topBuilt = true;
+        await transaction.SaveAsync(TopSavepoint, cancellationToken);
+        try
         {
-            deleteTop.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
-            await deleteTop.ExecuteNonQueryAsync(cancellationToken);
-        }
+            await using (var deleteTop = NewCommand(DeleteTopHourSql))
+            {
+                deleteTop.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+                await deleteTop.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        await using (var insertTop = NewCommand(BuildTopHourInsertSql))
+            await using (var insertTop = NewCommand(BuildTopHourInsertSql))
+            {
+                insertTop.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+                await insertTop.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.ReleaseAsync(TopSavepoint, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            insertTop.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
-            await insertTop.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.RollbackAsync(TopSavepoint, cancellationToken);
+            topBuilt = false;
+            logger?.LogWarning("Query Store compose rollup: the top rows of hour {Hour:yyyy-MM-dd HH}:00 failed ({Message}); the hour is built without them and the top-only pass retries them", hourValue, ex.Message);
         }
 
         long sourceRows;
@@ -1584,6 +1603,7 @@ WHERE hour < $1;";
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = servers.ToArray() });
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = lateSeqs.ToArray() });
+            built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = topBuilt });
             await built.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -1925,7 +1945,7 @@ WHERE hour < $1;";
                     : item.TopOnly
                         /* #9280: an hour stale only for the top-hourly table needs just its top rows, from the wide rows. */
                         ? await BuildTopHourAsync(connection, item.Hour, cancellationToken, statementTimeoutSeconds: timeoutSeconds)
-                        : await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds);
+                        : await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds, logger: logger);
                 if (built is null)
                 {
                     /* Only a plan hour is "deferred" by a writer: an extra the writer held is opportunistic and is the next tick's backlog, so it is in
