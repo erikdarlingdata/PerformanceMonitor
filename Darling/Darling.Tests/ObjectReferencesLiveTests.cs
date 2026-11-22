@@ -181,7 +181,7 @@ public sealed class ObjectReferencesLiveTests
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Server, ct);
 
-        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        var now = LiveClock.Now();
         foreach (var view in new[] { "vOuter", "vInner", "vOld", "vCrossDb", "vCustomer", "vBehindSynonym" })
         {
             await PlantInventoryAsync(connection, Db, view, "VIEW", now.AddDays(-1), ct);
@@ -263,7 +263,7 @@ public sealed class ObjectReferencesLiveTests
         await connection.OpenAsync(ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var newest = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-1));
+        var newest = DarlingMcpTestData.Naive(LiveClock.AnchoredEnd());
         await using (var plant = new NpgsqlCommand(
             """
             INSERT INTO collect.object_dependencies (collection_id, collection_time, server_id, server_name, database_name, referencing_schema,
