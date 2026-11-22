@@ -653,10 +653,10 @@ FROM config.store_log_read_marker AS m";
             return null;
         }
 
-        var body = raw.AsSpan(probe);
+        var body = raw.AsMemory(probe);
         if (probe == 1 && raw[0] != 0x0A)
         {
-            var tailEnd = body.IndexOf((byte)0x0A);
+            var tailEnd = body.Span.IndexOf((byte)0x0A);
             if (tailEnd >= 0)
             {
                 return (new StoreLogSlab.Slab(string.Empty, tailEnd + 1), StoreLogClassifier.Classify(null));
@@ -671,7 +671,7 @@ FROM config.store_log_read_marker AS m";
             return (new StoreLogSlab.Slab(string.Empty, body.Length), StoreLogClassifier.Classify(null));
         }
 
-        var slab = StoreLogSlab.TrimToLastNewline(body);
+        var slab = StoreLogSlab.TrimToLastNewline(body.Span);
         if (slab.BytesConsumed == 0)
         {
             if (body.Length < StoreLogSlab.MaxBytesPerRead)
@@ -685,7 +685,7 @@ FROM config.store_log_read_marker AS m";
                 return null;
             }
 
-            slab = StoreLogSlab.TrimLongLine(body, (int)(lineEnd - offset));
+            slab = StoreLogSlab.TrimLongLine(body.Span, (int)(lineEnd - offset));
         }
 
         return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget));
