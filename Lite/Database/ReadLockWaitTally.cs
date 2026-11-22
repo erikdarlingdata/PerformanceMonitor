@@ -78,6 +78,13 @@ internal sealed class ReadLockWaitTally : IDisposable
         if (_disposed) return;
         _disposed = true;
         s_current.Value = _outer;
+        /* A call inside a call (an MCP tool that runs the facts read) is part of the outer call's wait. */
+        if (_outer is not null)
+        {
+            Interlocked.Add(ref _outer._waitTicks, Interlocked.Read(ref _waitTicks));
+            Interlocked.Add(ref _outer._archiveSpanTicks, Interlocked.Read(ref _archiveSpanTicks));
+            Interlocked.Add(ref _outer._connections, Volatile.Read(ref _connections));
+        }
     }
 
     /// <summary><c>read lock wait 120 ms over 5 connections</c>.</summary>
