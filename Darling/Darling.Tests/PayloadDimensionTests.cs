@@ -526,7 +526,7 @@ public sealed class PayloadDimensionTests
            branches must end with that tail. */
         var occurrences = System.Text.RegularExpressions.Regex.Matches(body, "ORDER BY u.digest").Count;
         Assert.Equal(1, occurrences);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, \n"freshStamp;").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, "freshStamp;").Count);
     }
 
     // ── the gzip codec (#2069) ──
