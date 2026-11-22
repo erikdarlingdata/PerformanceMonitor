@@ -378,7 +378,7 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
 
         var builtAt = await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection,
             "SELECT built_at FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey));
-        var next = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, QueryStoreClosedDayRollupLiveTests.TickNow.AddHours(1), Retention, NullLogger.Instance, ct);
+        var next = await QueryStoreClosedDayRollup.RunTickAsync(store.Postgres, QueryStoreClosedDayRollupLiveTests.TickNow, Retention, NullLogger.Instance, ct);
         Assert.Equal(0, next.Failed);
         Assert.Equal(0, next.Built);
         Assert.Equal(builtAt, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection,
@@ -412,7 +412,7 @@ VALUES (990000001, @at, @server_id, 'late', 'dbA', 7777, 77770, '0xQ', '0xP', 'S
         await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
             "UPDATE collect.query_store_closed_day_built SET rebuild_needed = true WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", dayKey));
 
-        var tick = await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct, QueryStoreClosedDayRollupLiveTests.TickNow.AddHours(1));
+        var tick = await QueryStoreClosedDayRollupLiveTests.TickAsync(store, Retention, ct);
 
         Assert.Equal(1, tick.Built);
         Assert.Equal(clutterRows, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection,
