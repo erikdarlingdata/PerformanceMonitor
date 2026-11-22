@@ -9,6 +9,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Analysis.ObjectReferences;
 
@@ -26,6 +27,54 @@ public static class SqlWholeWordMatcher
 {
     /// <summary>Whether <paramref name="c"/> is part of a T-SQL identifier.</summary>
     public static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '@' or '#' or '$';
+
+    /// <summary>Whether every character of <paramref name="term"/> is a word character, so a whole-word match of it is exactly one of
+    /// <see cref="Words"/>.</summary>
+    public static bool IsWord(string term)
+    {
+        ArgumentNullException.ThrowIfNull(term);
+        if (term.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var c in term)
+        {
+            if (!IsWordChar(c))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Every maximal run of word characters in <paramref name="text"/>, compared ignoring case (#8784 review). A term made only of word
+    /// characters occurs as a whole word exactly when it is one of these runs, so an unparsed statement is split once, in one pass, and each
+    /// view is then one set lookup, where <see cref="Contains"/> per view searched the whole text once per view.
+    /// </summary>
+    public static IReadOnlySet<string> Words(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        var words = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var start = -1;
+        for (var i = 0; i <= text.Length; i++)
+        {
+            var word = i < text.Length && IsWordChar(text[i]);
+            if (word && start < 0)
+            {
+                start = i;
+            }
+            else if (!word && start >= 0)
+            {
+                words.Add(text[start..i]);
+                start = -1;
+            }
+        }
+
+        return words;
+    }
 
     /// <summary>Whether <paramref name="term"/> occurs in <paramref name="text"/> as a whole word.</summary>
     public static bool Contains(string? text, string? term) => IndexOf(text, term, 0) >= 0;

@@ -4215,9 +4215,11 @@ CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inven
     /// V297 (#8784 part 2): view usage from Query Store statement text.
     ///
     /// <para><c>collect.object_dependencies</c> is <c>ObjectDependenciesCollector</c>'s table, the daily dependency list per database from
-    /// <c>sys.sql_expression_dependencies</c> (Darling only). A PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE.
+    /// <c>sys.sql_expression_dependencies</c> (Darling only). A PLAIN table on every store (<c>StaysPlainTable</c>), time-sliced DELETE.
     /// Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store and an upgraded one
-    /// agree; the (server_id, database_name, collection_time) index finds a database's newest capture by one seek.</para>
+    /// agree; the (server_id, database_name, collection_time) index finds a database's newest capture by one seek, and its partial twin on
+    /// the rows that name another database lets the cross-database read skip the rest (#8784 review). Kept 3 days: every read takes only
+    /// the newest capture.</para>
     ///
     /// <para><c>collect.object_references_daily</c>, <c>collect.object_references_daily_built</c> and
     /// <c>collect.object_references_daily_databases</c> are the per-day summary of referenced names, its build record and the per-database
@@ -4246,6 +4248,9 @@ CREATE TABLE IF NOT EXISTS collect.object_dependencies (
 CREATE INDEX IF NOT EXISTS idx_object_dependencies_time ON collect.object_dependencies(server_id, collection_time);
 
 CREATE INDEX IF NOT EXISTS idx_object_dependencies_database ON collect.object_dependencies (server_id, database_name, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_object_dependencies_cross_database ON collect.object_dependencies (server_id, database_name, collection_time)
+    WHERE COALESCE(referenced_database, '') <> '';
 " + ObjectReferencesDaily.CreateSql;
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).

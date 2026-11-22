@@ -112,6 +112,12 @@ public sealed class QueryTextScanCache
         }
 
         var scan = QueryTextReferenceScanner.Scan(text);
+        if (!scan.Parsed)
+        {
+            /* Split once and kept with the scan: the text search is then one set lookup per view, on this day and every later one. */
+            scan = scan with { Words = SqlWholeWordMatcher.Words(text) };
+        }
+
         lock (_gate)
         {
             Store(key, scan);
@@ -202,12 +208,17 @@ public sealed class ObjectReferenceAggregator
         if (!scan.Parsed)
         {
             counts[2]++;
-            if (_fallbackNames?.Invoke(databaseName) is { } names)
+            if (_fallbackNames?.Invoke(databaseName) is { Count: > 0 } names)
             {
+                /* The text is split into words once (kept by the cache across days), and a view name made of word characters, which is
+                   nearly every one, is a set lookup (#8784 review): searching the text once per view cost the text's length times the
+                   database's views. A name with any other character (a space, a dot) is still searched for in the text. */
+                var words = scan.Words ?? SqlWholeWordMatcher.Words(text);
                 var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var name in names)
                 {
-                    if (matched.Add(name) && SqlWholeWordMatcher.Contains(text, name))
+                    if (matched.Add(name)
+                        && (SqlWholeWordMatcher.IsWord(name) ? words.Contains(name) : SqlWholeWordMatcher.Contains(text, name)))
                     {
                         Accumulate(databaseName, "", "", name, false, executions, lastExecution, textMatched: true);
                     }

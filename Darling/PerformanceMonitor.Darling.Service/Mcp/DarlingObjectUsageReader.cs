@@ -103,6 +103,12 @@ internal static class DarlingObjectUsageReader
     /// the asked name folded the same way, so the read and the build fold in one place (#8784 review). The schema and name come back as
     /// first seen where the build kept that spelling, and folded otherwise. $1 server_id, $2 database_name, $3 the first day, $4 the database
     /// name folded.
+    ///
+    /// <para><b>Two arms, each on its own index</b> (#8784 review). One <c>OR</c> over both could seek only on <c>server_id</c>, so every call
+    /// read every database's rows for the server across the window. The same-database arm seeks the primary key on
+    /// <c>(server_id, database_name, referenced_database)</c>; the cross-database arm seeks <c>idx_object_references_daily_cross_database</c>
+    /// <c>(server_id, referenced_database, day) WHERE referenced_database &lt;&gt; ''</c>, and repeats that predicate so the planner can prove
+    /// the partial index applies.</para>
     /// </summary>
     internal static readonly string ReferencesSql = $"""
         SELECT
@@ -112,13 +118,39 @@ internal static class DarlingObjectUsageReader
             sum(r.execution_count),
             max(r.last_execution_time),
             bool_and(r.text_matched)
-        FROM {ObjectReferencesDaily.Table} AS r
-        WHERE r.server_id = $1
-        AND   r.day >= $3
-        AND   (
-                  (r.database_name = $2 AND (r.referenced_database = '' OR r.referenced_database = $4))
-               OR (r.database_name <> $2 AND r.referenced_database = $4)
-              )
+        FROM
+        (
+            SELECT
+                s.referenced_schema,
+                s.referenced_name,
+                s.is_function,
+                s.execution_count,
+                s.last_execution_time,
+                s.text_matched,
+                s.referenced_schema_as_seen,
+                s.referenced_name_as_seen
+            FROM {ObjectReferencesDaily.Table} AS s
+            WHERE s.server_id = $1
+            AND   s.database_name = $2
+            AND   s.referenced_database IN ('', $4)
+            AND   s.day >= $3
+            UNION ALL
+            SELECT
+                x.referenced_schema,
+                x.referenced_name,
+                x.is_function,
+                x.execution_count,
+                x.last_execution_time,
+                x.text_matched,
+                x.referenced_schema_as_seen,
+                x.referenced_name_as_seen
+            FROM {ObjectReferencesDaily.Table} AS x
+            WHERE x.server_id = $1
+            AND   x.referenced_database = $4
+            AND   x.referenced_database <> ''
+            AND   x.day >= $3
+            AND   x.database_name <> $2
+        ) AS r
         GROUP BY
             r.referenced_schema,
             r.referenced_name,
@@ -181,6 +213,10 @@ internal static class DarlingObjectUsageReader
     /// <c>idx_object_dependencies_database</c> <c>(server_id, database_name, collection_time)</c>, one index seek per name, then each
     /// database's newest <c>collection_time</c> is one more seek (a <c>LATERAL</c> top-1 on the same index), and only those captures' rows
     /// are read.</para>
+    ///
+    /// <para><b>Only the rows that name another database</b> (#8784 review). The second <c>LATERAL</c> seeks
+    /// <c>idx_object_dependencies_cross_database</c>, partial on <c>COALESCE(referenced_database, '') &lt;&gt; ''</c>, and repeats that
+    /// predicate so the planner can prove the index applies: a newest capture's same-database rows, nearly all of it, are never read.</para>
     /// </summary>
     internal const string InboundDependenciesSql = """
         WITH RECURSIVE
@@ -242,6 +278,7 @@ internal static class DarlingObjectUsageReader
             WHERE c.server_id = $1
             AND   c.database_name = databases.database_name
             AND   c.collection_time = newest.collection_time
+            AND   COALESCE(c.referenced_database, '') <> ''
             AND   lower(c.referenced_database) = lower($2)
             AND   COALESCE(c.referenced_server, '') = ''
             /* A fence: without it the planner pulls this subquery up and, the referenced_database filter looking selective, reads the

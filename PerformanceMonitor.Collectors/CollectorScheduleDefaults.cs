@@ -140,8 +140,9 @@ public static class CollectorScheduleDefaults
         ["object_inventory"] = new(1440, 30),
         /* #8784 part 2 the dependency list per database (sys.sql_expression_dependencies), so get_object_usage can see a view used only
            through another view or an inline function. Changes only with deployments, like the object list, so daily; one catalog read per
-           database. Only the newest capture is read, so 30 days is generous. */
-        ["object_dependencies"] = new(1440, 30),
+           database. Every read takes only the newest capture, so 3 days keeps it and a spare or two (#8784 review): 30 kept thirty times the
+           rows with no reader. A database whose capture stops for 3 days loses its list, and its views read Not tracked, not unused. */
+        ["object_dependencies"] = new(1440, 3),
         /* #7643 schema tracking: table and view definitions kept as versions. Off until switched on, because the change-tracking session needs
            ALTER ANY EVENT SESSION. A pass reads the session and only the databases it names, so 15 minutes is cheap. Closed versions are kept 30 days. */
         ["schema_objects"] = new(15, 30, DefaultEnabled: false),

@@ -230,6 +230,21 @@ public sealed class QueryTextReferenceScannerTests
     public void TheWholeWordMatch_UsesTSqlIdentifierCharacters(string text, bool expected)
     {
         Assert.Equal(expected, SqlWholeWordMatcher.Contains(text, "person"));
+
+        /* The text split into words once gives the same answer as the search, for a name made of word characters (#8784 review). */
+        Assert.True(SqlWholeWordMatcher.IsWord("person"));
+        Assert.Equal(expected, SqlWholeWordMatcher.Words(text).Contains("person"));
+    }
+
+    [Theory]
+    [InlineData("person", true)]
+    [InlineData("v_Order$2", true)]
+    [InlineData("my view", false)]
+    [InlineData("a.b", false)]
+    [InlineData("", false)]
+    public void AWordName_IsMadeOnlyOfIdentifierCharacters(string name, bool expected)
+    {
+        Assert.Equal(expected, SqlWholeWordMatcher.IsWord(name));
     }
 
     [Fact]
@@ -284,6 +299,28 @@ public sealed class QueryTextReferenceScannerTests
         Assert.Equal(1, sales.StatementsWithoutText);
         Assert.Equal(1, sales.StatementsUnparsed);
         Assert.Equal(1, Assert.Single(aggregator.Databases, d => d.DatabaseName == "Other").StatementsUnparsed);
+    }
+
+    [Fact]
+    public void AnUnparsedStatement_IsSplitIntoWordsOnce_AndTheCacheKeepsThem()
+    {
+        /* #8784 review: the text search ran once per view over the whole text, with nothing kept. The cache now keeps an unparsed statement's
+           words with its scan, so a later day looks each view up in them; a name with a space is still searched for in the text. */
+        var cache = new QueryTextScanCache();
+        const string text = "SELEC * FROM dbo.vOrders JOIN [my view] ON 1 = 1 WHERE vOrd_id = 1";
+        var scan = cache.GetOrScan(text);
+        Assert.False(scan.Parsed);
+        Assert.NotNull(scan.Words);
+        Assert.Same(scan, cache.GetOrScan(text));
+        Assert.Contains("VORDERS", scan.Words!);
+        Assert.Null(QueryTextReferenceScanner.Scan("SELECT 1 FROM dbo.t").Words);
+
+        foreach (var withCache in new[] { true, false })
+        {
+            var aggregator = new ObjectReferenceAggregator(_ => ["vOrders", "vOrd", "my view", "vMissing"], withCache ? cache : null);
+            aggregator.Add("Sales", text, 3, null);
+            Assert.Equal(["my view", "vOrders"], aggregator.References.Select(r => r.ObjectName).Order(StringComparer.Ordinal));
+        }
     }
 
     [Fact]

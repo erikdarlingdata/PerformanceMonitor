@@ -73,8 +73,9 @@ public static class ObjectReferencesDaily
 
     /// <summary>
     /// The three tables as the V297 rung runs them. Idempotent. The rung embeds this text, so editing it after it ships edits a shipped
-    /// rung: add a new rung instead. Plain tables on every store. The primary key serves the build's upsert and the read's range per server;
-    /// <c>idx_object_references_daily_day</c> serves the retention delete. Needs no GRANT: the <c>collect</c> schema's blanket SELECT covers a
+    /// rung: add a new rung instead. Plain tables on every store. The primary key serves the build's upsert and the read's same-database
+    /// arm; <c>idx_object_references_daily_cross_database</c>, partial on the rows that name another database, serves the read's
+    /// cross-database arm (#8784 review); <c>idx_object_references_daily_day</c> serves the retention delete. Needs no GRANT: the <c>collect</c> schema's blanket SELECT covers a
     /// table a migration introduces.
     /// </summary>
     public const string CreateSql = @"
@@ -97,6 +98,9 @@ CREATE TABLE IF NOT EXISTS collect.object_references_daily
 );
 
 CREATE INDEX IF NOT EXISTS idx_object_references_daily_day ON collect.object_references_daily (day);
+
+CREATE INDEX IF NOT EXISTS idx_object_references_daily_cross_database ON collect.object_references_daily (server_id, referenced_database, day)
+    WHERE referenced_database <> '';
 
 CREATE TABLE IF NOT EXISTS collect.object_references_daily_built
 (

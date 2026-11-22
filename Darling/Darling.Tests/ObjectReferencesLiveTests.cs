@@ -292,8 +292,57 @@ public sealed class ObjectReferencesLiveTests
         explain.Parameters.AddWithValue(ServerId);
         explain.Parameters.AddWithValue("Sales");
         using var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
+        /* And of those captures only the 40 rows that name another database (#8784 review), through the partial index: one seek per database
+           name, one per newest time and one per newest capture's cross-database rows. */
         var read = RowsReadFrom(plan.RootElement[0].GetProperty("Plan"), "object_dependencies");
-        Assert.True(read <= 1_200 + 40 * 4, $"the cross-database read touched {read:N0} rows of 12,000 kept; the newest captures hold 1,200");
+        Assert.True(read <= 40 * 4, $"the cross-database read touched {read:N0} rows of 12,000 kept; the newest captures hold 40 that name another database");
+    }
+
+    [Fact]
+    public async Task TheSummaryRead_SeeksEachArm_NotEveryDatabasesRows()
+    {
+        /* #8784 review: one OR over the same-database and cross-database rows could seek only on server_id, so each call read every
+           database's rows for the server across the window. 40 other databases with 30 days of 30 names each, one of them a name in Sales,
+           plus Sales's own 30 days of 30 names: 36,900 rows kept, 2,100 the read wants (900 of Sales's, 1,200 from the others). */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var today = DateOnly.FromDateTime(LiveClock.AnchoredEnd());
+        await using (var plant = new NpgsqlCommand(
+            $"""
+            INSERT INTO {ObjectReferencesDaily.Table} (server_id, database_name, referenced_database, referenced_schema, referenced_name, is_function,
+                day, execution_count, statement_count, last_execution_time, text_matched)
+            SELECT $1, 'Db' || lpad(db::text, 2, '0'), CASE WHEN r = 1 THEN 'sales' ELSE '' END, 'dbo', 'v' || r, false, $2 - d, 1, 1, NULL::timestamp, false
+            FROM generate_series(1, 40) AS db, generate_series(0, 29) AS d, generate_series(1, 30) AS r
+            UNION ALL
+            SELECT $1, 'Sales', '', 'dbo', 'w' || r, false, $2 - d, 1, 1, NULL::timestamp, false
+            FROM generate_series(0, 29) AS d, generate_series(1, 30) AS r
+            """, connection))
+        {
+            plant.Parameters.AddWithValue(ServerId);
+            plant.Parameters.AddWithValue(today);
+            await plant.ExecuteNonQueryAsync(ct);
+        }
+
+        await ExecuteAsync(connection, $"ANALYZE {ObjectReferencesDaily.Table}", ct);
+
+        var references = await DarlingObjectUsageReader.ReadReferencesAsync(dataSource, ServerId, "Sales", LiveClock.AnchoredEnd().AddDays(-90), ct);
+        Assert.Equal(31, references.References.Count);
+
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingObjectUsageReader.ReferencesSql, connection);
+        explain.Parameters.AddWithValue(ServerId);
+        explain.Parameters.AddWithValue("Sales");
+        explain.Parameters.AddWithValue(today.AddDays(-89));
+        explain.Parameters.AddWithValue("sales");
+        using var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
+        var read = RowsReadFrom(plan.RootElement[0].GetProperty("Plan"), "object_references_daily");
+        Assert.True(read <= 2_100 + 100, $"the summary read touched {read:N0} rows of 36,900 kept; it wants 2,100");
     }
 
     /// <summary>The rows the plan's scans of <paramref name="relation"/> produced or filtered out, over all their loops.</summary>

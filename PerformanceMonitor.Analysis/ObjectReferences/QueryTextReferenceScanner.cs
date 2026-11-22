@@ -40,6 +40,10 @@ public readonly record struct ScannedReference(string? Server, string? Database,
 /// <param name="References">The objects named, each once. Empty when <paramref name="Parsed"/> is false.</param>
 public sealed record QueryTextScan(bool Parsed, IReadOnlyList<ScannedReference> References)
 {
+    /// <summary>For an unparsed statement held in a <c>QueryTextScanCache</c>, its words (<see cref="SqlWholeWordMatcher.Words"/>), so the text
+    /// search does not split the same text again each day it comes back (#8784 review). Null otherwise.</summary>
+    public IReadOnlySet<string>? Words { get; init; }
+
     /// <summary>The scan of a statement that could not be parsed.</summary>
     public static QueryTextScan Unparsed { get; } = new(false, Array.Empty<ScannedReference>());
 }
