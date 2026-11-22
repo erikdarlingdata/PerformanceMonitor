@@ -137,6 +137,136 @@ public sealed class TopProceduresHourlyMidLiveTests
             await AssertMidPlannedButRawPageAsync(scratch, connection, start, end, ct);
         }, SeedShape.MaterializationGap);
 
+    /// <summary>
+    /// #9280: with <see cref="ProcedureStatsNameIndex"/> the wide pass reads the uncompressed part of the window per winner, through the
+    /// index, instead of every row of the server. The statement the read chooses is explained before and after the index exists: the rows
+    /// its scans of <c>procedure_stats</c> return fall to a fraction (the winners' own rows plus the two raw edges), and the rows it
+    /// answers are the one-statement pass's rows, with the whole window seeked and with the window split between the two arms.
+    /// </summary>
+    [Fact]
+    public Task MidRoute_SeeksTheWinnersThroughTheNameIndex_AndReturnsTheSameRows() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            var run = await RunWithAndWithoutTheIndexAsync(scratch, connection, start, end, ct);
+            Assert.NotEmpty(run.Today.Rows);
+            Assert.Equal(run.Today.Rows, run.Seek.Rows);
+            Assert.Equal(run.Today.Rows, run.Split.Rows);
+            Assert.Equal(run.Today.Rows, run.NoSeek.Rows);
+            Assert.True(run.Seek.RowsRead * 2 < run.Today.RowsRead, $"the seek read {run.Seek.RowsRead} rows of procedure_stats, the one-statement pass {run.Today.RowsRead}");
+        });
+
+    /// <summary>
+    /// #9280: a winner with a NULL database or a NULL object name has no equality to seek on, so it keeps the NULL-safe join in the seek
+    /// part. Both kinds are on the page here, and the rows equal the one-statement pass's. Rows read are not compared: the NULL winners'
+    /// arm reads the window, as the one-statement pass does.
+    /// </summary>
+    [Fact]
+    public Task MidRoute_WithTheNameIndex_KeepsWinnersWithNullKeys() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            var run = await RunWithAndWithoutTheIndexAsync(scratch, connection, start, end, ct);
+            Assert.Contains(run.Today.Rows, r => r.StartsWith("~|", StringComparison.Ordinal));
+            Assert.Contains(run.Today.Rows, r => r.Contains("|~|", StringComparison.Ordinal) && r.StartsWith("db0|dbo|~|", StringComparison.Ordinal));
+            Assert.Equal(run.Today.Rows, run.Seek.Rows);
+            Assert.Equal(run.Today.Rows, run.Split.Rows);
+        }, SeedShape.NullKeys);
+
+    /// <summary>
+    /// #9280: the routed read answers the same page before and after the index exists, and still by the hourly mid (the production boundary
+    /// is a day before the clock, so a window of the seed's age is read by the one-statement arm: the page must not change).
+    /// </summary>
+    [Fact]
+    public Task MidRoute_RoutedPage_IsTheSameBeforeAndAfterTheNameIndex() =>
+        WithStoreAsync(async (scratch, connection, start, end, ct) =>
+        {
+            var before = await ReadAsync(scratch, TopRanking.Cpu, start, end, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, ProcedureStatsNameIndex.CreateSql);
+            var after = await ReadAsync(scratch, TopRanking.Cpu, start, end, ct);
+            Assert.True(before.ServedByHourlyMid);
+            Assert.True(after.ServedByHourlyMid);
+            Assert.NotEqual("[]", after.Json);
+            Assert.Equal(before.Json, after.Json);
+        });
+
+    /// <summary>The rows (as text, every column) a mid statement answered, and the rows its scans of the table returned in an EXPLAIN ANALYZE.</summary>
+    private sealed record StatementRun(System.Collections.Generic.List<string> Rows, long RowsRead);
+
+    private sealed record IndexRuns(StatementRun Today, StatementRun NoSeek, StatementRun Seek, StatementRun Split);
+
+    /// <summary>
+    /// Runs the mid statement the read chooses on a store without <see cref="ProcedureStatsNameIndex"/> (today's statement), then builds the
+    /// index and runs the chosen statement at three boundaries: before the window (everything is seeked), in the middle of it (both arms read
+    /// rows) and after it (nothing is seeked). The boundary is the clock the read is handed, a day later.
+    /// </summary>
+    private static async Task<IndexRuns> RunWithAndWithoutTheIndexAsync(ScratchPostgres scratch, NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct)
+    {
+        var chunks = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        await using (var names = new NpgsqlCommand("SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_name = 'procedure_stats'", connection))
+        await using (var reader = await names.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                chunks.Add(reader.GetString(0));
+            }
+        }
+
+        async Task<StatementRun> RunAsync(DateTime boundary)
+        {
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(source, ct);
+            var mid = DarlingDataReader.PlanProceduresHourlyMid(rollups, coverage, TopRanking.Cpu, start, end);
+            Assert.NotNull(mid);
+            var (sql, seekFrom) = await DarlingDataReader.ChooseProceduresMidSqlAsync(source, TopRanking.Cpu, mid!, boundary.AddDays(1), ct);
+            var rows = new System.Collections.Generic.List<string>();
+            await using (var command = MidCommand(connection, sql, start, end, mid!, seekFrom))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    rows.Add(string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "~" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+                }
+            }
+
+            return new StatementRun(rows, ExplainBuffers.RowsRead(await ExplainAsync(connection, sql, start, end, mid, ct, seekFrom), chunks));
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.procedure_stats");
+        var today = await RunAsync(start);
+        await DarlingMcpTestData.ExecAsync(connection, ct, ProcedureStatsNameIndex.CreateSql);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.procedure_stats");
+        var seek = await RunAsync(start);
+        var split = await RunAsync(start.AddHours(12));
+        var noSeek = await RunAsync(end.AddHours(2));
+        return new IndexRuns(today, noSeek, seek, split);
+    }
+
+    private static NpgsqlCommand MidCommand(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DarlingDataReader.HourlyMid mid, DateTime? seekFrom)
+    {
+        var command = new NpgsqlCommand(sql, connection);
+        AddMidParameters(command, start, end, mid, seekFrom);
+        return command;
+    }
+
+    private static void AddMidParameters(NpgsqlCommand command, DateTime start, DateTime end, DarlingDataReader.HourlyMid? mid, DateTime? seekFrom)
+    {
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = end });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Top });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
+        if (mid is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidStart });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidEnd });
+        }
+
+        if (seekFrom is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = seekFrom.Value });
+        }
+    }
+
     /// <summary>The plan takes the mid, yet the routed page equals the page with the rollup dropped (raw alone). The seed shape is one
     /// where the mid's own answer would differ from raw's, so a read that skipped its fallback fails here.</summary>
     private static async Task AssertMidPlannedButRawPageAsync(ScratchPostgres scratch, NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct)
@@ -158,21 +288,10 @@ public sealed class TopProceduresHourlyMidLiveTests
         Assert.NotEqual("[]", raw.Json);
     }
 
-    private static async Task<object?> ExplainAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DarlingDataReader.HourlyMid? mid, CancellationToken ct)
+    private static async Task<object?> ExplainAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DarlingDataReader.HourlyMid? mid, CancellationToken ct, DateTime? seekFrom = null)
     {
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, connection);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = start });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = end });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = Top });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
-        if (mid is not null)
-        {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidStart });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = mid.MidEnd });
-        }
-
+        AddMidParameters(command, start, end, mid, seekFrom);
         return await command.ExecuteScalarAsync(ct);
     }
 
@@ -205,6 +324,7 @@ public sealed class TopProceduresHourlyMidLiveTests
         TwoObjectTypes,
         MaterializationGap,
         Bounds,
+        NullKeys,
     }
 
     /// <summary>
@@ -302,6 +422,22 @@ public sealed class TopProceduresHourlyMidLiveTests
                        (914730000007, $6, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AT_END', 'P', 1, 5000000, 5000000, 300),
                        (914730000008, $7, {ServerId}, '{ServerName}', 'db0', 'dbo', 'AFTER_END', 'P', 1, 5000000, 5000000, 300)
                 """, start, midStart.AddMinutes(-1), midStart, midEnd.AddMinutes(-1), midEnd, end, end.AddSeconds(1));
+        }
+
+        if (shape == SeedShape.NullKeys)
+        {
+            /* Two heavy keys that rank first: PNULLDB has a NULL database, and an object with a NULL name sits in db0. Neither has an
+               equality to seek on, so both go through the NULL-safe join. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
+                INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name,
+                                             object_type, sql_handle, plan_handle, delta_execution_count, delta_worker_time, delta_elapsed_time,
+                                             sample_interval_seconds)
+                SELECT 914740000000 + row_number() OVER (), t, {ServerId}, '{ServerName}', NULL, 'dbo', 'PNULLDB', 'P', 'shn', 'phn', 3, 2000000, 2000000, 300
+                FROM generate_series($1::timestamp, $2::timestamp, interval '30 minutes') AS t
+                UNION ALL
+                SELECT 914741000000 + row_number() OVER (), t, {ServerId}, '{ServerName}', 'db0', 'dbo', NULL, 'P', 'sho', 'pho', 3, 1900000, 1900000, 300
+                FROM generate_series($1::timestamp, $2::timestamp, interval '30 minutes') AS t
+                """, start.AddHours(-2).AddMinutes(1), end.AddHours(1));
         }
 
         if (shape == SeedShape.MaterializationGap)
