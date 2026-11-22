@@ -23,6 +23,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// table leads on the server and the time, or on the time alone, so without this one a read of one procedure fetches every row the
 /// server stored in the window and keeps a few of them.
 ///
+/// <para>#9280: the top-procedures read's mid route uses it the same way. Its wide pass seeks each winner's rows through this index on the
+/// uncompressed chunks (<c>DarlingDataReader.TopProceduresMidSeekWideSql</c>) instead of reading every row the server wrote there, and
+/// keeps its one-statement join where this index is missing.</para>
+///
 /// <para><b>What it holds.</b> A compressed chunk keeps no rows in a B-tree, so the index holds the uncompressed chunks' rows and its
 /// size follows the uncompressed window, not the table. The read takes a compressed chunk through its batches, as every read of the
 /// table does. The service's start path builds it before the collectors start (<see cref="PgTableTuning.Statements"/>), and

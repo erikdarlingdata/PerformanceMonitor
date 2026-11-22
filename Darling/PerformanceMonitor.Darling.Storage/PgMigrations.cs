@@ -3390,6 +3390,52 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + TimescaleSupport.CreateAttentionCountIndexSql;
 
     /// <summary>
+    /// V294 (#9284): <c>collect.query_store_stats_corrected_daily</c> compresses ordered by <c>query_hash, bucket DESC</c> instead of
+    /// <c>bucket DESC</c>, the order <see cref="TimescaleSupport.EnableAggregateCompressionSql(string)"/> gives a fresh store, and the same order V279 gave
+    /// the hourly rollup. A compressed daily chunk with no min/max metadata on <c>query_hash</c> decompresses every batch of the chunk for a read of one
+    /// hash, such as the <c>mid</c> arm of <c>get_query_fleet_summary</c>'s Query Store statement, unless the chunk has a bloom filter, and a chunk gets
+    /// one only if it was compressed after V292's hash index existed. Measured on a test store, one compressed daily chunk and one hash: 8 of 127 batches
+    /// and 536 blocks with the old order and a bloom filter, and 7 of 127 batches and 122 blocks recompressed in the new order, with the same rows.
+    ///
+    /// <para>Same shape as <see cref="V279Sql"/>: the ALTER runs only when TimescaleDB is installed and the rollup already compresses (a store whose
+    /// ensure has not enabled compression yet gets the new order from the ensure itself), it is catalog-only (chunks already compressed keep
+    /// <c>bucket DESC</c> until they age out, and every chunk compressed afterwards takes the new order), a refusal is recorded as <c>skipped</c> with the
+    /// server's message while the rollup keeps <c>bucket DESC</c> (its reads stay correct either way), and <c>lock_not_available</c> is re-raised so the
+    /// runner's lock retry handles a busy materialization. Each outcome is a row in <c>collect.aggregate_compression_order_history</c>.</para>
+    ///
+    /// <para>The rung's sentinel is <c>ix_aggregate_compression_order_history_view</c>, a <c>(view_name, changed_at DESC)</c> index on that history table
+    /// (a few rows, never purged, so the build is instant): the table exists on every store since V279, so the index is a mark the rung ran on a store
+    /// with or without TimescaleDB, found by catalog. It also serves a read of one aggregate's latest outcome. Additive for an older build, which ignores
+    /// the index.</para>
+    /// </summary>
+    private static readonly string V294Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+
+CREATE INDEX IF NOT EXISTS ix_aggregate_compression_order_history_view
+    ON collect.aggregate_compression_order_history (view_name, changed_at DESC);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        IF EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates
+                   WHERE view_schema = 'collect' AND view_name = 'query_store_stats_corrected_daily' AND compression_enabled) THEN
+            BEGIN
+                ALTER MATERIALIZED VIEW collect.query_store_stats_corrected_daily SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id', timescaledb.compress_orderby = 'query_hash, bucket DESC');
+                INSERT INTO collect.aggregate_compression_order_history (changed_at, view_name, compress_orderby, outcome)
+                VALUES (now() AT TIME ZONE 'UTC', 'query_store_stats_corrected_daily', 'query_hash, bucket DESC', 'applied');
+            EXCEPTION
+                WHEN lock_not_available THEN
+                    RAISE;
+                WHEN OTHERS THEN
+                    INSERT INTO collect.aggregate_compression_order_history (changed_at, view_name, compress_orderby, outcome)
+                    VALUES (now() AT TIME ZONE 'UTC', 'query_store_stats_corrected_daily', 'query_hash, bucket DESC', 'skipped: ' || SQLERRM);
+            END;
+        END IF;
+    END IF;
+END
+$$;";
+
+    /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
     /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
     /// the answer), and read one heap page per matching hourly row through a plain (query_hash, bucket) index. The rung gives
@@ -3877,6 +3923,9 @@ END $$;";
         /* V293 (#9277): a partial covering index on the Client Timeouts counter rows, so get_client_timeouts' per-run counts read the newest uncompressed chunks
            through an index-only scan instead of fetching every sampled event of the range and dropping it. No row moves. An older build ignores the index. */
         new Migration(293, "attention-events-count-index", V293Sql),
+        /* V294 (#9284): the corrected daily Query Store rollup's compression order becomes query_hash then bucket, as V279 did for the hourly rollup, so one
+           query's days sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
+        new Migration(294, "qs-corrected-daily-compress-orderby", V294Sql),
         /* V295 (#9225): the plan regression block tables, the pre-aggregate of collect.plan_regression_daily the PLAN_REGRESSION read will take whole blocks of days
            from. Two plain tables and one unique index, created empty: no data moves, and the builder fills the blocks from the daily rows as it runs. An older
            build ignores them. */

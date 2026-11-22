@@ -524,6 +524,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "only the uncompressed chunks and is short. On a store without TimescaleDB, or one whose V277 swap has not taken its lock, the table "
             + "is one plain heap of about 0.7 GB a day for 30 days, and the build reads all of it in one statement, so it sets the floor as V22's "
             + "and V39's index builds do. It runs under V293CommandTimeoutSeconds, equal to V281's, so the lock-wait budget is unchanged."),
+        new(
+            294,
+            SetsTheFloor: false,
+            "#9284: CREATE INDEX on collect.aggregate_compression_order_history (created V279), the rung's sentinel and a read of one aggregate's "
+            + "latest outcome. The table gets one row per rung run that reached an ALTER and is never purged, so it holds a handful of rows on any "
+            + "store and the build is instant. The rung's other statement is a catalog-only ALTER of the corrected daily rollup's compression "
+            + "settings (no chunk is rewritten) and an INSERT of one history row. Far inside one command timeout, so it does not move the "
+            + "MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

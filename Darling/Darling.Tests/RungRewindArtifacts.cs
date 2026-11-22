@@ -925,13 +925,17 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // found by catalog (it lives in the materialization's schema), and a no-op without it. The plain (server_id, bucket) index it replaced is not put back: a re-run of V291 builds the covering one again.
         new(291, "hasQueryStoreServerCoveringIndex",
             @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_server_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
-        // V292 (#9223): the covering hash index on the corrected daily Query Store rollup. It is the probe's newest sentinel, found by the index's name. The rewind drops it by name, found by
+        // V292 (#9223): the covering hash index on the corrected daily Query Store rollup. It is the probe's newest sentinel until V294 (#9284) went on top, found by the index's name. The rewind drops it by name, found by
         // catalog (it lives in the materialization's schema), so a re-run of V292 builds it again. Safe on a store that never had it.
         new(292, "hasQueryStoreCorrectedDailyHashIndex",
             @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_daily_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
-        // V293 (#9277): the partial counter-row index on collect.attention_events. It is the probe's newest sentinel, found by the index's name. The rewind drops it by name, so a re-run of V293
+        // V293 (#9277): the partial counter-row index on collect.attention_events. It is the probe's newest sentinel until V294 (#9284) went on top, found by the index's name. The rewind drops it by name, so a re-run of V293
         // builds it again. Safe on a store that never had it.
         new(293, "hasAttentionCountIndex", @"DROP INDEX IF EXISTS collect.idx_attention_events_count_time;"),
+        // V294 (#9284): the view-and-time index on the aggregate compression order history. It is the probe's newest sentinel, found by the index's name. The rewind drops it, so a re-run of V294
+        // makes it again and moves the daily Query Store rollup's order if it is compressed. The history table stays (V279's). Safe on a store that never had it.
+        new(294, "hasAggregateCompressionOrderHistoryIndex",
+            @"DROP INDEX IF EXISTS collect.ix_aggregate_compression_order_history_view;"),
         // V295 (#9225): the plan regression block tables, the probe's newest sentinel. The rewind drops both, so a re-run of V295 creates them empty and the builder
         // sums the blocks again from the daily rows. Safe on a store that never had them.
         new(295, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
