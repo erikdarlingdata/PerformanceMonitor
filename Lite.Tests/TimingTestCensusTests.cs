@@ -45,6 +45,7 @@ public sealed class TimingTestCensusTests
         ["DuckDbSentinelConnectionTests.cs"] = OwnCollection + " (CollectionResetGate)",
         ["PostCollectionCheckpointBudgetTests.cs"] = OwnCollection + " (CollectionResetGate)",
         ["ReadLockWaitLogTests.cs"] = OwnCollection + " (app-logger-statics); the 150 ms is a lower bound the writer holds the lock for, which load only lengthens",
+        ["PlanRegressionInputsTests.cs"] = OwnCollection + " (app-logger-statics); the 4 s bound on a read with a 400 ms plan-fetch clock is a ceiling that only stops a read the clock failed to cut, which load cannot trip",
         ["QuerySnapshotPlanOnDemandTests.cs"] = Diagnostic + " (old and new read shapes compared on rows and allocations)",
         ["QueryWindowTruncationTests.cs"] = Diagnostic + " (written to the console)",
         ["ServerTabOpenNativeMemoryTests.cs"] = Diagnostic + " (the Overview open's time after a trim and warm goes into the table the test writes, #8535)",
