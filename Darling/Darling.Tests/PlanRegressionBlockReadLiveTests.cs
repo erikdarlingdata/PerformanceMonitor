@@ -237,26 +237,27 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 })
         return (built, blocks, leftover);
     }
 
-    private static AnalysisContext NewContext(Rig rig) => new()
+    private static AnalysisContext NewContext(Rig rig, bool anchored = false) => new()
     {
         ServerId = ServerId,
         ServerName = "blocksrv",
         TimeRangeStart = rig.End.AddHours(-4),
         TimeRangeEnd = rig.End,
         ServerUtcOffset = TimeSpan.Zero,
+        AsOfUtc = anchored ? rig.End : null,
     };
 
     private readonly record struct Answer(string Fact, List<string> Offenders, int Blocks, int LeftoverDays);
 
     /// <summary>The fact the real collector builds, with the block plan its read took.</summary>
-    private static async Task<Answer> FactAsync(Rig rig)
+    private static async Task<Answer> FactAsync(Rig rig, bool anchored = false)
     {
         var blocks = -1;
         var leftover = -1;
         PgFactCollector.TestOnlyBlockPlan.Value = (b, d) => { blocks = b.Count; leftover = d.Count; };
         try
         {
-            var context = NewContext(rig);
+            var context = NewContext(rig, anchored);
             var facts = await new PgFactCollector(rig.Source).CollectFactsAsync(context);
             var fact = facts.Single(f => f.Key == "PLAN_REGRESSION");
             var text = string.Join(";", fact.Metadata.OrderBy(m => m.Key, StringComparer.Ordinal).Select(m => m.Key + "=" + m.Value.ToString("R", CultureInfo.InvariantCulture)))
@@ -350,6 +351,27 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 })
 
             Assert.Equal(withBlocks.Fact, without.Fact);
             Assert.Equal(withBlocks.Offenders, without.Offenders);
+        });
+    }
+
+    [Fact]
+    public async Task TheAnchoredFact_TakesBlocks_AndIsTheSameAsWithNoBlockTaken()
+    {
+        await RunLiveAsync(async (rig, ct) =>
+        {
+            /* A pass anchored at an instant runs the anchored block statement, whose window end is $9 after the two block lists. */
+            var withBlocks = await FactAsync(rig, anchored: true);
+            Assert.True(withBlocks.Blocks >= 2, "the anchored read takes the whole valid blocks of the days that were whole by its end");
+            Assert.True(withBlocks.LeftoverDays > 0, "the days no block covers are read from the daily rows and the interval table");
+            Assert.Contains("blockdb/900001", withBlocks.Offenders);
+
+            await ExecAsync(rig.Connection, "DELETE FROM collect.plan_regression_block_built", ct);
+            var without = await FactAsync(rig, anchored: true);
+            Assert.Equal(0, without.Blocks);
+            Assert.True(without.LeftoverDays > withBlocks.LeftoverDays, "with no block the daily list holds every built day");
+
+            Assert.Equal(without.Fact, withBlocks.Fact);
+            Assert.Equal(without.Offenders, withBlocks.Offenders);
         });
     }
 }
