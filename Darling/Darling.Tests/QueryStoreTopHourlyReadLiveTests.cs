@@ -301,8 +301,8 @@ WHERE hour = @hour AND query_id = @q;";
                 source, QueryStoreTopDailyReadLiveTests.End.AddHours(-72), QueryStoreTopDailyReadLiveTests.End, null, null, null, ct);
 
             Assert.Equal(2, read.DailyDaysUsed);
-            Assert.Equal(ReadScope.SourceHourlyEdges, scope.Source);
-            Assert.Equal("24 summary hours, 2 days", scope.SourceReason);
+            Assert.Equal(ReadScope.SourceHourlyEdges, scope.Scope.Source);
+            Assert.Equal("24 summary hours, 2 days", scope.Scope.SourceReason);
         });
     }
 

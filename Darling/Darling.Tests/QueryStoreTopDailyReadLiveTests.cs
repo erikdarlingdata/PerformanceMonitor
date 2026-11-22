@@ -259,8 +259,8 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
             var read = await RouteAsync(source, End.AddHours(-72), End, null, null, null, ct);
 
             Assert.Equal(2, read.DailyDaysUsed);
-            Assert.Equal(ReadScope.SourceIntervalTable, scope.Source);
-            Assert.Equal("daily table, 2 days", scope.SourceReason);
+            Assert.Equal(ReadScope.SourceIntervalTable, scope.Scope.Source);
+            Assert.Equal("daily table, 2 days", scope.Scope.SourceReason);
         });
     }
 
