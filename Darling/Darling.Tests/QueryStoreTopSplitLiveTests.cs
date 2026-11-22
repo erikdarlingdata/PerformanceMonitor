@@ -37,19 +37,19 @@ namespace Darling.Tests;
    live collection. */
 public sealed class QueryStoreTopSplitLiveTests
 {
-    private const string Wide = "collect.query_store_interval_wide";
-    private const int ServerId = 9276;
+    internal const string Wide = "collect.query_store_interval_wide";
+    internal const int ServerId = 9276;
 
     /// <summary>Rows with an interval start inside the window (query_id 1..WindowRows) and rows with none (query_id 10001..10000+NullStartRows); the seed and the asserts share them.</summary>
-    private const int WindowRows = 300;
-    private const int NullStartRows = 20;
+    internal const int WindowRows = 300;
+    internal const int NullStartRows = 20;
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private static Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
         QueryStoreIntervalWideBrinIndexLiveTests.ExecAsync(connection, sql, ct);
 
-    private static string Ts(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+    internal static string Ts(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
     /* Three groups of rows for one server, all inside the days the migrated store accepts:
          window rows      query_id 1..300: an interval start inside the window, first execution ten minutes after it;
@@ -57,7 +57,7 @@ public sealed class QueryStoreTopSplitLiveTests
                           window starts, so only the 26 hour floor keeps them (the one-hour floor of an interval-start row would drop them);
          older rows       query_id 20001..23000: an interval start BEFORE the window and a first execution two to twenty hours before it.
                           The window drops all of them, and the one-floor read fetches every one of them first. */
-    private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct, int nullStartFirstExecHoursBefore = 5, string database = "db")
+    internal static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct, int nullStartFirstExecHoursBefore = 5, string database = "db")
     {
         var start = end.AddHours(-24);
         await ExecAsync(connection, string.Create(CultureInfo.InvariantCulture, $@"
@@ -85,7 +85,7 @@ FROM (SELECT g, timestamp '{Ts(start)}' - interval '2 hours' - make_interval(min
 ANALYZE {Wide};"), ct);
     }
 
-    private static async Task<NpgsqlConnection> OpenAsync(ScratchPostgres scratch, CancellationToken ct)
+    internal static async Task<NpgsqlConnection> OpenAsync(ScratchPostgres scratch, CancellationToken ct)
     {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
@@ -93,7 +93,7 @@ ANALYZE {Wide};"), ct);
         return connection;
     }
 
-    private static NpgsqlParameter Timestamp(DateTime value) =>
+    internal static NpgsqlParameter Timestamp(DateTime value) =>
         new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(value, DateTimeKind.Unspecified) };
 
     private static NpgsqlParameter NullText() => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value };
