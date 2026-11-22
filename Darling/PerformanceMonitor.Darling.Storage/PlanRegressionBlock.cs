@@ -60,6 +60,9 @@ public static class PlanRegressionBlock
     /// and 24 a tick (the tick is hourly) fills 100 servers in about a day without a long start.</summary>
     public const int MaxBuildsPerTick = 24;
 
+    // The client deadline sits past the server's statement_timeout so the server's limit decides (#9225).
+    private const int CommandTimeoutSeconds = PlanRegressionDaily.BuildStatementTimeoutSeconds + 30;
+
     /// <summary>
     /// The two tables as the V295 rung runs them. Idempotent and empty when created: no data moves, the builder fills the blocks as it
     /// runs. Editing this text edits a shipped rung: add a new rung instead. The column types follow <c>plan_regression_daily</c>, whose
@@ -317,12 +320,12 @@ ORDER BY k.block_start;";
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using (var timeout = new NpgsqlCommand($"SET LOCAL statement_timeout = '{PlanRegressionDaily.BuildStatementTimeoutSeconds}s'", connection, transaction))
+        await using (var timeout = new NpgsqlCommand($"SET LOCAL statement_timeout = '{PlanRegressionDaily.BuildStatementTimeoutSeconds}s'", connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var @lock = new NpgsqlCommand(PlanRegressionDaily.LockSql, connection, transaction))
+        await using (var @lock = new NpgsqlCommand(PlanRegressionDaily.LockSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             @lock.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
             if (!(bool)(await @lock.ExecuteScalarAsync(cancellationToken))!)
@@ -334,7 +337,7 @@ ORDER BY k.block_start;";
 
         long[]? seqs;
         int whole;
-        await using (var read = new NpgsqlCommand(SeqsSql, connection, transaction))
+        await using (var read = new NpgsqlCommand(SeqsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             AddServerBlock(read, serverId, blockStart);
             await using var reader = await read.ExecuteReaderAsync(cancellationToken);
@@ -349,20 +352,20 @@ ORDER BY k.block_start;";
             return null;
         }
 
-        await using (var delete = new NpgsqlCommand(DeleteBlockSql, connection, transaction))
+        await using (var delete = new NpgsqlCommand(DeleteBlockSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             AddServerBlock(delete, serverId, blockStart);
             await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long rows;
-        await using (var insert = new NpgsqlCommand(BuildBlockSql, connection, transaction))
+        await using (var insert = new NpgsqlCommand(BuildBlockSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             AddServerBlock(insert, serverId, blockStart);
             rows = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken));
         }
 
-        await using (var mark = new NpgsqlCommand(MarkBuiltSql, connection, transaction))
+        await using (var mark = new NpgsqlCommand(MarkBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             AddServerBlock(mark, serverId, blockStart);
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = seqs });
@@ -392,7 +395,7 @@ ORDER BY k.block_start;";
 
         var today = DateOnly.FromDateTime(nowUtc);
         var due = new List<(int ServerId, DateOnly BlockStart)>();
-        await using (var plan = new NpgsqlCommand(PlanSql, connection) { CommandTimeout = PlanRegressionDaily.BuildStatementTimeoutSeconds + 30 })
+        await using (var plan = new NpgsqlCommand(PlanSql, connection) { CommandTimeout = CommandTimeoutSeconds })
         {
             plan.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = BlockStart(today.AddDays(-PlanRegressionDaily.MarkLateWindowDays)) });
             plan.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = BlockStart(today.AddDays(PlanRegressionDaily.NewestBuiltDayAhead)) });
@@ -440,7 +443,7 @@ ORDER BY k.block_start;";
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var expired = new List<(int ServerId, DateOnly BlockStart)>();
-        await using (var command = new NpgsqlCommand(GcBuiltSql, connection, transaction))
+        await using (var command = new NpgsqlCommand(GcBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified) });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -452,7 +455,7 @@ ORDER BY k.block_start;";
 
         foreach (var (serverId, blockStart) in expired)
         {
-            await using var sums = new NpgsqlCommand(GcBlockSql, connection, transaction);
+            await using var sums = new NpgsqlCommand(GcBlockSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             AddServerBlock(sums, serverId, blockStart);
             await sums.ExecuteNonQueryAsync(cancellationToken);
         }
