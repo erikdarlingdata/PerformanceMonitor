@@ -1877,6 +1877,15 @@ jobs:
           fi
           echo "Windows and Linux versions match: ${windows_version}"
 
+      # A re-run attempt cannot create the release. On 11-22, attempts 2 and 3 of a nightly run deleted the nightly
+      # release and then got HTTP 403 from the create, which left no nightly at all, while a fresh run published a few
+      # minutes later. Stop before the delete, so the previous nightly stays up.
+      - name: Refuse to publish from a re-run attempt
+        if: github.run_attempt != '1'
+        run: |
+          echo "::error::A re-run cannot create the nightly release (GitHub refuses the create with HTTP 403 after the delete). Start a fresh nightly run instead."
+          exit 1
+
       - name: Delete previous nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
