@@ -790,9 +790,10 @@ public static class PgTableTuning
            dogfood store that is ~2.4 M rows, and it showed: 1,223,777 dead tuples with the last autovacuum
            two days earlier, while its own TOAST table (which has its own thresholds against 57 M chunks) had
            been vacuumed 152 times. The parent is the half that matters here, because the dead rows a purge
-           leaves behind are precisely the idx_query_plan_dim_last_seen entries the NEXT purge has to visit
-           and test for visibility before discarding. Untuned, each purge makes the following one slower and
-           then waits days for cleanup.
+           leaves behind are precisely the index entries the NEXT purge has to visit and test for visibility
+           before discarding (from V298, #9304, those are the idx_query_plan_dim_seen_last_seen entries of the
+           narrow stamp table, which cascades with the row; the wide row's own last_seen is no longer indexed).
+           Untuned, each purge makes the following one slower and then waits days for cleanup.
 
            0.02 + 10000 sizes the trigger to roughly one purge's worth of deletions rather than to the
            table's total size, so cleanup follows the work that created it. */
@@ -814,10 +815,11 @@ public static class PgTableTuning
            - collector_state: UPDATE-heavy. SaveCollectorStateAsync upserts each state key after every collection cycle, and
              only the key is indexed. Fillfactor 80 is the whole change: the table is small, so the stock trigger (50 + 20%
              of a few hundred rows) already fires within a cycle or two, and a lower scale factor would add nothing.
-           - query_text_dim: DELETE-heavy, the same shape as query_plan_dim above. The guarded last_seen refresh touches a row
-             at most every PayloadDimensions.LastSeenRefreshGuardHours, and retention deletes by last_seen. last_seen is
-             indexed, so the refresh can never be HOT and fillfactor would not help; only the vacuum trigger matters. Its
-             rows are far fewer than the plan dimension's, so the threshold is 1000 and not 10000.
+           - query_text_dim: DELETE-heavy, the same shape as query_plan_dim above. Since V298 (#9304) the guarded last_seen refresh
+             writes the narrow collect.query_text_dim_seen row, not this one: this row is rewritten only every
+             PayloadDimensionSeen.WideRowRefreshHours, for an older build, and retention deletes it by the stamp table's
+             order. Its own last_seen is no longer indexed, but the rewrite is rare, so fillfactor would not help; only the
+             vacuum trigger matters. Its rows are far fewer than the plan dimension's, so the threshold is 1000 and not 10000.
            - pg_statement_text: DELETE-heavy, with a few updates. The hourly refresh writes a statement only when its text or
              own-entry list changed or its last_seen is more than PayloadDimensions.LastSeenRefreshGuardHours behind (#8988), so
              an unchanged statement is no longer rewritten each hour. last_seen is indexed twice, so the updates that remain can

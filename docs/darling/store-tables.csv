@@ -118,6 +118,7 @@ procedure_stats_io_hourly,derived,derived,rollup view
 procedure_stats_totals,derived,derived,per-collection totals of procedure_stats
 pvs_stats,collected,yes,
 query_plan_dim,collected,yes,query plan text shared by the Query Store rows
+query_plan_dim_seen,internal,no,liveness stamp of each stored query plan
 query_snapshots,collected,yes,
 query_stats,collected,yes,
 query_stats_baseline,derived,derived,rollup view
@@ -183,6 +184,7 @@ query_store_watermarks,internal,no,Query Store read progress
 query_store_watermarks_coverage,internal,no,Query Store read coverage
 query_tag_sightings,derived,derived,tag map built from collected rows
 query_text_dim,collected,yes,query text shared by the Query Store rows
+query_text_dim_seen,internal,no,liveness stamp of each stored query text
 raw_chunk_interval_reconcile_runs,internal,no,chunk interval migration history
 raw_chunk_interval_rung_history,internal,no,chunk interval migration history
 read_latency,internal,no,read latency telemetry
