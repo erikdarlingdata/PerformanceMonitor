@@ -46,7 +46,7 @@ public sealed class QueryStoreAttachRetryLiveTests
             Func<TState, Exception?, string> formatter) => Lines.Add(formatter(state, exception));
     }
 
-    /* A writer in its own connection and transaction, holding ROW EXCLUSIVE on every index the leaf has when the insert runs. */
+    /* A second connection whose open transaction holds a lock on one leaf that its child index ATTACH has to wait behind. */
     private sealed class Writer : IAsyncDisposable
     {
         private readonly NpgsqlConnection _connection;
@@ -64,8 +64,8 @@ public sealed class QueryStoreAttachRetryLiveTests
         public async Task HoldAsync(string leaf, CancellationToken ct)
         {
             _transaction = await _connection.BeginTransactionAsync(ct);
-            await using var insert = new NpgsqlCommand($"INSERT INTO {leaf} (id, k) VALUES (999, {(leaf.EndsWith('a') ? 1 : leaf.EndsWith('b') ? 2 : 3)});", _connection, _transaction);
-            await insert.ExecuteNonQueryAsync(ct);
+            await using var hold = new NpgsqlCommand($"LOCK TABLE {leaf} IN ACCESS EXCLUSIVE MODE;", _connection, _transaction);
+            await hold.ExecuteNonQueryAsync(ct);
         }
 
         public async Task ReleaseAsync(CancellationToken ct)
