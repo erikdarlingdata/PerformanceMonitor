@@ -4035,7 +4035,8 @@ internal static partial class DarlingDataReader
         }
 
         var builtDays = new List<DateOnly>();
-        await using (var built = new NpgsqlCommand(withHours ? QueryStoreTopBuiltDaysAndHoursSql : QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        var builtSql = withHours ? QueryStoreTopBuiltDaysAndHoursSql : QueryStoreTopBuiltDaysSql;
+        await using (var built = new NpgsqlCommand(builtSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
         {
             AddInt(built, serverId);
             built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
