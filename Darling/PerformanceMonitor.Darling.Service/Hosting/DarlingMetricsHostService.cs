@@ -152,8 +152,14 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
                 if (!tlsOutcome.Expose || tlsOutcome.ExposesWithoutItsCertificate)
                 {
                     ReleaseCertificate();
-                    _logger.LogCritical(
-                        "Metrics port not started: web.network.tls is set but its certificate cannot be used. Fix web.network.tls and restart; collection, web and MCP keep running without the port (#9326)");
+                    /* A refusal already logged its one Critical line inside Resolve, ending "the metrics port stays off". Only the broken
+                       invariant (exposing with no certificate), which Resolve never returns, has logged nothing yet. */
+                    if (tlsOutcome.Expose)
+                    {
+                        _logger.LogCritical(
+                            "Metrics port TLS returned no certificate for web.network.tls: the metrics port stays off (#9326)");
+                    }
+
                     return;
                 }
             }
