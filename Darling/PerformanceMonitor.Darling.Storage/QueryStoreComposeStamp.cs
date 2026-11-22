@@ -684,6 +684,56 @@ WHERE hour = $1;";
 DELETE FROM collect.query_store_compose_fleet
 WHERE collection_time < $1;";
 
+    /// <summary>The store schema version that has <see cref="TopHourlyTable"/> (V296, #9280).</summary>
+    public const int TopHourlyRungVersion = 296;
+
+    /// <summary>The hourly summary of the Query Store statement list (V296, #9280): one row per (hour, server, statement key).</summary>
+    public const string TopHourlyTable = "collect.query_store_top_hourly";
+
+    /// <summary>
+    /// V296 (#9280): <c>collect.query_store_top_hourly</c>, the per-hour summary the daily read's edge hours are served from, its
+    /// <c>(hour, server_id)</c> index, and <c>top_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. A PLAIN table on every store, as
+    /// the hash-hourly and fleet tables are. The key columns are <c>query_store_top_daily</c>'s (V161's types); the measures are the ones the read
+    /// uses: the wide-row count, the execution-count sum, the six execution-weighted sums (V240's expressions), the newest execution time and the
+    /// plan hash. No unique index: the grain is held by the builder's GROUP BY and its one-transaction DELETE and INSERT. <c>top_built_seq</c> is the
+    /// <c>late_seq</c> this table's pair was built against: NULL on every hour built before V296 and on a pair a build that does not know the table
+    /// rebuilt, so the planner rebuilds those hours through the ordinary tick and the read does not trust the table for them. Naive UTC.
+    /// </summary>
+    public const string TopHourlyCreateSql = """
+/* V296 (#9280): one row per (hour, server, statement key) of the wide Query Store table, built by the hourly pass beside the stamp rows. Plain
+   table on every store kind. Naive UTC. hour is the hour start the builder was given. */
+CREATE TABLE IF NOT EXISTS collect.query_store_top_hourly
+(
+    hour timestamp NOT NULL,
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    query_hash text,
+    execution_type_desc text,
+    replica_role text,
+    module_name text,
+    wide_rows bigint NOT NULL,
+    execution_count_sum numeric,
+    avg_duration_us_wsum numeric,
+    avg_cpu_time_us_wsum numeric,
+    avg_logical_io_reads_wsum numeric,
+    avg_logical_io_writes_wsum numeric,
+    avg_physical_io_reads_wsum numeric,
+    avg_rowcount_wsum numeric,
+    last_execution_time_max timestamp,
+    query_plan_hash_max text
+);
+
+/* No unique index, as the stamp table. One index serves the build (hour =), the cleanup (hour <) and the read (hour = ANY and server_id =). */
+CREATE INDEX IF NOT EXISTS ix_query_store_top_hourly_hour_server
+ON collect.query_store_top_hourly (hour, server_id);
+
+/* The ledger's fourth sequence: the late_seq this table's pair was built against. NULL on a pair built before V296. */
+ALTER TABLE collect.query_store_compose_stamp_built
+    ADD COLUMN IF NOT EXISTS top_built_seq bigint;
+""";
+
     /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);

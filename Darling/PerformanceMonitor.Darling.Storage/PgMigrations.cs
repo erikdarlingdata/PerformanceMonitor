@@ -3436,6 +3436,20 @@ END
 $$;";
 
     /// <summary>
+    /// V296 (#9280): <c>collect.query_store_top_hourly</c>, the hourly summary the Query Store statement list's daily read serves its edge hours from, its
+    /// <c>(hour, server_id)</c> index, and <c>top_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text and the reasoning are on
+    /// <see cref="QueryStoreComposeStamp.TopHourlyCreateSql"/>. The service's hourly tick fills the table in the stamp's transaction and rebuilds just the
+    /// top rows of every hour whose <c>top_built_seq</c> differs from <c>late_seq</c>, which is every hour built before this rung (NULL), so the backfill is
+    /// the ordinary tick, newest first. <b>The rung scans nothing</b>: one new empty plain table, one index on it, and a nullable column with no default
+    /// on the small ledger. The column needs an ACCESS EXCLUSIVE lock on that ledger, which the wide table's late-row triggers take row locks on, so the
+    /// lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, V221's and V239's. Additive: an older build never reads the table,
+    /// and a build that rebuilds a stamp hour without writing it leaves the pair stale for the table, which this build then rebuilds. <b>No Lite twin:</b>
+    /// Lite has no compose stamp and no daily read.
+    /// </summary>
+    private static readonly string V296Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.TopHourlyCreateSql;
+
+    /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
     /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
     /// the answer), and read one heap page per matching hourly row through a plain (query_hash, bucket) index. The rung gives
@@ -3926,6 +3940,9 @@ END $$;";
         /* V294 (#9284): the corrected daily Query Store rollup's compression order becomes query_hash then bucket, as V279 did for the hourly rollup, so one
            query's days sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
         new Migration(294, "qs-corrected-daily-compress-orderby", V294Sql),
+        /* V296 (#9280): the hourly summary of the Query Store statement list (collect.query_store_top_hourly), its index and the ledger column
+           top_built_seq. An empty table and a nullable column with no default: no row moves. V295 is not in this build's ladder (#9295 takes that number). */
+        new Migration(296, "query-store-top-hourly", V296Sql),
     };
 
     /// <summary>
