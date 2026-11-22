@@ -35,6 +35,15 @@ public class AnalysisContext
     /// null or empty, so the filter fails open.
     /// </summary>
     public IReadOnlySet<string>? SecondaryReplicaDatabases { get; set; }
+
+    /// <summary>
+    /// True for an on-demand read a person or an agent is waiting on (Lite's <c>get_analysis_facts</c> and
+    /// <c>compare_analysis</c>, #9195). The plan regression inputs check then answers from the outcomes an earlier
+    /// background pass cached and makes no live plan fetch against the monitored server: a candidate with no cached
+    /// answer stays in the fact and is counted unverified, as one the fetch budget never reached is. Default false,
+    /// the background pass, which fetches and fills the cache. Darling does not read it.
+    /// </summary>
+    public bool InteractiveRead { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }

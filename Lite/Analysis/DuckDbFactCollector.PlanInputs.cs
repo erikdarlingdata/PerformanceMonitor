@@ -153,7 +153,9 @@ public partial class DuckDbFactCollector
         var judgements = new Dictionary<int, PlanInputJudgement>();
         var outcomes = new Dictionary<(string Database, long Latest, long Best), PairJudgement>();
         var causes = new int[PlanUnverifiedCauseCount];
-        var budget = new PlanFetchBudget();
+        /* #9195: an interactive read has no fetch budget. It answers from the outcomes an earlier background pass cached, and a
+           candidate with no cached answer stays unverified, the same as one a spent budget never reached. */
+        var budget = new PlanFetchBudget { Left = context.InteractiveRead ? 0 : MaxPlanInputFetches };
         var started = Stopwatch.GetTimestamp();
 
         using var overall = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
