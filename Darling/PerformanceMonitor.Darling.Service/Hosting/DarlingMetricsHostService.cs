@@ -56,6 +56,7 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
     private bool _reportedUnusableLogin;
     private bool _loginResolveFailing;
     private volatile DarlingConfig? _config;
+    private DarlingWebTls.LoadedCertificate? _certificate;
     private int _disposed;
 
     public DarlingMetricsHostService(
@@ -136,6 +137,34 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             }
 
             port = metrics.Port;
+
+            /* #9326: the web certificate, when web.network.tls is set, so the token in the Authorization header is not sent in the
+               clear. Loaded through the web and MCP listeners' own path (DarlingListenerTls.Resolve), with a state of its own so the
+               web host's certificate alert is neither published nor cleared from here. Read at start, as the web listener reads it:
+               a renewed certificate is picked up on the next restart. A block that is set but unusable keeps the port off: the
+               operator asked for TLS, and a plain-HTTP port is not what they asked for. No block set keeps plain HTTP. */
+            var webTls = config.Web?.Network?.Tls;
+            if (DarlingWebTls.Describe(webTls, ListenerTlsLabels.Metrics.Section).Shape != DarlingWebTls.TlsShape.NotConfigured)
+            {
+                var tlsOutcome = DarlingListenerTls.Resolve(
+                    _logger, new MetricsTlsCertificateState(), ListenerTlsLabels.Metrics, webTls, address, port, null);
+                _certificate = tlsOutcome.Certificate;
+                if (!tlsOutcome.Expose || tlsOutcome.ExposesWithoutItsCertificate)
+                {
+                    ReleaseCertificate();
+                    /* A refusal already logged its one Critical line inside Resolve, ending "the metrics port stays off". Only the broken
+                       invariant (exposing with no certificate), which Resolve never returns, has logged nothing yet. */
+                    if (tlsOutcome.Expose)
+                    {
+                        _logger.LogCritical(
+                            "Metrics port TLS returned no certificate for web.network.tls: the metrics port stays off (#9326)");
+                    }
+
+                    return;
+                }
+            }
+
+            var listenerCertificate = _certificate;
             _config = config;
             var refresher = new DarlingMetricsRefresher(
                 _dataSourceOverride ?? StoreDataSourceAsync, _admission, _registry, _collector, _time, _logger);
@@ -154,7 +183,15 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             {
                 options.Configure(new ConfigurationBuilder().Build());
                 DarlingHealthHostService.ApplyLimits(options);
-                options.Listen(listenAddress, port, l => l.Protocols = HttpProtocols.Http1);
+                options.Listen(listenAddress, port, l =>
+                {
+                    l.Protocols = HttpProtocols.Http1;
+                    if (listenerCertificate is not null)
+                    {
+                        /* #9326: the leaf and its intermediates, through the body the web and MCP listeners share. */
+                        l.UseHttps(https => DarlingListenerTls.ConfigureHttps(https, listenerCertificate.Value));
+                    }
+                });
             });
             app = builder.Build();
             /* #9013: one refusal log for this host, so its per-source rate limit spans every request the port answers. */
@@ -169,13 +206,12 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             IsListening = true;
             _logger.LogInformation("Metrics port listening on {Urls} (/metrics) (#9013)", string.Join(", ", app.Urls));
 
-            if (!IPAddress.IsLoopback(address) && check.AllowList.Count == 0)
+            if (!IPAddress.IsLoopback(address) && (listenerCertificate is null || check.AllowList.Count == 0))
             {
-                /* #9013: after the bind, so the log never says bound and then fails. Without allowFrom every host that can reach this
-                   address can try the token, and there is no TLS, so the token crosses the network in clear. */
-                _logger.LogWarning(
-                    "Metrics port is bound to {Address}, not loopback, and metrics.allowFrom is empty: it is guarded by the token alone, over plain HTTP. Set metrics.allowFrom to the scraper's addresses (#9013)",
-                    address);
+                /* #9013, #9326: after the bind, so the log never says bound and then fails. Without TLS the token in the Authorization
+                   header crosses the network in clear, whatever allowFrom holds; without allowFrom every host that can reach this
+                   address can try the token. One line names whichever of the two apply. */
+                _logger.LogWarning("{Warning} (#9013, #9326)", BindWarning(address, listenerCertificate is null, check.AllowList.Count == 0));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -396,10 +432,47 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
         }
     }
 
+    /// <summary>
+    /// #9013, #9326: the warning for a bind off loopback. <paramref name="plainHttp"/> is true when no certificate is served, which
+    /// puts the token in the Authorization header on the network unencrypted whatever <c>metrics.allowFrom</c> holds;
+    /// <paramref name="noAllowFrom"/> is true when <c>metrics.allowFrom</c> is empty, which leaves the token as the only guard.
+    /// Called only when at least one is true.
+    /// </summary>
+    internal static string BindWarning(IPAddress address, bool plainHttp, bool noAllowFrom)
+    {
+        var text = $"Metrics port is bound to {address}, not loopback";
+        if (noAllowFrom)
+        {
+            text += plainHttp
+                ? ", and metrics.allowFrom is empty: it is guarded by the token alone, over plain HTTP, so the token in the Authorization header crosses the network unencrypted. Set metrics.allowFrom to the scraper's addresses, and set web.network.tls to serve HTTPS with the web certificate"
+                : ", and metrics.allowFrom is empty: it is guarded by the token alone. Set metrics.allowFrom to the scraper's addresses";
+        }
+        else
+        {
+            text += ", and serves plain HTTP: the token in the Authorization header crosses the network unencrypted. Set web.network.tls to serve HTTPS with the web certificate";
+        }
+
+        return text;
+    }
+
+    /// <summary>#9326: a certificate this host adopted is released once, on every path that ends the port.</summary>
+    private void ReleaseCertificate()
+    {
+        var certificate = _certificate;
+        _certificate = null;
+        try { certificate?.Dispose(); } catch { /* best-effort */ }
+    }
+
+    /// <summary>#9326: this host's own certificate state, so its TLS load never touches the web host's published certificate facts.</summary>
+    private sealed class MetricsTlsCertificateState : ListenerTlsCertificateState
+    {
+    }
+
     private async Task DisposeFailedStartAsync(WebApplication? app)
     {
         IsListening = false;
         _app = null;
+        ReleaseCertificate();
         if (app is not null)
         {
             /* #9013: the health host's guard: a second Kestrel failure on teardown must not leave StartAsync, or the service start
@@ -421,6 +494,7 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             }
             finally
             {
+                ReleaseCertificate();
                 await CloseDataSourceAsync().ConfigureAwait(false);
             }
 
@@ -446,6 +520,7 @@ internal sealed class DarlingMetricsHostService : IHostedService, IAsyncDisposab
             try { await _disposeApp(app).ConfigureAwait(false); } catch { /* best-effort */ }
         }
 
+        ReleaseCertificate();
         await CloseDataSourceAsync().ConfigureAwait(false);
         _stopping.Dispose();
     }

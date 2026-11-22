@@ -394,7 +394,7 @@ Wrong tokens are throttled per address, as on the MCP endpoint: three wrong bear
 
 The service reads `metrics.token` once, at start. To rotate it, change the secret and restart the service. Each refusal is logged with the client's address and the reason, never the token, and a repeating refusal from one address is rate limited in the log.
 
-The port has no TLS, so the token crosses the network in clear text. Keep the port on a trusted network, or put a TLS-terminating proxy in front of it. Behind a proxy, every client reaches the port from the proxy's address, so they all share one throttle: one client that sends wrong tokens holds out the scraper too, until the wait ends. Keep the proxy's other clients off this route, or give the scraper its own path to the port. When the port binds an address that is not loopback and `allowFrom` is empty, the service logs one Warning after it binds: the token alone guards the port. Set `allowFrom` to the scraper's addresses.
+**TLS.** When `web.network.tls` is set, the metrics port serves HTTPS with that same certificate, and a scrape must use `https`. The service loads the certificate at start, as the web dashboard does, so a renewed certificate needs a restart. A certificate that cannot be used keeps the metrics port off, with one Critical line, and collection, web and MCP keep running. With no `web.network.tls`, the port serves plain HTTP, so the token crosses the network in clear text. Keep that port on a trusted network, or put a TLS-terminating proxy in front of it. Behind a proxy, every client reaches the port from the proxy's address, so they all share one throttle: one client that sends wrong tokens holds out the scraper too, until the wait ends. Keep the proxy's other clients off this route, or give the scraper its own path to the port. When the port binds an address that is not loopback, the service logs one Warning after it binds if the port serves plain HTTP, whatever `allowFrom` holds, because the token crosses the network unencrypted. It also warns when `allowFrom` is empty, because the token alone guards the port. Set `allowFrom` to the scraper's addresses, and set `web.network.tls` to serve HTTPS.
 
 ### Limits
 
@@ -501,6 +501,7 @@ scrape_configs:
     authorization:
       type: Bearer
       credentials_file: /etc/prometheus/darling-metrics-token
+    # scheme: https   # when web.network.tls is set
     static_configs:
       - targets: ['darling.example:5155']
 ```
