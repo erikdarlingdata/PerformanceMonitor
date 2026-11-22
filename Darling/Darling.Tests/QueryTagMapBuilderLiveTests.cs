@@ -1282,4 +1282,26 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.Equal($"0xAA|{tag},0xBB|{tag},0xCC|{tag}", await MapOfAsync(env, Server));
         });
     }
+
+    [Fact]
+    public async Task AServerBackedOffAfterAFailedAgeRebuild_IsPickedAgainOnceTheBackoffPasses_AndTheRebuildClearsIt()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(8));
+            await FailMapDeleteForAsync(env, Server);
+
+            /* A zero back-off has passed by the next pass. */
+            var builder = new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero, ageRebuildBackoff: TimeSpan.Zero);
+            Assert.False(await PassAsync(env, builder));
+            Assert.Equal(2, (await MapAsync(env)).Count);
+
+            await ExecAsync(env, "DROP TRIGGER fail_map_delete ON config.query_tag_map");
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+            DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);
+            Assert.True(clock - (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!.RebuiltAt < TimeSpan.FromMinutes(5));
+        });
+    }
 }

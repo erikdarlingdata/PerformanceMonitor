@@ -34,6 +34,9 @@ public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string 
     /// <summary>#9308: how old a server's last rebuild may get before the weekly staggered rebuild takes it.</summary>
     public static readonly TimeSpan MaxRebuildAge = TimeSpan.FromDays(7);
 
+    /// <summary>#9308: how long a server whose age-picked rebuild failed is left out of the age pick.</summary>
+    public static readonly TimeSpan AgeRebuildBackoff = TimeSpan.FromHours(1);
+
     /// <summary>#9308: the time after the collector service starts in which the staggered rebuild never runs.</summary>
     public static readonly TimeSpan RebuildStartupGrace = TimeSpan.FromMinutes(20);
 
@@ -91,11 +94,38 @@ public partial class LocalDataService
     /// leaves the map. Lite rebuilds one server in the same transaction as the extends, so it takes the one-a-pass shape
     /// Darling does. <paramref name="serviceAge"/> is how long the collector service has run; the staggered rebuild waits for
     /// <see cref="QueryTagMapCursor.RebuildStartupGrace"/>, and a null age never staggers.
+    /// A failed age rebuild must not stop every server's extend. Lite writes the rebuild and the extends in ONE transaction, so
+    /// the failure rolls back the whole pass. When the pass had an age-picked server and <paramref name="ageBackoffUntil"/> is
+    /// given, the server is recorded there for <see cref="QueryTagMapCursor.AgeRebuildBackoff"/> (it is left out of the age pick
+    /// until then) and the pass runs once more with no age rebuild, so every server still extends. A rebuild that commits clears
+    /// its server's entry. A second failure propagates to the caller, as before.
     /// A key that resolves to no tag has no map row (it reads as untagged). The write takes effect in this pass, never
     /// inside the rule or assignment write.
     /// </summary>
     public async Task<QueryTagMapPass> BuildQueryTagMapAsync(
-        IDictionary<int, QueryTagMapCursor>? cursors = null, int keyCap = QueryTagLimits.MaxKeysPerServerPerPass, TimeSpan? serviceAge = null)
+        IDictionary<int, QueryTagMapCursor>? cursors = null, int keyCap = QueryTagLimits.MaxKeysPerServerPerPass, TimeSpan? serviceAge = null,
+        IDictionary<int, DateTime>? ageBackoffUntil = null)
+    {
+        var pick = new AgePick();
+        try
+        {
+            return await BuildQueryTagMapOnceAsync(cursors, keyCap, serviceAge, ageBackoffUntil, pick);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && ageBackoffUntil is not null && pick.Server is { } failed)
+        {
+            ageBackoffUntil[failed] = DateTime.UtcNow + QueryTagMapCursor.AgeRebuildBackoff;
+            return await BuildQueryTagMapOnceAsync(cursors, keyCap, null, ageBackoffUntil, new AgePick());
+        }
+    }
+
+    /// <summary>The server the age rule picked in one attempt, for the caller that backs it off when the attempt fails.</summary>
+    private sealed class AgePick
+    {
+        public int? Server { get; set; }
+    }
+
+    private async Task<QueryTagMapPass> BuildQueryTagMapOnceAsync(
+        IDictionary<int, QueryTagMapCursor>? cursors, int keyCap, TimeSpan? serviceAge, IDictionary<int, DateTime>? ageBackoffUntil, AgePick pick)
     {
         /* The clock and the rules version are captured BEFORE the read. The read and the resolve run under the READ lock, so
            the UI's reads are not stalled by a rebuild; only the write takes the write lock. A sightings flush or a rule write
@@ -141,7 +171,7 @@ public partial class LocalDataService
             var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
             rebuiltServers = new HashSet<int>();
             List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> sightings;
-            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, stored, keyCap, rebuild, clock, rebuiltServers, serviceAge);
+            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, stored, keyCap, rebuild, clock, rebuiltServers, serviceAge, ageBackoffUntil, pick);
 
             resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
             removed = new List<(int ServerId, string Kind, string Key)>();
@@ -241,6 +271,14 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             }
         }
 
+        if (ageBackoffUntil is not null)
+        {
+            foreach (var serverId in rebuiltServers)
+            {
+                ageBackoffUntil.Remove(serverId);
+            }
+        }
+
         return new QueryTagMapPass(rebuild, keysSeen, resolved.Count);
     }
 
@@ -253,7 +291,8 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
     private static async Task<(List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> Rows, Dictionary<int, QueryTagMapCursor> Next)>
         ReadQuerySightingsAsync(
             LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, Dictionary<int, QueryTagMapCursor> stored,
-            int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers, TimeSpan? serviceAge)
+            int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers, TimeSpan? serviceAge,
+            IDictionary<int, DateTime>? ageBackoffUntil, AgePick pick)
     {
         var serverIds = new List<int>();
         using (var servers = connection.CreateCommand())
@@ -274,6 +313,11 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             var oldest = DateTime.MaxValue;
             foreach (var candidate in serverIds)
             {
+                if (ageBackoffUntil is not null && ageBackoffUntil.TryGetValue(candidate, out var until) && until > clock)
+                {
+                    continue;
+                }
+
                 if ((cursors.TryGetValue(candidate, out var held) || stored.TryGetValue(candidate, out held))
                     && clock - held.RebuiltAt >= QueryTagMapCursor.MaxRebuildAge && held.RebuiltAt < oldest)
                 {
@@ -281,6 +325,8 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
                     oldest = held.RebuiltAt;
                 }
             }
+
+            pick.Server = staggered;
         }
 
         var rows = new List<(int, QueryTagKeyKind, string, QueryTagSighting)>();

@@ -52,6 +52,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// #9303). A due server that is skipped extends as usual. A cursor stored before this field decodes as due, and the
 /// one-a-pass limit spreads those out. A rebuild-all ignores all of this.</para>
 ///
+/// <para><b>A failed age rebuild backs off and the server still extends (#9308).</b> A rebuild that throws leaves the
+/// server's cursor and <c>rebuilt_at</c> as they were, so it would be the oldest due server again a minute later, and
+/// every pass would take the rebuild path and never extend it: its tags would freeze while a failing all-sightings read
+/// ran once a minute. So when the rebuild the age rule picked fails, the server is not picked for age for
+/// <see cref="AgeRebuildBackoff"/> (store clock, held in memory), the slot goes to the next due server, and the pass
+/// runs the server's extend from its intact cursor. A rebuild that succeeds clears the back-off. A rebuild from a failed
+/// stored-cursor adopt and a rebuild-all are not age rebuilds and do not back off.</para>
+///
 /// <para><b>Caller carry-forward (decision 3 of #5971).</b> A hash key is resolved against every sighting row it has,
 /// each carrying the application, login and host it was seen under, so a rule on application X tags a hash seen under
 /// X. A hand assignment wins over a rule (the resolver's precedence).</para>
@@ -88,10 +96,15 @@ public sealed class QueryTagMapBuilder
     /// <summary>#9308: the time after the builder is constructed in which the staggered rebuild never runs.</summary>
     public static readonly TimeSpan RebuildStartupGrace = TimeSpan.FromMinutes(20);
 
+    /// <summary>#9308: how long a server whose age-picked rebuild failed is left out of the age pick, on the store clock.</summary>
+    public static readonly TimeSpan AgeRebuildBackoff = TimeSpan.FromHours(1);
+
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
     private readonly TimeSpan _maxRebuildAge;
     private readonly TimeSpan _rebuildStartupGrace;
+    private readonly TimeSpan _ageRebuildBackoff;
+    private readonly Dictionary<int, DateTime> _ageBackoffUntil = new();
     private readonly Stopwatch _sinceConstruction = Stopwatch.StartNew();
     private readonly int _keysPerServerPerPass;
     private readonly QueryTagSightingBuffer? _sightings;
@@ -100,10 +113,11 @@ public sealed class QueryTagMapBuilder
     /// <param name="sightings">The buffer the collectors append to; each pass flushes it first. Null for a builder that only
     /// reads sightings other code wrote.</param>
     public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null,
-        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null)
+        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null)
     {
         _maxRebuildAge = maxRebuildAge ?? MaxRebuildAge;
         _rebuildStartupGrace = rebuildStartupGrace ?? RebuildStartupGrace;
+        _ageRebuildBackoff = ageRebuildBackoff ?? AgeRebuildBackoff;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _sightings = sightings;
@@ -143,6 +157,8 @@ public sealed class QueryTagMapBuilder
         /* Which servers rebuild this pass, decided before any of them runs so the staggered rebuild can pick the oldest. */
         var rebuilds = new HashSet<int>();
         var failedAdopt = new HashSet<int>();
+        int? ageRebuild = null;
+        DateTime ageClock = default;
         if (!rebuildAll)
         {
             foreach (int serverId in serverIds)
@@ -174,9 +190,11 @@ public sealed class QueryTagMapBuilder
                 try
                 {
                     var due = await PickOldestDueServerAsync(serverIds.Where(id => !rebuilds.Contains(id) && !failedAdopt.Contains(id)), cancellationToken).ConfigureAwait(false);
-                    if (due is { } dueServer)
+                    if (due is var (dueServer, clock))
                     {
                         rebuilds.Add(dueServer);
+                        ageRebuild = dueServer;
+                        ageClock = clock;
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -196,6 +214,7 @@ public sealed class QueryTagMapBuilder
             }
 
             bool rebuild = rebuildAll || rebuilds.Contains(serverId);
+            bool agePicked = rebuild && !rebuildAll && ageRebuild == serverId;
             try
             {
                 await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -214,6 +233,22 @@ public sealed class QueryTagMapBuilder
                 _logger?.LogWarning(
                     "Query-tag map: the {Step} for server {ServerId} failed and its previous map stays: {Message}",
                     rebuild ? "rebuild" : "extend", serverId, ex.Message);
+
+                if (agePicked)
+                {
+                    /* The cursor is intact (a rebuild moves it only after its map write commits), so extend from it now and keep
+                       this server out of the age pick for a while: the next pass hands the slot to the next due server. */
+                    _ageBackoffUntil[serverId] = ageClock + _ageRebuildBackoff;
+                    try
+                    {
+                        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                        await ExtendServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception extendEx) when (extendEx is not OperationCanceledException)
+                    {
+                        _logger?.LogWarning("Query-tag map: the extend for server {ServerId} after its failed rebuild also failed and its previous map stays: {Message}", serverId, extendEx.Message);
+                    }
+                }
             }
         }
 
@@ -258,7 +293,7 @@ public sealed class QueryTagMapBuilder
     /// <see cref="MaxRebuildAge"/> old on the store clock, or null when none is due. Only servers with a cursor count: a server
     /// with none rebuilds this pass anyway.
     /// </summary>
-    private async Task<int?> PickOldestDueServerAsync(IEnumerable<int> serverIds, CancellationToken cancellationToken)
+    private async Task<(int ServerId, DateTime Clock)?> PickOldestDueServerAsync(IEnumerable<int> serverIds, CancellationToken cancellationToken)
     {
         var candidates = serverIds.Where(_cursors.ContainsKey).Distinct().ToList();
         if (candidates.Count == 0)
@@ -273,6 +308,16 @@ public sealed class QueryTagMapBuilder
         foreach (int serverId in candidates)
         {
             DateTime rebuiltAt = _cursors[serverId].RebuiltAt;
+            if (_ageBackoffUntil.TryGetValue(serverId, out DateTime until))
+            {
+                if (until > clock)
+                {
+                    continue;
+                }
+
+                _ageBackoffUntil.Remove(serverId);
+            }
+
             if (clock - rebuiltAt >= _maxRebuildAge && rebuiltAt < oldestRebuiltAt)
             {
                 oldest = serverId;
@@ -280,7 +325,7 @@ public sealed class QueryTagMapBuilder
             }
         }
 
-        return oldest;
+        return oldest is { } picked ? (picked, clock) : null;
     }
 
     private async Task RebuildServerAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
@@ -297,6 +342,7 @@ public sealed class QueryTagMapBuilder
         var next = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty, clock);
         await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
         _cursors[serverId] = next;
+        _ageBackoffUntil.Remove(serverId);
     }
 
     /// <summary>

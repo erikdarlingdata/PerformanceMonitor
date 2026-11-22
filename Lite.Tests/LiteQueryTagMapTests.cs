@@ -1125,4 +1125,49 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
     }
+
+    [Fact]
+    public async Task AFailedAgeRebuild_StillExtendsEveryServerInThePass_AndBacksTheServerOffUntilTheBackoffPasses()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+
+        /* The pass picks server 7 for age, and its first attempt fails after the read. */
+        var attempts = 0;
+        _service.AfterQueryTagMapReadForTests = () =>
+        {
+            if (attempts++ == 0)
+            {
+                throw new InvalidOperationException("rebuild failed");
+            }
+        };
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        var backoff = new Dictionary<int, DateTime>();
+        try
+        {
+            var pass = await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace, ageBackoffUntil: backoff);
+            Assert.False(pass.Rebuilt);
+        }
+        finally
+        {
+            _service.AfterQueryTagMapReadForTests = null;
+        }
+
+        /* The new key was extended in, the deleted one stayed (only a rebuild drops it), and the server is backed off. */
+        Assert.Equal(2, attempts);
+        Assert.Equal([HashA, HashB, "0x00000000000000CC"], (await MapAsync()).Select(r => r.Key).Order());
+        Assert.True(backoff[7] > DateTime.UtcNow.AddMinutes(30));
+
+        /* Inside the back-off the server extends and keeps the deleted key. */
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace, ageBackoffUntil: backoff);
+        Assert.Contains(HashA, (await MapAsync()).Select(r => r.Key));
+
+        /* Once it passes, the server is picked again, its rebuild drops the deleted key, and the back-off is cleared. */
+        backoff[7] = DateTime.UtcNow.AddSeconds(-1);
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace, ageBackoffUntil: backoff);
+        Assert.DoesNotContain(HashA, (await MapAsync()).Select(r => r.Key));
+        Assert.Empty(backoff);
+    }
 }
