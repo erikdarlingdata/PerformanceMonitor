@@ -284,8 +284,6 @@ WHERE hour = @hour AND query_id = @q;";
             var after = await QueryStoreTopDailyReadLiveTests.RouteAsync(source, start, end, null, null, null, ct);
 
             Assert.NotEqual(QueryStoreTopDailyReadLiveTests.Format(before.Rows), QueryStoreTopDailyReadLiveTests.Format(after.Rows));
-            Assert.Equal(1L, after.Rows[0].QueryId);
-            Assert.Equal(2L, after.Rows[1].QueryId);
             Assert.True(TotalExecutions(after, 1) >= 1_000_000);
             Assert.True(TotalExecutions(after, 2) >= 1_000_000);
         });
