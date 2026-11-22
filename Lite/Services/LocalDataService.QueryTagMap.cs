@@ -25,10 +25,18 @@ public sealed record QueryTagMapPass(bool Rebuilt, int KeysResolved, int KeysTag
 /// One server's extend cursor, held in memory by the caller (#9308: a copy is stored in <c>collector_state</c> with the rules version it was built at). Keys are read strictly after
 /// (<see cref="Since"/>, <see cref="AfterKind"/>, <see cref="AfterKey"/>) in (last_seen, key_kind, key) order. After a pass that
 /// finished under the cap it is the pass clock minus <see cref="Overlap"/> with empty kind and key; after a pass that hit the
-/// cap it is the last key read, so the next pass continues after it.
+/// cap it is the last key read, so the next pass continues after it. <see cref="RebuiltAt"/> is the clock at this server's last
+/// rebuild (an extend carries it forward); a cursor stored before the field existed has none and reads as
+/// <see cref="DateTime.MinValue"/>, "rebuilt long ago", so it is due for the weekly staggered rebuild.
 /// </summary>
-public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string AfterKey)
+public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string AfterKey, DateTime RebuiltAt = default)
 {
+    /// <summary>#9308: how old a server's last rebuild may get before the weekly staggered rebuild takes it.</summary>
+    public static readonly TimeSpan MaxRebuildAge = TimeSpan.FromDays(7);
+
+    /// <summary>#9308: the time after the collector service starts in which the staggered rebuild never runs.</summary>
+    public static readonly TimeSpan RebuildStartupGrace = TimeSpan.FromMinutes(20);
+
     /// <summary>How far behind the pass clock a finished pass sets the cursor, so a sighting stamped just before the read is seen.</summary>
     public static readonly TimeSpan Overlap = TimeSpan.FromMinutes(2);
 
@@ -38,11 +46,13 @@ public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string 
     /// <summary>#9308: the oldest stored cursor a fresh process extends from. An older one rebuilds.</summary>
     public static readonly TimeSpan MaxStoredAge = TimeSpan.FromHours(24);
 
-    private sealed record Wire(long V, long T, string K, string Key);
+    private sealed record Wire(long V, long T, string K, string Key, long? R = null);
 
     /// <summary>#9308: the stored text of this cursor, with the <c>rules_version</c> the map was built at.</summary>
     public string Encode(long rulesVersion) =>
-        System.Text.Json.JsonSerializer.Serialize(new Wire(rulesVersion, DateTime.SpecifyKind(Since, DateTimeKind.Utc).Ticks, AfterKind, AfterKey));
+        System.Text.Json.JsonSerializer.Serialize(new Wire(
+            rulesVersion, DateTime.SpecifyKind(Since, DateTimeKind.Utc).Ticks, AfterKind, AfterKey,
+            DateTime.SpecifyKind(RebuiltAt, DateTimeKind.Utc).Ticks));
 
     /// <summary>The cursor and rules version in stored text, or null when it does not read back.</summary>
     public static (long RulesVersion, QueryTagMapCursor Cursor)? TryDecode(string text)
@@ -51,7 +61,7 @@ public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string 
         {
             var wire = System.Text.Json.JsonSerializer.Deserialize<Wire>(text);
             return wire is { K: not null, Key: not null }
-                ? (wire.V, new QueryTagMapCursor(new DateTime(wire.T, DateTimeKind.Utc), wire.K, wire.Key))
+                ? (wire.V, new QueryTagMapCursor(new DateTime(wire.T, DateTimeKind.Utc), wire.K, wire.Key, new DateTime(wire.R ?? 0, DateTimeKind.Utc)))
                 : null;
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or ArgumentOutOfRangeException)
@@ -76,11 +86,16 @@ public partial class LocalDataService
     /// Each server resolves at most <paramref name="keyCap"/> keys (default <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>),
     /// oldest first, and its cursor moves on past the last key read. The method updates <paramref name="cursors"/> once the
     /// pass has committed.
+    /// #9308: a pass that extends also rebuilds ONE server when its last rebuild (the cursor's <c>RebuiltAt</c>) is
+    /// <see cref="QueryTagMapCursor.MaxRebuildAge"/> old, the oldest due server, so a key whose sightings retention deleted
+    /// leaves the map. Lite rebuilds one server in the same transaction as the extends, so it takes the one-a-pass shape
+    /// Darling does. <paramref name="serviceAge"/> is how long the collector service has run; the staggered rebuild waits for
+    /// <see cref="QueryTagMapCursor.RebuildStartupGrace"/>, and a null age never staggers.
     /// A key that resolves to no tag has no map row (it reads as untagged). The write takes effect in this pass, never
     /// inside the rule or assignment write.
     /// </summary>
     public async Task<QueryTagMapPass> BuildQueryTagMapAsync(
-        IDictionary<int, QueryTagMapCursor>? cursors = null, int keyCap = QueryTagLimits.MaxKeysPerServerPerPass)
+        IDictionary<int, QueryTagMapCursor>? cursors = null, int keyCap = QueryTagLimits.MaxKeysPerServerPerPass, TimeSpan? serviceAge = null)
     {
         /* The clock and the rules version are captured BEFORE the read. The read and the resolve run under the READ lock, so
            the UI's reads are not stalled by a rebuild; only the write takes the write lock. A sightings flush or a rule write
@@ -126,7 +141,7 @@ public partial class LocalDataService
             var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
             rebuiltServers = new HashSet<int>();
             List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> sightings;
-            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, stored, keyCap, rebuild, clock, rebuiltServers);
+            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, stored, keyCap, rebuild, clock, rebuiltServers, serviceAge);
 
             resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
             removed = new List<(int ServerId, string Kind, string Key)>();
@@ -238,7 +253,7 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
     private static async Task<(List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> Rows, Dictionary<int, QueryTagMapCursor> Next)>
         ReadQuerySightingsAsync(
             LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, Dictionary<int, QueryTagMapCursor> stored,
-            int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers)
+            int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers, TimeSpan? serviceAge)
     {
         var serverIds = new List<int>();
         using (var servers = connection.CreateCommand())
@@ -251,6 +266,23 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             }
         }
 
+        /* #9308: the one server the weekly staggered rebuild takes this pass: the oldest rebuilt_at among those at least
+           MaxRebuildAge old. A server with no cursor rebuilds anyway and does not use the slot. */
+        int? staggered = null;
+        if (!rebuild && cursors is not null && serviceAge is { } age && age >= QueryTagMapCursor.RebuildStartupGrace)
+        {
+            var oldest = DateTime.MaxValue;
+            foreach (var candidate in serverIds)
+            {
+                if ((cursors.TryGetValue(candidate, out var held) || stored.TryGetValue(candidate, out held))
+                    && clock - held.RebuiltAt >= QueryTagMapCursor.MaxRebuildAge && held.RebuiltAt < oldest)
+                {
+                    staggered = candidate;
+                    oldest = held.RebuiltAt;
+                }
+            }
+        }
+
         var rows = new List<(int, QueryTagKeyKind, string, QueryTagSighting)>();
         var next = new Dictionary<int, QueryTagMapCursor>();
         foreach (var serverId in serverIds)
@@ -259,10 +291,13 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
                paged by the cap; its cursor is then the pass clock minus the overlap. */
             var cursor = QueryTagMapCursor.Epoch;
             var serverRebuild = rebuild || cursors is null || !(cursors.TryGetValue(serverId, out cursor!) || stored.TryGetValue(serverId, out cursor!));
-            if (serverRebuild)
+            var rebuiltAt = serverRebuild ? default(DateTime) : cursor.RebuiltAt;
+            if (serverRebuild || serverId == staggered)
             {
+                serverRebuild = true;
                 rebuiltServers.Add(serverId);
                 cursor = QueryTagMapCursor.Epoch;
+                rebuiltAt = clock;
             }
 
             var serverCap = serverRebuild ? int.MaxValue : cap;
@@ -315,8 +350,8 @@ ORDER BY c.ls, c.key_kind, c.key, s.database_name, s.application_name, s.login_n
             }
 
             next[serverId] = !serverRebuild && keys >= cap
-                ? new QueryTagMapCursor(lastSeen, lastKind!, lastKey!)
-                : new QueryTagMapCursor(clock - QueryTagMapCursor.Overlap, string.Empty, string.Empty);
+                ? new QueryTagMapCursor(lastSeen, lastKind!, lastKey!, rebuiltAt)
+                : new QueryTagMapCursor(clock - QueryTagMapCursor.Overlap, string.Empty, string.Empty, rebuiltAt);
         }
 
         return (rows, next);

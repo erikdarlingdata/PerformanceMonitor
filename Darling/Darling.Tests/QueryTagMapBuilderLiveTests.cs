@@ -1079,4 +1079,165 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.Equal($"0x02|{tagB}", await MapOfAsync(env, other));
         });
     }
+
+    /* #9308: the weekly staggered rebuild. An extend never deletes, so a key whose sightings were deleted leaves the map only
+       when its server is rebuilt: that is what these tests watch. */
+    private static async Task StoreRebuiltAtAsync(Env env, int serverId, TimeSpan age)
+    {
+        var stored = (await QueryTagMapStore.ReadCursorAsync(env.Store, serverId, env.Ct))!;
+        DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);
+        await QueryTagMapStore.UpsertMapAsync(env.Store, serverId, Array.Empty<QueryTagMapRow>(), env.Ct, stored with { RebuiltAt = clock - age });
+    }
+
+    [Fact]
+    public async Task AServerRebuiltEightDaysAgo_IsRebuiltAfterTheStartupGrace_AndADeletedKeyLeavesTheMap()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(8));
+
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero)));
+
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+            DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);
+            Assert.True(clock - (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!.RebuiltAt < TimeSpan.FromMinutes(5));
+        });
+    }
+
+    [Fact]
+    public async Task AServerRebuiltEightDaysAgo_ExtendsInsideTheStartupGrace()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(8));
+            await SightAsync(env, HashSightings("0xCC", "Report"));
+
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.FromHours(1))));
+
+            Assert.Equal(new[] { $"hash|0xAA|{tag}|rule", $"hash|0xBB|{tag}|rule", $"hash|0xCC|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AServerRebuiltSixDaysAgo_ExtendsAfterTheGrace()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(6));
+
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero)));
+
+            Assert.Equal(new[] { $"hash|0xAA|{tag}|rule", $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AStoredCursorWithNoRebuiltAt_DecodesAsRebuiltLongAgo_AndIsRebuiltAfterTheGrace()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            var stored = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+
+            /* The text part 1 stored: no rebuilt_at in it. */
+            string partOne = System.Text.Json.JsonSerializer.Serialize(new { V = stored.RulesVersion, T = stored.Since.Ticks, K = stored.AfterKind, Key = stored.AfterKey });
+            await using (var write = new NpgsqlCommand(
+                "UPDATE collect.collector_state SET state_value = $1 WHERE server_id = $2 AND collector_name = 'query_tag_map' AND state_key = 'cursor'", env.Store))
+            {
+                write.Parameters.Add(new NpgsqlParameter { Value = partOne });
+                write.Parameters.Add(new NpgsqlParameter { Value = Server });
+                await write.ExecuteNonQueryAsync(env.Ct);
+            }
+
+            var decoded = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+            Assert.Equal(DateTime.MinValue, decoded.RebuiltAt);
+            Assert.Equal(stored.Since, decoded.Since);
+
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero)));
+
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task WithTwoServersDue_AOnePassRebuildsOnlyTheOldest_AndTheNextPassRebuildsTheOther()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int other = 7302;
+            int tag = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, tag, "application", "Report*");
+            await SightAsync(env, HashSightings("0xAA", "Report"), HashSightings("0xBB", "Report"));
+            await SightOnAsync(env, other, HashSightings("0xAA", "Report"), HashSightings("0xBB", "Report"));
+            var both = new[] { Server, other };
+            Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(both, env.Ct));
+            Assert.Equal(2, (await MapAsync(env)).Count);
+            Assert.Equal($"0xAA|{tag},0xBB|{tag}", await MapOfAsync(env, other));
+
+            await ExecAsync(env, "DELETE FROM collect.query_tag_sightings WHERE key = '0xAA'");
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(8));
+            await StoreRebuiltAtAsync(env, other, TimeSpan.FromDays(9));
+
+            var builder = new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero);
+            Assert.True(await builder.RunMapPassAsync(both, env.Ct));
+            Assert.Equal(2, (await MapAsync(env)).Count);
+            Assert.Equal($"0xBB|{tag}", await MapOfAsync(env, other));
+
+            Assert.True(await builder.RunMapPassAsync(both, env.Ct));
+            Assert.Equal(new[] { $"hash|0xBB|{tag}|rule" }, await MapAsync(env));
+            Assert.Equal($"0xBB|{tag}", await MapOfAsync(env, other));
+        });
+    }
+
+    [Fact]
+    public async Task ARebuildSetsRebuiltAt_AndAnExtendCarriesItForwardUnchanged()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await MapWithAKeyThatOnlyARebuildWouldDropAsync(env);
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(3));
+            var before = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+
+            var builder = new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero);
+            await SightAsync(env, HashSightings("0xCC", "Report"));
+            Assert.True(await PassAsync(env, builder));
+            Assert.True(await PassAsync(env, builder));
+
+            var after = (await QueryTagMapStore.ReadCursorAsync(env.Store, Server, env.Ct))!;
+            Assert.True(after.Since > before.Since);
+            Assert.Equal(before.RebuiltAt, after.RebuiltAt);
+        });
+    }
+
+    [Fact]
+    public async Task ARebuildAllWhoseCursorDropFails_StillRebuildsAnOutsideServerThatHeldAnInMemoryCursor_WhenItReturns()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int other = 7303;
+            int tagA = await NewTagAsync(env, "SetA");
+            int tagB = await NewTagAsync(env, "SetB");
+            int ruleId = await NewRuleAsync(env, tagA, "application", "Report*");
+            await SightAsync(env, HashSightings("0x01", "Report"));
+            await SightOnAsync(env, other, HashSightings("0x02", "Report"));
+            var both = new[] { Server, other };
+            var builder = new QueryTagMapBuilder(env.Source);
+            Assert.True(await builder.RunMapPassAsync(both, env.Ct));
+            Assert.Equal($"0x02|{tagA}", await MapOfAsync(env, other));
+
+            /* The rule changes, and the stored-cursor delete that ends the rebuild-all pass fails. */
+            await ExecAsync(env, $"UPDATE config.query_tag_rules SET tag_id = {tagB} WHERE id = {ruleId}");
+            await ExecAsync(env, "CREATE FUNCTION public.fail_cursor_drop() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'cursor drop blocked'; END $f$");
+            await ExecAsync(env, "CREATE TRIGGER fail_cursor_drop BEFORE DELETE ON collect.collector_state FOR EACH ROW EXECUTE FUNCTION public.fail_cursor_drop()");
+            Assert.False(await builder.RunMapPassAsync(new[] { Server }, env.Ct));
+            await ExecAsync(env, "DROP TRIGGER fail_cursor_drop ON collect.collector_state");
+
+            /* The outside server returns: it must be rebuilt under set B, not extended over its set A rows. */
+            Assert.True(await builder.RunMapPassAsync(both, env.Ct));
+            Assert.Equal($"0x02|{tagB}", await MapOfAsync(env, other));
+        });
+    }
 }

@@ -987,4 +987,142 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
+
+    /* #9308: the weekly staggered rebuild. An extend never deletes, so a key whose sightings were deleted leaves the map only
+       when its server is rebuilt: that is what these tests watch. The service has run 30 minutes unless a test says otherwise. */
+    private static readonly TimeSpan PastTheGrace = TimeSpan.FromMinutes(30);
+
+    private async Task StoreCursorForAsync(int serverId, Func<long, QueryTagMapCursor, string> edit)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        string text;
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = $"SELECT state_value FROM collector_state WHERE server_id = {serverId} AND collector_name = 'query_tag_map'";
+            text = (string)(await read.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+        }
+
+        var (version, cursor) = QueryTagMapCursor.TryDecode(text)!.Value;
+        using var write = connection.CreateCommand();
+        write.CommandText = $"UPDATE collector_state SET state_value = $1 WHERE server_id = {serverId} AND collector_name = 'query_tag_map'";
+        write.Parameters.Add(new DuckDBParameter { Value = edit(version, cursor) });
+        await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    private Task StoreRebuiltAtAsync(int serverId, TimeSpan age) =>
+        StoreCursorForAsync(serverId, (version, cursor) => (cursor with { RebuiltAt = DateTime.UtcNow - age }).Encode(version));
+
+    [Fact]
+    public async Task AServerRebuiltEightDaysAgo_IsRebuiltAfterTheStartupGrace_AndADeletedKeyLeavesTheMap()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+        Assert.True(DateTime.UtcNow - cursors[7].RebuiltAt < TimeSpan.FromMinutes(5));
+    }
+
+    [Fact]
+    public async Task AServerRebuiltEightDaysAgo_ExtendsInsideTheStartupGrace()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>(), serviceAge: TimeSpan.FromMinutes(5));
+
+        Assert.Equal(2, (await MapAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AServerRebuiltSixDaysAgo_ExtendsAfterTheGrace()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(6));
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>(), serviceAge: PastTheGrace);
+
+        Assert.Equal(2, (await MapAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AStoredCursorWithNoRebuiltAt_DecodesAsRebuiltLongAgo_AndIsRebuiltAfterTheGrace()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+
+        /* The text part 1 stored: no rebuilt_at in it. */
+        string PartOneText(long version, QueryTagMapCursor cursor) =>
+            System.Text.Json.JsonSerializer.Serialize(new { V = version, T = cursor.Since.Ticks, K = cursor.AfterKind, Key = cursor.AfterKey });
+        await StoreCursorForAsync(7, PartOneText);
+        await StoreCursorForAsync(7, (version, cursor) =>
+        {
+            Assert.Equal(DateTime.MinValue, cursor.RebuiltAt);
+            return cursor.Encode(version);
+        });
+        await StoreCursorForAsync(7, PartOneText);
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>(), serviceAge: PastTheGrace);
+
+        Assert.Equal([HashB], (await MapAsync()).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AnExtendCarriesRebuiltAtForwardUnchanged()
+    {
+        await MapWithAKeyThatOnlyARebuildWouldDropAsync();
+        var rebuiltAt = DateTime.UtcNow - TimeSpan.FromDays(3);
+        await StoreCursorForAsync(7, (version, cursor) => (cursor with { RebuiltAt = rebuiltAt }).Encode(version));
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+        Sight(Snapshot("0x00000000000000CC", "SELECT * FROM Orders"));
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+
+        Assert.Equal(rebuiltAt, cursors[7].RebuiltAt);
+        await StoreCursorForAsync(7, (version, cursor) =>
+        {
+            Assert.Equal(rebuiltAt, cursor.RebuiltAt);
+            return cursor.Encode(version);
+        });
+    }
+
+    [Fact]
+    public async Task WithTwoServersDue_AOnePassRebuildsOnlyTheOldest_AndTheNextPassRebuildsTheOther()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        foreach (var serverId in new[] { 7, 8 })
+        {
+            var buffer = new QueryTagSightingBuffer();
+            buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA, "SELECT * FROM Orders"), Snapshot(HashB, "SELECT * FROM Orders")], serverId: serverId);
+            buffer.Flush(_fixture.DuckDb);
+        }
+
+        await _service.BuildQueryTagMapAsync(new Dictionary<int, QueryTagMapCursor>());
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
+
+        using (var connection = _fixture.DuckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var delete = connection.CreateCommand();
+            delete.CommandText = $"DELETE FROM query_tag_sightings WHERE key = '{HashA}'";
+            await delete.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        await StoreRebuiltAtAsync(7, TimeSpan.FromDays(8));
+        await StoreRebuiltAtAsync(8, TimeSpan.FromDays(9));
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+        Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
+
+        await _service.BuildQueryTagMapAsync(cursors, serviceAge: PastTheGrace);
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 7"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM query_tag_map WHERE server_id = 8"));
+    }
 }

@@ -35,13 +35,17 @@ public sealed record QueryTagChangedKey(string KeyKind, string Key, DateTime Las
 /// <summary>
 /// #9308: one server's extend cursor as stored, with the <c>rules_version</c> the map was built at. <see cref="Since"/> is
 /// a UTC time that came from the store's own clock or a sighting's <c>last_seen</c>, so it round-trips exactly.
+/// <see cref="RebuiltAt"/> is the store clock at this server's last rebuild (the weekly staggered rebuild reads it). A cursor
+/// stored before that field existed has none and decodes as <see cref="DateTime.MinValue"/>, "rebuilt long ago", so it is due.
 /// </summary>
-public sealed record QueryTagMapStoredCursor(long RulesVersion, DateTime Since, string AfterKind, string AfterKey)
+public sealed record QueryTagMapStoredCursor(long RulesVersion, DateTime Since, string AfterKind, string AfterKey, DateTime RebuiltAt = default)
 {
-    private sealed record Wire(long V, long T, string K, string Key);
+    private sealed record Wire(long V, long T, string K, string Key, long? R = null);
 
     public string Encode() =>
-        JsonSerializer.Serialize(new Wire(RulesVersion, DateTime.SpecifyKind(Since, DateTimeKind.Utc).Ticks, AfterKind, AfterKey));
+        JsonSerializer.Serialize(new Wire(
+            RulesVersion, DateTime.SpecifyKind(Since, DateTimeKind.Utc).Ticks, AfterKind, AfterKey,
+            DateTime.SpecifyKind(RebuiltAt, DateTimeKind.Utc).Ticks));
 
     public static QueryTagMapStoredCursor? TryDecode(string text)
     {
@@ -49,7 +53,9 @@ public sealed record QueryTagMapStoredCursor(long RulesVersion, DateTime Since, 
         {
             var wire = JsonSerializer.Deserialize<Wire>(text);
             return wire is { K: not null, Key: not null }
-                ? new QueryTagMapStoredCursor(wire.V, new DateTime(wire.T, DateTimeKind.Utc), wire.K, wire.Key)
+                ? new QueryTagMapStoredCursor(
+                    wire.V, new DateTime(wire.T, DateTimeKind.Utc), wire.K, wire.Key,
+                    new DateTime(wire.R ?? 0, DateTimeKind.Utc))
                 : null;
         }
         catch (Exception ex) when (ex is JsonException or ArgumentOutOfRangeException)
@@ -468,16 +474,17 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET
     }
 
     /// <summary>Drops the stored cursor of every server that is not in <paramref name="serverIds"/>.</summary>
-    public static async Task DropCursorsOutsideAsync(NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken)
+    public static async Task DropCursorsOutsideAsync(
+        NpgsqlConnection connection, IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken, NpgsqlTransaction? transaction = null)
     {
-        await using var command = new NpgsqlCommand(DropCursorsOutsideSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var command = new NpgsqlCommand(DropCursorsOutsideSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds.ToArray() });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public static async Task StampBuiltVersionAsync(NpgsqlConnection connection, long version, CancellationToken cancellationToken)
+    public static async Task StampBuiltVersionAsync(NpgsqlConnection connection, long version, CancellationToken cancellationToken, NpgsqlTransaction? transaction = null)
     {
-        await using var command = new NpgsqlCommand(StampBuiltVersionSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var command = new NpgsqlCommand(StampBuiltVersionSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = version });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
