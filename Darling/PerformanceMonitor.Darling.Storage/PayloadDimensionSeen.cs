@@ -89,6 +89,18 @@ public static class PayloadDimensionSeen
         "interval '" + WideRowRefreshHours.ToString(CultureInfo.InvariantCulture) + " hours'";
 
     /// <summary>
+    /// The invariant the derivation has to satisfy: the refresh is no more frequent than the stamp's own guard, and a live
+    /// digest's dimension row stays inside the dimension GC's smallest cutoff (<see cref="OlderBuildCutoffHours"/>). The
+    /// dimension row of a digest that keeps being referenced trails by at most the refresh interval plus one stamp guard
+    /// (the refresh only looks at a digest when its stamp is stale), and what is left of the cutoff after that must be at
+    /// least another guard width. That is also why every stamp the GC retires is behind <see cref="WideRowRefreshHours"/>, so
+    /// a refresh that races the GC always rewrites the dimension row the GC then re-checks.
+    /// </summary>
+    public static bool WideRowRefreshStaysInsideDimensionCutoff() =>
+        WideRowRefreshHours >= PayloadDimensions.LastSeenRefreshGuardHours
+        && WideRowRefreshHours + (2 * PayloadDimensions.LastSeenRefreshGuardHours) <= OlderBuildCutoffHours;
+
+    /// <summary>
     /// The table of the rung (V298), created with no key. <see cref="PrimaryKeySql"/>, <see cref="ForeignKeySql"/> and
     /// <see cref="LastSeenIndexSql"/> are added after <see cref="BackfillSql"/>, because loading into a bare table is several
     /// times cheaper than into one with its key and index in place (V281's measurement). Fillfactor 90 keeps room for the

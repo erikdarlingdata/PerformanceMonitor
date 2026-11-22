@@ -645,8 +645,9 @@ public static class DarlingRetention
                The obvious sweep (delete dim rows no live fact references) is an anti-join against two
                hypertables per dim row and is not affordable at this size. Instead the write path stamps
                last_seen on every cycle that references a digest, so last_seen is never older than the newest
-               fact row pointing at it, and the GC is an index range scan on last_seen — run through the SAME
-               time-sliced DELETE every sibling purge uses, rather than one unbounded statement. That matters
+               fact row pointing at it, and the GC is an index range scan on the stamp table's last_seen (V298, #9304:
+               collect.{dim}_seen holds the stamp, the dimension row's own last_seen is no longer indexed) — run through a
+               row-capped, cursored DELETE rather than one unbounded statement. That matters
                most on the FIRST sweep after an upgrade, which is the one with a whole retention window of
                expired content to clear: unsliced, that is a single transaction holding a lock and generating
                WAL proportional to the entire backlog, which is exactly what the slicing exists to bound.
@@ -658,8 +659,8 @@ public static class DarlingRetention
                one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
                every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
                dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
-               to 6 by #4503 to cut non-HOT WAL on the indexed last_seen column — measured at ~42 KB of WAL
-               per touch on one production store), and the Query Store liveness touch at
+               to 6 by #4503 to cut non-HOT WAL on the then-indexed dimension last_seen column — measured at ~42 KB of
+               WAL per touch on one production store; since V298 the touch writes the narrow stamp row instead), and the Query Store liveness touch at
                QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
                this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
                already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with

@@ -459,7 +459,18 @@ public static class PayloadDimensions
     ///
     /// <para>The order and the cap come from the stamp table's own index, so the batch reads the narrow table and probes the
     /// dimension row of each due stamp by primary key. A dimension row that is not there (never, while the foreign key
-    /// holds) deletes nothing and returns nothing, so it takes a place under the cap and no more.</para>
+    /// holds) deletes nothing and returns nothing, so it takes no place under the cap.</para>
+    ///
+    /// <para>The dimension row's own <c>last_seen</c> is tested twice, as <c>QueryStoreTextSeen.PruneSql</c> tests the text
+    /// row's. Inside the capped select, so a stamp that is stale while its dimension row is fresh (a store back from an older
+    /// build, which stamped the dimension row only) takes no place under the cap. And on the <c>DELETE</c> itself, which is
+    /// what a concurrent refresh is re-checked against: every stamp behind the cutoff is also behind
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/>, so a refresh that references the digest rewrites the dimension
+    /// row first (<see cref="TouchSql"/>), and the delete, which waited for that row, reads the new version and skips it.
+    /// Without the second test the re-check would only compare the digest and delete a row the refresh just kept alive.</para>
+    ///
+    /// <para>The <c>LATERAL ... OFFSET 0</c> keeps the dimension side a primary-key probe per stale stamp, in stamp order, so
+    /// the <c>LIMIT</c> stops the stamp index scan after <paramref name="cap"/> due rows.</para>
     /// </summary>
     public static string CursoredDeleteSql(string dimTable, int cap, bool hasCursor)
     {
@@ -467,12 +478,18 @@ public static class PayloadDimensions
         return
             $"WITH due AS (\n" +
             $"    SELECT s.{DigestColumn}, s.{LastSeenColumn} FROM {seen} s\n" +
+            $"    CROSS JOIN LATERAL (\n" +
+            $"        SELECT k.{DigestColumn} FROM collect.{dimTable} k\n" +
+            $"        WHERE k.{DigestColumn} = s.{DigestColumn}\n" +
+            $"        AND   k.{LastSeenColumn} < $1\n" +
+            $"        OFFSET 0) AS x\n" +
             $"    WHERE s.{LastSeenColumn} < $1\n" +
             (hasCursor ? $"    AND   s.{LastSeenColumn} >= $2\n" : string.Empty) +
             $"    ORDER BY s.{LastSeenColumn} LIMIT {cap.ToString(CultureInfo.InvariantCulture)}),\n" +
             $"gone AS (\n" +
             $"    DELETE FROM collect.{dimTable} d USING due\n" +
             $"    WHERE d.{DigestColumn} = due.{DigestColumn}\n" +
+            $"    AND   d.{LastSeenColumn} < $1\n" +
             $"    RETURNING due.{LastSeenColumn})\n" +
             $"SELECT {LastSeenColumn} FROM gone";
     }

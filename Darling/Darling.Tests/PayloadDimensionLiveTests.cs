@@ -675,7 +675,7 @@ public sealed class PayloadDimensionLiveTests
 
             async Task<DateTime> LastSeenAsync()
                 => (DateTime)(await ScalarAsync(
-                    connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, digest))!;
+                    connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, digest))!;
 
             await FlushAtAsync(t0);
             Assert.Equal(t0, await LastSeenAsync());
@@ -800,7 +800,7 @@ public sealed class PayloadDimensionLiveTests
             async Task<long> ChangedLastSeenCountAsync(byte[][] digests, DateTime expected)
             {
                 await using var command = new NpgsqlCommand(
-                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND last_seen <> $2", connection);
+                    "SELECT count(*) FROM collect.query_plan_dim_seen WHERE digest = ANY($1) AND last_seen <> $2", connection);
                 command.Parameters.Add(new NpgsqlParameter
                 { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
                 command.Parameters.Add(new NpgsqlParameter
@@ -825,11 +825,11 @@ public sealed class PayloadDimensionLiveTests
             await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(7));
 
             var refreshedStale = (DateTime)(await ScalarAsync(
-                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, staleDigest))!;
+                connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, staleDigest))!;
             Assert.Equal(t0.AddHours(7), refreshedStale);
 
             var insertedNew = (DateTime)(await ScalarAsync(
-                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, newDigest))!;
+                connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, newDigest))!;
             Assert.Equal(t0.AddHours(7), insertedNew);
 
             bodySucceeded = true;
