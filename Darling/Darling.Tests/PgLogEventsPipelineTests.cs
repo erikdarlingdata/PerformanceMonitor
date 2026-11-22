@@ -2587,17 +2587,9 @@ public sealed class PgLogEventsRungTests
     private const int ProbeOrdinal = 104;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("pg-log-events", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* One below the top since V130 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
-           the top-arm claim moved to PgLogEventMetricsRungTests with the top. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V129 is expected to sit below the ladder's top now that V130 has landed");
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>The rung is the generated schema exactly — one table, one index — for V103's reason; the family index is a later rung.</summary>

@@ -87,18 +87,9 @@ public sealed class TimeHonestyRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("time-honesty", V134.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped being
-           true when V135 landed. The invariant that outlives the handoff is that the LADDER's top and the
-           declared version agree, which the two lines above already say. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>
@@ -677,7 +668,6 @@ SELECT deskewed FROM (
                     Assert.Equal("sample_time_utc", reader.GetName(3));
                     Assert.Equal(straddleUtc, reader.GetDateTime(3));
                 }
-
 
                 /* server_properties through ServerPropertiesCollector.WritePayload: a 2022+ row with the zone and
                    an older-engine row with NULL, the offset on both. */

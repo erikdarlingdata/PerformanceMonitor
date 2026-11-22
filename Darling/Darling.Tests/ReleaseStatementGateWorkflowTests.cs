@@ -137,7 +137,7 @@ public sealed class ReleaseStatementGateWorkflowTests
         // after the build step and before the build is trimmed and uploaded for the legs.
         Assert.Contains("--no-build", gate.Text, StringComparison.Ordinal);
         var jobSteps = steps.Where(s => s.Job == gate.Job).ToList();
-        var build = jobSteps.FindIndex(s => Regex.IsMatch(s.Text, @"dotnet build Darling/Darling\.Tests/Darling\.Tests\.csproj -c Release"));
+        var build = jobSteps.FindIndex(s => Regex.IsMatch(s.Text, @"dotnet build (Darling/Darling\.Tests/Darling\.Tests\.csproj|\.github/ci-test-build\.proj) -c Release"));
         Assert.True(build >= 0, $"the gate's job '{gate.Job}' does not build Darling.Tests in Release: the gate has nothing to run");
         var upload = jobSteps.FindIndex(s => s.Text.Contains("actions/upload-artifact", StringComparison.Ordinal));
         Assert.True(upload >= 0, "the gate's job has no artifact upload step: the scan is not reading it");

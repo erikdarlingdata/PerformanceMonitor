@@ -49,9 +49,6 @@ public sealed class NotificationRouteScopeRungTests
     {
         Assert.Equal("notification-route-scope", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V182 (#5506) took the top of the ladder; this rung stays registered below it. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(PgMigrations.Scripts.Select(s => s.Version).Distinct().OrderBy(v => v), PgMigrations.Scripts.Select(s => s.Version));
     }
 

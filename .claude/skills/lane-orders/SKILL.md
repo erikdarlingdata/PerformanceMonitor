@@ -88,7 +88,7 @@ The brief fills in `<LANE>`, `<ISSUES>`, `<DEADLINE>`, `<RIG_PORT>`, `<RIG_DIR>`
 Only a lane pre-approved by name may add one. Take the next free version number when you push, and renumber if dev moved. A version bump also obliges:
 - the sentinel in `ViewerDataService.StoreSchemaProbeSql`, plus its `MapProbedSchemaVersion` arm;
 - the `GetBoolean` list in `GetStoreSchemaVersionAsync`, plus `ViewerSchemaVersionGateTests`;
-- "newest migration" tests written as `Scripts[^1]`;
+- no rung test class needs an edit for a new rung: `MigrationLadderPins` is the one place that says which rung is the top (`Scripts[^1]` equals `StorageVersion.SchemaVersion`). A rung's own class asserts only its name at its version, its SQL and its probe ordinal;
 - a rung that changes how an older build reads existing data: its line in Darling/README.md's "Rolling back to an older build" list, in the same PR, saying what the older build reads differently and what to do before rolling back past it.
 
 Never edit an existing migration.

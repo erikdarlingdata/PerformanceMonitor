@@ -37,13 +37,11 @@ namespace Darling.Tests;
 public class CollectionLogDrainForensicsStoreTests
 {
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("collection-log-drain-forensics", PgMigrations.Scripts.Single(s => s.Version == 109).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Count, versions.Distinct().Count());
     }
 
