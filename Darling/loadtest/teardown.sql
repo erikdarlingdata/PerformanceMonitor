@@ -100,6 +100,8 @@ BEGIN
        on its own, and only when the store has it. */
     FOREACH t IN ARRAY ARRAY
     [
+        'collect.plan_regression_block',
+        'collect.plan_regression_block_built',
         'collect.plan_regression_daily',
         'collect.plan_regression_daily_built',
         'collect.query_store_top_daily',

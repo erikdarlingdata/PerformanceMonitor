@@ -101,6 +101,8 @@ pg_xmin_horizon,collected,yes,
 plan_cache_stats,collected,yes,
 plan_correction,collected,yes,
 plan_force_actions,internal,no,plan forcing audit trail
+plan_regression_block,derived,derived,per-block plan regression sums
+plan_regression_block_built,internal,no,which blocks are built
 plan_regression_daily,derived,derived,per-day plan regression summary
 plan_regression_daily_built,internal,no,which days are built
 procedure_stats,collected,yes,

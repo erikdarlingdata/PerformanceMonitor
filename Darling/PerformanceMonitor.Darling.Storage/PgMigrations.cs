@@ -3940,8 +3940,12 @@ END $$;";
         /* V294 (#9284): the corrected daily Query Store rollup's compression order becomes query_hash then bucket, as V279 did for the hourly rollup, so one
            query's days sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
         new Migration(294, "qs-corrected-daily-compress-orderby", V294Sql),
+        /* V295 (#9225): the plan regression block tables, the pre-aggregate of collect.plan_regression_daily the PLAN_REGRESSION read will take whole blocks of days
+           from. Two plain tables and one unique index, created empty: no data moves, and the builder fills the blocks from the daily rows as it runs. An older
+           build ignores them. */
+        new Migration(PlanRegressionBlock.Version, "plan-regression-block", PlanRegressionBlock.CreateSql),
         /* V296 (#9280): the hourly summary of the Query Store statement list (collect.query_store_top_hourly), its index and the ledger column
-           top_built_seq. An empty table and a nullable column with no default: no row moves. V295 is not in this build's ladder (#9295 takes that number). */
+           top_built_seq. An empty table and a nullable column with no default: no row moves. V295 is #9225's plan regression block. */
         new Migration(296, "query-store-top-hourly", V296Sql),
     };
 
