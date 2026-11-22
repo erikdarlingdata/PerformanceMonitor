@@ -480,6 +480,63 @@ public sealed class PayloadDimensionSeenLiveTests
         Assert.Equal(now, (await WideRowAsync(toucher, PayloadDimensions.QueryPlanDimTable, heldStamp, ct)).LastSeen);
     }
 
+    [Theory]
+    [InlineData(PayloadDimensions.QueryTextDimTable)]
+    [InlineData(PayloadDimensions.QueryPlanDimTable)]
+    public async Task ARefreshOfAnUnstampedRow_AnotherTransactionHolds_ReturnsWithoutWaiting_AndAddsNoStamp(string dimTable)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var toucher = await OpenAsync(scratch, ct);
+        await using var holder = await OpenAsync(scratch, ct);
+
+        /* A refresh that waits for the held row fails here, on the toucher's own lock_timeout (55P03), instead of holding the test host. */
+        await ExecuteAsync(toucher, "SET lock_timeout = '3s'", ct);
+
+        var now = WholeSecondNow();
+        var digest = await InsertAsync(toucher, dimTable, "held-unstamped", now.AddHours(-1), ct);
+        await ExecuteAsync(toucher, $"DELETE FROM collect.{PayloadDimensionSeen.SeenName(dimTable)} WHERE digest = $1", ct, Bytea(digest));
+
+        /* A GC batch holds the dimension row, as it does while it deletes it. The stamp insert needs a key share lock on that row
+           through the foreign key, so without the skip it waits, and with another stamp row held it would deadlock (#9304). */
+        await using (var transaction = await holder.BeginTransactionAsync(ct))
+        {
+            await ExecuteInAsync(holder, transaction, $"SELECT 1 FROM collect.{dimTable} WHERE digest = $1 FOR UPDATE", ct, Bytea(digest));
+            var absent = await TouchAsync(toucher, dimTable, new[] { digest }, now, ct);
+            Assert.Empty(absent);
+            await transaction.RollbackAsync(ct);
+        }
+
+        Assert.Null(await StampAsync(toucher, dimTable, digest, ct));
+    }
+
+    [Fact]
+    public async Task ThePlanMapTouchOfAnUnstampedRow_AnotherTransactionHolds_ReturnsWithoutWaiting_AndAddsNoStamp()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var toucher = await OpenAsync(scratch, ct);
+        await using var holder = await OpenAsync(scratch, ct);
+
+        await ExecuteAsync(toucher, "SET lock_timeout = '3s'", ct);
+
+        var now = WholeSecondNow();
+        var old = now.AddHours(-(PayloadDimensionSeen.WideRowRefreshHours + 2));
+        var digest = await PlanMapRowAsync(toucher, 1, "held-unstamped", old, ct);
+        await ExecuteAsync(toucher, $"DELETE FROM {PayloadDimensionSeen.TableName(PayloadDimensions.QueryPlanDimTable)} WHERE digest = $1", ct, Bytea(digest));
+
+        await using (var transaction = await holder.BeginTransactionAsync(ct))
+        {
+            await ExecuteInAsync(holder, transaction, $"SELECT 1 FROM collect.{PayloadDimensions.QueryPlanDimTable} WHERE digest = $1 FOR UPDATE", ct, Bytea(digest));
+            await QueryStoreFetchProbe.TouchAndProbePlansAsync(toucher, 1, PlanMapDatabase, new (long, string?)[] { (1L, "0xAA") }, now, 30, ct);
+            await transaction.RollbackAsync(ct);
+        }
+
+        Assert.Null(await StampAsync(toucher, PayloadDimensions.QueryPlanDimTable, digest, ct));
+    }
+
     [Fact]
     public async Task ThePlanMapTouch_RewritesTheWideRowOnlyPastTheWideInterval_AndGivesAMissingStampOne()
     {
