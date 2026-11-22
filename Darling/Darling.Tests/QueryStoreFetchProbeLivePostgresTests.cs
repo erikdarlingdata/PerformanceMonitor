@@ -111,13 +111,13 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
             Assert.Equal(new FetchProbeVerdict(3, Resolved: false, HashStale: false), verdicts[2]);
 
             /* Liveness: the touch advanced last_seen past the landing stamp (the rows were older than the
-               guard, so the update fired) — on the map AND on the dimension row the real digest points
+               guard, so the update fired) — on the map AND on the dimension stamp row the real digest points
                at. */
             using (var freshness = new NpgsqlCommand(@"
 SELECT
     (SELECT COUNT(*) FROM collect.query_store_plan_map
      WHERE server_id = $1 AND database_name = $2 AND last_seen > $3),
-    (SELECT COUNT(*) FROM collect.query_plan_dim d
+    (SELECT COUNT(*) FROM collect.query_plan_dim_seen d
      JOIN collect.query_store_plan_map m ON m.digest = d.digest
      WHERE m.server_id = $1 AND m.database_name = $2 AND d.last_seen > $3)", connection))
             {
@@ -204,7 +204,7 @@ SELECT
 SELECT
     (SELECT COUNT(*) FROM collect.query_store_plan_map
      WHERE server_id = $1 AND database_name = $2 AND last_seen = $3),
-    (SELECT COUNT(*) FROM collect.query_plan_dim d
+    (SELECT COUNT(*) FROM collect.query_plan_dim_seen d
      JOIN collect.query_store_plan_map m ON m.digest = d.digest
      WHERE m.server_id = $1 AND m.database_name = $2 AND d.last_seen = $3),
     (SELECT COUNT(*) FROM collect.query_store_text_seen
