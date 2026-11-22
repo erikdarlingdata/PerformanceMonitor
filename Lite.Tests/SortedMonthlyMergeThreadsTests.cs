@@ -17,10 +17,12 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #9320. A sorted monthly merge at the 512MB limit ran out of memory on two threads for field files (more rows
-/// per on-disk MB than the seeded files its byte budget was measured on) and fell back to the unsorted order,
-/// whose row groups all mix servers. The sorted attempt now runs on one thread.
+/// #9320. On one install, sorted monthly merges at the 512MB limit ran out of memory on two threads and fell back
+/// to the unsorted order, whose row groups all mix servers. The sorted attempt now runs on one thread. The class
+/// is in the CollectionResetGate collection with <see cref="SortedMonthlyMergeThreadsCompactionTests"/>, because
+/// both set the one static <see cref="ParquetCompaction.MergeAttemptObservedForTests"/> callback.
 /// </summary>
+[Collection("CollectionResetGate")]
 public sealed class SortedMonthlyMergeThreadsTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "SortedMonthlyMergeThreads_" + Guid.NewGuid().ToString("N"));
