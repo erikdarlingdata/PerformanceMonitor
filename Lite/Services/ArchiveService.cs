@@ -1665,8 +1665,9 @@ COPY (
                     /* #9188: shutdown between batches. The catch below drops the temps merged so far. */
                     cancellationToken.ThrowIfCancellationRequested();
 
+                    /* No threads argument: a sorted merge's first attempt runs on one thread, the unsorted merge and the
+                       fallback on ParquetCompaction.ThreadsFor(table) (#9320). */
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
-                        threads: ParquetCompaction.ThreadsFor(table),
                         onSortFallback: (fallbackTable, files, error) => _logger?.LogWarning(
                             "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
                             fallbackTable, files, error));
