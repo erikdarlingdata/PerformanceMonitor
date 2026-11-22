@@ -951,6 +951,17 @@ ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXI
 DROP TABLE IF EXISTS collect.object_references_daily;
 DROP TABLE IF EXISTS collect.object_references_daily_built;
 DROP TABLE IF EXISTS collect.object_references_daily_databases;"),
+        // V298 (#9304): the payload dimension tables' stamp tables, their insert triggers on the dimensions and the triggers' functions. The pair of stamp tables is the
+        // probe's newest sentinel. The rewind drops all six and puts back the two last_seen indexes the rung dropped, so a re-run of V298 creates the tables, fills them from
+        // the dimension rows, re-arms the triggers and drops the indexes again. Safe on a store that never had them.
+        new(298, "hasPayloadDimensionSeen", @"DROP TRIGGER IF EXISTS trg_query_text_dim_seen_ins ON collect.query_text_dim;
+DROP TRIGGER IF EXISTS trg_query_plan_dim_seen_ins ON collect.query_plan_dim;
+DROP FUNCTION IF EXISTS collect.query_text_dim_seen_track();
+DROP FUNCTION IF EXISTS collect.query_plan_dim_seen_track();
+DROP TABLE IF EXISTS collect.query_text_dim_seen;
+DROP TABLE IF EXISTS collect.query_plan_dim_seen;
+CREATE INDEX IF NOT EXISTS idx_query_text_dim_last_seen ON collect.query_text_dim (last_seen);
+CREATE INDEX IF NOT EXISTS idx_query_plan_dim_last_seen ON collect.query_plan_dim (last_seen);"),
     ];
 
     /// <summary>

@@ -126,6 +126,28 @@ public static class PayloadDimensionWriter
             });
 
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            /* #9304: the insert above never updates a dimension row, so the stamp of a digest this batch found already stored
+               (or inserted a moment ago, which the trigger stamped fresh and this statement then skips) is refreshed here, under
+               the same guard, on the narrow stamp table. Its result (the absent digests) is empty for digests the insert
+               just made present, and is not read. */
+            await using var stamp = new NpgsqlCommand(PayloadDimensions.TouchSql(dimTable), connection, transaction);
+            if (commandTimeoutSeconds is int stampTimeout)
+            {
+                stamp.CommandTimeout = stampTimeout;
+            }
+
+            stamp.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+                Value = digests,
+            });
+            stamp.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = lastSeen,
+            });
+            await stamp.ExecuteNonQueryAsync(cancellationToken);
         }
 
         List<string>? absent = null;

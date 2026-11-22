@@ -908,30 +908,34 @@ public static class DarlingRetention
                        is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
                        break "text stays analyzable for the facts' full retention", which is half the knob's
                        own justification. The router is pure so the scoping is pinned by tests. */
-                    /* #2386: the plan dim is capped by ROWS, every other dim keeps the one-day slice.
-                       Only this table carries multi-kilobyte TOAST payloads, so only this one has a day
-                       that cannot be deleted inside the command timeout — query_text_dim is ~40 MB
-                       total and drains in a single slice. Scoped rather than global so a table that is
-                       fine keeps the compressed-chunk-safe shape it needs. */
-                    var isPlanDim = string.Equals(
-                        dimTable, PayloadDimensions.QueryPlanDimTable, StringComparison.Ordinal);
+                    /* #9304: both dimensions are capped by ROWS, ordered by the stamp table's own index
+                       (PayloadDimensions.CursoredDeleteSql), because the dimension row no longer carries an index on
+                       last_seen. The delete cascades to the stamp row. #2386 is why a row cap and not a one-day slice:
+                       the plan dim's TOAST payloads make a day that cannot be deleted inside the command timeout. */
+                    var dimCutoff = ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff);
+
+                    /* A dimension row with no stamp row gets one first, stamped with its own last_seen, so the delete below
+                       judges it by that stamp (PayloadDimensionSeen.AdoptMissingSql). */
+                    if (!await AdoptMissingSeenRowsAsync(
+                            postgres, PayloadDimensionSeen.AdoptMissingSql(dimTable), PayloadDimensionSeen.TableName(dimTable),
+                            dimCutoff, logger, walPacer, cancellationToken))
+                    {
+                        tablesFailed++;
+                    }
 
                     var dimDeleted = await PurgeOneAsync(
                         postgres,
                         dimTable,
-                        /* Illustrative at the CEILING cap when isPlanDim — PurgeOneAsync rebuilds this
-                           same statement per attempt at whatever cap #4130's adaptive sizing has chosen
-                           once adaptiveRowCapTimeColumn is set below, so this exact string is never the
-                           one executed for that table. */
-                        isPlanDim
-                            ? RowCappedDeleteSql("collect." + dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
-                            : TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                        ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff),
+                        /* Illustrative at the CEILING cap: PurgeOneAsync rebuilds the statement per attempt at whatever cap
+                           #4130's adaptive sizing has chosen, so this exact string is never the one executed. */
+                        PayloadDimensions.CursoredDeleteSql(dimTable, PlanDimDeleteRowCap, hasCursor: false),
+                        dimCutoff,
                         logger,
                         cancellationToken,
-                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1,
-                        adaptiveRowCapTimeColumn: isPlanDim ? PayloadDimensions.LastSeenColumn : null,
-                        pacer: walPacer);
+                        batchSize: PlanDimDeleteRowCap,
+                        adaptiveRowCapTimeColumn: PayloadDimensions.LastSeenColumn,
+                        pacer: walPacer,
+                        cursoredSql: (attemptCap, hasCursor) => PayloadDimensions.CursoredDeleteSql(dimTable, attemptCap, hasCursor));
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -2142,10 +2146,13 @@ WHERE NOT EXISTS
     /// </summary>
     internal static async Task<(int Deleted, DateTime? MaxDeleted)> ExecuteCursoredBatchAsync(
         NpgsqlConnection connection, string table, string timeColumn, int cap, DateTime cutoff, DateTime? cursor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Func<int, bool, string>? cursoredSql = null)
     {
         using var command = new NpgsqlCommand(
-            CursoredRowCappedDeleteSql(table, timeColumn, cap, cursor is not null), connection)
+            cursoredSql is null
+                ? CursoredRowCappedDeleteSql(table, timeColumn, cap, cursor is not null)
+                : cursoredSql(cap, cursor is not null),
+            connection)
         { CommandTimeout = DeleteTimeoutSeconds };
         command.Parameters.AddWithValue(cutoff);
         if (cursor is not null)
@@ -2666,8 +2673,23 @@ $do$";
     /// It is paced like any purge batch, through the same drain loop, so it waits for collection and the WAL of a large
     /// adoption is paid for before the prune starts.</para>
     /// </summary>
+    private static Task<bool> AdoptMissingSeenRowsAsync(
+        NpgsqlDataSource postgres,
+        DateTime cutoff,
+        ILogger? logger,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken) =>
+        AdoptMissingSeenRowsAsync(postgres, QueryStoreTextSeen.AdoptMissingSql, QueryStoreTextSeen.TableName, cutoff, logger, pacer, cancellationToken);
+
+    /// <summary>
+    /// The adopt step of any liveness table (the Query Store text's, and #9304's two dimension stamp tables): runs
+    /// <paramref name="adoptSql"/> once on its own connection, bound with the pass's cutoff, and logs the rows it wrote
+    /// under <paramref name="tableName"/>.
+    /// </summary>
     private static async Task<bool> AdoptMissingSeenRowsAsync(
         NpgsqlDataSource postgres,
+        string adoptSql,
+        string tableName,
         DateTime cutoff,
         ILogger? logger,
         RetentionWalPacer? pacer,
@@ -2681,7 +2703,7 @@ $do$";
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(QueryStoreTextSeen.AdoptMissingSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+            using var command = new NpgsqlCommand(adoptSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
             command.Parameters.AddWithValue(cutoff);
 
             /* SingleShotStatement as the cap: no row count reaches it, so the one execution is the whole step. */
@@ -2698,8 +2720,8 @@ $do$";
             if (adopted > 0)
             {
                 logger?.LogInformation(
-                    "Retention adopted {Rows} Query Store text row(s) that had no liveness row into {Table}",
-                    adopted, QueryStoreTextSeen.TableName);
+                    "Retention adopted {Rows} row(s) that had no liveness row into {Table}",
+                    adopted, tableName);
             }
 
             return true;
@@ -2707,8 +2729,8 @@ $do$";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Retention could not write the missing liveness rows of {Table}; a Query Store text with none is kept until a later pass adopts it: {Failure}",
-                QueryStoreTextSeen.TableName, DescribePurgeFailure(ex));
+                "Retention could not write the missing liveness rows of {Table}; a row with none is kept until a later pass adopts it: {Failure}",
+                tableName, DescribePurgeFailure(ex));
             return false;
         }
     }
@@ -2743,7 +2765,8 @@ $do$";
         int batchSize = 1,
         string? adaptiveRowCapTimeColumn = null,
         RetentionWalPacer? pacer = null,
-        Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null)
+        Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null,
+        Func<int, bool, string>? cursoredSql = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -2855,7 +2878,7 @@ $do$";
                                 batches++;
                                 var (affected, maxDeleted) = await ExecuteCursoredBatchAsync(
                                     connection, qualifiedTable, adaptiveRowCapTimeColumn, attemptCap, cutoff, cursor,
-                                    attemptCt);
+                                    attemptCt, cursoredSql);
                                 deleted += affected;
                                 if (maxDeleted is not null)
                                 {

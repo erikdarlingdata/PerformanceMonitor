@@ -3545,6 +3545,29 @@ BEGIN
     ALTER INDEX collect.idx_collection_log_watermark_new RENAME TO idx_collection_log_watermark;
 END $$;";
 
+    /// <summary>
+    /// V298 (#9304): <c>collect.query_text_dim_seen</c> and <c>collect.query_plan_dim_seen</c>, the narrow tables that hold the
+    /// payload dimension tables' liveness stamp (<see cref="PayloadDimensionSeen"/>), so the refresh that runs every collection
+    /// writes a row of about 70 bytes instead of a new copy of a text or plan row (and, for the text, its trigrams). It is V281's
+    /// rung (<see cref="V281Sql"/>) applied to the two dimensions.
+    ///
+    /// <para><b>Order, in the rung's one transaction.</b> The lock timeout. Then, per dimension: the stamp table with no key, the
+    /// statement trigger on the dimension that writes the stamp row of every inserted row, the backfill of the rows stored before
+    /// the rung, the primary key, the foreign key to the dimension row (<c>ON DELETE CASCADE</c>), and the index on the stamp's
+    /// <c>last_seen</c>. Last, the drop of each dimension's own <c>idx_{dim}_last_seen</c>: from the rung's commit the GC
+    /// (<see cref="PayloadDimensions.CursoredDeleteSql"/>) orders by the stamp table's index, so nothing needs the dimension's.
+    /// The dimension's own <c>last_seen</c> column stays, as V281 kept the text row's, for an older build.
+    /// <c>CREATE TRIGGER</c> takes a SHARE ROW EXCLUSIVE lock on the dimension, held to the commit, so a writer of the dimension
+    /// waits for the rung and no insert falls between the trigger and the backfill. The lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V281's.</para>
+    ///
+    /// <para><b>An older build against this store.</b> It keeps stamping and pruning on the dimension row's own <c>last_seen</c>
+    /// and never reads the stamp tables. Its prune has no index to order by, so it scans the dimension. The triggers stay, so the
+    /// rows it inserts get stamp rows, and the cascade removes the stamp rows of the rows it prunes. See
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/> for what keeps its first prune from retiring live content.</para>
+    /// </summary>
+    private static readonly string V298Sql = PayloadDimensionSeen.RungSql(MigrationCommandTimeoutSeconds - 20);
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3952,6 +3975,10 @@ END $$;";
            upgrade stays fast and the housekeeping tick fills the summary from the days the daily Query Store summary still holds. An older
            build ignores them. */
         new Migration(ObjectReferencesDaily.Version, "object-references", V297Sql),
+        /* V298 (#9304): the payload dimension tables' liveness stamp moves to collect.query_text_dim_seen and collect.query_plan_dim_seen, so the
+           refresh no longer rewrites a text or plan row. Per dimension: the table, the insert trigger, the backfill, the two constraints and the
+           index, then the drop of the dimension's own last_seen index. */
+        new Migration(298, "payload-dimension-seen", V298Sql),
     };
 
     /// <summary>

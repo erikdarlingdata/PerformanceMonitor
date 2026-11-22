@@ -192,10 +192,17 @@ map_touch AS (
     RETURNING t.digest
 ),
 dim_touch AS (
-    UPDATE collect.query_plan_dim AS d
+    UPDATE collect.query_plan_dim_seen AS d
     SET last_seen = $5::timestamp
     WHERE d.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
       AND d.last_seen < $5::timestamp - " + QueryStoreLivenessTouchGuard.GuardInterval + @"
+    RETURNING d.digest
+),
+dim_wide_touch AS (
+    UPDATE collect.query_plan_dim AS d
+    SET last_seen = $5::timestamp
+    WHERE d.digest IN (SELECT digest FROM map_touch WHERE digest IS NOT NULL)
+      AND d.last_seen < $5::timestamp - " + PayloadDimensionSeen.WideRowRefreshInterval + @"
     RETURNING d.digest
 )
 SELECT
