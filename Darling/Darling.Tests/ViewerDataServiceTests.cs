@@ -760,6 +760,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #8784 part 2: the V297 sentinel (the dependency list and the per-day referenced-names summary) is the last parameter, so a store that has
            every sentinel but that one is a V296 store and maps to 296, not 297. Each sentinel below shifts one place from the end. */
         var allButV297 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV297[^1] = false;
         allButV297[^2] = false;
         Assert.Equal("hasObjectReferences", map.GetParameters()[^2].Name);
         Assert.Equal(296, (int)map.Invoke(null, allButV297)!);
@@ -767,6 +768,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #9280: the V296 sentinel (the hourly Query Store summary's index) is the one before the last, so a store that has every sentinel but that
            one and V297's is a V295 store and maps to 295, not 296. Each sentinel below shifts one place from the end. */
         var allButV296 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV296[^1] = false;
         allButV296[^2] = false;
         allButV296[^3] = false;
         Assert.Equal("hasQueryStoreTopHourly", map.GetParameters()[^3].Name);
@@ -775,6 +777,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #9225: the V295 sentinel (the plan regression block tables) is the one before the last, so a store that has every sentinel but that one and V296's
            is a V294 store and maps to 294, not 295. Each sentinel below shifts one place from the end. */
         var allButV295 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV295[^1] = false;
         allButV295[^2] = false;
         allButV295[^3] = false;
         allButV295[^4] = false;
@@ -784,6 +787,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #9284: the V294 sentinel (the view-and-time index on the aggregate compression order history) is the one before V295's, so a store that has every
            sentinel but that one and V295's and V296's is a V293 store and maps to 293, not 294. Each sentinel below shifts one place from the end. */
         var allButV294 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV294[^1] = false;
         allButV294[^2] = false;
         allButV294[^3] = false;
         allButV294[^4] = false;
@@ -794,6 +798,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #9277: the V293 sentinel (the partial counter-row index on attention_events) is the one before the last, so a store that has every
            sentinel but that one is a V292 store and maps to 292, not 293. Each sentinel below shifts one place from the end. */
         var allButV293 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV293[^1] = false;
         allButV293[^2] = false;
         allButV293[^3] = false;
         allButV293[^4] = false;
@@ -803,6 +808,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(292, (int)map.Invoke(null, allButV293)!);
 
         var allButV292 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV292[^1] = false;
         allButV292[^2] = false;
         allButV292[^3] = false;
         allButV292[^4] = false;
@@ -815,6 +821,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #9215: the V291 sentinel (the covering server index on the corrected hourly Query Store rollup) is the one before the last, so a store that has every
            sentinel but that one is a V290 store and maps to 290, not 291. Each sentinel below shifts one place from the end. */
         var allButV291 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV291[^1] = false;
         allButV291[^2] = false;
         allButV291[^3] = false;
         allButV291[^4] = false;
@@ -828,6 +835,7 @@ public sealed class ViewerSchemaVersionGateTests
         /* #9193: the V290 sentinel (the query_stats summary floor table) is the third from the end, so a store that has every sentinel but that one
            and V291's and V292's is a V289 store and maps to 289, not 290. Each sentinel below shifts one place from the end. */
         var allButV290 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV290[^1] = false;
         allButV290[^2] = false;
         allButV290[^3] = false;
         allButV290[^4] = false;
@@ -840,6 +848,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(289, (int)map.Invoke(null, allButV290)!);
 
         var allButV289 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV289[^1] = false;
         allButV289[^2] = false;
         allButV289[^3] = false;
         allButV289[^4] = false;
@@ -853,6 +862,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(288, (int)map.Invoke(null, allButV289)!);
 
         var allButV288 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV288[^1] = false;
         allButV288[^2] = false;
         allButV288[^3] = false;
         allButV288[^4] = false;
@@ -867,6 +877,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(287, (int)map.Invoke(null, allButV288)!);
 
         var allButV287 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV287[^1] = false;
         allButV287[^2] = false;
         allButV287[^3] = false;
         allButV287[^4] = false;
@@ -882,6 +893,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(286, (int)map.Invoke(null, allButV287)!);
 
         var allButV286 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV286[^1] = false;
         allButV286[^2] = false;
         allButV286[^3] = false;
         allButV286[^4] = false;
@@ -898,6 +910,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(285, (int)map.Invoke(null, allButV286)!);
 
         var allButV285 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV285[^1] = false;
         allButV285[^2] = false;
         allButV285[^3] = false;
         allButV285[^4] = false;
@@ -915,6 +928,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(284, (int)map.Invoke(null, allButV285)!);
 
         var allButV284 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV284[^1] = false;
         allButV284[^2] = false;
         allButV284[^3] = false;
         allButV284[^4] = false;
@@ -933,6 +947,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(283, (int)map.Invoke(null, allButV284)!);
 
         var allButV283 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV283[^1] = false;
         allButV283[^2] = false;
         allButV283[^3] = false;
         allButV283[^4] = false;
@@ -952,6 +967,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(282, (int)map.Invoke(null, allButV283)!);
 
         var allButV282 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV282[^1] = false;
         allButV282[^2] = false;
         allButV282[^3] = false;
         allButV282[^4] = false;
@@ -972,6 +988,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(281, (int)map.Invoke(null, allButV282)!);
 
         var allButV281 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV281[^1] = false;
         allButV281[^2] = false;
         allButV281[^3] = false;
         allButV281[^4] = false;
@@ -993,6 +1010,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(280, (int)map.Invoke(null, allButV281)!);
 
         var allButV280 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV280[^1] = false;
         allButV280[^2] = false;
         allButV280[^3] = false;
         allButV280[^4] = false;
@@ -1015,6 +1033,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(279, (int)map.Invoke(null, allButV280)!);
 
         var allButV279 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV279[^1] = false;
         allButV279[^2] = false;
         allButV279[^3] = false;
         allButV279[^4] = false;
@@ -1038,6 +1057,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(278, (int)map.Invoke(null, allButV279)!);
 
         var allButV278 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV278[^1] = false;
         allButV278[^2] = false;
         allButV278[^3] = false;
         allButV278[^4] = false;
@@ -1062,6 +1082,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(277, (int)map.Invoke(null, allButV278)!);
 
         var allButV277 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV277[^1] = false;
         allButV277[^2] = false;
         allButV277[^3] = false;
         allButV277[^4] = false;
@@ -1087,6 +1108,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(276, (int)map.Invoke(null, allButV277)!);
 
         var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV276[^1] = false;
         allButV276[^2] = false;
         allButV276[^3] = false;
         allButV276[^4] = false;
@@ -1113,6 +1135,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
 
         var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV275[^1] = false;
         allButV275[^2] = false;
         allButV275[^3] = false;
         allButV275[^4] = false;
@@ -1140,6 +1163,7 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
 
         var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV274[^1] = false;
         allButV274[^2] = false;
         allButV274[^3] = false;
         allButV274[^4] = false;

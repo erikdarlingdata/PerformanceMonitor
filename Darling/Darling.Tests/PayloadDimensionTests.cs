@@ -430,7 +430,7 @@ public sealed class PayloadDimensionTests
 
         /* ON CONFLICT is the entire dedup mechanism: the second and every later sighting of the same
            content writes no new row. */
-        Assert.Contains("ON CONFLICT (digest) DO UPDATE", sql, StringComparison.Ordinal);
+        Assert.Contains("ON CONFLICT (digest) DO NOTHING", sql, StringComparison.Ordinal);
 
         /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the then-indexed
            last_seen column), tested on the stamp table since V298 (#9304). Without it, every referenced dim row
