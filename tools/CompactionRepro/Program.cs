@@ -31,17 +31,17 @@ using PerformanceMonitorLite.Services;
  *
  * Tuning knobs (defaults = ParquetCompaction's non-table-specific defaults):
  *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: the table's production limit
- *   --threads <int>        DuckDB threads per merge connection. Default: 2
+ *   --threads <int>        DuckDB threads per merge connection. Default: the production pick
  *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: ParquetCompaction.DefaultRowGroupSize (2048)
  *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
  *                          ParquetCompaction.RowGroupBytesFor (#5393: the daily table's byte bound)
- *   (--threads defaults to ParquetCompaction.ThreadsFor(--table) when not given.)
+ *   (Absent --threads is the production pick: one thread for the sorted attempt, ThreadsFor(--table) for the fallback.)
  *   --max-batch-mb <int>   Per-batch on-disk input budget (MB). Default: the table's ParquetCompaction.BatchInputBytesFor
  *   --table <name>         Table name (drives exclude-column logic). Default: query_snapshots
  *
  * Seeded month (#9258): --seed-files N writes N hourly files of a numeric/text shape (instead of --source-file etc.)
  *   --seed-rows R (150000) --seed-servers S (5) --seed-numeric-cols C (50) --seed-text-cols T (10)
- *   --seed-text-bytes B (24) --seed-time-column <name> (collection_time). The report adds the row groups that mix
+ *   --seed-text-bytes B (24) --seed-noise N (97: range of the random part of each numeric column) --seed-time-column <name> (collection_time). The report adds the row groups that mix
  *   servers, and a sorted merge that falls back to the unsorted order prints one [sort fallback] line.
  *
  * Other options:
@@ -103,7 +103,7 @@ var table = GetArg(args, "--table", "query_snapshots");
 /* Absent means null, so MergeBatchToFile picks the table's production limit (512MB for the sorted merge). */
 var memoryLimitArg = GetArg(args, "--memory-limit", "");
 string? memoryLimit = memoryLimitArg.Length > 0 ? memoryLimitArg : null;
-var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.ThreadsFor(table).ToString()));
+int? threads = args.Contains("--threads") ? int.Parse(GetArg(args, "--threads", "")) : null;
 var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
 var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
 var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;
@@ -120,6 +120,7 @@ var seedServers = int.Parse(GetArg(args, "--seed-servers", "5"));
 var seedNumericCols = int.Parse(GetArg(args, "--seed-numeric-cols", "50"));
 var seedTextCols = int.Parse(GetArg(args, "--seed-text-cols", "10"));
 var seedTextBytes = int.Parse(GetArg(args, "--seed-text-bytes", "24"));
+var seedNoise = int.Parse(GetArg(args, "--seed-noise", "97"));
 var seedTimeColumn = GetArg(args, "--seed-time-column", "collection_time");
 var keep = args.Contains("--keep");
 var profileOnly = args.Contains("--profile-only");
@@ -145,7 +146,7 @@ foreach (var mf in mergeFiles)
 
 if (seedFiles > 0)
 {
-    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn);
+    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn, seedNoise);
 }
 
 if (synthetic)
@@ -184,7 +185,7 @@ if (sweep)
 }
 else
 {
-    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
+    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={(threads?.ToString() ?? "production pick")}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
 }
 if (mergeFiles.Count == 0)
     Console.WriteLine($"Splitting source into {numFiles} chunks");
@@ -258,7 +259,7 @@ try
        given config. Never throws — a merge OOM is caught and returned as
        Ok=false so a sweep can carry on to the next config. */
     (bool Ok, double StartMb, double PeakMb, double Sec, int Batches, string? Fail, List<string> Outputs)
-        RunOneConfig(int rgs, long batchBytes, string? memLimit, int thr, bool verbose)
+        RunOneConfig(int rgs, long batchBytes, string? memLimit, int? thr, bool verbose)
     {
         var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBytes);
         if (verbose)
@@ -551,10 +552,10 @@ static string MixedServerRowGroups(List<string> paths)
    time column, server_id, server_name, numeric counters that grow slowly (so they compress like real counters), and
    text columns drawn from a few thousand distinct values. Returns the file paths. */
 static List<string> GenerateSeededMonth(string dir, int files, int rows, int servers, int numericCols, int textCols,
-    int textBytes, string timeColumn)
+    int textBytes, string timeColumn, int noise = 97)
 {
     var numeric = string.Concat(Enumerable.Range(1, numericCols).Select(k =>
-        $", (((h * {rows} + i) // 50) * {k} + (hash(i, {k}) % 97))::BIGINT AS c{k}"));
+        $", (((h * {rows} + i) // 50) * {k} + (hash(i, {k}) % {noise}))::BIGINT AS c{k}"));
     var text = string.Concat(Enumerable.Range(1, textCols).Select(k =>
         $", substr(repeat(md5((((h * {rows} + i) % 5000) + {k})::VARCHAR), {textBytes / 32 + 1}), 1, {textBytes}) AS t{k}"));
     var paths = new List<string>();
