@@ -237,7 +237,7 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
     /// </summary>
     private static async Task<(List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> Rows, Dictionary<int, QueryTagMapCursor> Next)>
         ReadQuerySightingsAsync(
-            LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, IReadOnlyDictionary<int, QueryTagMapCursor> stored,
+            LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, Dictionary<int, QueryTagMapCursor> stored,
             int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers)
     {
         var serverIds = new List<int>();
