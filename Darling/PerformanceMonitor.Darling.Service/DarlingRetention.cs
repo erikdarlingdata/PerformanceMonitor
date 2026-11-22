@@ -1388,6 +1388,25 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* #8784 follow-up: the dependency lists of databases the server no longer has. The loop above keeps each database's newest
+               list however old (DeleteSqlFor's ObjectDependenciesReplacedPredicate), so this is the only way a dropped database's list
+               goes. One statement; the horizon is the collector's own retention. */
+            var droppedDatabaseDependenciesDeleted = await PurgeOneAsync(
+                postgres, ObjectDependenciesTable, DroppedDatabaseDependenciesDeleteSql,
+                utcNow.AddDays(-EffectivePurgeRetentionDays(
+                    "object_dependencies",
+                    retentionDaysFor?.Invoke("object_dependencies") ?? CollectorScheduleDefaults.All["object_dependencies"].RetentionDays)),
+                logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+            if (droppedDatabaseDependenciesDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += droppedDatabaseDependenciesDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
                guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
                collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
@@ -1778,9 +1797,100 @@ public static class DarlingRetention
     /// (DarlingCollectorRunner.GetLastCollectedTimeAsync).
     /// </summary>
     internal static string DeleteSqlFor(ICollectorSchemaInfo schema)
-        => schema is AttentionCollector
-            ? ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName)
-            : TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName);
+        => schema switch
+        {
+            AttentionCollector => ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
+            ObjectDependenciesCollector => TimeSlicedDeleteSql(
+                schema.TargetTable, schema.PrefixTimeColumnName, ObjectDependenciesReplacedPredicate),
+            _ => TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
+        };
+
+    /// <summary>The dependency list table (#8784 part 2), as <see cref="DeleteSqlFor"/> and <see cref="DroppedDatabaseDependenciesDeleteSql"/> name it.</summary>
+    internal const string ObjectDependenciesTable = "collect.object_dependencies";
+
+    /// <summary>
+    /// #8784 follow-up: which expired dependency rows the time-sliced purge may delete. Every read takes only a database's NEWEST capture,
+    /// and a view a database's list names counts as used, so a list must not age out while it is still the newest one: a database whose
+    /// capture fails for a few days (a lost grant, a collector failing there) would otherwise take its references with it, and another
+    /// database's view that only it named would read "Not used in window". So an expired row goes only once a newer capture of the same
+    /// (server, database) exists, which <c>idx_object_dependencies_database</c> answers with one seek. A dropped database's list goes
+    /// through <see cref="DroppedDatabaseDependenciesDeleteSql"/>. A removed server's last lists stay, one capture per database: no read
+    /// looks at them, and the same server added again (the same server_id) finds them until its first capture replaces them. Applied to the DELETE and to
+    /// both <c>min()</c> subqueries of <see cref="TimeSlicedDeleteSql"/>, so a kept row never anchors an empty slice; the unqualified
+    /// <c>object_dependencies</c> there is the nearest scope's table, the DELETE target or the subquery's own.
+    /// </summary>
+    internal const string ObjectDependenciesReplacedPredicate =
+        "EXISTS (SELECT 1 FROM collect.object_dependencies AS n WHERE n.server_id = object_dependencies.server_id"
+        + " AND n.database_name = object_dependencies.database_name AND n.collection_time > object_dependencies.collection_time)";
+
+    /// <summary>
+    /// #8784 follow-up: the dependency rows of a database the server no longer has. A kept newest list (<see cref="ObjectDependenciesReplacedPredicate"/>)
+    /// of a dropped database would keep its references alive for good, so it goes once both hold: it is past the retention cutoff ($1),
+    /// and the server's newest <c>collect.database_states</c> capture (an unfiltered <c>sys.databases</c> read, every minute by default)
+    /// is newer than the list and does not name the database. The cutoff keeps a database that is briefly gone (detached and attached
+    /// again, renamed and renamed back) until its next capture replaces the list. A server with no <c>database_states</c> rows (that
+    /// collector off, or Azure SQL Database, where it does not run) keeps its lists: that errs toward "used". The servers are listed by a
+    /// skip scan over <c>idx_object_dependencies_time</c>, and each one's newest state capture is one seek on <c>idx_database_states_time</c>.
+    /// </summary>
+    internal const string DroppedDatabaseDependenciesDeleteSql = @"
+WITH RECURSIVE
+    servers AS
+(
+    (
+        SELECT
+            d.server_id
+        FROM collect.object_dependencies AS d
+        ORDER BY
+            d.server_id
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT
+        (
+            SELECT
+                d.server_id
+            FROM collect.object_dependencies AS d
+            WHERE d.server_id > servers.server_id
+            ORDER BY
+                d.server_id
+            LIMIT 1
+        )
+    FROM servers
+    WHERE servers.server_id IS NOT NULL
+),
+    newest AS
+(
+    SELECT
+        servers.server_id,
+        s.collection_time
+    FROM servers
+    CROSS JOIN LATERAL
+    (
+        SELECT
+            st.collection_time
+        FROM collect.database_states AS st
+        WHERE st.server_id = servers.server_id
+        ORDER BY
+            st.collection_time DESC
+        LIMIT 1
+    ) AS s
+    WHERE servers.server_id IS NOT NULL
+)
+DELETE FROM collect.object_dependencies AS d
+USING newest AS n
+WHERE d.server_id = n.server_id
+AND   d.collection_time < $1
+AND   d.collection_time < n.collection_time
+AND   d.database_name IS NOT NULL
+AND   NOT EXISTS
+      (
+          SELECT
+              1
+          FROM collect.database_states AS st
+          WHERE st.server_id = n.server_id
+          AND   st.collection_time = n.collection_time
+          AND   st.database_name = d.database_name
+      )";
 
     /// <summary>
     /// #8719: <see cref="TimeSlicedDeleteSql"/> for a plain table whose only index is <c>(server_id, {col})</c> and whose
