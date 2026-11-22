@@ -124,6 +124,8 @@ public sealed class RollupChunkVisibilityLiveTests
     /// the release can find the horizon held for a moment.</summary>
     private static readonly TimeSpan HorizonWait = TimeSpan.FromSeconds(10);
 
+    private static readonly TimeSpan HorizonPoll = TimeSpan.FromMilliseconds(250);
+
     /// <summary>
     /// Runs the step until a pass counts a chunk, for at most <see cref="HorizonWait"/>, and returns how many chunks it counted in all. A pass that marked
     /// no page counts nothing and the chunk stays listed, so a retry is the step's own next hourly pass. Used only after the test closed its snapshot: the
@@ -132,16 +134,15 @@ public sealed class RollupChunkVisibilityLiveTests
     private static async Task<int> PassUntilCountedAsync(NpgsqlConnection c, ILogger? log, CancellationToken ct, Func<Func<TimeSpan>>? clock = null)
     {
         var counted = 0;
-        var waited = System.Diagnostics.Stopwatch.StartNew();
-        while (true)
+        for (var waited = TimeSpan.Zero; ; waited += HorizonPoll)
         {
             counted += await TimescaleSupport.EnsureRollupChunkVisibilityAsync(c, log, TimeSpan.Zero, clock?.Invoke(), ct);
-            if (counted > 0 || waited.Elapsed >= HorizonWait)
+            if (counted > 0 || waited >= HorizonWait)
             {
                 return counted;
             }
 
-            await Task.Delay(250, ct);
+            await Task.Delay(HorizonPoll, ct);
         }
     }
 
