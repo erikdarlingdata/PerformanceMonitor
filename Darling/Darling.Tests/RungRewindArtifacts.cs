@@ -936,6 +936,9 @@ DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL TH
         // makes it again and moves the daily Query Store rollup's order if it is compressed. The history table stays (V279's). Safe on a store that never had it.
         new(294, "hasAggregateCompressionOrderHistoryIndex",
             @"DROP INDEX IF EXISTS collect.ix_aggregate_compression_order_history_view;"),
+        // V295 (#9225): the plan regression block tables, the probe's newest sentinel. The rewind drops both, so a re-run of V295 creates them empty and the builder
+        // sums the blocks again from the daily rows. Safe on a store that never had them.
+        new(295, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
     ];
 
     /// <summary>
