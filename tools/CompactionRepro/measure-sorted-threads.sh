@@ -3,7 +3,7 @@
 # files shaped like field ones: highly compressible numeric rows across 6 servers, one file per table. Each merge is
 # its own process, so the peak working set is that merge's alone. Run from the repo root. One summary line per merge,
 # each starting "Total:" so a wrapper that only echoes result lines shows it.
-# PERFMON_COLS, WAIT_COLS and LOG_COLS set the numeric column count of each shape (to match an on-disk size).
+# PERFMON_VARIANTS, WAIT_VARIANTS and LOG_VARIANTS replace the shapes tried for each table.
 set -u
 cd "$(dirname "$0")"
 dotnet build -c Release -nologo -v q 2>&1 | grep -E " error |Warn|Elapsed" | head -5
@@ -27,14 +27,20 @@ run() {
   rm -f "$out"
 }
 
+# shape <table> <rows> <variants>: a variant is numeric-columns:noise:text-columns. Noise is the range of the random
+# part of each numeric column (2 = nearly constant runs, 97 = the seeded default), text columns are 24-byte strings
+# of 5,000 distinct values. More columns and less noise put more rows in memory per on-disk MB.
 shape() {
-  table=$1; rows=$2; cols=$3
-  d=$(seed --seed-files 1 --seed-rows "$rows" --seed-servers 6 --seed-numeric-cols "$cols" --seed-text-cols 0 --table "$table")
-  echo "Total: $table seeded: $rows rows, $(du -sk "$d" | cut -f1) KB on disk"
-  for t in 2 1; do run "$table $t thread(s), 512MB" "$d" --table "$table" --threads $t --memory-limit 512MB; done
-  rm -rf "$d"
+  table=$1; rows=$2; variants=$3
+  for v in $variants; do
+    IFS=: read -r cols noise text <<< "$v"
+    d=$(seed --seed-files 1 --seed-rows "$rows" --seed-servers 6 --seed-numeric-cols "$cols" --seed-text-cols "$text" --seed-noise "$noise" --table "$table")
+    echo "Total: $table [$v] seeded: $rows rows, $(du -sk "$d" | cut -f1) KB on disk"
+    for t in 2 1; do run "$table [$v] $t thread(s), 512MB" "$d" --table "$table" --threads $t --memory-limit 512MB; done
+    rm -rf "$d"
+  done
 }
 
-shape perfmon_stats 1162302 "${PERFMON_COLS:-6}"
-shape wait_stats 2078794 "${WAIT_COLS:-6}"
-shape collection_log 447949 "${LOG_COLS:-12}"
+shape perfmon_stats 1162302 "${PERFMON_VARIANTS:-6:97:0 12:2:0 20:2:1 30:2:2}"
+shape wait_stats 2078794 "${WAIT_VARIANTS:-6:97:0 8:2:0 12:2:1 16:2:2}"
+shape collection_log 447949 "${LOG_VARIANTS:-12:97:0 20:2:1 30:2:3 40:2:4}"

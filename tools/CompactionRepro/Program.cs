@@ -41,7 +41,7 @@ using PerformanceMonitorLite.Services;
  *
  * Seeded month (#9258): --seed-files N writes N hourly files of a numeric/text shape (instead of --source-file etc.)
  *   --seed-rows R (150000) --seed-servers S (5) --seed-numeric-cols C (50) --seed-text-cols T (10)
- *   --seed-text-bytes B (24) --seed-time-column <name> (collection_time). The report adds the row groups that mix
+ *   --seed-text-bytes B (24) --seed-noise N (97: range of the random part of each numeric column) --seed-time-column <name> (collection_time). The report adds the row groups that mix
  *   servers, and a sorted merge that falls back to the unsorted order prints one [sort fallback] line.
  *
  * Other options:
@@ -120,6 +120,7 @@ var seedServers = int.Parse(GetArg(args, "--seed-servers", "5"));
 var seedNumericCols = int.Parse(GetArg(args, "--seed-numeric-cols", "50"));
 var seedTextCols = int.Parse(GetArg(args, "--seed-text-cols", "10"));
 var seedTextBytes = int.Parse(GetArg(args, "--seed-text-bytes", "24"));
+var seedNoise = int.Parse(GetArg(args, "--seed-noise", "97"));
 var seedTimeColumn = GetArg(args, "--seed-time-column", "collection_time");
 var keep = args.Contains("--keep");
 var profileOnly = args.Contains("--profile-only");
@@ -145,7 +146,7 @@ foreach (var mf in mergeFiles)
 
 if (seedFiles > 0)
 {
-    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn);
+    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn, seedNoise);
 }
 
 if (synthetic)
@@ -551,10 +552,10 @@ static string MixedServerRowGroups(List<string> paths)
    time column, server_id, server_name, numeric counters that grow slowly (so they compress like real counters), and
    text columns drawn from a few thousand distinct values. Returns the file paths. */
 static List<string> GenerateSeededMonth(string dir, int files, int rows, int servers, int numericCols, int textCols,
-    int textBytes, string timeColumn)
+    int textBytes, string timeColumn, int noise = 97)
 {
     var numeric = string.Concat(Enumerable.Range(1, numericCols).Select(k =>
-        $", (((h * {rows} + i) // 50) * {k} + (hash(i, {k}) % 97))::BIGINT AS c{k}"));
+        $", (((h * {rows} + i) // 50) * {k} + (hash(i, {k}) % {noise}))::BIGINT AS c{k}"));
     var text = string.Concat(Enumerable.Range(1, textCols).Select(k =>
         $", substr(repeat(md5((((h * {rows} + i) % 5000) + {k})::VARCHAR), {textBytes / 32 + 1}), 1, {textBytes}) AS t{k}"));
     var paths = new List<string>();
