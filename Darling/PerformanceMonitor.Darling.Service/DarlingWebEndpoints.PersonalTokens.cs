@@ -29,6 +29,10 @@ public static partial class DarlingWebEndpoints
     /// <summary>The route the personal-token page reads and writes (#8737).</summary>
     internal const string PersonalTokensRoute = "/api/mcp-tokens";
 
+    /// <summary>The most bytes a token create request may carry (#9325): its three fields are a 64-character name, a day count and a role. A longer
+    /// body is refused before it is parsed.</summary>
+    internal const int MaxCreateBodyBytes = 4096;
+
     /// <summary>The code a front door and a host with the feature off both answer with.</summary>
     internal const string PersonalTokensUnavailableCode = "personal_tokens_unavailable";
 
@@ -40,7 +44,7 @@ public static partial class DarlingWebEndpoints
     /// <para><c>GET /api/mcp-tokens</c> answers <c>{tokens, truncated, max_lifetime_days, allowed_roles}</c>: the caller's own rows, or with
     /// <c>?all=1</c> (an admin seat only) every row with its <c>subject</c>; <see cref="PersonalTokenStore.ListLimit"/> rows at most, live ones first, with
     /// <c>truncated</c> true when rows were left out (dead rows first, then the oldest live ones). <c>POST /api/mcp-tokens</c> with <c>{name, lifetime_days, role}</c> answers 201
-    /// <c>{token, record}</c>, the one place the value ever appears, or 429 <c>too_many_recent</c> once the person has created
+    /// <c>{token, record}</c> (the body is at most <see cref="MaxCreateBodyBytes"/> bytes, else 400 <c>bad_request</c>), the one place the value ever appears, or 429 <c>too_many_recent</c> once the person has created
     /// <see cref="PersonalTokenStore.RecentCreatesPerSlot"/> times the cap in the last 24 hours. <c>POST /api/mcp-tokens/{id}/revoke</c> answers 204; a token that is absent,
     /// already dead or not the caller's is one 404 answer, so it never shows that an id exists. Each POST needs a JSON content type. After a
     /// successful write the service log line is written, then the snapshot is refreshed before the answer, so the MCP gate sees the change at once.
@@ -53,6 +57,47 @@ public static partial class DarlingWebEndpoints
         var hostStopping = app.Lifetime.ApplicationStopping;
         /* M7: a store below the rung is logged once for this host, at Information and without a stack; the 503 says the rest. */
         var missingTableLogged = 0;
+
+        static void LowerBodyLimit(HttpContext context, int max)
+        {
+            var limit = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+            if (limit is { IsReadOnly: false })
+            {
+                limit.MaxRequestBodySize = max;
+            }
+        }
+
+        /* The body text, or null when it is longer than max bytes. The cap counts the bytes actually read, so a chunked body (no Content-Length) is held
+           to it too, and a body the server's own limit stops at the cap is too large as well. */
+        static async Task<string?> ReadBoundedBodyAsync(HttpContext context, int max)
+        {
+            if (context.Request.ContentLength is { } declared && declared > max)
+            {
+                return null;
+            }
+
+            var buffer = new byte[max + 1];
+            var total = 0;
+            try
+            {
+                while (total < buffer.Length)
+                {
+                    var read = await context.Request.Body.ReadAsync(buffer.AsMemory(total), context.RequestAborted);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    total += read;
+                }
+            }
+            catch (BadHttpRequestException)
+            {
+                return null;
+            }
+
+            return total > max ? null : System.Text.Encoding.UTF8.GetString(buffer, 0, total);
+        }
 
         static IResult Refusal(string code, string message, int status) =>
             JsonNodeResult(new JsonObject { ["error"] = code, ["message"] = message }, status);
@@ -176,6 +221,10 @@ public static partial class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
+            /* The body is three short fields (a 64-character name, a day count, a role), so the server's own limit for this route is lowered to a
+               few KB before anything reads it. */
+            LowerBodyLimit(context, MaxCreateBodyBytes);
+
             var seat = DarlingWebSeat.FromContext(context);
             if (seat.OwnerKey is null)
             {
@@ -192,7 +241,14 @@ public static partial class DarlingWebEndpoints
             JsonObject? request;
             try
             {
-                request = JsonNode.Parse(await ReadBodyAsync(context)) as JsonObject;
+                var body = await ReadBoundedBodyAsync(context, MaxCreateBodyBytes);
+                if (body is null)
+                {
+                    return Refusal("bad_request", string.Create(CultureInfo.InvariantCulture, $"The token request is at most {MaxCreateBodyBytes} bytes."),
+                        StatusCodes.Status400BadRequest);
+                }
+
+                request = JsonNode.Parse(body) as JsonObject;
             }
             catch (JsonException)
             {

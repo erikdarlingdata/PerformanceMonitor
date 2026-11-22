@@ -256,6 +256,34 @@ public sealed class PersonalTokenWebRouteLiveTests : IClassFixture<PersonalToken
         Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(value, DateTimeOffset.UtcNow).Outcome);
     }
 
+    private static string PaddedCreate(string name, int padBytes) =>
+        new JsonObject { ["name"] = name, ["lifetime_days"] = 7, ["role"] = "reader", ["pad"] = new string('x', padBytes) }.ToJsonString();
+
+    [Fact]
+    public async Task Create_BodyOverTheCap_400BadRequest_NoRowMade()
+    {
+        await using var rig = await StartAsync(Settings());
+        var vera = PersonFor("create-big-body");
+
+        var reply = await rig.SendAsync("POST", "/api/mcp-tokens", vera, body: PaddedCreate("laptop", 10_000));
+
+        Assert.Equal(400, reply.Status);
+        Assert.Equal("bad_request", reply.Error);
+        Assert.Equal("0", await rig.ScalarAsync($"SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = '{vera.OwnerKey}'"));
+    }
+
+    [Fact]
+    public async Task Create_BodyNearTheCap_StillCreated()
+    {
+        await using var rig = await StartAsync(Settings());
+        var padding = DarlingWebEndpoints.MaxCreateBodyBytes - Create("laptop").Length - 40;
+
+        var reply = await rig.SendAsync("POST", "/api/mcp-tokens", PersonFor("create-edge-body"), body: PaddedCreate("laptop", padding));
+
+        Assert.True(Encoding.UTF8.GetByteCount(PaddedCreate("laptop", padding)) <= DarlingWebEndpoints.MaxCreateBodyBytes);
+        Assert.Equal(201, reply.Status);
+    }
+
     [Fact]
     public async Task Create_ReadOnlySeat_OperatorRefused_role_not_allowed()
     {

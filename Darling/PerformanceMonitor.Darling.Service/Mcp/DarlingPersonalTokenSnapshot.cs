@@ -13,6 +13,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -58,6 +59,10 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
     private readonly object _deadSync = new();
     private readonly Dictionary<string, DateTimeOffset> _deadLogged = new(StringComparer.Ordinal);
 
+    /// <summary>The sign-in revokes still waiting for the store (#9325). While an owner has one queued, <see cref="Check"/> refuses that
+    /// owner's tokens as revoked (operator tokens only for an operator-only entry), so a revoke the store has not taken yet binds at once.</summary>
+    internal PersonalTokenPendingRevokes? Pending { get; init; }
+
     /// <summary>Production: loads and writes through <see cref="PersonalTokenStore"/> on the published owner connection.</summary>
     public DarlingPersonalTokenSnapshot()
     {
@@ -73,13 +78,13 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
         _time = time ?? TimeProvider.System;
     }
 
-    /// <summary>Reloads the rows. Throws only for cancellation; every failure leaves the snapshot unavailable.</summary>
-    public async Task RefreshAsync(StoreOwnerSource owner, ILogger logger, CancellationToken ct)
+    /// <summary>Reloads the rows. Throws only for cancellation; every failure leaves the snapshot unavailable. True when the rows were loaded.</summary>
+    public async Task<bool> RefreshAsync(StoreOwnerSource owner, ILogger logger, CancellationToken ct)
     {
         await _refreshGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await RefreshCoreAsync(owner, logger, ct).ConfigureAwait(false);
+            return await RefreshCoreAsync(owner, logger, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -87,13 +92,13 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
         }
     }
 
-    private async Task RefreshCoreAsync(StoreOwnerSource owner, ILogger logger, CancellationToken ct)
+    private async Task<bool> RefreshCoreAsync(StoreOwnerSource owner, ILogger logger, CancellationToken ct)
     {
         var source = owner.Read();
         if (source is null)
         {
             _rows = null;
-            return;
+            return false;
         }
 
         try
@@ -114,6 +119,8 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
                 _missingTableLogged = false;
                 _lastWarnAt = null;
             }
+
+            return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -139,7 +146,7 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
                     logger.LogInformation("The store has not reached V{Version} yet; personal tokens are refused until it does", PersonalTokenSchema.Version);
                 }
 
-                return;
+                return false;
             }
 
             var warn = false;
@@ -158,6 +165,8 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
                 logger.LogWarning(ex, "Refreshing the personal MCP tokens failed; personal tokens are refused until a refresh succeeds");
             }
         }
+
+        return false;
     }
 
     /// <summary>Decides a presented value: parse, then look up the id, then compare the hash in fixed time, then revocation and expiry. With
@@ -187,6 +196,7 @@ internal sealed class DarlingPersonalTokenSnapshot : IDisposable
         }
 
         if (found.Row.RevokedAt is not null || found.Row.ExpiresAt <= now
+            || Pending?.Refuses(found.Row.OwnerKey, found.Row.Role) == true
             || (maxLifetimeDays is { } days && found.Row.CreatedAt.AddDays(days) <= now))
         {
             return new PersonalTokenCheck(PersonalTokenOutcome.Dead, found.Row);

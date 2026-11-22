@@ -7,10 +7,12 @@
  */
 
 using System;
+using System.IO;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.FrontDoor;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -50,7 +52,27 @@ internal static class DarlingProcessServices
     services.AddSingleton<StoreOwnerSource>();
 
     /* #8737: every personal MCP token row, refreshed over the owner connection; the MCP bearer gate checks it. */
-    services.AddSingleton<DarlingPersonalTokenSnapshot>();
+    services.AddSingleton<DarlingPersonalTokenSnapshot>(provider => new DarlingPersonalTokenSnapshot
+    {
+        Pending = provider.GetRequiredService<PersonalTokenPendingRevokes>(),
+    });
+
+    /* #9325: the sign-in revokes the store has not taken yet. One queue for the process: the snapshot's token check refuses the owners in it at
+       once, the web supervisor drains it, and it is saved in the folder that holds the service's keys so a restart keeps it. Built before either
+       host serves, because the snapshot takes it. A config that cannot be loaded leaves it in memory only, with one warning. */
+    services.AddSingleton(provider =>
+    {
+        var logger = provider.GetService<ILoggerFactory>()?.CreateLogger<PersonalTokenPendingRevokes>();
+        try
+        {
+            return PersonalTokenPendingRevokes.ForConfig(DarlingConfig.Load(), DarlingConfig.ResolveConfigPath(), logger);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "The MCP personal token revoke queue is kept in memory only, so a restart would lose it: darling.json could not be loaded.");
+            return new PersonalTokenPendingRevokes(logger: logger);
+        }
+    });
 
     /* #7041: the worker publishes its alert evaluator here for the MCP host's send_daily_health_report_now. */
     services.AddSingleton<DailyHealthReportHub>();
