@@ -86,7 +86,7 @@ public sealed class ObjectUsageReportTests
             new ObjectInventoryEntry("dbo", "usp_YearEnd", "SQL_STORED_PROCEDURE", null, null),
             new ObjectInventoryEntry("dbo", "vSomething", "VIEW", null, null),
         ]);
-        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 90, Now.AddHours(-3))]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 90, Now.AddHours(-3))], QueryCaptureMode: "ALL");
 
         var root = Build(Side("srv", Tables(WindowStart, Now), executions, inventory));
 
@@ -94,14 +94,15 @@ public sealed class ObjectUsageReportTests
         Assert.Equal(90, Obj(root, "usp_Daily").GetProperty("executions").GetInt64());
         Assert.Equal("SQL_STORED_PROCEDURE", Obj(root, "usp_Daily").GetProperty("object_type").GetString());
         Assert.Equal(ObjectUsageReport.NotExecuted, Obj(root, "usp_YearEnd").GetProperty("classification").GetString());
-        /* Views that are not indexed are left to the view usage read: listing them here would call every one of them unused. */
-        Assert.DoesNotContain(root.GetProperty("objects").EnumerateArray(), o => o.GetProperty("object_name").GetString() == "vSomething");
+        /* #8784 part 2: a view is listed, but with no statement text read it is never called unused: there is no evidence either way. */
+        Assert.Equal(ObjectUsageReport.NotTracked, Obj(root, "vSomething").GetProperty("classification").GetString());
+        Assert.Equal("VIEW", Obj(root, "vSomething").GetProperty("object_type").GetString());
     }
 
     [Fact]
     public void WithoutAnObjectList_OnlyModulesThatRanAreListed_AndTheNoteSaysSo()
     {
-        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 4, Now)]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 4, Now)], QueryCaptureMode: "ALL");
 
         var root = Build(Side("srv", Tables(WindowStart, Now), executions));
 
@@ -126,7 +127,7 @@ public sealed class ObjectUsageReportTests
             new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null),
             new ObjectInventoryEntry("dbo", "usp_Old", "SQL_STORED_PROCEDURE", null, null),
         ]);
-        var root = Build(Side("srv", Tables(WindowStart, Now), new ObjectExecutionWindow(WindowStart, Now, "test", []), inventory));
+        var root = Build(Side("srv", Tables(WindowStart, Now), new ObjectExecutionWindow(WindowStart, Now, "test", [], QueryCaptureMode: "ALL"), inventory));
 
         foreach (var name in new[] { "fn_GetOrders", "clr_Proc", "clr_Scalar", "clr_Tvf" })
         {
@@ -153,7 +154,7 @@ public sealed class ObjectUsageReportTests
     public void AnUntrackedType_ThatQueryStoreDidSeeRun_IsExecuted()
     {
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_GetOrders", "SQL_INLINE_TABLE_VALUED_FUNCTION", null, null)]);
-        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.fn_GetOrders", 3, Now)]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.fn_GetOrders", 3, Now)], QueryCaptureMode: "ALL");
 
         var root = Build(Side("srv", Tables(WindowStart, Now), executions, inventory));
 
@@ -181,7 +182,7 @@ public sealed class ObjectUsageReportTests
             new ObjectInventoryEntry("dbo", "usp_Run", "SQL_STORED_PROCEDURE", null, null),
             new ObjectInventoryEntry("dbo", "USP_RUN", "SQL_STORED_PROCEDURE", null, null),
         ]);
-        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Run", 8, Now)]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Run", 8, Now)], QueryCaptureMode: "ALL");
 
         var root = Build(Side("srv", Tables(WindowStart, Now, Table("Orders", reads: 50), Table("ORDERS")), executions, inventory));
 
@@ -197,7 +198,7 @@ public sealed class ObjectUsageReportTests
     {
         /* The primary has executions but no object list; the read-only side has the list. The procedure is one row, typed and Executed,
            not a MODULE row beside a typed "Not executed in window" one. */
-        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 90, Now)]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 90, Now)], QueryCaptureMode: "ALL");
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "usp_Daily", "SQL_STORED_PROCEDURE", null, null)]);
         var primary = Side("SQL1", TablesOn("NODE1"), executions);
         var secondary = Side("SQL1:RO", TablesOn("NODE2"), executions, inventory);
@@ -215,9 +216,9 @@ public sealed class ObjectUsageReportTests
     {
         /* A database has one Query Store, on the primary: both registrations read the same 1,000 executions. */
         var primary = Side("SQL1", TablesOn("NODE1"),
-            new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 1_000, Now.AddHours(-2))]));
+            new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 1_000, Now.AddHours(-2))], QueryCaptureMode: "ALL"));
         var secondary = Side("SQL1:RO", TablesOn("NODE2"),
-            new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 990, Now.AddHours(-5))]));
+            new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_Daily", 990, Now.AddHours(-5))], QueryCaptureMode: "ALL"));
 
         var root = Build(primary, secondary);
 
@@ -246,7 +247,7 @@ public sealed class ObjectUsageReportTests
     public void ExecutionCoverage_CarriesTheDaysWithData_AndTheIndexResets()
     {
         var tables = new ObjectUsageWindowResult(WindowStart, Now, 91, TimeSpan.FromDays(1), [], ["NODE1"], [], IndexResets: 3);
-        var root = Build(Side("srv", tables, new ObjectExecutionWindow(WindowStart, Now, "test", [], DaysWithData: 12)));
+        var root = Build(Side("srv", tables, new ObjectExecutionWindow(WindowStart, Now, "test", [], DaysWithData: 12, QueryCaptureMode: "ALL")));
 
         var coverage = root.GetProperty("coverage")[0];
         Assert.Equal(12, coverage.GetProperty("executions").GetProperty("days_with_data").GetInt32());
@@ -256,7 +257,7 @@ public sealed class ObjectUsageReportTests
     [Fact]
     public void ADatabaseWithNoQueryStoreData_IsShortOfTheWindow()
     {
-        var root = Build(Side("srv", Tables(WindowStart, Now), new ObjectExecutionWindow(null, null, "test", [], DaysWithData: 0)));
+        var root = Build(Side("srv", Tables(WindowStart, Now), new ObjectExecutionWindow(null, null, "test", [], DaysWithData: 0, QueryCaptureMode: "ALL")));
 
         var executions = root.GetProperty("coverage")[0].GetProperty("executions");
         Assert.True(executions.GetProperty("short_of_window").GetBoolean());
@@ -428,7 +429,7 @@ public sealed class ObjectUsageReportTests
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "usp_Hidden", "SQL_STORED_PROCEDURE", null, null)]);
 
         /* Query Store off, or the summary not built yet: nothing was looked at, so nothing can be said. */
-        foreach (var executions in new[] { null, new ObjectExecutionWindow(null, null, "test", [], 0) })
+        foreach (var executions in new[] { null, new ObjectExecutionWindow(null, null, "test", [], 0, QueryCaptureMode: "ALL") })
         {
             var root = Build(Side("srv", Tables(WindowStart, Now), executions, inventory));
 
@@ -443,8 +444,8 @@ public sealed class ObjectUsageReportTests
     public void WithQueryStoreDataForPartOfTheWindow_AModuleThatDidNotRun_SaysHowMuchWasCovered()
     {
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "usp_YearEnd", "SQL_STORED_PROCEDURE", null, null)]);
-        var partial = new ObjectExecutionWindow(Now.AddDays(-20), Now, "test", [], 20);
-        var whole = new ObjectExecutionWindow(WindowStart.AddDays(2), Now, "test", [], 88);
+        var partial = new ObjectExecutionWindow(Now.AddDays(-20), Now, "test", [], 20, QueryCaptureMode: "ALL");
+        var whole = new ObjectExecutionWindow(WindowStart.AddDays(2), Now, "test", [], 88, QueryCaptureMode: "ALL");
 
         var shortRow = Obj(Build(Side("srv", Tables(WindowStart, Now), partial, inventory)), "usp_YearEnd");
         Assert.Equal(ObjectUsageReport.NotExecuted, shortRow.GetProperty("classification").GetString());
@@ -461,8 +462,8 @@ public sealed class ObjectUsageReportTests
         /* The registrations read one Query Store: the read-only side having no summary rows does not make the primary's evidence partial. */
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
         var root = Build(
-            Side("srv", TablesOn("NODE1"), new ObjectExecutionWindow(WindowStart, Now, "test", [], 90), inventory),
-            Side("srv:RO", TablesOn("NODE2"), new ObjectExecutionWindow(null, null, "test", [], 0)));
+            Side("srv", TablesOn("NODE1"), new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: "ALL"), inventory),
+            Side("srv:RO", TablesOn("NODE2"), new ObjectExecutionWindow(null, null, "test", [], 0, QueryCaptureMode: "ALL")));
 
         var row = Obj(root, "fn_Multi");
         Assert.Equal(ObjectUsageReport.NotExecuted, row.GetProperty("classification").GetString());
@@ -477,7 +478,7 @@ public sealed class ObjectUsageReportTests
             new ObjectInventoryEntry("dbo", "usp_NativeRan", "SQL_STORED_PROCEDURE", null, null, IsNativelyCompiled: true),
             new ObjectInventoryEntry("dbo", "usp_Wrapper", "SQL_STORED_PROCEDURE", null, null),
         ]);
-        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_NativeRan", 7, Now)], 90);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [new ObjectExecutionTotals("dbo.usp_NativeRan", 7, Now)], 90, QueryCaptureMode: "ALL");
 
         var root = Build(Side("srv", Tables(WindowStart, Now), executions, inventory));
 
@@ -629,8 +630,8 @@ public sealed class ObjectUsageReportTests
 
     [Theory]
     [InlineData("ALL")]
-    [InlineData(null)]
-    public void UnderCaptureModeAll_OrWithNoStoredMode_AModuleThatDidNotRun_StaysACandidate(string? mode)
+    [InlineData(" all ")]
+    public void UnderCaptureModeAll_AModuleThatDidNotRun_StaysACandidate(string mode)
     {
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
         var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: mode);
@@ -639,6 +640,39 @@ public sealed class ObjectUsageReportTests
 
         Assert.Equal(ObjectUsageReport.NotExecuted, row.GetProperty("classification").GetString());
         Assert.Equal(JsonValueKind.Null, row.GetProperty("caveat").ValueKind);
+    }
+
+    [Fact]
+    public void WithNoStoredCaptureMode_AModuleThatDidNotRun_IsNotTracked_BecauseTheDefaultAutoLeavesRareStatementsOut()
+    {
+        /* #8784 review: no query_store_health row (the collector off, failing or scoped elsewhere) is not taken to be ALL. */
+        var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
+        var executions = new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: null);
+
+        var row = Obj(Build(Side("srv", Tables(WindowStart, Now), executions, inventory)), "fn_Multi");
+
+        Assert.Equal(ObjectUsageReport.NotTracked, row.GetProperty("classification").GetString());
+        Assert.Equal(ObjectUsageReport.CaptureModeUnknownCaveat, row.GetProperty("caveat").GetString());
+    }
+
+    [Fact]
+    public void AStoredAllOnOneSide_IsEnoughWhenTheOtherSideHasNoMode()
+    {
+        var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
+        var root = Build(
+            Side("srv", TablesOn("NODE1"), new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: null), inventory),
+            Side("srv:RO", TablesOn("NODE2"), new ObjectExecutionWindow(WindowStart, Now, "test", [], 90, QueryCaptureMode: "ALL")));
+
+        Assert.Equal(ObjectUsageReport.NotExecuted, Obj(root, "fn_Multi").GetProperty("classification").GetString());
+    }
+
+    [Fact]
+    public void EffectiveCaptureMode_PrefersAPartialMode_ThenAll_ThenUnknown()
+    {
+        Assert.Equal("AUTO", ObjectUsageReport.EffectiveCaptureMode(["ALL", null, " auto "]));
+        Assert.Equal("ALL", ObjectUsageReport.EffectiveCaptureMode([null, "all"]));
+        Assert.Null(ObjectUsageReport.EffectiveCaptureMode([null, " "]));
+        Assert.Null(ObjectUsageReport.EffectiveCaptureMode([]));
     }
 
     [Fact]
@@ -661,7 +695,7 @@ public sealed class ObjectUsageReportTests
         /* Review of #8855: data near each end of the window and Query Store off in between. The span is the whole window, the days with data
            are 10, so a module that did not run says only 10 of the 90 days were looked at. */
         var inventory = new ObjectInventory(Now, [new ObjectInventoryEntry("dbo", "fn_Multi", "SQL_TABLE_VALUED_FUNCTION", null, null)]);
-        var holed = new ObjectExecutionWindow(WindowStart, Now, "test", [], DaysWithData: 10);
+        var holed = new ObjectExecutionWindow(WindowStart, Now, "test", [], DaysWithData: 10, QueryCaptureMode: "ALL");
 
         var root = Build(Side("srv", Tables(WindowStart, Now), holed, inventory));
 
@@ -676,11 +710,11 @@ public sealed class ObjectUsageReportTests
     [Fact]
     public void TheEvidenceDays_AreTheDaysWithData_WhereKnown_NeverMoreThanTheSpan_AndTheSpanOtherwise()
     {
-        Assert.Equal(10, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(WindowStart, Now, "t", [], DaysWithData: 10)));
+        Assert.Equal(10, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(WindowStart, Now, "t", [], DaysWithData: 10, QueryCaptureMode: "ALL")));
         /* A count of days includes both ends, one more than the span: the span caps it. */
-        Assert.Equal(20, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(Now.AddDays(-20), Now, "t", [], DaysWithData: 21)));
-        Assert.Equal(90, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(WindowStart, Now, "t", [])));
-        Assert.Equal(0, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(null, null, "t", [], DaysWithData: 0)));
+        Assert.Equal(20, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(Now.AddDays(-20), Now, "t", [], DaysWithData: 21, QueryCaptureMode: "ALL")));
+        Assert.Equal(90, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(WindowStart, Now, "t", [], QueryCaptureMode: "ALL")));
+        Assert.Equal(0, ObjectUsageReport.ExecutionDays(new ObjectExecutionWindow(null, null, "t", [], DaysWithData: 0, QueryCaptureMode: "ALL")));
         Assert.Equal(0, ObjectUsageReport.ExecutionDays(null));
     }
 

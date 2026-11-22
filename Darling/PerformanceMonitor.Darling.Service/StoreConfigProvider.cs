@@ -3419,7 +3419,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// </summary>
     public static IReadOnlyList<string> ResolveDatabaseScope(string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides)
     {
-        /* #8784: object_inventory runs under index_object_stats's scope, so the object list and the usage counters cover the same databases. */
+        /* #8784: object_inventory and object_dependencies run under index_object_stats's scope, so the object list, the dependency list and the
+           usage counters cover the same databases. */
         collectorName = PerformanceMonitor.Collectors.DatabaseScopeFilter.ScopeOwner(collectorName);
 
         ScheduleOverride? perServer = null;

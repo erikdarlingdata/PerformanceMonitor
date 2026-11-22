@@ -845,7 +845,7 @@ public sealed class DailyCollectorDetachTests
         Assert.Equal(
             new[]
             {
-                "database_config", "database_scoped_config", "index_object_stats", "object_inventory", "pg_column_stats", "pg_extension_availability",
+                "database_config", "database_scoped_config", "index_object_stats", "object_dependencies", "object_inventory", "pg_column_stats", "pg_extension_availability",
                 "pg_index_bloat", "pg_index_usage_stats", "server_config", "server_properties", "trace_flags",
             },
             daily);
