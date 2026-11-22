@@ -158,7 +158,8 @@ public sealed class QueryStoreArchiveReadTests : IDisposable
         await read();
         await ExecuteAsync(connection, "PRAGMA disable_profiling");
 
-        using var profile = JsonDocument.Parse(await File.ReadAllTextAsync(profilePath, TestContext.Current.CancellationToken));
+        // A real async file read can resume on another thread while the connection holds the thread-affine read lock (#2463).
+        using var profile = JsonDocument.Parse(File.ReadAllText(profilePath));
         long rows = 0;
         var scans = 0;
         Walk(profile.RootElement);
