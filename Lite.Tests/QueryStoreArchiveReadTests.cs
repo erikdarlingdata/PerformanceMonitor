@@ -149,6 +149,72 @@ public sealed class QueryStoreArchiveReadTests : IDisposable
         Assert.Equal(cost.OrderByDescending(c => c).ToList(), cost);
     }
 
+    /// <summary>
+    /// The fixture puts the same text on every row, so a lookup that picks the wrong row of a candidate still reads the right text.
+    /// This candidate has three archived rows with three texts: the newest and a middle one collected a day to a day and a half before
+    /// the window start, and an older one before the lookup's floor. Their runtime intervals start inside the window, which is what
+    /// makes the ranking take the candidate (it windows on the interval start), so the newest row is the one the floor must keep.
+    /// A floor at the window start drops it and returns the middle row's text, and a lookup that takes the oldest row returns another.
+    /// </summary>
+    [Fact]
+    public async Task TheTopRead_ReturnsTheTextOfTheNewestRow_WhenThatRowWasCollectedJustBeforeTheWindowStart()
+    {
+        var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+        _now = DateTime.UtcNow;
+        var windowStart = _now.AddHours(-24);
+
+        using (var connection = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "test.duckdb")}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await QueryStoreArchiveFixture.SeedAsync(connection, _now, 6, [60, 15], 4, 600, TestContext.Current.CancellationToken);
+            var rows = new (long Id, DateTime Collected, DateTime IntervalStart, string Text)[]
+            {
+                (9_000_000_000_001, windowStart.AddHours(-30), windowStart.AddHours(-30), "/* before the floor */ SELECT 1"),
+                (9_000_000_000_002, windowStart.AddHours(-12), windowStart.AddHours(2), "/* middle */ SELECT 2"),
+                (9_000_000_000_003, windowStart.AddHours(-6), windowStart.AddHours(3), "/* newest */ SELECT 3"),
+            };
+            foreach (var (id, collected, intervalStart, text) in rows)
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = $@"
+INSERT INTO query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
+     first_execution_time, last_execution_time, query_text, query_hash, execution_count,
+     avg_duration_us, min_duration_us, max_duration_us, avg_cpu_time_us, min_cpu_time_us, max_cpu_time_us,
+     avg_logical_io_reads, min_logical_io_reads, max_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+     avg_rowcount, min_dop, max_dop, plan_type, is_forced_plan, force_failure_count, query_plan_hash,
+     runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc)
+VALUES
+    ({id}, TIMESTAMP '{collected:yyyy-MM-dd HH:mm:ss}', {ServerId}, 'SRV{ServerId}', 'DbFloor', 990001, 990001, 'Regular',
+     TIMESTAMP '{intervalStart:yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{intervalStart:yyyy-MM-dd HH:mm:ss}', '{text}', '0xAB', 1000000,
+     500000, 500000, 500000, 400000, 400000, 400000, 100, 100, 100, 10, 10, 5, 1, 1, 'Regular', FALSE, 0, '0xCD',
+     {id % 1_000_000}, TIMESTAMP '{intervalStart:yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{intervalStart.AddHours(1):yyyy-MM-dd HH:mm:ss}')";
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        var archive = new ArchiveService(initializer, Path.Combine(_tempDir, "archive"));
+        foreach (var days in new[] { 4, 2, 1 })
+        {
+            archive.TimestampForTests = _now.AddDays(-days).ToString("yyyyMMdd_HHmm");
+            await archive.ArchiveOldDataAsync(hotDataDays: days, cancellationToken: TestContext.Current.CancellationToken);
+        }
+
+        var data = new LocalDataService(initializer);
+        using (var connection = await data.OpenConnectionAsync())
+        {
+            Assert.Equal(0, await ScalarAsync(connection, "SELECT count(*) FROM query_store_stats WHERE query_id = 990001"));
+            Assert.Equal(3, await ScalarAsync(connection, "SELECT count(*) FROM v_query_store_stats WHERE query_id = 990001"));
+        }
+
+        var rowsRead = await data.GetQueryStoreTopQueriesAsync(ServerId, 24, 50);
+
+        var candidate = Assert.Single(rowsRead, r => r.QueryId == 990001);
+        Assert.Equal("/* newest */ SELECT 3", candidate.QueryText);
+    }
+
     /// <summary>The rows the Parquet scans of the one statement <paramref name="read"/> runs output, from DuckDB's profile of it.</summary>
     private async Task<long> ParquetRowsScannedAsync<T>(LockedConnection connection, Func<Task<T>> read)
     {
