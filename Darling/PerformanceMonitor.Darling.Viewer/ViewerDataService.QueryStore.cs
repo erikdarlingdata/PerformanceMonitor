@@ -1018,7 +1018,7 @@ public sealed partial class ViewerDataService
             rollupsTried = served is not null;
             var source = QueryStoreClosedDayRollup.DescribeSource(
                 plan.ReadStart, literalEndUtc ?? endUtc, served, servedReason,
-                await QueryStoreClosedDayRollup.HoldsEdgeDaysAsync(connection, transaction, serverId, served, cancellationToken));
+                QueryStoreClosedDayRollup.HoldsEdgeDays(connection, served));
             /* #9283: the window as two arms, each with the floor that holds for its rows (the MCP top read's split, #9276), once the partial
                index the NULL-start arm reads through is built. A served run reads the rollup statements, which keep their own arms. Until the
                index is built the read keeps the one 26 hour floor and the statements it had. */
@@ -1823,7 +1823,7 @@ public sealed partial class ViewerDataService
             rollupsTried = served is not null;
             var source = QueryStoreClosedDayRollup.DescribeSource(
                 plan.ReadStart, endUtc, served, servedReason,
-                await QueryStoreClosedDayRollup.HoldsEdgeDaysAsync(connection, transaction, serverId, served, cancellationToken));
+                QueryStoreClosedDayRollup.HoldsEdgeDays(connection, served));
             await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
