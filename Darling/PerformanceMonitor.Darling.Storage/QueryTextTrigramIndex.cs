@@ -415,6 +415,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// list past its limit and merge it inside their own statement.</summary>
     internal static readonly TimeSpan CleanFirstDelay = TimeSpan.Zero;
 
+    /// <summary>#8570: a clean statement that takes this long or longer is logged at Information, so a slow clean shows in the service log by default.</summary>
+    internal static readonly TimeSpan SlowCleanLogThreshold = TimeSpan.FromSeconds(10);
+
     /// <summary>How long the limit change waits for its lock. <c>ALTER INDEX ... SET (gin_pending_list_limit)</c> takes <c>ACCESS EXCLUSIVE</c> on the
     /// index, so while a long search holds the index it queues, and every insert into the table queues behind it.</summary>
     internal const string LockTimeout = "2s";
@@ -805,7 +808,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
                 return;
             }
 
+            var total = System.Diagnostics.Stopwatch.StartNew();
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            var openSeconds = total.Elapsed.TotalSeconds;
             bool limitSet;
             await using (var read = new NpgsqlCommand(PendingListStateSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
             await using (var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
@@ -824,7 +829,24 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             }
 
             await using var clean = new NpgsqlCommand(CleanPendingListSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
-            await clean.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            var cleanTimer = System.Diagnostics.Stopwatch.StartNew();
+            var result = await clean.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            cleanTimer.Stop();
+            var pages = result is null or DBNull ? 0L : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+
+            /* #8570: the clean's result and timing, so the log says which index a clean worked on and how long it took. */
+            if (cleanTimer.Elapsed >= SlowCleanLogThreshold)
+            {
+                logger.LogInformation(
+                    "Cleaned the pending list of trigram index {Index}: {Pages} pages in {CleanSeconds:F1}s ({TotalSeconds:F1}s from start, {OpenSeconds:F1}s waiting for a connection).",
+                    indexName, pages, cleanTimer.Elapsed.TotalSeconds, total.Elapsed.TotalSeconds, openSeconds);
+            }
+            else
+            {
+                logger.LogDebug(
+                    "Cleaned the pending list of trigram index {Index}: {Pages} pages in {CleanSeconds:F1}s ({TotalSeconds:F1}s from start, {OpenSeconds:F1}s waiting for a connection).",
+                    indexName, pages, cleanTimer.Elapsed.TotalSeconds, total.Elapsed.TotalSeconds, openSeconds);
+            }
         }
         catch (OperationCanceledException)
         {
