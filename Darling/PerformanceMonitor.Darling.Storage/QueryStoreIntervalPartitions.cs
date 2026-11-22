@@ -184,6 +184,8 @@ public static class QueryStoreIntervalPartitions
     /// The wide table's retention horizon in days: the ONE constant behind the partition maintenance (<see cref="Wide"/>), the
     /// purge and the wide read's floor (<c>DarlingRetention.QueryStoreIntervalWideRetentionDays</c>), and the compose rollup's floor
     /// (<see cref="QueryStoreComposeStamp.FloorHour"/>, #5582): a rollup hour must not outlive, or start below, what the table keeps.
+    /// Raising it can build a closed day from a table the purge has already thinned (#9287): a day inside the old thinned zone passes
+    /// <see cref="QueryStoreClosedDayRollup.MayBeThinned"/> under the larger value, but its rows below the old edge are gone.
     /// </summary>
     public const int WideHorizonDays = 10;
 
