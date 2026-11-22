@@ -427,8 +427,11 @@ public partial class ServerTab : UserControl
         /* #9232: the tab's reads are timed from here, once per tab (per Queries sub-tab), and logged when the first one completes. */
         _tabFirstLoad ??= new TabFirstLoad(line => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] {line}"));
         var tabIndex = MainTabControl.SelectedIndex;
-        var loadKey = tabIndex == QueriesTabIndex ? $"tab {tabIndex}/{QueriesSubTabControl.SelectedIndex}" : $"tab {tabIndex}";
-        var loadLabel = (MainTabControl.SelectedItem as TabItem)?.Header as string ?? loadKey;
+        /* No sub-tab picked yet: the load is not a sub-tab's first open, so it is not tracked (#9232). */
+        string? loadKey = tabIndex != QueriesTabIndex ? $"tab {tabIndex}"
+            : QueriesSubTabControl.SelectedIndex < 0 ? null
+            : $"tab {tabIndex}/{QueriesSubTabControl.SelectedIndex}";
+        var loadLabel = (MainTabControl.SelectedItem as TabItem)?.Header as string ?? loadKey ?? "Queries";
         if (tabIndex == QueriesTabIndex && (QueriesSubTabControl.SelectedItem as TabItem)?.Header is string subTabLabel)
             loadLabel = $"{loadLabel} > {subTabLabel}";
 

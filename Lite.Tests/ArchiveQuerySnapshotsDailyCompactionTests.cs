@@ -93,7 +93,7 @@ public sealed class ArchiveQuerySnapshotsDailyCompactionTests : IDisposable
     /* Rows [from, to) over the hour starting at `hour`, one a second, with a payload wide enough that file
        sizes follow row counts. */
     private void MakeParquet(string fileName, long from, long to, string hour = "2026-09-28 14:00:00") =>
-        Exec($"COPY (SELECT i AS id, TIMESTAMP '{hour}' + INTERVAL (i - {from}) SECOND AS collection_time, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' (FORMAT PARQUET, ROW_GROUP_SIZE 100)");
+        Exec($"COPY (SELECT i AS id, 1 AS server_id, TIMESTAMP '{hour}' + INTERVAL (i - {from}) SECOND AS collection_time, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' (FORMAT PARQUET, ROW_GROUP_SIZE 100)");
 
     private long SizeOf(string fileName) => new FileInfo(P(fileName).Replace("/", "\\")).Length;
 
@@ -433,7 +433,7 @@ public sealed class ArchiveQuerySnapshotsDailyCompactionTests : IDisposable
         var spill = P("spill");
         Directory.CreateDirectory(spill);
         ParquetCompaction.MergeBatchToFile("query_snapshots", inputs, P("out_daily.parquet"), spill, threads: ParquetCompaction.ThreadsFor("query_snapshots"));
-        ParquetCompaction.MergeBatchToFile("wait_stats", inputs, P("out_other.parquet"), spill, threads: 1);
+        ParquetCompaction.MergeBatchToFile("other_table", inputs, P("out_other.parquet"), spill, threads: 1);
 
         var daily = RowGroupsOf(P("out_daily.parquet"));
         var other = RowGroupsOf(P("out_other.parquet"));

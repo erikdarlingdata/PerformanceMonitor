@@ -2461,6 +2461,33 @@ internal static partial class DarlingDataReader
         )
         """;
 
+    /// <summary>#9280: the wide row's aggregate columns after the four group keys, shared by the one-statement wide pass and the per-winner seek.</summary>
+    private const string TopProceduresWideAggregates = """
+        MAX(sql_handle) AS sql_handle,
+        MAX(plan_handle) AS plan_handle,
+        CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+        CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+        CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+        CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+        CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+        CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+        CAST(SUM(delta_spills) AS bigint) AS total_spills,
+        MIN(min_worker_time) AS min_worker_time,
+        MAX(max_worker_time) AS max_worker_time,
+        MIN(min_elapsed_time) AS min_elapsed_time,
+        MAX(max_elapsed_time) AS max_elapsed_time,
+        MAX(last_execution_time) AS last_execution_time,
+        MAX(cached_time) AS cached_time,
+        MIN(min_logical_reads) AS min_logical_reads,
+        MAX(max_logical_reads) AS max_logical_reads,
+        MIN(min_physical_reads) AS min_physical_reads,
+        MAX(max_physical_reads) AS max_physical_reads,
+        MIN(min_logical_writes) AS min_logical_writes,
+        MAX(max_logical_writes) AS max_logical_writes,
+        MIN(min_spills) AS min_spills,
+        MAX(max_spills) AS max_spills
+        """;
+
     /// <summary>Pass 2 of <see cref="TopProceduresSql"/> and of <see cref="TopProceduresMidWinnersSql"/>: the wide row for the
     /// winners, from raw. On the mid route <c>win_object_type</c> does not exist, so the caller drops that one match line
     /// (<see cref="MidObjectTypeMatch"/>).</summary>
@@ -2475,29 +2502,7 @@ internal static partial class DarlingDataReader
             schema_name,
             object_name,
             object_type,
-            MAX(sql_handle) AS sql_handle,
-            MAX(plan_handle) AS plan_handle,
-            CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-            CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-            CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-            CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-            CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-            CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-            CAST(SUM(delta_spills) AS bigint) AS total_spills,
-            MIN(min_worker_time) AS min_worker_time,
-            MAX(max_worker_time) AS max_worker_time,
-            MIN(min_elapsed_time) AS min_elapsed_time,
-            MAX(max_elapsed_time) AS max_elapsed_time,
-            MAX(last_execution_time) AS last_execution_time,
-            MAX(cached_time) AS cached_time,
-            MIN(min_logical_reads) AS min_logical_reads,
-            MAX(max_logical_reads) AS max_logical_reads,
-            MIN(min_physical_reads) AS min_physical_reads,
-            MAX(max_physical_reads) AS max_physical_reads,
-            MIN(min_logical_writes) AS min_logical_writes,
-            MAX(max_logical_writes) AS max_logical_writes,
-            MIN(min_spills) AS min_spills,
-            MAX(max_spills) AS max_spills
+            {TopProceduresWideAggregates}
         FROM procedure_stats
         JOIN winners AS w
             ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
@@ -2514,6 +2519,133 @@ internal static partial class DarlingDataReader
         GROUP BY database_name, schema_name, object_name, object_type
         ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
+
+    /// <summary>The seek arm's name match: the expression <see cref="ProcedureStatsNameIndex"/> keys, so each winner's rows are an index range.</summary>
+    internal const string MidSeekNameMatch = "AND " + DurationTrendRouting.ProcedureFullNameSql + " = COALESCE(NULLIF(w.win_schema_name, '') || '.', '') || w.win_object_name";
+
+    /// <summary>
+    /// #9280: <see cref="TopProceduresWideSql"/> for the mid route on a store that has <see cref="ProcedureStatsNameIndex"/>. The
+    /// one-statement wide pass joins the winners to every raw row of the server in the window and keeps the winners' rows, so on the
+    /// uncompressed chunks (a bitmap scan of the heap, which holds every server's rows) its cost follows the server's row count. $9 splits
+    /// the window: rows before it (the compressed chunks, which hold no B-tree) keep today's join; rows from it on (the uncompressed
+    /// chunks, <see cref="SeekBoundary"/>) are read per winner through the index (a LATERAL, so each winner is an index range), and
+    /// a winner with a NULL database or object keeps the NULL-safe join there. The three arms are partial sums of disjoint rows, so the
+    /// outer group adds them up to the one-statement pass's own row: same sums, same extremes, same order.
+    /// </summary>
+    internal const string TopProceduresMidSeekWideSql = $"""
+        /* #9280: the winners' wide rows, the uncompressed part by index seek (see TopProceduresWideSql for the columns). */
+        SELECT
+            database_name,
+            schema_name,
+            object_name,
+            object_type,
+            MAX(sql_handle) AS sql_handle,
+            MAX(plan_handle) AS plan_handle,
+            CAST(SUM(total_executions) AS bigint) AS total_executions,
+            CAST(SUM(total_cpu_us) AS bigint) AS total_cpu_us,
+            CAST(SUM(total_elapsed_us) AS bigint) AS total_elapsed_us,
+            CAST(SUM(total_reads) AS bigint) AS total_reads,
+            CAST(SUM(total_writes) AS bigint) AS total_writes,
+            CAST(SUM(total_physical_reads) AS bigint) AS total_physical_reads,
+            CAST(SUM(total_spills) AS bigint) AS total_spills,
+            MIN(min_worker_time) AS min_worker_time,
+            MAX(max_worker_time) AS max_worker_time,
+            MIN(min_elapsed_time) AS min_elapsed_time,
+            MAX(max_elapsed_time) AS max_elapsed_time,
+            MAX(last_execution_time) AS last_execution_time,
+            MAX(cached_time) AS cached_time,
+            MIN(min_logical_reads) AS min_logical_reads,
+            MAX(max_logical_reads) AS max_logical_reads,
+            MIN(min_physical_reads) AS min_physical_reads,
+            MAX(max_physical_reads) AS max_physical_reads,
+            MIN(min_logical_writes) AS min_logical_writes,
+            MAX(max_logical_writes) AS max_logical_writes,
+            MIN(min_spills) AS min_spills,
+            MAX(max_spills) AS max_spills
+        FROM (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                {TopProceduresWideAggregates},
+                MAX(w.rank_metric) AS seek_rank_metric,
+                MAX(w.rank_cpu) AS seek_rank_cpu
+            FROM procedure_stats
+            JOIN winners AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+            WHERE server_id = $1
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time < $9
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+            UNION ALL
+            SELECT s.*, w.rank_metric AS seek_rank_metric, w.rank_cpu AS seek_rank_cpu
+            FROM winners AS w
+            CROSS JOIN LATERAL (
+                SELECT
+                    database_name,
+                    schema_name,
+                    object_name,
+                    object_type,
+                    {TopProceduresWideAggregates}
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   database_name = w.win_database_name
+                {MidSeekNameMatch}
+                AND   schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND   object_name = w.win_object_name
+                AND   collection_time > $2
+                AND   collection_time <= $3
+                AND   collection_time >= $9
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+                AND   {TimescaleSupport.IntervalHonestSourceFilter}
+                GROUP BY database_name, schema_name, object_name, object_type
+            ) AS s
+            WHERE w.win_database_name IS NOT NULL
+            AND   w.win_object_name IS NOT NULL
+            UNION ALL
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                object_type,
+                {TopProceduresWideAggregates},
+                MAX(w.rank_metric) AS seek_rank_metric,
+                MAX(w.rank_cpu) AS seek_rank_cpu
+            FROM procedure_stats
+            JOIN (SELECT * FROM winners WHERE win_database_name IS NULL OR win_object_name IS NULL) AS w
+                ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+                AND object_name IS NOT DISTINCT FROM w.win_object_name
+            WHERE server_id = $1
+            AND   collection_time > $2
+            AND   collection_time <= $3
+            AND   collection_time >= $9
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+        ) AS u
+        GROUP BY database_name, schema_name, object_name, object_type
+        ORDER BY MAX(seek_rank_metric) DESC NULLS LAST, MAX(seek_rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
+        """;
+
+    /// <summary>
+    /// #9280: the time from which the rows of <c>procedure_stats</c> are surely in uncompressed chunks: the compression policy's own
+    /// delay (<see cref="TimescaleSupport.CompressAfterFor"/>) before <paramref name="nowUtc"/>. A chunk is compressed only once its whole
+    /// range is older than that, so every row at or after the boundary has a B-tree to seek; a row before it may be in either kind.
+    /// </summary>
+    internal static DateTime SeekBoundary(DateTime nowUtc) =>
+        DateTime.SpecifyKind(nowUtc.AddDays(-TimescaleSupport.CompressAfterDays).AddHours(-TimescaleSupport.HeavyOffsetHoursFor("procedure_stats")), DateTimeKind.Unspecified);
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
     /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
@@ -2683,8 +2815,9 @@ internal static partial class DarlingDataReader
         var mid = tier == RetentionTier.Raw ? PlanProceduresHourlyMid(rollups, coverage, ranking, startUtc, endUtc) : null;
         if (mid is not null && await ProceduresMidHasNoHoleAsync(postgres, mid, cancellationToken))
         {
-            var midSql = QueryTagReadJoin.Apply(BuildProceduresMidSql(ranking, mid), serverId, tags);
-            var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken);
+            var (chosenSql, seekFrom) = await ChooseProceduresMidSqlAsync(postgres, ranking, mid, DateTime.UtcNow, cancellationToken);
+            var midSql = QueryTagReadJoin.Apply(chosenSql, serverId, tags);
+            var midRows = await ReadTopProcedureRowsAsync(postgres, midSql, serverId, startUtc, endUtc, top, databases, mid, clock, cancellationToken, seekFrom);
             if (midRows.Select(r => (r.DatabaseName, r.SchemaName, r.ObjectName)).Distinct().Count() == midRows.Count)
             {
                 return new TopProceduresReadResult(midRows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice) { ServedByHourlyMid = true };
@@ -2702,9 +2835,19 @@ internal static partial class DarlingDataReader
 
     /// <summary>#9147: the mid route's statement: <see cref="TopProceduresMidWinnersSql"/> over the mid's relation, then the raw
     /// wide pass matched on (database, schema, object), the key the rollup ranks. The query tag token is still in it.</summary>
-    internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid) =>
+    internal static string BuildProceduresMidSql(TopRanking ranking, HourlyMid mid, bool seek = false) =>
         TopRankings.Apply(TopProceduresMidWinnersSql, ranking, hourly: true).Replace(HourlyMidRelationPlaceholder, mid.Relation, StringComparison.Ordinal)
-        + "\n" + TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal);
+        + "\n" + (seek ? TopProceduresMidSeekWideSql : TopProceduresWideSql.Replace(MidObjectTypeMatch, "", StringComparison.Ordinal));
+
+    /// <summary>#9280: the mid route's statement for this store, and the boundary it binds at $9 (null for today's statement, which has no $9): the per-winner
+    /// seek when <see cref="ProcedureStatsNameIndex"/> is present and valid, today's one-statement wide pass when it is not (a store whose
+    /// start has not built it yet, or a probe that failed).</summary>
+    internal static async Task<(string Sql, DateTime? SeekFrom)> ChooseProceduresMidSqlAsync(
+        NpgsqlDataSource postgres, TopRanking ranking, HourlyMid mid, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var seek = await ProcedureStatsNameIndex.IsPresentAsync(postgres, cancellationToken);
+        return (BuildProceduresMidSql(ranking, mid, seek), seek ? SeekBoundary(nowUtc) : null);
+    }
 
     /// <summary>#9147: the whole hours <c>[MidStart, MidEnd)</c> a raw top-procedures read takes from <c>Relation</c>.</summary>
     internal sealed record HourlyMid(string Relation, string View, DateTime MidStart, DateTime MidEnd);
@@ -2759,10 +2902,10 @@ internal static partial class DarlingDataReader
     }
 
     /// <summary>Runs a top-procedures statement (<see cref="TopProceduresSql"/>, or the mid route's) and reads its rows. The mid's
-    /// two hours bind at $7 and $8.</summary>
+    /// two hours bind at $7 and $8, and the seek statement's boundary (#9280) at $9.</summary>
     private static async Task<List<TopProcedureRow>> ReadTopProcedureRowsAsync(
         NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
-        HourlyMid? mid, ServerClock clock, CancellationToken cancellationToken)
+        HourlyMid? mid, ServerClock clock, CancellationToken cancellationToken, DateTime? seekFrom = null)
     {
         var rows = new List<TopProcedureRow>();
         await using var command = postgres.CreateCommand(sql);
@@ -2775,6 +2918,11 @@ internal static partial class DarlingDataReader
         {
             AddTimestamp(command, mid.MidStart);
             AddTimestamp(command, mid.MidEnd);
+        }
+
+        if (seekFrom is not null)
+        {
+            AddTimestamp(command, seekFrom.Value);
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -3117,6 +3265,34 @@ internal static partial class DarlingDataReader
         ),
         """;
 
+    /// <summary>The select list both arms of <see cref="QueryStoreTopTableSplitPrefix"/> project: every column, and the literal <c>rn</c> of <see cref="QueryStoreTopTablePrefix"/>.</summary>
+    private const string QueryStoreTopTableSplitSelect = "*, 1 AS rn";
+
+    /// <summary>The predicates both arms repeat: the database list ($5) and the execution outcome ($6).</summary>
+    private const string QueryStoreTopTableSplitTrailing =
+        "            AND   ($5::text[] IS NULL OR database_name = ANY($5))\n"
+        + "            AND   ($6::text IS NULL OR execution_type_desc = $6)";
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTablePrefix"/> with the window as two arms (#9276), for a store whose
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built: rows with an interval start take the one hour
+    /// <c>first_execution_time</c> floor, rows without one keep the <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> floor
+    /// and read through the partial index (<see cref="QueryStoreIntervalWide.IntervalStartSplitSql"/>). One floor for both was the
+    /// 26 hours, because a row placed by <c>collection_time</c> needs it, and half the heap pages a first call read were rows the
+    /// window dropped. The same rows, columns and parameters as <see cref="QueryStoreTopTablePrefix"/>.
+    /// </summary>
+    private static readonly string QueryStoreTopTableSplitPrefix = $$"""
+        WITH deduped AS (
+        {{QueryStoreIntervalWide.IntervalStartSplitSql(QueryStoreTopTableSplitSelect, QueryStoreTopTableSplitTrailing)}}
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTableSql"/> over <see cref="QueryStoreTopTableSplitPrefix"/>, chosen per call when
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built (#9276); same parameters, rows and order.
+    /// </summary>
+    public static readonly string QueryStoreTopTableSplitSql = QueryStoreTopTableSplitPrefix + QueryStoreTopSuffix;
+
     /// <summary>
     /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reads
     /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
@@ -3302,7 +3478,7 @@ internal static partial class DarlingDataReader
     /// <see cref="QueryStoreWindowProbeDailyRowsSql"/>. Indented as <see cref="QueryStoreTopRawWindowSql"/> is.
     /// $1 server_id, $2 the gate's <c>ReadStart</c>, $5 databases, $8 <c>S</c>. A static readonly declared above its users.
     /// </summary>
-    private static readonly string QueryStoreTopDailyLeadingEdgeSql = $$"""
+    internal static readonly string QueryStoreTopDailyLeadingEdgeSql = $$"""
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -3316,7 +3492,7 @@ internal static partial class DarlingDataReader
     /// <see cref="QueryStoreTopDailyTableSql"/>'s trailing edge, <c>[E, $3)</c> of the wide table, as
     /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading one. $3 window end, $9 <c>E</c>.
     /// </summary>
-    private static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
+    internal static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $9::date
@@ -3732,9 +3908,23 @@ internal static partial class DarlingDataReader
 
             /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. With no built day
                the interval-table statement reads the whole window. */
-            var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
+            var (dailySpan, validHours) = await ReadQueryStoreTopDailyBuiltAsync(connection, transaction, serverId, plan.ReadStart, endUtc, withHours: true, cancellationToken);
 
-            var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
+            /* #9280: the whole hours of the two edges that the ledger says the hourly table holds exactly are read from it, the rest from the
+               wide table. No valid hour leaves the daily statement as it is. */
+            var hourly = dailySpan is var (hourlyStart, hourlyEnd)
+                ? QueryStoreTopHourlyEdges.Segment(plan.ReadStart, endUtc, hourlyStart, hourlyEnd, validHours)
+                : null;
+            if (hourly is { UsesSummary: false })
+            {
+                hourly = null;
+            }
+
+            /* #9276: the window as two arms, each with the floor that holds for its rows, once the partial index for the NULL-start
+               arm is built. The daily read is placed by collection_time and keeps its statement. */
+            var splitBuilt = dailySpan is null && await QueryStoreBackgroundIndexes.IsBuiltAsync(
+                connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var topSql = hourly is not null ? QueryStoreTopHourlyEdges.BuildSql(hourly) : dailySpan is not null ? QueryStoreTopDailyTableSql : splitBuilt ? QueryStoreTopTableSplitSql : QueryStoreTopTableSql;
 
             /* #5882: the first_execution_time floor of both reads reaches PurgeEdgeMargin (26 hours) before the window,
                because an interval may span a day. When the server's own intervals are shorter, the floor shrinks to what
@@ -3775,6 +3965,15 @@ internal static partial class DarlingDataReader
                 }
 
                 AddInt(command, TopFill.FinalCandidates(top));
+                if (hourly is not null)
+                {
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = QueryStoreTopHourlyEdges.HourValues(hourly) });
+                    foreach (var bound in QueryStoreTopHourlyEdges.RangeValues(hourly))
+                    {
+                        AddTimestamp(command, bound);
+                    }
+                }
+
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
@@ -3793,28 +3992,80 @@ internal static partial class DarlingDataReader
     /// days is built. The top read and <see cref="QueryStoreWindowHasRowsAsync"/> both take their daily span from here, so
     /// they choose the same tier.</summary>
     private static async Task<(DateOnly Start, DateOnly EndExclusive)?> ReadQueryStoreTopDailySpanAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, CancellationToken cancellationToken)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, CancellationToken cancellationToken) =>
+        (await ReadQueryStoreTopDailyBuiltAsync(connection, transaction, serverId, readStart, endUtc, withHours: false, cancellationToken)).Span;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopBuiltDaysSql"/> and, in the same statement and round trip, the whole hours of <c>[ceil(readStart), floor(endUtc))</c>
+    /// the hourly table holds exactly (#9280): an hour the builder has done whose pair for server $1 has a <c>top_built_seq</c> level with its
+    /// <c>late_seq</c>. A pair that does not exist is valid with no rows, as in <see cref="QueryTagRollupHashRoute"/>: any later write
+    /// would have created it, stale. At most the retained hours, a few hundred small rows. Read in the caller's snapshot, so a late write
+    /// committed before it has its <c>late_seq</c> bump committed with it and that hour reads raw.
+    /// </summary>
+    private const string QueryStoreTopBuiltDaysAndHoursSql = """
+        SELECT 0 AS kind, w.day::timestamp AS t
+        FROM (
+        """ + QueryStoreTopBuiltDaysSql + """
+
+        ) AS w
+        UNION ALL
+        SELECT 1 AS kind, h.hour AS t
+        FROM collect.query_store_compose_stamp_hours AS h
+        WHERE h.hour >= $4::timestamp
+        AND   h.hour < $5::timestamp
+        AND   NOT EXISTS
+              (
+                  SELECT 1
+                  FROM collect.query_store_compose_stamp_built AS b
+                  WHERE b.server_id = $1
+                  AND   b.hour = h.hour
+                  AND   b.top_built_seq IS DISTINCT FROM b.late_seq
+              )
+        ORDER BY 1, 2
+        """;
+
+    private static async Task<((DateOnly Start, DateOnly EndExclusive)? Span, List<DateTime> ValidHours)> ReadQueryStoreTopDailyBuiltAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, bool withHours, CancellationToken cancellationToken)
     {
+        var validHours = new List<DateTime>();
         var (firstDay, endDay) = WholeDays(readStart, endUtc);
         if (firstDay >= endDay)
         {
-            return null;
+            return (null, validHours);
         }
 
         var builtDays = new List<DateOnly>();
-        await using (var built = new NpgsqlCommand(QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        var builtSql = withHours ? QueryStoreTopBuiltDaysAndHoursSql : QueryStoreTopBuiltDaysSql;
+        await using (var built = new NpgsqlCommand(builtSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
         {
             AddInt(built, serverId);
             built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
             built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
+            if (withHours)
+            {
+                AddTimestamp(built, QueryStoreTopHourlyEdges.CeilHour(readStart));
+                AddTimestamp(built, QueryStoreTopHourlyEdges.FloorHour(endUtc));
+            }
+
             await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
             while (await builtReader.ReadAsync(cancellationToken))
             {
-                builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+                if (!withHours)
+                {
+                    builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+                }
+                else if (builtReader.GetInt32(0) == 0)
+                {
+                    builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(1)));
+                }
+                else
+                {
+                    validHours.Add(builtReader.GetDateTime(1));
+                }
             }
         }
 
-        return LongestBuiltRun(builtDays);
+        return (LongestBuiltRun(builtDays), validHours);
     }
 
     /// <summary>How many of the window's rows <see cref="QueryStoreWindowProbeSql"/> tests one by one before it tests the

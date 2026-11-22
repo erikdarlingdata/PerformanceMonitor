@@ -56,6 +56,39 @@ public sealed class PlanInputOutcomeCacheTests
     }
 
     [Fact]
+    public void AnUncomparablePair_IsAnsweredUnverifiedForTheLifetime_AndExpires()
+    {
+        var time = new ManualTime();
+        var cache = new PlanInputOutcomeCache(time);
+        cache.StoreUncomparable(Pair(2));
+
+        Assert.Equal(1, cache.Count);
+        Assert.True(cache.TryGet(Pair(2), out var held));
+        Assert.Equal(PlanInputOutcome.KeepUnverified, held);
+        Assert.False(cache.TryGet(Pair(3), out _));
+
+        time.Advance(PlanInputOutcomeCache.Lifetime - TimeSpan.FromMinutes(1));
+        Assert.True(cache.TryGet(Pair(2), out _));
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        Assert.False(cache.TryGet(Pair(2), out _));
+        Assert.Equal(0, cache.Count);
+    }
+
+    [Fact]
+    public void UncomparablePairs_ShareTheCapWithTheOutcomes_AndTheOldestIsEvicted()
+    {
+        var cache = new PlanInputOutcomeCache();
+        cache.Store(Pair(100), PlanInputOutcome.DropValuesOnly);
+        for (var plan = 1; plan <= PlanInputOutcomeCache.MaxEntries; plan++)
+            cache.StoreUncomparable(Pair(100 + plan));
+
+        Assert.Equal(PlanInputOutcomeCache.MaxEntries, cache.Count);
+        Assert.False(cache.TryGet(Pair(100), out _));
+        Assert.True(cache.TryGet(Pair(100 + PlanInputOutcomeCache.MaxEntries), out _));
+    }
+
+    [Fact]
     public void PastTheCap_TheOldestEntryIsEvicted_AndTheRestStay()
     {
         var cache = new PlanInputOutcomeCache();
@@ -97,5 +130,88 @@ public sealed class PlanInputOutcomeCacheTests
         time.Advance(TimeSpan.FromMinutes(2));
         Assert.False(cache.TryGet(Pair(2), out _));
         Assert.Equal(0, cache.Count);
+    }
+
+    private static PlanInputOutcomeCache.PlanKey Plan(long id, int serverId = 7, string database = "Db") => new(serverId, database, id);
+
+    [Fact]
+    public void ASkippedPlan_IsSkippedOnlyForTheSameServerDatabaseAndPlanId_AndIsNotAnOutcome()
+    {
+        var cache = new PlanInputOutcomeCache();
+        cache.Skip(Plan(2));
+
+        Assert.True(cache.IsSkipped(Plan(2)));
+        Assert.False(cache.IsSkipped(Plan(2, serverId: 8)));
+        Assert.False(cache.IsSkipped(Plan(2, database: "Other")));
+        Assert.False(cache.IsSkipped(Plan(3)));
+        Assert.False(cache.IsSkipped(Pair(2)));
+        Assert.False(cache.TryGet(Pair(2), out _));
+        Assert.Equal(0, cache.Count);
+    }
+
+    [Fact]
+    public void ASkippedPair_IsSkippedOnlyForTheSameServerDatabaseAndBothPlanIds()
+    {
+        var cache = new PlanInputOutcomeCache();
+        cache.Skip(Pair(2));
+
+        Assert.True(cache.IsSkipped(Pair(2)));
+        Assert.False(cache.IsSkipped(Pair(2, serverId: 8)));
+        Assert.False(cache.IsSkipped(Pair(2, database: "Other")));
+        Assert.False(cache.IsSkipped(Pair(3)));
+        Assert.False(cache.IsSkipped(Pair(2, best: 4)));
+        Assert.False(cache.IsSkipped(Plan(2)));
+    }
+
+    [Fact]
+    public void ASkipEntry_ExpiresAfterTheSkipLifetime_NotTheOutcomeLifetime()
+    {
+        var time = new ManualTime();
+        var cache = new PlanInputOutcomeCache(time);
+        cache.Skip(Plan(2));
+        cache.Skip(Pair(2));
+
+        time.Advance(PlanInputOutcomeCache.SkipLifetime - TimeSpan.FromMinutes(1));
+        Assert.True(cache.IsSkipped(Plan(2)));
+        Assert.True(cache.IsSkipped(Pair(2)));
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        Assert.False(cache.IsSkipped(Plan(2)));
+        Assert.False(cache.IsSkipped(Pair(2)));
+        Assert.Equal(0, cache.SkipCount);
+    }
+
+    [Fact]
+    public void PastTheCap_TheOldestSkipEntryOfEachKindIsEvicted_AndTheRestStay()
+    {
+        var cache = new PlanInputOutcomeCache();
+        for (var plan = 0; plan <= PlanInputOutcomeCache.MaxSkipEntries; plan++)
+        {
+            cache.Skip(Plan(100 + plan));
+            cache.Skip(Pair(100 + plan));
+        }
+
+        Assert.Equal(2 * PlanInputOutcomeCache.MaxSkipEntries, cache.SkipCount);
+        Assert.False(cache.IsSkipped(Plan(100)));
+        Assert.False(cache.IsSkipped(Pair(100)));
+        Assert.True(cache.IsSkipped(Plan(101)));
+        Assert.True(cache.IsSkipped(Pair(101)));
+        Assert.True(cache.IsSkipped(Plan(100 + PlanInputOutcomeCache.MaxSkipEntries)));
+        Assert.True(cache.IsSkipped(Pair(100 + PlanInputOutcomeCache.MaxSkipEntries)));
+    }
+
+    [Fact]
+    public void ASkipThatIsRepeated_MakesItTheNewest_NotAnExtraEntry()
+    {
+        var cache = new PlanInputOutcomeCache();
+        for (var plan = 0; plan < PlanInputOutcomeCache.MaxSkipEntries; plan++)
+            cache.Skip(Plan(100 + plan));
+
+        cache.Skip(Plan(100));
+        cache.Skip(Plan(5000));
+
+        Assert.Equal(PlanInputOutcomeCache.MaxSkipEntries, cache.SkipCount);
+        Assert.True(cache.IsSkipped(Plan(100)));
+        Assert.False(cache.IsSkipped(Plan(101)));
     }
 }

@@ -36,8 +36,13 @@ using PerformanceMonitorLite.Services;
  *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
  *                          ParquetCompaction.RowGroupBytesFor (#5393: the daily table's byte bound)
  *   (--threads defaults to ParquetCompaction.ThreadsFor(--table) when not given.)
- *   --max-batch-mb <int>   Per-batch on-disk input budget (MB). Default: 200
+ *   --max-batch-mb <int>   Per-batch on-disk input budget (MB). Default: the table's ParquetCompaction.BatchInputBytesFor
  *   --table <name>         Table name (drives exclude-column logic). Default: query_snapshots
+ *
+ * Seeded month (#9258): --seed-files N writes N hourly files of a numeric/text shape (instead of --source-file etc.)
+ *   --seed-rows R (150000) --seed-servers S (5) --seed-numeric-cols C (50) --seed-text-cols T (10)
+ *   --seed-text-bytes B (24) --seed-time-column <name> (collection_time). The report adds the row groups that mix
+ *   servers, and a sorted merge that falls back to the unsorted order prints one [sort fallback] line.
  *
  * Other options:
  *   --profile-only         Print the source data profile and exit (no merge).
@@ -80,7 +85,7 @@ var syntheticRows = int.Parse(GetArg(args, "--synthetic-rows", "30000"));
 var syntheticBaseOps = int.Parse(GetArg(args, "--synthetic-base-ops", "130"));
 var syntheticTailOps = int.Parse(GetArg(args, "--synthetic-tail-ops", "75000"));
 var syntheticTailEvery = int.Parse(GetArg(args, "--synthetic-tail-every", "500"));
-if (string.IsNullOrEmpty(sourceFile) && string.IsNullOrEmpty(mergeFilesArg) && !synthetic)
+if (string.IsNullOrEmpty(sourceFile) && string.IsNullOrEmpty(mergeFilesArg) && !synthetic && !args.Contains("--seed-files"))
 {
     Console.Error.WriteLine("error: --source-file <path> OR --merge-files <a.parquet,...> OR --synthetic required");
     Console.Error.WriteLine("  --source-file:  split the given monthly parquet into chunks, then compact (full repro)");
@@ -105,9 +110,17 @@ var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;
 var copies = int.Parse(GetArg(args, "--copies", "1"));
 var repeatPlans = int.Parse(GetArg(args, "--repeat-plans", "1"));
 var repeatColumns = GetArg(args, "--repeat-columns", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-var maxBatchMb = int.Parse(GetArg(args, "--max-batch-mb", (ParquetCompaction.DefaultBatchInputBytes / (1024 * 1024)).ToString()));
+var maxBatchMb = int.Parse(GetArg(args, "--max-batch-mb", (ParquetCompaction.BatchInputBytesFor(table) / (1024 * 1024)).ToString()));
 var maxBatchBytes = maxBatchMb * 1024L * 1024L;
 var numFiles = int.Parse(GetArg(args, "--num-files", "15"));
+/* A seeded month (#9258): N hourly files of a numeric/text shape the table's merge can sort, instead of a real store's files. */
+var seedFiles = int.Parse(GetArg(args, "--seed-files", "0"));
+var seedRows = int.Parse(GetArg(args, "--seed-rows", "150000"));
+var seedServers = int.Parse(GetArg(args, "--seed-servers", "5"));
+var seedNumericCols = int.Parse(GetArg(args, "--seed-numeric-cols", "50"));
+var seedTextCols = int.Parse(GetArg(args, "--seed-text-cols", "10"));
+var seedTextBytes = int.Parse(GetArg(args, "--seed-text-bytes", "24"));
+var seedTimeColumn = GetArg(args, "--seed-time-column", "collection_time");
 var keep = args.Contains("--keep");
 var profileOnly = args.Contains("--profile-only");
 var sweep = args.Contains("--sweep");
@@ -128,6 +141,11 @@ foreach (var mf in mergeFiles)
         Console.Error.WriteLine($"error: --merge-files entry not found: {mf}");
         return 2;
     }
+}
+
+if (seedFiles > 0)
+{
+    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn);
 }
 
 if (synthetic)
@@ -291,7 +309,10 @@ try
                 if (File.Exists(outPath)) File.Delete(outPath);
 
                 var bsw = Stopwatch.StartNew();
-                ParquetCompaction.MergeBatchToFile(table, batches[i], outPath, spillDir, memLimit, thr, rgs, rowGroupBytes);
+                ParquetCompaction.MergeBatchToFile(table, batches[i], outPath, spillDir, memLimit, thr, rgs, rowGroupBytes,
+                    onSortFallback: (fallbackTable, files, error) => Console.WriteLine(
+                        $"        [sort fallback] {fallbackTable}: the server-ordered merge of {files} file(s) ran out of memory or temp space, " +
+                        $"so this batch fell back to the unsorted order: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"));
                 bsw.Stop();
 
                 process.Refresh();
@@ -385,6 +406,7 @@ try
         var outBytes = single.Outputs.Sum(p => new FileInfo(p).Length);
         Console.WriteLine($"      Output:           {single.Outputs.Count} part file(s), {outBytes / 1024.0 / 1024.0:F1} MB total");
         Console.WriteLine($"      Output row groups: {CountRowGroups(single.Outputs)}  (input row groups: {CountRowGroups(sourcePaths)})");
+        Console.WriteLine($"      Row groups mixing servers: {MixedServerRowGroups(single.Outputs)}  (input: {MixedServerRowGroups(sourcePaths)})");
 
         /* Row-count round-trip: total output rows must equal total source rows. */
         var srcSqlList = string.Join(", ", sourcePaths.Select(p => $"'{p.Replace("'", "''").Replace("\\", "/")}'"));
@@ -501,6 +523,56 @@ static List<string> PrepareInputs(List<string> inputs, string outDir, int copies
         }
     }
     return result;
+}
+
+/* "mixed of total" row groups whose server_id min and max differ (the sort's goal is one server per group), or
+   "n/a" when the files carry no server_id. */
+static string MixedServerRowGroups(List<string> paths)
+{
+    try
+    {
+        using var con = new DuckDBConnection("DataSource=:memory:");
+        con.Open();
+        var list = string.Join(", ", paths.Select(p => $"'{p.Replace("'", "''").Replace("\\", "/")}'"));
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "SELECT count(*), count(*) FILTER (WHERE stats_min_value <> stats_max_value) " +
+                          $"FROM parquet_metadata([{list}]) WHERE path_in_schema = 'server_id'";
+        using var reader = cmd.ExecuteReader();
+        reader.Read();
+        return $"{reader.GetInt64(1)} of {reader.GetInt64(0)}";
+    }
+    catch (Exception)
+    {
+        return "n/a";
+    }
+}
+
+/* N hourly files the way the archiver writes them (archive COPY options, rows in time order, servers interleaved):
+   time column, server_id, server_name, numeric counters that grow slowly (so they compress like real counters), and
+   text columns drawn from a few thousand distinct values. Returns the file paths. */
+static List<string> GenerateSeededMonth(string dir, int files, int rows, int servers, int numericCols, int textCols,
+    int textBytes, string timeColumn)
+{
+    var numeric = string.Concat(Enumerable.Range(1, numericCols).Select(k =>
+        $", (((h * {rows} + i) // 50) * {k} + (hash(i, {k}) % 97))::BIGINT AS c{k}"));
+    var text = string.Concat(Enumerable.Range(1, textCols).Select(k =>
+        $", substr(repeat(md5((((h * {rows} + i) % 5000) + {k})::VARCHAR), {textBytes / 32 + 1}), 1, {textBytes}) AS t{k}"));
+    var paths = new List<string>();
+    using var con = new DuckDBConnection("DataSource=:memory:");
+    con.Open();
+    for (var h = 0; h < files; h++)
+    {
+        var path = Path.Combine(dir, $"seed_{h:D3}.parquet").Replace("\\", "/");
+        using var cmd = con.CreateCommand();
+        cmd.CommandText =
+            $"COPY (SELECT TIMESTAMP '2026-10-01 00:00:00' + to_seconds(({h} * 3600 + i * 3600 // {rows})::BIGINT) AS {timeColumn}, " +
+            $"(1 + i % {servers})::INTEGER AS server_id, 'server' || (1 + i % {servers})::VARCHAR AS server_name{numeric}{text} " +
+            $"FROM (SELECT {h} AS h, i FROM range({rows}) t(i))) TO '{path}' ({ParquetCompaction.ArchiveCopyOptions})";
+        cmd.ExecuteNonQuery();
+        paths.Add(path);
+    }
+
+    return paths;
 }
 
 static long CountRowGroups(List<string> paths)

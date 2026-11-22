@@ -904,6 +904,53 @@ SELECT EXISTS
     /// The Viewer's grid and the MCP top and aborts reads place their window with it, so a window's rows are the intervals its bars draw.</summary>
     public const string IntervalStartExpressionSql = "COALESCE(interval_start_time_utc, collection_time)";
 
+    /// <summary>
+    /// The interval-start-placed window of a per-server read of this table as two arms, <c>UNION ALL</c>, each with the
+    /// <c>first_execution_time</c> floor that holds for its rows (#9276). <paramref name="selectList"/> is projected from both arms
+    /// and <paramref name="trailingPredicates"/> (each line starting with <c>AND</c>) is repeated in both. $1 server_id, $2/$3 the
+    /// window (naive UTC, half-open), as the single-arm window of the top read binds them.
+    /// <list type="bullet">
+    /// <item>Rows WITH <c>interval_start_time_utc</c> are placed by it, and <c>first_execution_time</c> is an end time inside the
+    /// interval (<see cref="IntervalStartSlack"/> explains it), so the floor is the window's start less that hour, not
+    /// <see cref="PurgeEdgeMargin"/> (26 hours).</item>
+    /// <item>Rows WITHOUT it are placed by <c>collection_time</c> and keep <see cref="PurgeEdgeMarginSql"/>, which
+    /// <see cref="WithEdgeMargin"/> still narrows. Only this arm carries that text. The partial index
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> holds exactly these rows, so the arm is one short range.</item>
+    /// </list>
+    /// Every row of the one-arm window is in exactly one arm, so the rows are the same. The caller uses this statement only when
+    /// that index is built (<see cref="QueryStoreBackgroundIndexes.IsBuiltAsync"/>); without it the two arms would each walk the
+    /// server's rows. <paramref name="openEnd"/> (#9283) lets $3 be NULL, an open end that reads to now, as the Viewer grid's window
+    /// can; the end bounds of both arms are then dropped for that call.
+    /// </summary>
+    public static string IntervalStartSplitSql(string selectList, string trailingPredicates, string indent = "            ", bool openEnd = false)
+    {
+        /* #9283: the Viewer grid's window can have no end ($3 NULL, a preset that reads to now). Each end bound is then true, as the one-arm
+           statement's are, and the start bounds and floors stay. */
+        string EndBound(string predicate) => openEnd ? $"($3::timestamp IS NULL OR {predicate})" : predicate;
+
+        return $@"{indent}SELECT
+{indent}    {selectList}
+{indent}FROM query_store_interval_wide
+{indent}WHERE server_id = $1
+{indent}AND   interval_start_time_utc IS NOT NULL
+{indent}AND   interval_start_time_utc >= $2
+{indent}AND   {EndBound("interval_start_time_utc < $3")}
+{indent}AND   first_execution_time >= $2 - {IntervalStartSlackSql}
+{indent}AND   {EndBound($"first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}")}
+{trailingPredicates}
+{indent}UNION ALL
+{indent}SELECT
+{indent}    {selectList}
+{indent}FROM query_store_interval_wide
+{indent}WHERE server_id = $1
+{indent}AND   interval_start_time_utc IS NULL
+{indent}AND   collection_time >= $2
+{indent}AND   {EndBound("collection_time < $3")}
+{indent}AND   first_execution_time >= $2 - {PurgeEdgeMarginSql}
+{indent}AND   {EndBound($"first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}")}
+{trailingPredicates}";
+    }
+
     /// <summary>The <c>collection_time</c> floor beside an interval-start-placed window on the raw Query Store reads (#7776, #7814): an
     /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
     public const string CollectionFloorSlackSql = "interval '1 hour'";
@@ -1114,13 +1161,16 @@ FROM (
     /// truncated.</param>
     /// <param name="DecisionFailed">True only when the source decision itself faulted and the plan is the
     /// raw fallback; a legitimate "the gate says raw" leaves it false, so a caller can tell the two apart.</param>
+    /// <param name="Source">#9287: the Viewer's Query Store reads set it to the UTC days they took from the closed-day rollups and the
+    /// days they read from the interval table, with the reason when no rollup day was taken. Null elsewhere.</param>
     public readonly record struct WideReadPlan(
         bool UseTable,
         DateTime ClampedStart,
         DateTime ReadStart,
         DateTime? BelowFloorStart,
         WideStartBound StartBound = WideStartBound.Window,
-        bool DecisionFailed = false)
+        bool DecisionFailed = false,
+        QueryStoreClosedDayRollup.ReadSource? Source = null)
     {
         /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -149,7 +150,7 @@ public sealed class DarlingStoreTableHealthCacheTests
     }
 
     [Fact]
-    public async Task AReadIsHeldUntilTheLifetimeHasPassed_AndTheNextOneGoesToTheStore()
+    public async Task AReadIsHeldUntilTheLifetimeHasPassed_AndTheNextCallGetsItAtOnceWhileANewOneRunsBehind()
     {
         var store = new CountedStore();
         await using var source = NeverOpened();
@@ -161,12 +162,20 @@ public sealed class DarlingStoreTableHealthCacheTests
         Assert.Same(first.Rows, inside.Rows);
         Assert.Equal(299, inside.AgeSeconds(store.Cache.UtcNow()));
 
+        /* #9224: past the lifetime the call gets the held read with its own time, and a new read runs behind it. */
         store.Now = Start + DarlingStoreTableHealthCache.Lifetime;
         var after = await store.Cache.GetTablesAsync(source);
+        Assert.Same(first.Rows, after.Rows);
+        Assert.Equal(Start, after.ReadAtUtc);
+        Assert.Equal(300, after.AgeSeconds(store.Cache.UtcNow()));
+
+        await store.Cache.WhenIdleAsync();
         Assert.Equal(2, store.Reads.Tables);
-        Assert.NotSame(first.Rows, after.Rows);
-        Assert.Equal(store.Now, after.ReadAtUtc);
-        Assert.Equal(0, after.AgeSeconds(store.Cache.UtcNow()));
+        var next = await store.Cache.GetTablesAsync(source);
+        Assert.Equal(2, store.Reads.Tables);
+        Assert.NotSame(first.Rows, next.Rows);
+        Assert.Equal(store.Now, next.ReadAtUtc);
+        Assert.Equal(0, next.AgeSeconds(store.Cache.UtcNow()));
     }
 
     [Fact]
@@ -428,8 +437,14 @@ public sealed class DarlingStoreTableHealthCacheTests
         Assert.Equal(300, held.RootElement.GetProperty("held_for_seconds").GetInt32());
         Assert.Equal(DarlingMcpStoreTableHealthTools.AsOfNote, held.RootElement.GetProperty("as_of_note").GetString());
 
-        /* Past the lifetime the reply is a new store read and says so: a new as-of time and no age. */
+        /* #9224: past the lifetime the reply is the held read, with its own time and its age, and a new read runs behind it. The reply after
+           that carries the new read's time and no age. */
         store.Now = Start.AddSeconds(301);
+        using var stale = await Tool(store, source);
+        Assert.Equal(Start, stale.RootElement.GetProperty("tables_as_of").GetDateTime().ToUniversalTime());
+        Assert.Equal(301, stale.RootElement.GetProperty("tables_age_seconds").GetInt64());
+        await store.Cache.WhenIdleAsync();
+        Assert.Equal((2, 2, 2), store.Reads);
         using var reread = await Tool(store, source);
         Assert.Equal((2, 2, 2), store.Reads);
         Assert.Equal(Start.AddSeconds(301), reread.RootElement.GetProperty("tables_as_of").GetDateTime().ToUniversalTime());
@@ -458,5 +473,189 @@ public sealed class DarlingStoreTableHealthCacheTests
         Assert.Equal(Start.AddSeconds(10), second.RootElement.GetProperty("tables_as_of").GetDateTime().ToUniversalTime());
         Assert.Equal(0, second.RootElement.GetProperty("tables_age_seconds").GetInt64());
         Assert.Equal(10, second.RootElement.GetProperty("indexes_age_seconds").GetInt64());
+    }
+
+    /// <summary>#9224: the service takes one pass of every part when it starts, so the first MCP call finds them held and reads nothing.</summary>
+    [Fact]
+    public async Task AfterTheStartPass_AnMcpCallReadsNothingFromTheStore()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+
+        await store.Cache.WarmAsync(source);
+        Assert.Equal((1, 1, 1), store.Reads);
+        Assert.Equal(1, Volatile.Read(ref store.AutovacuumSettings));
+
+        store.Now = Start.AddSeconds(40);
+        using var reply = await Tool(store, source);
+
+        Assert.Equal((1, 1, 1), store.Reads);
+        Assert.Equal(1, Volatile.Read(ref store.AutovacuumSettings));
+        Assert.Equal(5, reply.RootElement.GetProperty("tables_returned").GetInt32());
+        Assert.Equal(Start, reply.RootElement.GetProperty("tables_as_of").GetDateTime().ToUniversalTime());
+        Assert.Equal(40, reply.RootElement.GetProperty("tables_age_seconds").GetInt64());
+        Assert.Equal(40, reply.RootElement.GetProperty("indexes_age_seconds").GetInt64());
+        Assert.Equal(40, reply.RootElement.GetProperty("partition_index_coverage_age_seconds").GetInt64());
+        Assert.Equal(40, reply.RootElement.GetProperty("autovacuum_settings").GetProperty("age_seconds").GetDouble());
+    }
+
+    /// <summary>#9224: a call that arrives while the start pass is reading a part waits for that read, so the store is read once.</summary>
+    [Fact]
+    public async Task ACallMadeDuringTheStartPass_AwaitsIt_AndTheStoreIsReadOnce()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+        var running = Signal();
+        var release = Signal();
+        store.BeforeTables = _ =>
+        {
+            running.TrySetResult();
+            return release.Task;
+        };
+
+        var warm = store.Cache.WarmAsync(source);
+        await running.Task;
+        var call = Tool(store, source);
+        Assert.False(warm.IsCompleted);
+        Assert.False(call.IsCompleted);
+
+        release.SetResult();
+        await warm;
+        using var reply = await call;
+
+        Assert.Equal((1, 1, 1), store.Reads);
+        Assert.Equal(1, Volatile.Read(ref store.AutovacuumSettings));
+        Assert.Equal(5, reply.RootElement.GetProperty("tables_returned").GetInt32());
+    }
+
+    /// <summary>#9224: past the lifetime a call gets the held part at once with its old time, and many concurrent calls start one refresh.</summary>
+    [Fact]
+    public async Task PastTheLifetime_CallsGetTheHeldPartAtOnce_AndConcurrentCallsStartOneRefresh()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+        var first = await store.Cache.GetTablesAsync(source);
+        var running = Signal();
+        var release = Signal();
+        store.BeforeTables = _ =>
+        {
+            running.TrySetResult();
+            return release.Task;
+        };
+
+        store.Now = Start + DarlingStoreTableHealthCache.Lifetime + TimeSpan.FromSeconds(1);
+        var calls = Enumerable.Range(0, 8).Select(_ => Task.Run(() => store.Cache.GetTablesAsync(source))).ToArray();
+        /* Every call is answered while the refresh is still held open: none of them waits for it. */
+        var answers = await Task.WhenAll(calls);
+        await running.Task;
+
+        Assert.All(answers, a =>
+        {
+            Assert.Same(first.Rows, a.Rows);
+            Assert.Equal(Start, a.ReadAtUtc);
+            Assert.Equal(301, a.AgeSeconds(store.Cache.UtcNow()));
+        });
+        Assert.Equal(2, store.Reads.Tables);
+
+        using var reply = await Tool(store, source, section: "tables");
+        Assert.Equal(Start, reply.RootElement.GetProperty("tables_as_of").GetDateTime().ToUniversalTime());
+        Assert.Equal(301, reply.RootElement.GetProperty("tables_age_seconds").GetInt64());
+        Assert.Equal(2, store.Reads.Tables);
+
+        release.SetResult();
+        await store.Cache.WhenIdleAsync();
+        Assert.Equal(2, store.Reads.Tables);
+        var after = await store.Cache.GetTablesAsync(source);
+        Assert.NotSame(first.Rows, after.Rows);
+        Assert.Equal(store.Now, after.ReadAtUtc);
+        Assert.Equal(2, store.Reads.Tables);
+    }
+
+    /// <summary>#9224: a refresh that fails keeps the held part, says so once, and is tried again by the first call a lifetime after it.</summary>
+    [Fact]
+    public async Task AFailedRefresh_KeepsTheHeldPart_ReportsOnce_AndTheNextCallPastTheLifetimeTriesAgain()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+        var failures = new List<string>();
+        store.Cache.OnReadFailed = (part, _) =>
+        {
+            lock (failures)
+            {
+                failures.Add(part);
+            }
+        };
+        var first = await store.Cache.GetTablesAsync(source);
+        store.BeforeTables = call => call == 2 ? Task.FromException(new InvalidOperationException("scripted")) : Task.CompletedTask;
+
+        store.Now = Start + DarlingStoreTableHealthCache.Lifetime + TimeSpan.FromSeconds(1);
+        var held = await store.Cache.GetTablesAsync(source);
+        await store.Cache.WhenIdleAsync();
+        Assert.Same(first.Rows, held.Rows);
+        Assert.Equal(2, store.Reads.Tables);
+        Assert.Equal(["tables"], failures);
+
+        /* Inside a lifetime of the failed attempt no other refresh starts, and the held part is still served with its own time. */
+        store.Now += TimeSpan.FromSeconds(30);
+        var again = await store.Cache.GetTablesAsync(source);
+        await store.Cache.WhenIdleAsync();
+        Assert.Same(first.Rows, again.Rows);
+        Assert.Equal(Start, again.ReadAtUtc);
+        Assert.Equal(2, store.Reads.Tables);
+
+        store.Now += DarlingStoreTableHealthCache.Lifetime;
+        var retrying = await store.Cache.GetTablesAsync(source);
+        Assert.Same(first.Rows, retrying.Rows);
+        await store.Cache.WhenIdleAsync();
+        Assert.Equal(3, store.Reads.Tables);
+        Assert.Equal(["tables"], failures);
+
+        var renewed = await store.Cache.GetTablesAsync(source);
+        Assert.NotSame(first.Rows, renewed.Rows);
+        Assert.Equal(store.Now, renewed.ReadAtUtc);
+    }
+
+    /// <summary>#9224: a part that fails in the start pass is reported and does not stop the others, and the first caller reads it.</summary>
+    [Fact]
+    public async Task AStartPassPartThatFails_IsReported_TheOthersAreHeld_AndTheFirstCallReadsIt()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+        var failures = new List<string>();
+        store.Cache.OnReadFailed = (part, _) => failures.Add(part);
+        store.BeforeTables = call => call == 1 ? Task.FromException(new InvalidOperationException("scripted")) : Task.CompletedTask;
+
+        await store.Cache.WarmAsync(source);
+        Assert.Equal(["tables"], failures);
+        Assert.Equal((1, 1, 1), store.Reads);
+
+        var table = await store.Cache.GetTablesAsync(source);
+        Assert.Equal(2, store.Reads.Tables);
+        Assert.Equal(5, table.Rows.Count);
+        await store.Cache.GetIndexesAsync(source);
+        Assert.Equal(1, store.Reads.Indexes);
+    }
+
+    /// <summary>#9224: the host's pass waits for the worker to say the store is migrated, then reads every part once.</summary>
+    [Fact]
+    public async Task TheWarmGate_StartsNoPassBeforeTheStoreIsMigrated_ThenReadsEveryPartOnce()
+    {
+        var store = new CountedStore();
+        await using var source = NeverOpened();
+        var gate = new StoreHealthWarmGate();
+
+        var pass = gate.WarmWhenReady(source, NullLogger.Instance, cache: store.Cache);
+        Assert.False(pass.IsCompleted);
+        Assert.Equal((0, 0, 0), store.Reads);
+
+        gate.MarkStoreReady();
+        await pass;
+        Assert.Equal((1, 1, 1), store.Reads);
+        Assert.Equal(1, Volatile.Read(ref store.AutovacuumSettings));
+
+        /* A host that asks after the store is ready starts its pass at once. */
+        var late = new CountedStore();
+        await gate.WarmWhenReady(source, NullLogger.Instance, cache: late.Cache);
+        Assert.Equal((1, 1, 1), late.Reads);
     }
 }

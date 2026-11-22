@@ -41,6 +41,7 @@ public sealed class ViewerLoadTimer
        task's state to tell that read from one still running. */
     private readonly Dictionary<int, (string Phase, long StartedMs, Task Task)> _inFlight = new();
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _cancelled = new();
+    private readonly Dictionary<string, string> _phaseNotes = new();
     private int _nextReadId;
     private bool _superseded;
     private readonly object _gate = new();
@@ -87,6 +88,16 @@ public sealed class ViewerLoadTimer
     {
         _ = Watch(phase, StartRead(phase, task), task);
         return task;
+    }
+
+    /// <summary>#9287: says what a read read, shown after the read's time in the slow-load line (a Query Store read names the days it took
+    /// from the rollups and the days it read from the interval table). The latest note for a phase name wins.</summary>
+    internal void NotePhase(string phase, string note)
+    {
+        lock (_gate)
+        {
+            _phaseNotes[phase] = note;
+        }
     }
 
     /// <summary>#8549: the load was stopped by a newer one (a tab that cancels its superseded load calls this from its cancel path). A read
@@ -215,7 +226,8 @@ public sealed class ViewerLoadTimer
     /// <summary>The log line for a load of <paramref name="totalMs"/>, or null when it was not slow. Pure, so a test reads the text.</summary>
     internal static string? Describe(string surface, long totalMs, IReadOnlyList<(string Phase, long StartedMs, long EndedMs)> phases,
         IReadOnlyList<(string Step, long Ms)>? clientSteps = null, int slowThresholdMs = SlowLoadThresholdMs,
-        IReadOnlyList<(string Phase, long StartedMs, long EndedMs, string Marker)>? stoppedReads = null)
+        IReadOnlyList<(string Phase, long StartedMs, long EndedMs, string Marker)>? stoppedReads = null,
+        IReadOnlyDictionary<string, string>? phaseNotes = null)
     {
         if (totalMs < slowThresholdMs)
         {
@@ -231,7 +243,8 @@ public sealed class ViewerLoadTimer
         var clientMs = Math.Max(0, totalMs - lastReadEnded);
         var split = reads.Count == 0
             ? "no store phase timed"
-            : string.Join(", ", reads.Select(p => $"{p.Phase} {p.EndedMs - p.StartedMs} ms{(p.Marker.Length == 0 ? "" : $" ({p.Marker})")}"));
+            : string.Join(", ", reads.Select(p => $"{p.Phase} {p.EndedMs - p.StartedMs} ms{(p.Marker.Length == 0 ? "" : $" ({p.Marker})")}"
+                + (phaseNotes is not null && phaseNotes.TryGetValue(p.Phase, out var note) ? $" ({note})" : "")));
         var line = $"slow load: {surface} took {totalMs} ms: store reads [{split}], then {clientMs} ms of client work after the last read";
         if (clientSteps is { Count: > 0 })
         {
@@ -318,7 +331,7 @@ public sealed class ViewerLoadTimer
                 phases.AddRange(_inFlight.Values.Where(f => f.Task.IsCompleted).Select(f => (f.Phase, f.StartedMs, now)));
             }
 
-            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), now, phases, _clientSteps.ToList(), _slowThresholdMs, stopped);
+            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), now, phases, _clientSteps.ToList(), _slowThresholdMs, stopped, new Dictionary<string, string>(_phaseNotes));
         }
     }
 }
