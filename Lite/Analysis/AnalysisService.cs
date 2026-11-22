@@ -658,8 +658,9 @@ public class AnalysisService
                 facts.AddRange(anomalies);
                 detectorTime = System.Diagnostics.Stopwatch.GetElapsedTime(detectorStarted);
             }
-            if (facts.Count > 0) _scorer.ScoreAll(facts);
             ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime);
+            if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
+            _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -674,7 +675,8 @@ public class AnalysisService
     /// <summary>
     /// #9195: one Information line when the facts read took over <see cref="CollectorPassTimer.SlowPassThreshold"/>, with the time
     /// split between its steps. The "Fact collection took" line times the fact pass alone, and a field read ran about 2 s longer
-    /// than that pass: this line says whether the rest went to the secondary replica read, the anomaly detector or the scorer.
+    /// than that pass: this line says whether the rest went to the secondary replica read, the anomaly detector or neither
+    /// (the scope and the other small steps before the pass). Scoring runs after the line and is in memory.
     /// </summary>
     private static void ReportSlowFactsRead(
         string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector)
@@ -684,7 +686,7 @@ public class AnalysisService
         static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
         AppLogger.Info("AnalysisService",
             $"Analysis facts read took {Ms(total)} ms for {serverName} (server {serverId}): secondary replica scope {Ms(scope)} ms, " +
-            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, scoring and the rest {Ms(total - scope - pass - detector)} ms");
+            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, other {Ms(total - scope - pass - detector)} ms");
     }
 
     /// <summary>
