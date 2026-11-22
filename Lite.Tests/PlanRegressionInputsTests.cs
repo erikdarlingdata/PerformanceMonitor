@@ -799,24 +799,92 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
         Assert.Equal(firstPass.PlanRegressionOffenders, secondPass.PlanRegressionOffenders);
     }
 
-    /* #9195: an interactive read (get_analysis_facts, compare_analysis) fetches no plan. It answers from the outcomes a
-       background pass cached, and a candidate with no cached answer stays in the fact, counted unverified. */
+    /* #9195: an interactive read (get_analysis_facts, compare_analysis) answers from the outcomes a background pass cached, and for the
+       pairs it lacks makes at most 3 live plan fetches in 3 s for the whole call. A candidate the allowance does not reach stays in the
+       fact, counted unverified. */
 
     [Fact]
-    public async Task AnInteractiveRead_OverAnEmptyCache_MakesNoFetch_AndKeepsTheUncachedCandidatesUnverified()
+    public async Task AnInteractiveRead_OverAnEmptyCache_MakesAtMostThreeFetches_AndKeepsTheUnreachedCandidatesUnverified()
     {
         var source = new FixturePlanSource();
         await SeedIssueCasesAsync(source);
+        var cache = new PlanInputOutcomeCache();
 
-        var (fact, pass) = await RunSharedAsync(source, new PlanInputOutcomeCache(), interactive: true);
+        var (fact, pass) = await RunSharedAsync(source, cache, interactive: true);
 
-        Assert.Empty(source.Fetched);
-        /* The two false alarms the read alone decides (a recompile statement, a plan that only returns more) are still left
-           out. The three that need their plans stay, none of them checked. */
-        Assert.Equal(2, Convert.ToInt32(fact!.Metadata["cross_input_excluded_count"]));
-        Assert.Equal(3, Convert.ToInt32(fact.Metadata["offender_count"]));
+        /* The values-only pair (the worst of the three that need plans) takes two fetches and is dropped. The next pair's newer plan
+           takes the third, and its older plan and the last pair are past the allowance. */
+        Assert.Equal(3, source.Fetched.Count);
+        Assert.Equal(3, Convert.ToInt32(fact!.Metadata["cross_input_excluded_count"]));
+        Assert.Equal(2, Convert.ToInt32(fact.Metadata["offender_count"]));
+        Assert.Equal(2, Convert.ToInt32(fact.Metadata["inputs_unverified_count"]));
+        Assert.Equal(2, pass.PlanRegressionOffenders!.Count);
+        Assert.Equal(1, cache.Count);
+    }
+
+    [Fact]
+    public async Task AnInteractiveRead_FillsTheCacheLikeABackgroundPass_SoASecondIdenticalCallFetchesNothing()
+    {
+        var source = new FixturePlanSource();
+        await SeedValuesOnlyAsync(source, factor: 30);
+        await SeedPlanAsync(SingleHashQuery, CheapPlanId(SingleHashQuery), "0xONE" + SingleHashQuery, PlainText,
+            cpuUs: 100_000, firstIntervalId: 1, lastExec: PeriodEnd);
+        var cache = new PlanInputOutcomeCache();
+
+        await RunSharedAsync(source, cache, interactive: true);
+        Assert.Equal(2, source.Fetched.Count);
+        Assert.Equal(1, cache.Count);
+
+        var (second, _) = await RunSharedAsync(source, cache, interactive: true);
+
+        Assert.Equal(2, source.Fetched.Count);
+        Assert.Null(second);
+    }
+
+    [Fact]
+    public async Task RepeatedInteractiveCalls_CheckTheRestOfTheUncachedPairs_UntilNoneNeedsAFetch()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        var cache = new PlanInputOutcomeCache();
+
+        /* Three pairs need their plans (two fetches each). Each call finishes what the allowance reaches and caches it. */
+        await RunSharedAsync(source, cache, interactive: true);
+        Assert.Equal(3, source.Fetched.Count);
+        await RunSharedAsync(source, cache, interactive: true);
+        Assert.Equal(6, source.Fetched.Count);
+        await RunSharedAsync(source, cache, interactive: true);
+        Assert.Equal(8, source.Fetched.Count);
+
+        var (fourth, _) = await RunSharedAsync(source, cache, interactive: true);
+
+        Assert.Equal(8, source.Fetched.Count);
+        Assert.Equal(0, Convert.ToInt32(fourth!.Metadata["inputs_unverified_count"]));
+    }
+
+    [Fact]
+    public async Task AnInteractiveRead_WithASlowPlanSource_StopsAtTheCallsClock_NoFetchOutlivesIt_AndTheRestAreUnreached()
+    {
+        var source = new FixturePlanSource();
+        await SeedIssueCasesAsync(source);
+        source.Behavior = (_, token) => Task.Delay(TimeSpan.FromSeconds(30), token);
+        var cache = new PlanInputOutcomeCache();
+        var pass = NewContext();
+        pass.InteractiveRead = true;
+        pass.InteractiveFetches = new InteractivePlanFetchAllowance(3, TimeSpan.FromMilliseconds(400));
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source, planInputCache: cache).CollectFactsAsync(pass))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+        var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+
+        /* The first fetch is cut at what the clock allows, well inside the 5 s a fetch may otherwise take. Its pair fails, and the
+           pairs after it find the clock spent, so they never fetch. All three stay unverified. */
+        Assert.True(elapsed < TimeSpan.FromSeconds(4), $"the read took {elapsed}");
+        Assert.Single(source.Fetched);
         Assert.Equal(3, Convert.ToInt32(fact.Metadata["inputs_unverified_count"]));
-        Assert.Equal(3, pass.PlanRegressionOffenders!.Count);
+        /* The clock cut that fetch, not a fault of the plan, so the plan is not set aside for the hour. */
+        Assert.False(cache.IsSkipped(new PlanInputOutcomeCache.PlanKey(ServerId, Database, CostlyPlanId(ValuesOnlyQuery))));
     }
 
     [Fact]
@@ -842,22 +910,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
         Assert.Equal(backgroundPass.PlanRegressionOffenders, interactivePass.PlanRegressionOffenders);
     }
 
-    [Fact]
-    public async Task AnInteractiveRead_DoesNotSpendOrFillTheCache_SoTheNextBackgroundPassStillFetches()
-    {
-        var source = new FixturePlanSource();
-        await SeedIssueCasesAsync(source);
-        var cache = new PlanInputOutcomeCache();
-
-        await RunSharedAsync(source, cache, interactive: true);
-        Assert.Equal(0, cache.Count);
-
-        var (fact, _) = await RunSharedAsync(source, cache);
-
-        Assert.NotEmpty(source.Fetched);
-        Assert.Equal(0, Convert.ToInt32(fact!.Metadata["inputs_unverified_count"]));
-    }
-
     /// <summary>The plan source handed to an <see cref="AnalysisService"/>, which takes it as its plan fetcher.</summary>
     private sealed class ServiceFetcher(FixturePlanSource source) : IPlanFetcher, IQueryStorePlanSource
     {
@@ -869,24 +921,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
     }
 
     [Fact]
-    public async Task TheFactsRead_AndTheCompareRead_FetchNoPlan_WhereTheBackgroundCallDoes()
+    public async Task TheFactsRead_AndTheCompareRead_EachMakeAtMostThreeFetches_WhereTheBackgroundCallDoesNot()
     {
         var source = new FixturePlanSource();
         await SeedIssueCasesAsync(source);
-        var service = new AnalysisService(_duckDb, new ServiceFetcher(source)) { MinimumDataHours = 0 };
         var hoursBack = 4;
 
-        var (facts, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack, PeriodEnd);
-        Assert.Empty(source.Fetched);
-        Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
+        var facts = new AnalysisService(_duckDb, new ServiceFetcher(source)) { MinimumDataHours = 0 };
+        var (read, _, _) = await facts.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack, PeriodEnd);
+        Assert.Equal(3, source.Fetched.Count);
+        Assert.Contains(read, f => f.Key == "PLAN_REGRESSION");
 
-        var interactive = await service.ComparePeriodsAsync(
-            ServerId, ServerName, PeriodStart.AddHours(-4), PeriodStart, PeriodStart, PeriodEnd, interactive: true);
-        Assert.Empty(source.Fetched);
+        /* Both windows hold the same uncached pairs. A compare that gave each window its own allowance would fetch more than three. */
+        var compare = new AnalysisService(_duckDb, new ServiceFetcher(source)) { MinimumDataHours = 0 };
+        var before = source.Fetched.Count;
+        var interactive = await compare.ComparePeriodsAsync(
+            ServerId, ServerName, PeriodEnd.AddHours(-hoursBack), PeriodEnd, PeriodEnd.AddHours(-hoursBack), PeriodEnd, interactive: true);
+        Assert.Equal(3, source.Fetched.Count - before);
         Assert.NotEmpty(interactive.ComparisonFacts);
 
-        await service.ComparePeriodsAsync(ServerId, ServerName, PeriodStart.AddHours(-4), PeriodStart, PeriodStart, PeriodEnd);
-        Assert.NotEmpty(source.Fetched);
+        var background = new AnalysisService(_duckDb, new ServiceFetcher(source)) { MinimumDataHours = 0 };
+        before = source.Fetched.Count;
+        await background.ComparePeriodsAsync(ServerId, ServerName, PeriodEnd.AddHours(-hoursBack), PeriodEnd, PeriodEnd.AddHours(-hoursBack), PeriodEnd);
+        Assert.True(source.Fetched.Count - before > 3);
     }
 
     private sealed class ManualTime : TimeProvider
