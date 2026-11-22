@@ -776,7 +776,10 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>#9111: the built run of whole UTC days this read takes from the closed-day rollups, or null to read the interval table
-    /// alone: a store below the rollups' version, a server with no built day in the window, or one whose builds have stopped.</summary>
+    /// alone: a store below the rollups' version, a server with no built day in the window, or one whose builds have stopped. #9287: the
+    /// run is clipped to the days wholly inside retention on the store's clock, and is not cut to the days the interval table still holds
+    /// whole. A day near the retention edge comes from its rollup as collected, and the same day read from the interval table (the fault
+    /// fallback, or a day with no rollup) can lack the rows the purge dropped early.</summary>
     private async Task<(QueryStoreClosedDayRollup.ServedDays? Served, QueryStoreClosedDayRollup.SourceReason Reason)> ResolveServedDaysAsync(
         Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime end, CancellationToken cancellationToken)
     {
@@ -1013,7 +1016,9 @@ public sealed partial class ViewerDataService
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken)
                 : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack);
             rollupsTried = served is not null;
-            var source = QueryStoreClosedDayRollup.DescribeSource(plan.ReadStart, literalEndUtc ?? endUtc, served, servedReason);
+            var source = QueryStoreClosedDayRollup.DescribeSource(
+                plan.ReadStart, literalEndUtc ?? endUtc, served, servedReason,
+                await QueryStoreClosedDayRollup.HoldsEdgeDaysAsync(connection, transaction, serverId, served, cancellationToken));
             /* #9283: the window as two arms, each with the floor that holds for its rows (the MCP top read's split, #9276), once the partial
                index the NULL-start arm reads through is built. A served run reads the rollup statements, which keep their own arms. Until the
                index is built the read keeps the one 26 hour floor and the statements it had. */
@@ -1816,7 +1821,9 @@ public sealed partial class ViewerDataService
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken)
                 : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack);
             rollupsTried = served is not null;
-            var source = QueryStoreClosedDayRollup.DescribeSource(plan.ReadStart, endUtc, served, servedReason);
+            var source = QueryStoreClosedDayRollup.DescribeSource(
+                plan.ReadStart, endUtc, served, servedReason,
+                await QueryStoreClosedDayRollup.HoldsEdgeDaysAsync(connection, transaction, serverId, served, cancellationToken));
             await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });

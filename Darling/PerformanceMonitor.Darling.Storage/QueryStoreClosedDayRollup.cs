@@ -50,12 +50,18 @@ namespace PerformanceMonitor.Darling.Storage;
 /// and the build take the same built row, so a row written while its day is being built is either read by that build or marks the
 /// day after it.</para>
 ///
-/// <para><b>Retention.</b> The interval table is purged by <c>first_execution_time</c>, which can sit below a row's own day, so the
-/// days near the purge edge can differ between the two. A tick removes every day before the first whole day
-/// (<see cref="GcMarginDays"/> after the retention edge's date) from both tables and leaves the newest removed day in the built table
-/// as <c>removed</c>. That row only moves forward: no day at or before it is built again, so a retention that was lowered and raised
-/// does not bring back a day built from a partly purged table. The reader takes a server's days only while its newest build is no
-/// older than <see cref="FreshFor"/>, which keeps a stopped tick from being outrun by the purge.</para>
+/// <para><b>Retention (#9287).</b> The interval table is purged by <c>first_execution_time</c>, which can sit up to
+/// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> below a row's own day, so near the retention edge the interval table can already
+/// have lost early-keyed rows of a day that is still inside retention. A built day holds what was collected for that day, which is the
+/// truer answer, so a built day is kept and served until the whole day is before the retention edge. A tick removes every day wholly
+/// before the edge (<see cref="FirstWholeDay"/> is the first day wholly inside it) from both tables and leaves the newest removed day in
+/// the built table as <c>removed</c>. That row only moves forward: no day at or before it is built again. A reader takes only days
+/// wholly inside retention on the store's clock, so a tick that has not run yet, or a retention that was just lowered, never serves a
+/// day past the edge. <b>The exception:</b> an edge day served from its rollup answers as collected, and the same day read from the
+/// interval table (the fault fallback, or a day with no rollup) can lack the rows the purge dropped early. A day the interval table no
+/// longer holds whole (<see cref="RawHoldsDayWhole"/>) is never built, and never rebuilt, from that thinner table: a rebuild mark on it
+/// is cleared and its rollup stays. The reader takes a server's days only while its newest build is no older than
+/// <see cref="FreshFor"/>.</para>
 /// </summary>
 public static class QueryStoreClosedDayRollup
 {
@@ -231,10 +237,45 @@ ALTER TABLE collect.query_store_closed_day_built ADD COLUMN IF NOT EXISTS clutte
     /// catch-up, so no interval that starts in the day is still being written.</summary>
     public static readonly TimeSpan CloseAfter = QueryStoreTopDaily.FinalBuildAfter;
 
-    /// <summary>The first day the rollups keep is this many days after the date of the interval table's retention edge. The purge
-    /// deletes on <c>first_execution_time</c>, which can sit <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> below a row's own
-    /// day; the rest is the room between a tick's cleanup and a later purge (<see cref="FreshFor"/>).</summary>
-    public const int GcMarginDays = 4;
+    /// <summary>
+    /// #9287: the first day wholly inside the retention edge (<paramref name="nowUtc"/> less <paramref name="retentionDays"/>): the edge's
+    /// own date when the edge is at midnight, the next day otherwise. The rollups keep every day from the edge's date, so the day that
+    /// holds the edge is kept but never served. A day before it is wholly past the edge and goes. Retention is the interval table's
+    /// (<see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>), and the readers and the tick use the same edge.
+    /// </summary>
+    public static DateOnly FirstWholeDay(DateTime nowUtc, int retentionDays)
+    {
+        var edge = nowUtc.AddDays(-retentionDays);
+        var date = DateOnly.FromDateTime(edge);
+        return edge.TimeOfDay == TimeSpan.Zero ? date : date.AddDays(1);
+    }
+
+    /// <summary>#9287: the same day as <see cref="FirstWholeDay"/>, on the store's clock, for a statement. $n is the store's now as a
+    /// timestamp and $m the retention days.</summary>
+    private static string FirstWholeDaySql(string now, string retentionDays) =>
+        $"(({now} - make_interval(days => {retentionDays})) + interval '1 day' - interval '1 microsecond')::date";
+
+    /// <summary>
+    /// #9287: whether the interval table still holds <paramref name="day"/> whole, from the server's oldest interval
+    /// (<see cref="QueryStoreIntervalWide.PlainTableFloorSql"/>): the day is whole when it is on or after the first whole day at or
+    /// after that floor. A server with no interval has no whole day. A built day that fails this is served from its rollup as collected
+    /// and is never built again from the thinner table.
+    /// </summary>
+    public static bool RawHoldsDayWhole(DateTime? floor, DateOnly day)
+    {
+        if (floor is not { } f)
+        {
+            return false;
+        }
+
+        var firstWhole = DateOnly.FromDateTime(f);
+        if (f.TimeOfDay > TimeSpan.Zero)
+        {
+            firstWhole = firstWhole.AddDays(1);
+        }
+
+        return day >= firstWhole;
+    }
 
     /// <summary>A reader takes a server's built days only while the server's newest build is no older than this. A closed day is
     /// built every day, so a healthy tick is always inside it; a tick that stopped is outside it before the purge can reach a day
@@ -484,12 +525,12 @@ WHERE NOT b.rebuild_needed
 
     /// <summary>
     /// The builds due now, newest day first, so the short windows are served within the first ticks after an upgrade and the older
-    /// days follow. $1 now, $2 retention days, $3 <see cref="CloseAfter"/>, $4 the cap, $5 <see cref="GcMarginDays"/>. Servers are the
+    /// days follow. $1 now, $2 retention days, $3 <see cref="CloseAfter"/>, $4 the cap. Servers are the
     /// enabled ones with an interval-table coverage claim, and a server's days start the day after its <c>filled_since</c>. Days run
-    /// from the first day the cleanup keeps through the newest closed day, above the server's newest removed day. A day is due when
+    /// from the first day wholly inside retention (<see cref="FirstWholeDay"/>) through the newest closed day, above the server's newest removed day. A day is due when
     /// it has no built row or its row is marked, or (#9148) its clutter rows do not come from its newest build.
     /// </summary>
-    public const string PlanSql = @"
+    public static readonly string PlanSql = $@"
 SELECT s.server_id, d.day
 FROM
 (
@@ -501,7 +542,7 @@ FROM
 CROSS JOIN LATERAL
 (
     SELECT g::date AS day
-    FROM generate_series((($1 - make_interval(days => $2))::date + $5)::timestamp, (($1 - $3)::date - 1)::timestamp, interval '1 day') AS g
+    FROM generate_series(({FirstWholeDaySql("$1", "$2")})::timestamp, (($1 - $3)::date - 1)::timestamp, interval '1 day') AS g
 ) AS d
 LEFT JOIN collect.query_store_closed_day_built AS b
   ON b.server_id = s.server_id AND b.day_utc = d.day
@@ -511,13 +552,12 @@ WHERE d.day >= s.filled_since::date + 1
 ORDER BY d.day DESC, s.server_id
 LIMIT $4;";
 
-    /// <summary>Marks every day before the first day kept as removed and returns their keys. $1 now, $2 retention days,
-    /// $3 <see cref="GcMarginDays"/>.</summary>
+    /// <summary>Marks every day wholly before the retention edge (#9287) as removed and returns their keys. $1 now, $2 retention days.</summary>
     public const string GcMarkRemovedSql = @"
 UPDATE collect.query_store_closed_day_built
 SET removed = true,
     rebuild_needed = false
-WHERE day_utc < ($1 - make_interval(days => $2))::date + $3
+WHERE day_utc < ($1 - make_interval(days => $2))::date
   AND NOT removed
 RETURNING server_id, day_utc;";
 
@@ -600,14 +640,17 @@ SELECT NOT EXISTS
 
     /// <summary>
     /// The built days of one server a reader may take, oldest first. $1 server_id, $2 the first day, $3 the day after the last,
-    /// $4 <see cref="FreshFor"/>. No row comes back when the server's newest build is older than $4 on the store's clock.
+    /// $4 <see cref="FreshFor"/>, $5 the retention days, $6 the store's now (null for its own clock). No row comes back when the server's newest build is older than $4 on the store's
+    /// clock. #9287: only days wholly inside retention on the store's clock come back (<see cref="FirstWholeDay"/>), so a day past the
+    /// edge that the cleanup has not removed yet is never served, and a day near the edge is served from its rollup as collected.
     /// </summary>
-    public const string ServedDaysSql = @"
+    public static readonly string ServedDaysSql = $@"
 SELECT b.day_utc
 FROM collect.query_store_closed_day_built AS b
 WHERE b.server_id = $1
   AND b.day_utc >= $2
   AND b.day_utc < $3
+  AND b.day_utc >= {FirstWholeDaySql("COALESCE($6, now() AT TIME ZONE 'UTC')", "$5")}
   AND NOT b.rebuild_needed
   AND NOT b.removed
   AND (SELECT max(n.built_at) FROM collect.query_store_closed_day_built AS n WHERE n.server_id = $1 AND NOT n.removed)
@@ -618,12 +661,13 @@ ORDER BY b.day_utc;";
     /// #9148: <see cref="ServedDaysSql"/> for the clutter rollups: the same days, less any whose clutter rows do not come from the day's
     /// newest build (a day built before <see cref="ClutterVersion"/>, or rebuilt by a build that does not fill the clutter tables).
     /// </summary>
-    public const string ServedClutterDaysSql = @"
+    public static readonly string ServedClutterDaysSql = $@"
 SELECT b.day_utc
 FROM collect.query_store_closed_day_built AS b
 WHERE b.server_id = $1
   AND b.day_utc >= $2
   AND b.day_utc < $3
+  AND b.day_utc >= {FirstWholeDaySql("COALESCE($6, now() AT TIME ZONE 'UTC')", "$5")}
   AND NOT b.rebuild_needed
   AND NOT b.removed
   AND b.clutter_built_at = b.built_at
@@ -640,6 +684,18 @@ ORDER BY b.day_utc;";
 
     /// <summary>The whole built UTC days a read takes from the rollups: <c>[Start, End)</c>, both at midnight.</summary>
     public readonly record struct ServedDays(DateTime Start, DateTime End);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime NowUtc, int RetentionDays)> ReadClocks = new();
+
+    /// <summary>
+    /// #9287: a test seam. A live test whose seeded days sit in the past, on a store whose clock is the real one, tells the served-day
+    /// reads which clock and retention to clip to for the database it runs in, as the tick it ran was given them. No caller in the
+    /// service sets it, so a read clips to the store's own clock and <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>.
+    /// </summary>
+    public static void SetReadClockForTests(string database, DateTime nowUtc, int retentionDays) => ReadClocks[database] = (nowUtc, retentionDays);
+
+    private static (DateTime? NowUtc, int RetentionDays) ReadClockFor(NpgsqlConnection connection) =>
+        ReadClocks.TryGetValue(connection.Database ?? string.Empty, out var set) ? (set.NowUtc, set.RetentionDays) : (null, QueryStoreIntervalPartitions.WideHorizonDays);
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -693,6 +749,9 @@ ORDER BY b.day_utc;";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = first });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = afterLast });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = FreshFor });
+            var (clockOverride, retention) = ReadClockFor(connection);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retention });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = clockOverride is { } at ? Unspecified(at) : DBNull.Value });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -735,7 +794,8 @@ ORDER BY b.day_utc;";
     /// <see cref="IntervalDays"/> every other UTC day the window touches, read from the interval table (a partial first or last day and
     /// the open day count as days). A caller reads the day lists, not the clock, to see whether closed days were read as intervals.
     /// </summary>
-    public sealed record ReadSource(IReadOnlyList<DateOnly> RollupDays, IReadOnlyList<DateOnly> IntervalDays, SourceReason Reason)
+    public sealed record ReadSource(
+        IReadOnlyList<DateOnly> RollupDays, IReadOnlyList<DateOnly> IntervalDays, SourceReason Reason, bool EdgeDaysAsCollected = false)
     {
         /// <summary>The slow-load line's words, for example <c>3 days from rollups, 7 days from the interval table</c>.</summary>
         public string Describe()
@@ -743,7 +803,7 @@ ORDER BY b.day_utc;";
             static string Days(int n) => n == 1 ? "1 day" : $"{n} days";
             return RollupDays.Count == 0
                 ? $"{Days(IntervalDays.Count)} from the interval table, no rollup days: {Why()}"
-                : $"{Days(RollupDays.Count)} from rollups, {Days(IntervalDays.Count)} from the interval table";
+                : $"{Days(RollupDays.Count)} from rollups{(EdgeDaysAsCollected ? EdgeDaysNote : string.Empty)}, {Days(IntervalDays.Count)} from the interval table";
         }
 
         /// <summary>The grid banner's note, or null when nothing is worth saying: rollups served, or there was no whole day to take.</summary>
@@ -764,11 +824,33 @@ ORDER BY b.day_utc;";
         };
     }
 
+    /// <summary>#9287: said after the rollup days when the served run holds a day the interval table no longer holds whole
+    /// (<see cref="RawHoldsDayWhole"/>). Such a day answers as collected: the same day read from the interval table can lack rows the
+    /// purge dropped early.</summary>
+    public const string EdgeDaysNote = " (edge days as collected)";
+
+    /// <summary>
+    /// #9287: whether the run <paramref name="served"/> holds a day the interval table no longer holds whole, from the server's oldest
+    /// interval. False for no run. Run it on the read's own connection and transaction.
+    /// </summary>
+    public static async Task<bool> HoldsEdgeDaysAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, ServedDays? served, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        if (served is not { } run)
+        {
+            return false;
+        }
+
+        var floor = await ReadFloorAsync(connection, transaction, QueryStoreIntervalWide.PlainTableFloorSql, serverId, cancellationToken);
+        return !RawHoldsDayWhole(floor, DateOnly.FromDateTime(run.Start));
+    }
+
     /// <summary>
     /// #9287: the source of a read over <c>[readStart, end]</c> that took <paramref name="served"/> (null for none) from the rollups, for
     /// <paramref name="reason"/> when it took none. A window that ends exactly at midnight does not touch the day that starts there.
     /// </summary>
-    public static ReadSource DescribeSource(DateTime readStart, DateTime end, ServedDays? served, SourceReason reason)
+    public static ReadSource DescribeSource(DateTime readStart, DateTime end, ServedDays? served, SourceReason reason, bool edgeDaysAsCollected = false)
     {
         var rollup = new List<DateOnly>();
         var interval = new List<DateOnly>();
@@ -784,7 +866,7 @@ ORDER BY b.day_utc;";
             (served is { } run && midnight >= run.Start && midnight < run.End ? rollup : interval).Add(day);
         }
 
-        return new ReadSource(rollup, interval, served is null && reason == SourceReason.Served ? SourceReason.NoBuiltDays : reason);
+        return new ReadSource(rollup, interval, served is null && reason == SourceReason.Served ? SourceReason.NoBuiltDays : reason, edgeDaysAsCollected && served is not null);
     }
 
     /// <summary>The longest run of consecutive days in <paramref name="days"/> (sorted, oldest first); the newest such run on a tie.</summary>
@@ -886,17 +968,66 @@ ORDER BY b.day_utc;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = CloseAfter });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = GcMarginDays });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             builds.Add(new Build(reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
         }
 
-        return builds;
+        await reader.CloseAsync();
+
+        /* #9287: a day the interval table no longer holds whole is never built, or rebuilt, from the thinner table. A never-built one
+           stays with the interval table. A built one keeps its rollup: its rebuild mark is cleared, so the reader keeps serving it. */
+        var floors = new Dictionary<int, DateTime?>();
+        var plan = new List<Build>(builds.Count);
+        foreach (var build in builds)
+        {
+            if (!floors.TryGetValue(build.ServerId, out var floor))
+            {
+                floors[build.ServerId] = floor = await ReadFloorAsync(connection, null, QueryStoreIntervalWide.PlainTableFloorSql, build.ServerId, cancellationToken);
+            }
+
+            if (RawHoldsDayWhole(floor, build.Day))
+            {
+                plan.Add(build);
+                continue;
+            }
+
+            await using var clear = new NpgsqlCommand(ClearThinDayMarkSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+            clear.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = build.ServerId });
+            clear.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = build.Day });
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        return plan;
     }
 
-    /// <summary>Removes the days before the first day kept from both rollups and leaves each server's newest removed day in the built
+    /// <summary>#9287: clears the rebuild mark of a built day the interval table no longer holds whole, so its rollup stays served.
+    /// $1 server_id, $2 day.</summary>
+    public const string ClearThinDayMarkSql = @"
+UPDATE collect.query_store_closed_day_built
+SET rebuild_needed = false
+WHERE server_id = $1
+  AND day_utc = $2
+  AND rebuild_needed
+  AND NOT removed;";
+
+    /// <summary>#9287: the oldest <c>collection_time</c> the raw stats table holds for one server, the floor
+    /// <see cref="RawHoldsDayWhole"/> reads for the clutter rollups. $1 server_id.</summary>
+    public const string StatsFloorSql = @"
+SELECT MIN(s.collection_time)
+FROM collect.query_store_stats AS s
+WHERE s.server_id = $1;";
+
+    private static async Task<DateTime?> ReadFloorAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) is DateTime floor ? floor : null;
+    }
+
+    /// <summary>Removes the days wholly before the retention edge (#9287) from both rollups and leaves each server's newest removed day in the built
     /// table, in one transaction; returns how many (server, day) went.</summary>
     public static async Task<long> GcAsync(
         NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
@@ -909,8 +1040,7 @@ ORDER BY b.day_utc;";
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = GcMarginDays });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 expired.Add((reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
@@ -933,9 +1063,11 @@ ORDER BY b.day_utc;";
     }
 
     private static async Task DeleteDayAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateOnly day, CancellationToken cancellationToken)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateOnly day, CancellationToken cancellationToken, bool keepClutter = false)
     {
-        foreach (var sql in new[] { DeleteGridDaySql, DeleteSlicerDaySql, DeleteClutterPlanDaySql, DeleteClutterCollectionsDaySql })
+        foreach (var sql in keepClutter
+            ? new[] { DeleteGridDaySql, DeleteSlicerDaySql }
+            : new[] { DeleteGridDaySql, DeleteSlicerDaySql, DeleteClutterPlanDaySql, DeleteClutterCollectionsDaySql })
         {
             await using var delete = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -972,7 +1104,10 @@ ORDER BY b.day_utc;";
             }
         }
 
-        await DeleteDayAsync(connection, transaction, serverId, day, cancellationToken);
+        /* #9287: raw query_store_stats is purged sooner than the rollups. A day it no longer holds whole keeps the clutter rows an
+           earlier build took from it (none, for a day never built), and only the grid and the slicer are built again. */
+        var keepClutter = !RawHoldsDayWhole(await ReadFloorAsync(connection, transaction, StatsFloorSql, serverId, cancellationToken), day);
+        await DeleteDayAsync(connection, transaction, serverId, day, cancellationToken, keepClutter);
 
         long sourceRows;
         await using (var grid = new NpgsqlCommand(BuildGridDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
@@ -991,7 +1126,9 @@ ORDER BY b.day_utc;";
 
         /* #9148: the clutter rollups of raw query_store_stats, in the same transaction and under the same claim, so a late raw row marks
            and rebuilds the day the way a late interval row does. */
-        foreach (var sql in new[] { BuildClutterPlanDaySql, BuildClutterCollectionsDaySql, RecordClutterBuiltSql })
+        foreach (var sql in keepClutter
+            ? new[] { RecordClutterBuiltSql }
+            : new[] { BuildClutterPlanDaySql, BuildClutterCollectionsDaySql, RecordClutterBuiltSql })
         {
             await using var clutter = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             clutter.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
