@@ -214,8 +214,7 @@ public sealed class StoreLogLongLine9314LiveTests
             }
 
             var other = Encoding.UTF8.GetBytes(normal.ToString());
-            var longFile = Join(LongLineWithoutNewline((int)StoreLogSweep.MaxBytesPerCapture - 200_000), "
-", NormalLine(2));
+            var longFile = Join(LongLineWithoutNewline((int)StoreLogSweep.MaxBytesPerCapture - 200_000), "\n", NormalLine(2));
             var source = new SeveralLogFiles(("postgresql-Mon.log", longFile), ("postgresql-Tue.log", other), ("postgresql-Wed.log", other), ("postgresql-Thu.log", other));
 
             var captures = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, source, ct);
