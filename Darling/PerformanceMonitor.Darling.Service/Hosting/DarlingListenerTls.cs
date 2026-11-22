@@ -38,6 +38,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// <param name="CleartextLead">The opening clause of the cleartext warning, up to and including "in the clear". It
 /// names what crosses the segment, which is the one place the two listeners say different things: the dashboard's
 /// token and the session cookie it mints, the MCP endpoint's token and every tool result.</param>
+/// <param name="HasHostGuard">True when the listener checks the Host header against an allowlist, so only the literal bind IP or
+/// loopback can reach it and a certificate without an IP SAN can never match. False for the metrics port, which a scraper
+/// reaches by whatever name its target holds, so a DNS-name-only certificate is fine and gets no SAN warning.</param>
 internal sealed record ListenerTlsLabels(
     string Section,
     string Surface,
@@ -45,7 +48,8 @@ internal sealed record ListenerTlsLabels(
     string Client,
     string Reach,
     string RefusalTail,
-    string CleartextLead)
+    string CleartextLead,
+    bool HasHostGuard)
 {
     /// <summary>The web dashboard's words, exactly as the web host's own TLS block logged them (#2562).</summary>
     internal static ListenerTlsLabels Web { get; } = new(
@@ -55,7 +59,8 @@ internal sealed record ListenerTlsLabels(
         Client: "browser",
         Reach: "browse",
         RefusalTail: "binding loopback-only",
-        CleartextLead: "Web dashboard is LAN-exposed WITHOUT TLS — the access token and its session cookie cross the segment in the clear");
+        CleartextLead: "Web dashboard is LAN-exposed WITHOUT TLS — the access token and its session cookie cross the segment in the clear",
+        HasHostGuard: true);
 
     /// <summary>The MCP endpoint's words (#5288).</summary>
     internal static ListenerTlsLabels Mcp { get; } = new(
@@ -65,7 +70,8 @@ internal sealed record ListenerTlsLabels(
         Client: "client",
         Reach: "connect",
         RefusalTail: "binding loopback-only",
-        CleartextLead: "MCP server is LAN-exposed WITHOUT TLS: the bearer token and every tool result cross the segment in the clear");
+        CleartextLead: "MCP server is LAN-exposed WITHOUT TLS: the bearer token and every tool result cross the segment in the clear",
+        HasHostGuard: true);
 
     /// <summary>
     /// The metrics port's words (#9326). It serves the web certificate, so <see cref="Section"/> stays <c>"web"</c> and every
@@ -79,7 +85,8 @@ internal sealed record ListenerTlsLabels(
         Client: "scraper",
         Reach: "scrape",
         RefusalTail: "the metrics port stays off",
-        CleartextLead: "Metrics port is bound off loopback WITHOUT TLS: the token in the Authorization header crosses the network in the clear");
+        CleartextLead: "Metrics port is bound off loopback WITHOUT TLS: the token in the Authorization header crosses the network in the clear",
+        HasHostGuard: false);
 }
 
 /// <summary>
@@ -308,7 +315,7 @@ internal static class DarlingListenerTls
                it down over a name mismatch would be a worse outcome than saying so. Runs inside the try
                on purpose: the SAN reader re-materializes an extension from raw DER and can throw on a
                malformed one, and a throw there must land in the catch below holding the certificate. */
-            if (SanWarning(labels, certificate, listenIp, port, hostName) is { } sanWarning)
+            if (labels.HasHostGuard && SanWarning(labels, certificate, listenIp, port, hostName) is { } sanWarning)
             {
                 logger.LogWarning("{Warning}", sanWarning);
             }
