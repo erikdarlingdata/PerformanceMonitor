@@ -399,6 +399,10 @@ public static class ParquetCompaction
             || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
     }
 
+    /* Tests only: called with each merge attempt's output path, whether it sorts, and the thread count its pragma sets
+       (#9320). Null in production, so the attempt pays one null check. */
+    internal static Action<string, bool, int>? MergeAttemptObservedForTests;
+
     private static void RunMerge(
         string table,
         List<string> sourcePaths,
@@ -410,6 +414,8 @@ public static class ParquetCompaction
         long? rowGroupBytes,
         string? orderBy)
     {
+        MergeAttemptObservedForTests?.Invoke(outputPath, orderBy is not null, threads);
+
         using var con = new DuckDBConnection("DataSource=:memory:");
         con.Open();
         using (var pragmaCmd = con.CreateCommand())
