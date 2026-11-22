@@ -11580,6 +11580,9 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// unit, since each rung is one transaction, but it is PostgreSQL 17+ against readers here that gate
     /// as low as 13, and it ends the session with FATAL rather than failing the statement.</para>
     ///
+    /// <para>V298 (#9304) is the seventh floor-setting rung, so the margin of one default bound this constant carried became a second
+    /// one: the census derives 2,400 s, the larger of eight default bounds and the longest declared bound plus one default.</para>
+    ///
     /// <para>A sum of the two rung bounds rather than a literal so the budgets cannot drift apart if a rung bound moves.
     /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A new
     /// FLOOR-SETTING rung is pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans
@@ -11597,7 +11600,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// per poll on the store being migrated, to buy a case that needs the pending rungs to outlast this budget
     /// while each stays inside its own bound, on a ladder measured at 0.301 s.</para>
     /// </summary>
-    private const int MigrationLockWaitTimeoutSeconds = V281CommandTimeoutSeconds + MigrationCommandTimeoutSeconds;
+    private const int MigrationLockWaitTimeoutSeconds = V281CommandTimeoutSeconds + (2 * MigrationCommandTimeoutSeconds);
 
     /// <summary>
     /// Gap (seconds) between <c>pg_try_advisory_lock</c> attempts while a sibling migrator holds the lock.

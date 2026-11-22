@@ -1279,27 +1279,28 @@ WHERE hypertable_name = 'wait_stats'
     }
 
     /// <summary>
-    /// Among the payload DIMENSION tables only the plan dimension is capped. <c>query_text_dim</c> is ~40 MB in
-    /// total and drains in a single slice, so the row cap is scoped to the one dimension whose rows are large
-    /// enough to matter. (The two Query Store interval fact tables are row-capped too since #5569, because they
+    /// Both payload DIMENSION tables are row-capped, in stamp order (#9304, V298). The dimension row no longer carries an
+    /// index on <c>last_seen</c>, so a time-sliced delete over it would scan the table for every slice: the purge runs
+    /// <see cref="PayloadDimensions.CursoredDeleteSql"/>, which orders by the stamp table's own index, for each dimension.
+    /// (The two Query Store interval fact tables are row-capped too since #5569, because they
     /// are plain heaps where the <c>ctid</c> idiom is safe; <c>QueryStoreIntervalPurgeRowCappedTests</c> pins
     /// that. The fact tables that stay time-sliced need the compressed-chunk-safe shape, #1564.)
     /// </summary>
     [Fact]
-    public void OnlyThePlanDim_TakesTheRowCap()
+    public void BothDims_TakeTheStampOrderedRowCap()
     {
         var source = ReadRetentionSource();
 
         var at = source.IndexOf("foreach (var dimTable in PayloadDimensions.DimTables)", StringComparison.Ordinal);
         Assert.True(at >= 0, "the dim purge loop moved (#2386)");
 
-        var body = source[at..Math.Min(source.Length, at + 2200)];
+        var body = source[at..Math.Min(source.Length, at + 3200)];
 
-        /* The plan dim is selected by name, and BOTH the statement and the drain batch size follow it. */
-        Assert.Contains("PayloadDimensions.QueryPlanDimTable", body, StringComparison.Ordinal);
-        Assert.Contains("RowCappedDeleteSql(", body, StringComparison.Ordinal);
-        Assert.Contains("TimeSlicedDeleteSql(", body, StringComparison.Ordinal);
+        /* One statement for every dimension, and BOTH the statement and the drain batch size follow it. */
+        Assert.Contains("PayloadDimensions.CursoredDeleteSql(", body, StringComparison.Ordinal);
+        Assert.Contains("cursoredSql:", body, StringComparison.Ordinal);
         Assert.Contains("batchSize:", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("TimeSlicedDeleteSql(", body, StringComparison.Ordinal);
 
         /* A row-capped statement MUST carry its cap as the batch size, or the drain loop reverts to
            "stop when a batch clears nothing" and does one batch per sweep instead of draining. */
