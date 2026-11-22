@@ -1243,4 +1243,43 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.Equal($"0x02|{tagB}", await MapOfAsync(env, other));
         });
     }
+
+    private static async Task FailMapDeleteForAsync(Env env, int serverId)
+    {
+        await ExecAsync(env, $"CREATE FUNCTION public.fail_map_delete() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN IF OLD.server_id = {serverId} THEN RAISE EXCEPTION 'map delete blocked'; END IF; RETURN OLD; END $f$");
+        await ExecAsync(env, "CREATE TRIGGER fail_map_delete BEFORE DELETE ON config.query_tag_map FOR EACH ROW EXECUTE FUNCTION public.fail_map_delete()");
+    }
+
+    [Fact]
+    public async Task AnAgePickedRebuildThatFails_StillExtendsItsServer_AndTheNextPassRebuildsTheOtherDueServerInstead()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int other = 7304;
+            int tag = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, tag, "application", "Report*");
+            await SightAsync(env, HashSightings("0xAA", "Report"), HashSightings("0xBB", "Report"));
+            await SightOnAsync(env, other, HashSightings("0xAA", "Report"), HashSightings("0xBB", "Report"));
+            var both = new[] { Server, other };
+            Assert.True(await new QueryTagMapBuilder(env.Source).RunMapPassAsync(both, env.Ct));
+
+            /* Both are due, Server is the older, and its rebuild fails: the map delete of its rows raises. */
+            await ExecAsync(env, "DELETE FROM collect.query_tag_sightings WHERE key = '0xAA'");
+            await StoreRebuiltAtAsync(env, Server, TimeSpan.FromDays(9));
+            await StoreRebuiltAtAsync(env, other, TimeSpan.FromDays(8));
+            await FailMapDeleteForAsync(env, Server);
+            await SightAsync(env, HashSightings("0xCC", "Report"));
+
+            var builder = new QueryTagMapBuilder(env.Source, rebuildStartupGrace: TimeSpan.Zero);
+            Assert.False(await builder.RunMapPassAsync(both, env.Ct));
+
+            /* The failed rebuild did not stop the extend: the new key is mapped, and the deleted one stays (only a rebuild drops it). */
+            Assert.Equal($"0xAA|{tag},0xBB|{tag},0xCC|{tag}", await MapOfAsync(env, Server));
+
+            /* The next pass gives the slot to the other due server, so it is rebuilt and the pass is clean. */
+            Assert.True(await builder.RunMapPassAsync(both, env.Ct));
+            Assert.Equal($"0xBB|{tag}", await MapOfAsync(env, other));
+            Assert.Equal($"0xAA|{tag},0xBB|{tag},0xCC|{tag}", await MapOfAsync(env, Server));
+        });
+    }
 }
