@@ -32,10 +32,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// next one. A key with no sightings left (retention removed them) leaves the map at the next rebuild; the extend path
 /// never deletes.</para>
 ///
-/// <para><b>The cursor is in memory, and a server without one rebuilds.</b> A server with no cursor (a fresh process, a
-/// newly listed server) gets the same one-transaction rebuild a rule change gets, then a cursor two minutes behind the
-/// clock. It does not drain from the start of time: a restart would otherwise re-read the whole sighting history, one
-/// aggregate-and-sort statement per page, once a minute until it finished, to re-derive a map that was already right.</para>
+/// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
+/// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it
+/// describes is still current: its <c>rules_version</c> equals the current one, <c>built_version</c> equals it too, and
+/// the cursor is under <see cref="MaxStoredCursorAge"/> old. Otherwise it gets the one-transaction rebuild a rule change
+/// gets, then a cursor two minutes behind the clock. It never drains from the start of time: that would re-read the whole
+/// sighting history, one aggregate-and-sort statement per page, once a minute until it finished. Each rebuild and each
+/// extend stores its cursor in the transaction of the map write it describes
+/// (<see cref="QueryTagMapStore.ReplaceMapAsync"/>, <see cref="QueryTagMapStore.UpsertMapAsync"/>), so a stored cursor is never
+/// ahead of the map, and a rebuild-all stamp drops the stored cursor of every server outside the pass.</para>
 ///
 /// <para><b>Caller carry-forward (decision 3 of #5971).</b> A hash key is resolved against every sighting row it has,
 /// each carrying the application, login and host it was seen under, so a rule on application X tags a hash seen under
@@ -60,6 +65,12 @@ public sealed class QueryTagMapBuilder
     /// and closes that gap.
     /// </summary>
     public static readonly TimeSpan ExtendOverlap = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// #9308: the oldest stored cursor a fresh process extends from. An older one rebuilds, so a long outage does not turn
+    /// into a page-at-a-time drain of everything sighted meanwhile.
+    /// </summary>
+    public static readonly TimeSpan MaxStoredCursorAge = TimeSpan.FromHours(24);
 
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
@@ -109,10 +120,15 @@ public sealed class QueryTagMapBuilder
         foreach (int serverId in serverIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            bool rebuild = rebuildAll || !_cursors.ContainsKey(serverId);
+            bool rebuild = rebuildAll;
             try
             {
                 await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                if (!rebuild && !_cursors.ContainsKey(serverId))
+                {
+                    rebuild = !await TryAdoptStoredCursorAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
+                }
+
                 if (rebuild)
                 {
                     await RebuildServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
@@ -143,6 +159,7 @@ public sealed class QueryTagMapBuilder
             {
                 await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
                 await QueryTagMapStore.StampBuiltVersionAsync(connection, snapshot.RulesVersion, cancellationToken).ConfigureAwait(false);
+                await QueryTagMapStore.DropCursorsOutsideAsync(connection, serverIds, cancellationToken).ConfigureAwait(false);
                 var inPass = new HashSet<int>(serverIds);
                 foreach (int cursorServer in _cursors.Keys.Where(id => !inPass.Contains(id)).ToList())
                 {
@@ -170,9 +187,40 @@ public sealed class QueryTagMapBuilder
             AddResolved(rows, serverId, sightings, snapshot);
         }
 
-        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken).ConfigureAwait(false);
-        _cursors[serverId] = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty);
+        var next = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty);
+        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
+        _cursors[serverId] = next;
     }
+
+    /// <summary>
+    /// A server with no in-memory cursor takes the cursor the last process stored, when every condition says the map on disk is
+    /// the one that cursor describes (#9308). False means rebuild.
+    /// </summary>
+    private async Task<bool> TryAdoptStoredCursorAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (snapshot.BuiltVersion != snapshot.RulesVersion)
+        {
+            return false;
+        }
+
+        var stored = await QueryTagMapStore.ReadCursorAsync(connection, serverId, cancellationToken).ConfigureAwait(false);
+        if (stored is null || stored.RulesVersion != snapshot.RulesVersion)
+        {
+            return false;
+        }
+
+        DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
+        if (clock - stored.Since >= MaxStoredCursorAge)
+        {
+            return false;
+        }
+
+        _cursors[serverId] = new Cursor(stored.Since, stored.AfterKind, stored.AfterKey);
+        return true;
+    }
+
+    private static QueryTagMapStoredCursor Stored(Cursor cursor, QueryTagMapSnapshot snapshot) =>
+        new(snapshot.RulesVersion, cursor.Since, cursor.AfterKind, cursor.AfterKey);
 
     private async Task ExtendServerAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
     {
@@ -182,10 +230,10 @@ public sealed class QueryTagMapBuilder
 
         var changed = await QueryTagMapStore.ReadChangedKeysAsync(
             connection, serverId, cursor.Since, cursor.AfterKind, cursor.AfterKey, _keysPerServerPerPass, cancellationToken).ConfigureAwait(false);
+        var rows = new List<QueryTagMapRow>();
         if (changed.Count > 0)
         {
             var sightingsByKey = await QueryTagMapStore.ReadSightingsOfKeysAsync(connection, serverId, changed, cancellationToken).ConfigureAwait(false);
-            var rows = new List<QueryTagMapRow>();
             foreach (var key in changed)
             {
                 if (sightingsByKey.TryGetValue((key.KeyKind, key.Key), out var sightings))
@@ -193,14 +241,14 @@ public sealed class QueryTagMapBuilder
                     AddResolved(rows, serverId, sightings, snapshot);
                 }
             }
-
-            await QueryTagMapStore.UpsertMapAsync(connection, serverId, rows, cancellationToken).ConfigureAwait(false);
         }
 
         /* A full page means more may wait: step past the last key. A short page drained everything up to the clock. */
-        _cursors[serverId] = changed.Count >= _keysPerServerPerPass
+        var next = changed.Count >= _keysPerServerPerPass
             ? new Cursor(changed[^1].LastSeen, changed[^1].KeyKind, changed[^1].Key)
             : new Cursor(clock - ExtendOverlap, string.Empty, string.Empty);
+        await QueryTagMapStore.UpsertMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
+        _cursors[serverId] = next;
     }
 
     private static void AddResolved(List<QueryTagMapRow> rows, int serverId, List<QueryTagSighting> sightings, QueryTagMapSnapshot snapshot)
