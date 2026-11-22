@@ -712,7 +712,7 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         await KeyEarlyAsync(store, nearEdge, ct);
         var collected = await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", EdgeDay), ("to", DataEnd));
 
-        await TickAsync(store, 10, ct);
+        await TickAsync(store, KeepEverything, ct);
         var collectedForTheDay = await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", nearEdge), ("to", nearEdge.AddDays(1)));
         Assert.Equal(collectedForTheDay, await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", DateOnly.FromDateTime(nearEdge))));
 
@@ -791,10 +791,10 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         var dayKey = DateOnly.FromDateTime(day);
         Assert.True(QueryStoreClosedDayRollup.MayBeThinned(dayKey, TickNow, 10), "the day is outside the margin zone, so the test proves nothing");
         await KeyEarlyAsync(store, day, ct);
-        await TickAsync(store, 10, ct);
+        await TickAsync(store, KeepEverything, ct);
         var built = await ScalarAsync<long>(store.Connection, RollupSumSql, ct, ("server_id", ServerId), ("day", dayKey));
 
-        /* The purge takes the early-keyed rows of the day and leaves the table's oldest row two hours before the day starts. */
+        /* The day was built while it was well inside retention. The purge takes its early-keyed rows and leaves the table's oldest row two hours before the day starts. */
         await PurgeBelowAsync(store, day.AddHours(-2), ct);
         Assert.True(await ScalarAsync<long>(store.Connection, IntervalSumSql, ct, ("server_id", ServerId), ("from", day), ("to", day.AddDays(1))) < built, "the purge dropped no row of the day");
         var oldest = await ScalarAsync<DateTime>(store.Connection, "SELECT MIN(first_execution_time) FROM collect.query_store_interval_wide WHERE server_id = @server_id", ct, ("server_id", ServerId));
