@@ -670,13 +670,17 @@ ORDER BY c.relname;";
     /// attached child gets a <c>CONCURRENTLY</c> build on the leaf (an INVALID leftover of an interrupted build dropped
     /// first) and an <c>ALTER INDEX ... ATTACH PARTITION</c>. The parent turns VALID by itself when the last leaf attaches.
     /// A partition made afterwards builds its own child at ATTACH, on an empty table, so this runs to completion once.
-    /// The two short statements that take a parent-level lock run in a transaction under a 5 s <c>lock_timeout</c>; a
-    /// timeout is an error here (the delayed task logs it and the next start retries).
+    /// The two short statements that take a parent-level lock run in a transaction under a 5 s <c>lock_timeout</c>. A
+    /// timeout is retried within the start (#9313, <see cref="LockRetryPlan"/>): a leaf whose ATTACH still times out keeps its
+    /// valid child, the later leaves go on, and one come-back pass retries it. Only a leaf still unattached after that throws
+    /// (the delayed task logs it and the next start retries). A valid unattached child is attached as it is, never rebuilt.
     /// </summary>
     internal static async Task EnsurePartitionedAsync(
         NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken,
-        Func<string, CancellationToken, Task>? beforeLeafBuild = null)
+        Func<string, CancellationToken, Task>? beforeLeafBuild = null,
+        LockRetryPlan? retryPlan = null)
     {
+        var plan = retryPlan ?? LockRetryPlan.Production;
         if (string.IsNullOrEmpty(spec.IndexDefinition))
         {
             throw new InvalidOperationException($"Index spec {spec.IndexName} has no IndexDefinition, which the partitioned path needs.");
@@ -686,10 +690,11 @@ ORDER BY c.relname;";
         var tableShortName = SplitTableName(spec.TableName).Name;
         var started = System.Diagnostics.Stopwatch.StartNew();
 
-        await ExecuteInLockTimeoutAsync(
+        await ExecuteWithLockRetryAsync(
             connection,
             $"CREATE INDEX IF NOT EXISTS {indexShortName} ON ONLY {spec.TableName} {spec.IndexDefinition};",
-            cancellationToken).ConfigureAwait(false);
+            new LockAttempt("CREATE INDEX ON ONLY", spec.TableName, 1, 1),
+            spec.IndexName, logger, plan, cancellationToken).ConfigureAwait(false);
 
         var leaves = new List<(string Leaf, string Suffix, bool Attached)>();
         await using (var state = new NpgsqlCommand(LeafStateSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds })
@@ -706,6 +711,7 @@ ORDER BY c.relname;";
         }
 
         var built = 0;
+        var unattached = new List<(string Leaf, string Child)>();
         foreach (var (leaf, suffix, attached) in leaves)
         {
             if (attached)
@@ -754,9 +760,19 @@ ORDER BY c.relname;";
                     await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                await ExecuteInLockTimeoutAsync(
-                    connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
-                built++;
+                try
+                {
+                    await ExecuteWithLockRetryAsync(
+                        connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};",
+                        new LockAttempt("ATTACH PARTITION", leaf, 1, 1), spec.IndexName, logger, plan, cancellationToken).ConfigureAwait(false);
+                    built++;
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+                {
+                    /* #9313: a writer held this leaf for every attempt. Its valid child stays, and the leaves after it still get
+                       theirs. The come-back pass below tries it again once more. */
+                    unattached.Add((leaf, childQualified));
+                }
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
@@ -771,6 +787,38 @@ ORDER BY c.relname;";
             }
         }
 
+        /* #9313: the come-back pass. Each leaf whose ATTACH timed out through all its attempts gets one more bounded round,
+           after every other leaf is done and the writer that held it has had the whole first pass to finish. */
+        var stillUnattached = new List<string>();
+        foreach (var (leaf, childQualified) in unattached)
+        {
+            try
+            {
+                await ExecuteWithLockRetryAsync(
+                    connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};",
+                    new LockAttempt("ATTACH PARTITION", leaf, 1, 2), spec.IndexName, logger, plan, cancellationToken).ConfigureAwait(false);
+                built++;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                stillUnattached.Add(leaf);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                logger.LogInformation(
+                    "Query Store index {Index}: leaf {Leaf} was dropped by retention before its index was attached; skipping it.",
+                    spec.IndexName, leaf);
+            }
+        }
+
+        if (stillUnattached.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Query Store index {spec.IndexName} on {spec.TableName}: the ATTACH of {stillUnattached.Count} leaf index(es) "
+                + $"timed out on every attempt and is left for the next start: {string.Join(", ", stillUnattached)}. "
+                + "The other leaves are attached.");
+        }
+
         bool parentValid;
         await using (var final = new NpgsqlCommand("SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
         {
@@ -783,10 +831,73 @@ ORDER BY c.relname;";
             spec.IndexName, spec.TableName, built, started.Elapsed.TotalSeconds, parentValid ? "valid" : "INVALID");
     }
 
-    private static async Task ExecuteInLockTimeoutAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    /// <summary>One try of a short lock-taking statement: which statement, on what, which attempt, in which pass (1 first, 2 come-back).</summary>
+    internal readonly record struct LockAttempt(string Statement, string Leaf, int Attempt, int Pass);
+
+    /// <summary>
+    /// How the partitioned path retries a lock-timed-out short statement (#9313): how many attempts, the per-attempt
+    /// <c>lock_timeout</c>, the wait after each failed attempt, and a hook that runs before every attempt (tests only).
+    /// </summary>
+    internal sealed record LockRetryPlan(
+        int MaxAttempts,
+        TimeSpan LockTimeout,
+        Func<int, TimeSpan> BackoffAfterAttempt,
+        Func<LockAttempt, CancellationToken, Task>? BeforeAttempt = null)
+    {
+        /// <summary>Five attempts of 5 s each, waiting 5, 10, 20 and 30 s between them.</summary>
+        internal static readonly LockRetryPlan Production = new(
+            5,
+            TimeSpan.FromSeconds(PartitionedLockTimeoutSeconds),
+            failedAttempt => TimeSpan.FromSeconds(failedAttempt switch { 1 => 5, 2 => 10, 3 => 20, _ => 30 }));
+    }
+
+    /* Runs one short statement under the plan's lock_timeout, up to MaxAttempts times. Only 55P03 is retried and any other
+       error goes out as it is. The last attempt's 55P03 goes out too, for the caller to turn into "leave this leaf for later". */
+    private static async Task ExecuteWithLockRetryAsync(
+        NpgsqlConnection connection, string sql, LockAttempt first, string indexName, ILogger logger, LockRetryPlan plan,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var current = first with { Attempt = attempt };
+            if (plan.BeforeAttempt is not null)
+            {
+                await plan.BeforeAttempt(current, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                await ExecuteInLockTimeoutAsync(connection, sql, plan.LockTimeout, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                var seconds = plan.LockTimeout.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                if (attempt >= plan.MaxAttempts)
+                {
+                    logger.LogInformation(
+                        "Query Store index {Index}: lock for {Statement} on {Leaf} not granted within {Seconds} s (attempt {Attempt} of {Max}); giving up on it for now.",
+                        indexName, first.Statement, first.Leaf, seconds, attempt, plan.MaxAttempts);
+                    throw;
+                }
+
+                var wait = plan.BackoffAfterAttempt(attempt);
+                logger.LogInformation(
+                    "Query Store index {Index}: lock for {Statement} on {Leaf} not granted within {Seconds} s (attempt {Attempt} of {Max}); retrying in {Wait}s.",
+                    indexName, first.Statement, first.Leaf, seconds, attempt, plan.MaxAttempts,
+                    wait.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+                if (wait > TimeSpan.Zero)
+                {
+                    await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
+    private static async Task ExecuteInLockTimeoutAsync(NpgsqlConnection connection, string sql, TimeSpan lockTimeout, CancellationToken cancellationToken)
     {
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{PartitionedLockTimeoutSeconds}s';", connection, transaction) { CommandTimeout = CatalogReadTimeoutSeconds })
+        await using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{(int)lockTimeout.TotalMilliseconds}ms';", connection, transaction) { CommandTimeout = CatalogReadTimeoutSeconds })
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
