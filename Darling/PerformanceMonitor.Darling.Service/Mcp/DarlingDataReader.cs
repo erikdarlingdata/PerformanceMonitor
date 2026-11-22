@@ -3478,7 +3478,7 @@ internal static partial class DarlingDataReader
     /// <see cref="QueryStoreWindowProbeDailyRowsSql"/>. Indented as <see cref="QueryStoreTopRawWindowSql"/> is.
     /// $1 server_id, $2 the gate's <c>ReadStart</c>, $5 databases, $8 <c>S</c>. A static readonly declared above its users.
     /// </summary>
-    private static readonly string QueryStoreTopDailyLeadingEdgeSql = $$"""
+    internal static readonly string QueryStoreTopDailyLeadingEdgeSql = $$"""
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -3492,7 +3492,7 @@ internal static partial class DarlingDataReader
     /// <see cref="QueryStoreTopDailyTableSql"/>'s trailing edge, <c>[E, $3)</c> of the wide table, as
     /// <see cref="QueryStoreTopDailyLeadingEdgeSql"/> is for the leading one. $3 window end, $9 <c>E</c>.
     /// </summary>
-    private static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
+    internal static readonly string QueryStoreTopDailyTrailingEdgeSql = $$"""
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   collection_time >= $9::date
@@ -3908,13 +3908,23 @@ internal static partial class DarlingDataReader
 
             /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. With no built day
                the interval-table statement reads the whole window. */
-            var dailySpan = await ReadQueryStoreTopDailySpanAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken);
+            var (dailySpan, validHours) = await ReadQueryStoreTopDailyBuiltAsync(connection, transaction, serverId, plan.ReadStart, endUtc, withHours: true, cancellationToken);
+
+            /* #9280: the whole hours of the two edges that the ledger says the hourly table holds exactly are read from it, the rest from the
+               wide table. No valid hour leaves the daily statement as it is. */
+            var hourly = dailySpan is var (hourlyStart, hourlyEnd)
+                ? QueryStoreTopHourlyEdges.Segment(plan.ReadStart, endUtc, hourlyStart, hourlyEnd, validHours)
+                : null;
+            if (hourly is { UsesSummary: false })
+            {
+                hourly = null;
+            }
 
             /* #9276: the window as two arms, each with the floor that holds for its rows, once the partial index for the NULL-start
                arm is built. The daily read is placed by collection_time and keeps its statement. */
             var splitBuilt = dailySpan is null && await QueryStoreBackgroundIndexes.IsBuiltAsync(
                 connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, McpCommandDeadlines.ReadSeconds, cancellationToken);
-            var topSql = dailySpan is not null ? QueryStoreTopDailyTableSql : splitBuilt ? QueryStoreTopTableSplitSql : QueryStoreTopTableSql;
+            var topSql = hourly is not null ? QueryStoreTopHourlyEdges.BuildSql(hourly) : dailySpan is not null ? QueryStoreTopDailyTableSql : splitBuilt ? QueryStoreTopTableSplitSql : QueryStoreTopTableSql;
 
             /* #5882: the first_execution_time floor of both reads reaches PurgeEdgeMargin (26 hours) before the window,
                because an interval may span a day. When the server's own intervals are shorter, the floor shrinks to what
@@ -3955,6 +3965,15 @@ internal static partial class DarlingDataReader
                 }
 
                 AddInt(command, TopFill.FinalCandidates(top));
+                if (hourly is not null)
+                {
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = QueryStoreTopHourlyEdges.HourValues(hourly) });
+                    foreach (var bound in QueryStoreTopHourlyEdges.RangeValues(hourly))
+                    {
+                        AddTimestamp(command, bound);
+                    }
+                }
+
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             }
@@ -3973,28 +3992,79 @@ internal static partial class DarlingDataReader
     /// days is built. The top read and <see cref="QueryStoreWindowHasRowsAsync"/> both take their daily span from here, so
     /// they choose the same tier.</summary>
     private static async Task<(DateOnly Start, DateOnly EndExclusive)?> ReadQueryStoreTopDailySpanAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, CancellationToken cancellationToken)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, CancellationToken cancellationToken) =>
+        (await ReadQueryStoreTopDailyBuiltAsync(connection, transaction, serverId, readStart, endUtc, withHours: false, cancellationToken)).Span;
+
+    /// <summary>
+    /// <see cref="QueryStoreTopBuiltDaysSql"/> and, in the same statement and round trip, the whole hours of <c>[ceil(readStart), floor(endUtc))</c>
+    /// the hourly table holds exactly (#9280): an hour the builder has done whose pair for server $1 has a <c>top_built_seq</c> level with its
+    /// <c>late_seq</c>. A pair that does not exist is valid with no rows, as in <see cref="QueryTagRollupHashRoute"/>: any later write
+    /// would have created it, stale. At most the retained hours, a few hundred small rows. Read in the caller's snapshot, so a late write
+    /// committed before it has its <c>late_seq</c> bump committed with it and that hour reads raw.
+    /// </summary>
+    private const string QueryStoreTopBuiltDaysAndHoursSql = """
+        SELECT 0 AS kind, w.day::timestamp AS t
+        FROM (
+        """ + QueryStoreTopBuiltDaysSql + """
+
+        ) AS w
+        UNION ALL
+        SELECT 1 AS kind, h.hour AS t
+        FROM collect.query_store_compose_stamp_hours AS h
+        WHERE h.hour >= $4::timestamp
+        AND   h.hour < $5::timestamp
+        AND   NOT EXISTS
+              (
+                  SELECT 1
+                  FROM collect.query_store_compose_stamp_built AS b
+                  WHERE b.server_id = $1
+                  AND   b.hour = h.hour
+                  AND   b.top_built_seq IS DISTINCT FROM b.late_seq
+              )
+        ORDER BY 1, 2
+        """;
+
+    private static async Task<((DateOnly Start, DateOnly EndExclusive)? Span, List<DateTime> ValidHours)> ReadQueryStoreTopDailyBuiltAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime endUtc, bool withHours, CancellationToken cancellationToken)
     {
+        var validHours = new List<DateTime>();
         var (firstDay, endDay) = WholeDays(readStart, endUtc);
         if (firstDay >= endDay)
         {
-            return null;
+            return (null, validHours);
         }
 
         var builtDays = new List<DateOnly>();
-        await using (var built = new NpgsqlCommand(QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        await using (var built = new NpgsqlCommand(withHours ? QueryStoreTopBuiltDaysAndHoursSql : QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
         {
             AddInt(built, serverId);
             built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
             built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
+            if (withHours)
+            {
+                AddTimestamp(built, QueryStoreTopHourlyEdges.CeilHour(readStart));
+                AddTimestamp(built, QueryStoreTopHourlyEdges.FloorHour(endUtc));
+            }
+
             await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
             while (await builtReader.ReadAsync(cancellationToken))
             {
-                builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+                if (!withHours)
+                {
+                    builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+                }
+                else if (builtReader.GetInt32(0) == 0)
+                {
+                    builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(1)));
+                }
+                else
+                {
+                    validHours.Add(builtReader.GetDateTime(1));
+                }
             }
         }
 
-        return LongestBuiltRun(builtDays);
+        return (LongestBuiltRun(builtDays), validHours);
     }
 
     /// <summary>How many of the window's rows <see cref="QueryStoreWindowProbeSql"/> tests one by one before it tests the
