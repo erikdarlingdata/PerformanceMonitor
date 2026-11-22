@@ -64,11 +64,16 @@ public sealed class QueryStoreAttachRetryLiveTests
             return new Writer(connection);
         }
 
-        public async Task HoldAsync(string leaf, CancellationToken ct)
+        public async Task HoldAsync(string leaf, CancellationToken ct, string mode = "ACCESS EXCLUSIVE", string? thenRun = null)
         {
             _transaction = await _connection.BeginTransactionAsync(ct);
-            await using var hold = new NpgsqlCommand($"LOCK TABLE {leaf} IN ACCESS EXCLUSIVE MODE;", _connection, _transaction);
+            await using var hold = new NpgsqlCommand($"LOCK TABLE {leaf} IN {mode} MODE;", _connection, _transaction);
             await hold.ExecuteNonQueryAsync(ct);
+            if (thenRun is not null)
+            {
+                await using var run = new NpgsqlCommand(thenRun, _connection, _transaction);
+                await run.ExecuteNonQueryAsync(ct);
+            }
         }
 
         public async Task ReleaseAsync(CancellationToken ct)
@@ -112,12 +117,12 @@ public sealed class QueryStoreAttachRetryLiveTests
         await CountAsync(connection, $"SELECT count(*) FROM pg_index WHERE indexrelid = '{IndexName}'::regclass AND indisvalid", ct) == 1;
 
     [Fact]
-    public void TheProductionPlan_IsFiveAttemptsOfFiveSeconds_WithTheBackoffBetweenThem()
+    public void TheProductionPlan_IsTenAttemptsOfOneSecond_WithTheBackoffBetweenThem()
     {
         var plan = LockRetryPlan.Production;
-        Assert.Equal(5, plan.MaxAttempts);
-        Assert.Equal(TimeSpan.FromSeconds(PartitionedLockTimeoutSeconds), plan.LockTimeout);
-        Assert.Equal(new[] { 5, 10, 20, 30 }, Enumerable.Range(1, 4).Select(n => (int)plan.BackoffAfterAttempt(n).TotalSeconds));
+        Assert.Equal(10, plan.MaxAttempts);
+        Assert.Equal(TimeSpan.FromSeconds(1), plan.LockTimeout);
+        Assert.Equal(new[] { 2, 4, 8, 15, 15, 15 }, Enumerable.Range(1, 6).Select(n => (int)plan.BackoffAfterAttempt(n).TotalSeconds));
     }
 
     [Fact]
@@ -261,5 +266,70 @@ public sealed class QueryStoreAttachRetryLiveTests
         Assert.Equal(before, after);
         Assert.Equal(3L, await AttachedLeavesAsync(connection, ct));
         Assert.True(await ParentValidAsync(connection, ct));
+    }
+
+    [Fact]
+    public async Task AParentIndexThatExists_IsNotCreatedAgain_SoAWriteOnTheParentDoesNotTimeItOut()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await SeedAsync(connection, ct);
+        await EnsurePartitionedAsync(connection, Spec, new CapturingLogger(), ct, null, Plan((_, _) => Task.CompletedTask));
+        Assert.Equal(3L, await AttachedLeavesAsync(connection, ct));
+
+        /* An insert holds ROW EXCLUSIVE on the parent, which a SHARE lock request would wait behind. */
+        await using var writer = await Writer.OpenAsync(scratch.ConnectionString, ct);
+        await writer.HoldAsync(Parent, ct, "ROW EXCLUSIVE");
+
+        var attempts = new List<LockAttempt>();
+        await EnsurePartitionedAsync(connection, Spec, new CapturingLogger(), ct, null, Plan((attempt, _) =>
+        {
+            attempts.Add(attempt);
+            return Task.CompletedTask;
+        }));
+
+        Assert.DoesNotContain(attempts, a => a.Statement == "CREATE INDEX ON ONLY");
+        Assert.True(await ParentValidAsync(connection, ct));
+    }
+
+    [Fact]
+    public async Task ATimedOutAttempt_NamesTheHolder_AndNeverLogsItsQueryText()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await SeedAsync(connection, ct);
+        var holderConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { ApplicationName = "holder9313app" }.ConnectionString;
+        await using var writer = await Writer.OpenAsync(holderConnectionString, ct);
+
+        var logger = new CapturingLogger();
+        await EnsurePartitionedAsync(connection, Spec, logger, ct, null, Plan(async (attempt, token) =>
+        {
+            if (attempt.Statement == "ATTACH PARTITION" && attempt.Leaf == "t9313_c")
+            {
+                if (attempt.Attempt == 1)
+                {
+                    await writer.HoldAsync("t9313_c", token, thenRun: "SELECT 'secretliteral9313';");
+                }
+                else
+                {
+                    await writer.ReleaseAsync(token);
+                }
+            }
+        }));
+
+        var retryLine = Assert.Single(logger.Lines, line => line.Contains("attempt 1 of 5", StringComparison.Ordinal));
+        Assert.Contains("held by: pid ", retryLine, StringComparison.Ordinal);
+        Assert.Contains("'holder9313app'", retryLine, StringComparison.Ordinal);
+        Assert.Contains("idle in transaction", retryLine, StringComparison.Ordinal);
+        Assert.Contains("AccessExclusiveLock", retryLine, StringComparison.Ordinal);
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("secretliteral9313", StringComparison.Ordinal));
     }
 }
