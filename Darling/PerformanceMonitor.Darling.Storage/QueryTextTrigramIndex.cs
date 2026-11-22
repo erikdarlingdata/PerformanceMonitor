@@ -408,7 +408,12 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
 
     /// <summary>The time between cleans of the pending list. The list grows with the collector's calls, and the clean must run often enough
     /// that a store far busier than the largest field store still never fills it between cleans.</summary>
-    public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(2);
+
+    /// <summary>#9303: the wait before the first clean after a start. Zero: the clean does not wait for the build's <see cref="StartDelay"/>,
+    /// because it only works on an index that exists, and the first inserts after a restart are the ones most likely to take a cold pending
+    /// list past its limit and merge it inside their own statement.</summary>
+    internal static readonly TimeSpan CleanFirstDelay = TimeSpan.Zero;
 
     /// <summary>How long the limit change waits for its lock. <c>ALTER INDEX ... SET (gin_pending_list_limit)</c> takes <c>ACCESS EXCLUSIVE</c> on the
     /// index, so while a long search holds the index it queues, and every insert into the table queues behind it.</summary>
@@ -735,14 +740,26 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     public static Task RunAsync(
         NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
         TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
+        RunLoopsAsync(
+            enabled, tracker, logger, "Trigram index", firstDelay, interval, CleanInterval,
+            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+            ct => CleanPendingListAsync(postgres, enabled, logger, ct),
+            static (wait, ct) => Task.Delay(wait, ct),
+            cancellationToken);
+
+    /// <summary>
+    /// #9303: the two loops under both indexes' <c>RunAsync</c>, with the pass, the clean and the wait passed in so a test steps them without a
+    /// store or a clock. The build pass waits <paramref name="firstDelay"/>, which keeps a whole-table build off the post-restart IO burst. The
+    /// clean starts at once (<see cref="CleanFirstDelay"/>): it only touches an index that already exists, and it is what keeps a collection
+    /// insert from merging the pending list inside its own statement, which is most likely right after a restart while the list is cold.
+    /// </summary>
+    internal static Task RunLoopsAsync(
+        Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval,
+        TimeSpan cleanInterval, Func<bool, CancellationToken, Task<bool>> pass, Func<CancellationToken, Task> clean,
+        Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken) =>
         Task.WhenAll(
-            RunLoopAsync(
-                enabled, tracker, logger, "Trigram index", firstDelay, interval,
-                (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
-                static (wait, ct) => Task.Delay(wait, ct),
-                cancellationToken),
-            RunCleanLoopAsync(
-                ct => CleanPendingListAsync(postgres, enabled, logger, ct), logger, "Trigram index", firstDelay, CleanInterval, cancellationToken));
+            RunLoopAsync(enabled, tracker, logger, indexLabel, firstDelay, interval, pass, delay, cancellationToken),
+            RunCleanLoopAsync(clean, logger, indexLabel, CleanFirstDelay, cleanInterval, delay, cancellationToken));
 
     /// <summary>
     /// #9044: the clean loop under both indexes' <c>RunAsync</c>. Runs <paramref name="clean"/> every <paramref name="interval"/> (each index's
@@ -750,15 +767,16 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// on <see cref="PassInterval"/>. Never throws: <paramref name="clean"/> throws only on cancellation.
     /// </summary>
     internal static async Task RunCleanLoopAsync(
-        Func<CancellationToken, Task> clean, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
+        Func<CancellationToken, Task> clean, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval,
+        Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken)
     {
         try
         {
-            await Task.Delay(firstDelay, cancellationToken).ConfigureAwait(false);
+            await delay(firstDelay, cancellationToken).ConfigureAwait(false);
             while (true)
             {
                 await clean(cancellationToken).ConfigureAwait(false);
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                await delay(interval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)

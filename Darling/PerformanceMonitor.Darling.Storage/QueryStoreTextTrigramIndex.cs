@@ -103,8 +103,8 @@ public static class QueryStoreTextTrigramIndex
     /// <summary>The time between cleans of the two indexes' pending lists. Each row that reaches this GIN carries a whole Query Store
     /// statement's trigrams, about 456 trigrams or about 1.9 pending-list pages on a text of 1.4 KB, so its list fills faster per row than the
     /// plan-cache index's: at a store ten times the field's write rate a list cleaned every 5 minutes reaches the
-    /// <see cref="PendingListLimitKb"/> limit, and 2 minutes keeps it under half of it. This index's own value, with its own reason, apart
-    /// from <see cref="QueryTextTrigramIndex.CleanInterval"/>.</summary>
+    /// <see cref="PendingListLimitKb"/> limit, and 2 minutes keeps it under half of it. #9303: the plan-cache index's
+    /// <see cref="QueryTextTrigramIndex.CleanInterval"/> is the same 2 minutes, so a collection insert on either one rarely meets a long list.</summary>
     public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(2);
 
     /// <summary>One catalog read: the table, the index, the index it replaces, both extensions and any build in progress on the table. No
@@ -373,21 +373,18 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// <paramref name="enabled"/> is the option's live, resolved value (#8978: the store's <c>config.config_service</c> column when it holds
     /// one, else <c>darling.json</c>), read at the start of every pass, so a store write takes effect at the next pass with no restart. With
     /// the option off and no index the pass is one catalog read. Never throws: a pass that fails is a Warning and the next interval tries again.
-    /// The clean of the pending lists runs beside the pass on its own loop, every <see cref="CleanInterval"/> after
-    /// <paramref name="firstDelay"/>, and ends with it at shutdown.
+    /// The clean of the pending lists runs beside the pass on its own loop, every <see cref="CleanInterval"/>, and ends with it at
+    /// shutdown. #9303: it starts at once and does not wait for <paramref name="firstDelay"/>, which holds back only the build.
     /// </summary>
     public static Task RunAsync(
         NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
         TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
-        Task.WhenAll(
-            QueryTextTrigramIndex.RunLoopAsync(
-                enabled, tracker, logger, "Query Store text trigram index", firstDelay, interval,
-                (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
-                static (wait, ct) => Task.Delay(wait, ct),
-                cancellationToken),
-            QueryTextTrigramIndex.RunCleanLoopAsync(
-                ct => CleanPendingListsAsync(postgres, enabled, logger, ct), logger, "Query Store text trigram index", firstDelay, CleanInterval,
-                cancellationToken));
+        QueryTextTrigramIndex.RunLoopsAsync(
+            enabled, tracker, logger, "Query Store text trigram index", firstDelay, interval, CleanInterval,
+            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+            ct => CleanPendingListsAsync(postgres, enabled, logger, ct),
+            static (wait, ct) => Task.Delay(wait, ct),
+            cancellationToken);
 
     /// <summary>
     /// One clean of both indexes, this one and the one it replaces, each on the plan-cache index's terms
