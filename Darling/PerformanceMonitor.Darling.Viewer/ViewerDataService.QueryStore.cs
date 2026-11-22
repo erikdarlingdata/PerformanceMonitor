@@ -1150,7 +1150,7 @@ public sealed partial class ViewerDataService
                 ? QueryStoreTopRollupStatements(splitBuilt, longestSpan)
                 : splitBuilt ? (QueryStoreTopTableSplitKeysSql, QueryStoreTopTableSplitByKeysSql) : (QueryStoreTopTableKeysSql, QueryStoreTopTableByKeysSql);
             /* #9287: the slow-load line says which shape this read got, so a cold read can be told apart without a store read. */
-            source = source with { Shape = QueryStoreClosedDayRollup.DescribeShape(edgeMargin, splitBuilt) };
+            source = source with { Shape = QueryStoreClosedDayRollup.DescribeShape(edgeMargin, longestSpan, splitBuilt) };
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
             {
                 var marginSql = QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin);

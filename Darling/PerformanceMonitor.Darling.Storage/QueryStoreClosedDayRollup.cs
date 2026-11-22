@@ -885,15 +885,20 @@ ORDER BY b.day_utc;";
 
     /// <summary>
     /// #9287: the shape of a Query Store grid read's interval-table statements, for its slow-load line: the edge margin the read used
-    /// (<paramref name="edgeMargin"/>, from <see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/>), "fell back to" when it is the full
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> because the interval length could not be trusted, and whether the arms are split
-    /// (<paramref name="splitBuilt"/>, the partial index is built) or the read kept its one-arm bounds.
+    /// (<paramref name="edgeMargin"/>, from <see cref="QueryStoreIntervalWide.ResolveEdgeMarginAndLongestSpanAsync"/>), "fell back to" when it is the full
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> because the interval length could not be trusted, the longest interval span the
+    /// split arms' upper bound uses (<paramref name="longestSpan"/>, "fell back to" when it is the full
+    /// <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/>), and whether the arms are split (<paramref name="splitBuilt"/>, the partial
+    /// index is built) or the read kept its one-arm bounds.
     /// </summary>
-    public static string DescribeShape(TimeSpan edgeMargin, bool splitBuilt)
+    public static string DescribeShape(TimeSpan edgeMargin, TimeSpan longestSpan, bool splitBuilt)
     {
-        var hours = edgeMargin.TotalHours.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
-        var margin = edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin ? $"edge margin {hours} h" : $"edge margin fell back to {hours} h";
-        return $"{margin}, {(splitBuilt ? "split arms" : "one arm, index not built")}";
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var marginHours = edgeMargin.TotalHours.ToString("0.#", culture);
+        var spanHours = longestSpan.TotalHours.ToString("0.#", culture);
+        var margin = edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin ? $"edge margin {marginHours} h" : $"edge margin fell back to {marginHours} h";
+        var span = longestSpan < QueryStoreIntervalWide.IntervalSpanMargin ? $"span {spanHours} h" : $"span fell back to {spanHours} h";
+        return $"{margin}, {span}, {(splitBuilt ? "split arms" : "one arm, index not built")}";
     }
 
     /// <summary>The longest run of consecutive days in <paramref name="days"/> (sorted, oldest first); the newest such run on a tie.</summary>

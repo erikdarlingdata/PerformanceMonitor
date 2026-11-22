@@ -86,16 +86,18 @@ public sealed class ViewerQueryStoreRollupSourceTests
 
     /* #9287: the grid read's line also says which shape its interval-table statements took, so a cold read can be told apart without a store read. */
     [Theory]
-    [InlineData(3, true, "edge margin 3 h, split arms")]
-    [InlineData(2.5, false, "edge margin 2.5 h, one arm, index not built")]
-    [InlineData(26, true, "edge margin fell back to 26 h, split arms")]
-    [InlineData(26, false, "edge margin fell back to 26 h, one arm, index not built")]
-    public void ASlowLoad_NamesTheEdgeMarginAndTheArmsOfTheGridRead(double marginHours, bool splitBuilt, string expected)
+    [InlineData(3, 1, true, "edge margin 3 h, span 1 h, split arms")]
+    [InlineData(2.5, 0.5, false, "edge margin 2.5 h, span 0.5 h, one arm, index not built")]
+    [InlineData(26, 1, true, "edge margin fell back to 26 h, span 1 h, split arms")]
+    [InlineData(26, 1, false, "edge margin fell back to 26 h, span 1 h, one arm, index not built")]
+    [InlineData(3, 24, true, "edge margin 3 h, span fell back to 24 h, split arms")]
+    [InlineData(26, 24, false, "edge margin fell back to 26 h, span fell back to 24 h, one arm, index not built")]
+    public void ASlowLoad_NamesTheEdgeMarginTheSpanAndTheArmsOfTheGridRead(double marginHours, double spanHours, bool splitBuilt, string expected)
     {
         var timer = new ViewerLoadTimer(0);
         timer.Track("grid read", Task.FromResult(1));
         var source = QueryStoreClosedDayRollup.DescribeSource(Start, End, Run(12, 15), QueryStoreClosedDayRollup.SourceReason.Served)
-            with { Shape = QueryStoreClosedDayRollup.DescribeShape(TimeSpan.FromHours(marginHours), splitBuilt) };
+            with { Shape = QueryStoreClosedDayRollup.DescribeShape(TimeSpan.FromHours(marginHours), TimeSpan.FromHours(spanHours), splitBuilt) };
         timer.NotePhase("grid read", source.Describe());
 
         var line = timer.Finish("Queries > Query Store by Duration");
