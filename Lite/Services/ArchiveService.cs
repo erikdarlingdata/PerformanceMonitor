@@ -82,6 +82,10 @@ public class ArchiveService
     /* The per-batch input budget for the tables merged one day at a time (query_snapshots, #5393; query_stats and query_store_stats, #5410). */
     internal long DailyCompactionBatchInputBytes { get; set; } = ParquetCompaction.DailyBatchInputBytes;
 
+    /* The per-batch input budget for a monthly table whose merge sorts by server (#9258): smaller than the 200 MB
+       the unsorted tables use, because the sort holds more of a batch than the streaming copy. */
+    internal long SortedCompactionBatchInputBytes { get; set; } = ParquetCompaction.SortedBatchInputBytes;
+
     /// <summary>
     /// The most disk space (bytes) the last compaction pass found a single month/table group would need for its
     /// merged output: the on-disk size of the files it would read, which its temps match until the swap removes
@@ -615,6 +619,14 @@ public class ArchiveService
         if (deleted > 0)
             _duckDb.BumpArchiveViewGeneration();
 
+        /* #9241: rows of a table whose query text lives in the dimension just left the hot store, so a text no hot row references
+           any more can go. Only here, under the write lock the caller holds: a collector's batch that reuses a digest is
+           excluded by the dimension's own semaphore, which the cleanup takes. A failure never fails the archive. */
+        if (deleted > 0 && LiteTextDimensions.IsDiverted(table))
+        {
+            TextDimensionWriter.TryRemoveUnreferenced(writeConnection, _logger, $"archiving {table}");
+        }
+
         return deleted;
     }
 
@@ -1054,7 +1066,7 @@ public class ArchiveService
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = $@"
 COPY (
-    SELECT * FROM {table} WHERE {RangePredicate(timeColumn, lower)}
+    SELECT * FROM {LiteTextDimensions.HotSource(table)} WHERE {RangePredicate(timeColumn, lower)}
 ) TO '{EscapeSqlPath(filePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                 AddRangeParameters(cmd, lower, upper);
                 await cmd.ExecuteNonQueryAsync();
@@ -1538,12 +1550,16 @@ COPY (
                     .ToList();
 
                 /* Bucket files into size-budgeted batches so a single COPY never
-                   merges an unbounded amount of data. Most tables compress mildly, so
-                   the on-disk budget is a fine proxy and they fit one batch with many
-                   files (#933). query_snapshots, whose query-plan XML expands about 30x
-                   on read, gets a much smaller budget (#5393). */
+                   merges an unbounded amount of data. The budget is ParquetCompaction.BatchInputBytesFor
+                   with this service's three settings: a daily table (query_snapshots, query_stats and
+                   query_store_stats) takes the daily budget, which is much smaller because query-plan
+                   XML expands about 30x on read (#5393, #5410), a monthly table whose merge sorts by
+                   server takes the sorted budget (#9258), and every other monthly table takes the
+                   default, a fine proxy because they compress mildly (#933). */
                 var isDaily = ParquetCompaction.IsDailyTable(table);
-                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, isDaily ? DailyCompactionBatchInputBytes : CompactionBatchInputBytes);
+                var batchBudget = ParquetCompaction.BatchInputBytesFor(
+                    table, CompactionBatchInputBytes, DailyCompactionBatchInputBytes, SortedCompactionBatchInputBytes);
+                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBudget);
 
                 /* Merge only what changes, and only what fits (#5377).
 
@@ -1650,7 +1666,10 @@ COPY (
                     cancellationToken.ThrowIfCancellationRequested();
 
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
-                        threads: ParquetCompaction.ThreadsFor(table));
+                        threads: ParquetCompaction.ThreadsFor(table),
+                        onSortFallback: (fallbackTable, files, error) => _logger?.LogWarning(
+                            "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
+                            fallbackTable, files, error));
                     AfterCompactionBatchMergedForTests?.Invoke(i);
                 }
 
@@ -2135,8 +2154,10 @@ COPY (
     /// Called when the database exceeds the size threshold. Data remains queryable through archive views.
     /// <para>#9188: <paramref name="cancellationToken"/> is the shutdown, and reaches only the compaction after the reset.
     /// The reset itself is not interrupted.</para>
+    /// <para>#9250: returns true only when the store was really reset. A deferral (a restore pending, the archive lock busy,
+    /// the retry backoff, a collection in flight) and a failure that returns normally answer false.</para>
     /// </summary>
-    public async Task ArchiveAllAndResetAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> ArchiveAllAndResetAsync(CancellationToken cancellationToken = default)
     {
         if (File.Exists(RestoreMarkerPath))
         {
@@ -2146,13 +2167,13 @@ COPY (
             _logger?.LogError(
                 "Database reset deferred: an earlier reset's restore is pending ({Marker}); restart Lite to finish it before another reset",
                 RestoreMarkerPath);
-            return;
+            return false;
         }
 
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero, CancellationToken.None))
         {
             _logger?.LogDebug("Archive operation already in progress, skipping");
-            return;
+            return false;
         }
 
         /* #4732: a retry time more than one backoff ahead of the clock can only come from a wall clock that stepped
@@ -2164,7 +2185,7 @@ COPY (
         {
             _logger?.LogDebug("Database reset skipped: the previous attempt failed and its retry is due at {RetryAt:u}", ResetRetryNotBeforeUtc);
             s_archiveLock.Release();
-            return;
+            return false;
         }
 
         /* Wait for in-flight collections before deleting the database (#2594). The write lock below does NOT
@@ -2185,7 +2206,7 @@ COPY (
                 "next archival check.",
                 CollectionResetGate.CollectionsInFlight);
             s_archiveLock.Release();
-            return;
+            return false;
         }
 
         IsArchiving = true;
@@ -2201,6 +2222,9 @@ COPY (
         var exports = new List<(string TempPath, string FinalPath)>();
         var promoted = new List<string>();
         var resetStarted = false;
+        /* #9250: true once the store file was really deleted and reinitialized, so the caller can tell a reset from a
+           deferral or a failure that also return normally. */
+        var storeWasReset = false;
         string? preId = null;
         long exportedRows = 0;
 
@@ -2283,7 +2307,8 @@ COPY (
                         await WithRaisedCopyMemoryLimit(connection, async () =>
                         {
                             using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
+                            /* #9241: through the vh_ view for a table whose query text is kept in a dimension, so the file carries the text on every row. */
+                            exportCmd.CommandText = $"COPY (SELECT * FROM {LiteTextDimensions.HotSource(table)}) TO '{EscapeSqlPath(tempParquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                             await exportCmd.ExecuteNonQueryAsync();
                         });
 
@@ -2308,7 +2333,7 @@ COPY (
                     ResetRetryNotBeforeUtc);
                 RecordReset(StoreHousekeepingHistory.OutcomeFailed, null, null, usedMbAtStart,
                     $"The export failed, so no data was moved and the store was not reset. {exportError}");
-                return;
+                return false;
             }
 
             /* Everything is on disk. Name the files about to be promoted before promoting them: if the
@@ -2402,6 +2427,7 @@ COPY (
                     BeforeDatabaseFileResetForTests?.Invoke();
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
+                    storeWasReset = true;
 
                     /* Every live table just lost its rows, so cached archive answers are invalid until re-read. */
                     _duckDb.BumpArchiveViewGeneration();
@@ -2535,6 +2561,8 @@ COPY (
             ReleaseCollectionGate();
             s_archiveLock.Release();
         }
+
+        return storeWasReset;
     }
 
 }

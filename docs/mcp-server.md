@@ -26,6 +26,8 @@ Lite and Darling set up MCP in different ways. Follow the part for your edition,
 claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ --header "Authorization: Bearer <token>"
 ```
 
+   The command puts the token on the command line. It stays in your shell history, and it shows in the process list while the command runs. PowerShell keeps its history in a file, at the path `(Get-PSReadLineOption).HistorySavePath`, so delete the line there if you ran it. To keep the token off the command line, use a `.mcp.json` file. Claude Code's documentation says a `headers` value there can hold `${NAME}`, which it replaces with the environment variable `NAME`, for example `"Authorization": "Bearer ${SQL_MONITOR_TOKEN}"`. Set that variable in the Windows environment variable settings, not with a typed command.
+
    If you type the command yourself, replace `<token>` with the token. A request with no token, or a wrong one, is answered `401`.
 
    If MCP was already on when you updated, Lite makes the token at its first start and logs a line saying so. Copy the new config then, because the old registration has no token.
@@ -60,7 +62,7 @@ The MCP token gates the entire read surface. It also gates `analyze_server`, whi
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
-   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how.
+   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how. The command above puts the token on the command line in the same way, so the note under the Lite step applies to it too.
 
 **Proof**, in the service log:
 
@@ -215,7 +217,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Query text search (Darling) | `find_queries_by_text` (finds the statements whose text holds a piece of text, such as a table name. Name a server and it searches Query Store text and the plan-cache text of the raw tier. Each source has its own horizon and its own 4 second budget. The Query Store text is read through its opt-in trigram index (`queryStoreTextTrigramIndexEnabled`, or `update_service_flags` `query_store_text_trigram_index_enabled`, which wins and needs no restart) when that index is ready, which makes a rare pattern fast. The plan-cache text of that server is read through the plan-cache text index (`queryTextTrigramIndexEnabled`) when that index is ready: the matching texts are found first and the server's samples read by them (`sample_read` is `probe`), and a pattern more than 1,000 texts contain, or a text match that takes more than a second, tests each text instead (`sample_read` is `plain`). Leave the server out to search the plan-cache text of every server, which is served only when the opt-in trigram index (`queryTextTrigramIndexEnabled`, or `update_service_flags` `query_text_trigram_index_enabled`, which wins and needs no restart) is ready. The matching texts' digests are then bound to the sample read (`sample_read` is `probe`, `matched_texts` says how many), which the sample index the same option builds on `query_stats` serves on uncompressed chunks; a pattern more than 1,000 statements contain joins the whole raw window instead (`sample_read` is `join`) and can reach the 4 second budget and report `stopped`. Each source reports `ok`, `empty`, `stopped`, or `not_searched` (Query Store text, in the all-servers scope). A statement the sensitive-statement filter withholds is listed with the withheld marker in place of its text. It is refused when `mcp.dataDetail` hides statement text) |
 | Tool guides | `get_tool_guide` (the long-form reading guide of a tool whose description ends "Reading guide: get_tool_guide.", and cross-tool topics; both editions) |
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
-| Store health (Lite) | `get_store_health` (Lite's own store, not a monitored server: size against the 512 MB reset point, archive files, the history of archives, resets and cleanups, and rows per table) |
+| Store health (Lite) | `get_store_health` (Lite's own store, not a monitored server: data against the reset point (`hot_store_reset_mb`, 512 MB by default), file size against twice that, archive files, the history of archives, resets and cleanups, and rows per table) |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) and, with writes on, `create_known_pattern`, `update_known_pattern`, `delete_known_pattern` |
 | Daily Health Report (Darling) | `get_daily_health_report` (one day's report on every server: bands, alerts, failed Agent jobs, backup and CHECKDB gaps, low disk and collection problems, read from the store and sent nowhere) and, with writes on, `send_daily_health_report_now` (sends the report now through the alert routes) |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
@@ -308,6 +310,8 @@ Then set up the client. Point it at the LAN IP of the box and never at `localhos
 claude mcp add --transport http --scope user sql-monitor-darling http://192.168.1.205:5152/ `
   --header "Authorization: Bearer <token>"
 ```
+
+The command above puts the token on the command line in the same way, so the note under the Lite step applies to it too.
 
 Two gates apply, in this order:
 

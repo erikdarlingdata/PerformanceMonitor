@@ -13,6 +13,7 @@
 
 using System.IO;
 using DuckDB.NET.Data;
+using DuckDB.NET.Native;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -23,6 +24,9 @@ public static class ParquetCompaction
        so tools/CompactionRepro can sweep them; production callers use the
        defaults below. */
     public const string DefaultMemoryLimit = "4GB";
+
+    /* Memory limit of a sorted merge's connection (ServerOrderedTables, #9255) when the caller passes none. */
+    public const string SortedMergeMemoryLimit = "512MB";
     public const int DefaultThreads = 2;
     public const int DefaultRowGroupSize = ArchiveRowGroupSize;
 
@@ -94,7 +98,8 @@ public static class ParquetCompaction
        wanted) and a day file touches about 4% (1.05 rows decoded per row wanted). Measured with
        tools/CompactionRepro on a copy of one laptop's hourly files, repeated for size (directional: one laptop,
        DuckDB 1.5.5): the day merge with no sort peaked at 1.16 GB at most and used no temp space; ORDER BY
-       collection_time added nothing to the pruning and peaked at 4.2 GB, so the day merge has no sort.
+       collection_time added nothing to the pruning and peaked at 4.2 GB, so the day merge has no sort, except
+       query_store_stats' by server then time (ServerOrderedTables, #9255), which has no plan text to hold.
        A month file written before the switch, and an imported_ file, stay as they are: the per-cycle files that
        are waiting at the switch were never merged into the month file, so a day file and a month file never
        hold the same row (neither archive view dedups). */
@@ -137,10 +142,124 @@ public static class ParquetCompaction
        the input budget above, is what bounds the merge's peak (see the measurements there). 32 and 64 MiB peaked
        the same (x24, 64 MiB batches: 1.18 and 1.15 GB); 32 MiB makes smaller groups (341 against 311 for the
        157 MB input), which a time-windowed read prunes better. Usable only because the merge connection sets
-       preserve_insertion_order = false (DuckDB 1.5.5 refuses it otherwise). */
+       preserve_insertion_order = false (DuckDB 1.5.5 refuses it otherwise). query_store_stats' compaction merge no
+       longer uses it (ServerOrderedTables, #9255): with an ORDER BY the bound is not honoured on every DuckDB
+       version, and with plan text excluded a 2,048-row group of its rows is far under 32 MiB. The sliced export's
+       merge still uses it. */
     public const long DailyRowGroupBytes = 32L * 1024 * 1024; /* 32 MiB */
 
     public static long RowGroupBytesFor(string table) => IsDailyTable(table) ? DailyRowGroupBytes : 0;
+
+    /* On-disk parquet bytes per merge batch for a monthly table whose merge sorts by server (#9258). A batch's sort
+       holds more of it than the streaming copy, so the sorted monthly merge gets its own smaller budget instead of
+       DefaultBatchInputBytes: more _ptNNN parts, each sorted on its own and each holding one server per row group.
+       Measured with tools/CompactionRepro (measure-sorted-monthly.sh) on 22 seeded hourly files, sorted merge at the
+       512MB limit, peak working set (baseline about 60 MB included) and row groups that still mix servers:
+         - 60-column index_object_stats shape (655 MB on disk): 32 MiB 474 MB, 88 of 1628 mixed;
+           64 MiB 653 MB, 44 mixed; 100 MiB 647 MB, 32 mixed. Unsorted at 200 MB: 343 MB, every group mixed.
+         - 37-column procedure_stats shape with seven 200-byte texts (241 MB): 32 MiB 605 MB, 44 of 649 mixed;
+           64 MiB 623 MB, 20 mixed; 100 MiB 640 MB, 12 mixed. Unsorted at 200 MB: 304 MB, every group mixed.
+       32 MiB is the one budget that stays near 600 MB on both shapes, so no table is taken out of the sorted set.
+       The mixed groups left are the seams where a server's rows continue across two parts. */
+    public const long SortedBatchInputBytes = 32L * 1024 * 1024; /* 32 MiB */
+
+    /* The per-batch input budget of a table's compaction merge. The one rule, so the production merge and
+       tools/CompactionRepro cannot drift apart: the daily budget for a table merged per day (query_snapshots,
+       query_stats and query_store_stats, the last of which is also sorted and keeps its day budget as measured in
+       #9255), the sorted monthly budget for any other server-ordered table, else the default. The three budgets
+       are parameters so a caller with its own settings (ArchiveService's test-settable properties) passes them in. */
+    public static long BatchInputBytesFor(
+        string table,
+        long defaultBytes = DefaultBatchInputBytes,
+        long dailyBytes = DailyBatchInputBytes,
+        long sortedBytes = SortedBatchInputBytes) =>
+        IsDailyTable(table) ? dailyBytes
+        : ServerOrderByFor(table) is null ? defaultBytes
+        : sortedBytes;
+
+    /* Tables whose compaction merge sorts by server, then by the table's time column (#9255): table -> time column.
+
+       Every archive file mixed every server's rows in each row group (the archiver's COPY and a merge without a sort
+       both keep the hot table's time order, which interleaves the servers), so a read filtered to one server decoded
+       the other servers' rows too and the footer's server_id min/max could prune nothing. Sorted by server_id, then
+       time, a group holds one server (the few at a boundary hold two), and a server-filtered read skips the rest.
+       Measured with a seeded store of the field shape (5 servers sharing the rows 33/22.5/17/17/10.5%, hourly files as
+       the archiver writes them, one day merged by compaction's own settings: 1 thread, 4 GB; DuckDB 1.5.6): 4 of 141
+       groups mixed servers, against all 121 groups without the sort, and a one-server read of 8 such days took 2.5 s
+       CPU against 5.3 s on the biggest server (1.2 s against 4.3 s on the smallest), with the same rows read.
+
+       Memory cost, measured on a copy of a field store (query_store_stats day files at the 64 MiB batch budget, each
+       its own batch): at a 4 GB limit the sorted merge's peak process memory was over three times the unsorted
+       merge's. A 1 GB limit did not lower it. A 512MB limit (SortedMergeMemoryLimit) brings it to two to three times the
+       unsorted peak, for one to two seconds more per merge. 512MB, not 250MB: 512MB was measured three times and 250MB
+       once, and the hard-ceiling risk below grows as the limit drops. Rows and reads came out the same. At 512MB the
+       sort spills a few hundred MB of temp files per merge, and the field day files all finished without the
+       fallback below.
+
+       Time spans: on field day files, which hold rows from many collection days, a sorted group spans LESS time than
+       an unsorted one (the average fell from about a day or more to a few hours), so a narrow time window decodes no
+       more groups. Only on a seeded single-day store did a group span more time (90 against 12 minutes on average, a
+       24 h window over all servers read 1.39 s CPU against 1.09 s, one hour no change).
+
+       The cap is a hard ceiling for the parquet writer (see MergeBatchToFile), and a sorted merge has no row-group byte
+       bound, so a day of very long statement texts can fill a 2,048-row group past 512MB. MergeBatchToFile then reruns
+       that batch unsorted at DefaultMemoryLimit with the byte bound, as the merge ran before #9255, and logs a warning.
+       DuckDB's out-of-memory error fires quickly, before anything is spilled. Field compressibility does not reach
+       this case, so the fallback guards against unusually long, repetitive statement texts or a DuckDB change.
+
+       Which tables are sorted. At the daily level only query_store_stats: its merge reads no plan text
+       (CompactionExcludeColumns drops query_plan_text), so the #5410 peak does not apply, and its day budget
+       stays DailyBatchInputBytes. query_snapshots and query_stats carry plan XML, are merged per day and stay
+       unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
+       (32 MiB) per batch, not the 200 MB default the unsorted monthly tables keep: a numeric month batch of
+       100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a sorted batch needs its own smaller budget
+       (see there for the measurements). A table not listed keeps its merge unsorted at the default budget. The
+       archiver's hourly COPY is not sorted: at the field's cadence an hourly file is one row group, so the sort
+       clusters nothing, and compaction rewrites the day's files in the same pass. */
+    private static readonly Dictionary<string, string> ServerOrderedTables = BuildServerOrderedTables();
+
+    private static Dictionary<string, string> BuildServerOrderedTables()
+    {
+        var tables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["query_store_stats"] = "collection_time"
+        };
+
+        /* The monthly-merged tables (#9258): every table Lite stores and archives except the three merged per day
+           above (query_snapshots and query_stats stay unsorted, see below). Each carries server_id and its own
+           time column: capture_time for the config snapshots, alert_time for the alert log, collection_time for
+           the rest. A table that is not named here keeps its merge unsorted, whatever it is called (the
+           ArchiveService tests merge tables of other names with files that have no server_id). */
+        foreach (var table in new[]
+        {
+            "ag_database_replica_states", "ag_replica_states", "agent_status", "attention_events",
+            "blocked_process_reports", "collection_log", "cpu_scheduler_stats", "cpu_utilization_stats",
+            "database_size_stats", "database_states", "deadlocks", "default_trace_events",
+            "dmv_blocking_snapshots", "file_io_stats", "index_object_stats", "job_history", "latch_stats",
+            "long_query_completions", "memory_clerks", "memory_grant_stats", "memory_pressure_events",
+            "memory_stats", "perfmon_stats", "plan_cache_stats", "plan_correction", "procedure_stats",
+            "pvs_stats", "running_jobs", "server_properties", "session_stats", "session_summary_stats",
+            "spinlock_stats", "system_health_events", "tempdb_stats", "wait_stats", "waiting_tasks"
+        })
+        {
+            tables[table] = "collection_time";
+        }
+
+        foreach (var table in new[]
+        {
+            "database_config", "database_scoped_config", "query_store_health", "server_config", "trace_flags"
+        })
+        {
+            tables[table] = "capture_time";
+        }
+
+        tables["config_alert_log"] = "alert_time";
+        return tables;
+    }
+
+    /* The ORDER BY list of the table's compaction merge, or null when the merge keeps no order. */
+    public static string? ServerOrderByFor(string table) =>
+        ServerOrderedTables.TryGetValue(table, out var timeColumn) ? $"server_id, {timeColumn}" : null;
 
     /* Columns to exclude during compaction — dead weight from legacy archives */
     private static readonly Dictionary<string, string[]> CompactionExcludeColumns = new()
@@ -196,26 +315,88 @@ public static class ParquetCompaction
        numeric tables this runs on. (query_snapshots, with its query-plan XML,
        is merged one day at a time on a much smaller batch budget, and
        query_stats and query_store_stats are merged one day at a time so a
-       one-hour read prunes — see DailyCompactionTables.)
+       one-hour read prunes, see DailyCompactionTables. The monthly tables
+       that sort by server take the sorted budget, see BatchInputBytesFor.)
 
        Pragma tuning:
          - memory_limit = 4GB: parquet COPY makes allocations that bypass the
            buffer manager and can't spill; the cap is a hard ceiling, not a
            spill trigger. Paired with the batch budget (DefaultBatchInputBytes)
-           so the working set stays under it.
+           so the working set stays under it. A sorted merge (ServerOrderedTables,
+           #9255) runs at SortedMergeMemoryLimit (512MB) instead: the sort holds
+           more of the batch than the streaming copy, and the lower limit makes
+           it spill, which cut its peak from over three times the unsorted
+           merge's to two to three times (see ServerOrderedTables). If that merge hits
+           the ceiling anyway, the batch is rerun unsorted at 4GB.
          - threads = 2: fewer per-thread row-group buffers in flight.
          - preserve_insertion_order = false: lets DuckDB stream.
        The memoryLimit/threads/rowGroupSize parameters let tools/CompactionRepro
-       sweep them; production passes the defaults. */
+       sweep them (null memoryLimit means the table's default); production passes
+       the defaults. */
     public static void MergeBatchToFile(
         string table,
         List<string> sourcePaths,
         string outputPath,
         string spillDirSql,
-        string memoryLimit = DefaultMemoryLimit,
+        string? memoryLimit = null,
         int threads = DefaultThreads,
         int rowGroupSize = DefaultRowGroupSize,
-        long? rowGroupBytes = null)
+        long? rowGroupBytes = null,
+        Action<string, int, string>? onSortFallback = null)
+    {
+        var orderBy = ServerOrderByFor(table);
+        try
+        {
+            RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
+                threads, rowGroupSize, rowGroupBytes, orderBy);
+        }
+        catch (DuckDBException ex) when (orderBy is not null && IsOutOfMemoryOrTempSpace(ex))
+        {
+            /* The cap is a hard ceiling for the parquet writer and a sorted merge has no row-group byte bound, so a
+               batch of very long rows can pass it (#9255). Without this the day's compaction would fail on every
+               pass and its hourly files would pile up. Rerun the batch as dev ran it before the sort: unsorted, at
+               the default limit, with the byte bound, on a fresh connection (a failed instance may hold memory). */
+            if (File.Exists(outputPath))
+            {
+                File.Delete(outputPath);
+            }
+
+            onSortFallback?.Invoke(table, sourcePaths.Count, ex.Message);
+            RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
+                threads, rowGroupSize, rowGroupBytes, orderBy: null);
+        }
+    }
+
+    /* The memory limit a merge of the table runs at: the caller's when it passes one, else the sorted merge's lower
+       limit for a ServerOrderedTables table, else the default. */
+    internal static string EffectiveMemoryLimit(string table, string? memoryLimit) =>
+        memoryLimit ?? (ServerOrderByFor(table) is null ? DefaultMemoryLimit : SortedMergeMemoryLimit);
+
+    /* DuckDB's out-of-memory error type, or the temp folder filling up (the sorted merge spills under its limit). */
+    private static bool IsOutOfMemoryOrTempSpace(DuckDBException ex) =>
+        ex.ErrorType == DuckDBErrorType.OutOfMemory || IsOutOfTempSpace(ex);
+
+    /* True when a DuckDB failure is the temp folder filling up: its own cap (max_temp_directory_size) or the disk under
+       it. Lives here so this file stays free of Lite types, because tools/CompactionRepro compiles it too. */
+    internal static bool IsOutOfTempSpace(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void RunMerge(
+        string table,
+        List<string> sourcePaths,
+        string outputPath,
+        string spillDirSql,
+        string memoryLimit,
+        int threads,
+        int rowGroupSize,
+        long? rowGroupBytes,
+        string? orderBy)
     {
         using var con = new DuckDBConnection("DataSource=:memory:");
         con.Open();
@@ -225,17 +406,19 @@ public static class ParquetCompaction
             pragmaCmd.ExecuteNonQuery();
         }
 
-        /* No ORDER BY on this statement, deliberately. #5410 measured ORDER BY collection_time in the merge (4 to
-           6 GB peaks on the plan-heavy shape) and it will not be built. The daily tables' batch budget and
-           row-group byte bound (DailyBatchInputBytes, DailyRowGroupBytes) were measured UNSORTED: a sort holds the
-           whole batch, and DuckDB does not honour ROW_GROUP_SIZE_BYTES under an ORDER BY inside the COPY (one
-           68,708-row group), so a future ORDER BY must leave a daily table out of the byte bound and budget
-           unless both are measured again with it. */
+        /* No ORDER BY on this statement unless the table is in ServerOrderedTables (#9255). #5410 measured ORDER BY
+           collection_time in the merge (4 to 6 GB peaks on the plan-heavy shape) and it will not be built for those
+           tables. The daily tables' batch budget and row-group byte bound (DailyBatchInputBytes, DailyRowGroupBytes)
+           were measured UNSORTED: a sort holds the whole batch, and DuckDB 1.5.5 did not honour ROW_GROUP_SIZE_BYTES
+           under an ORDER BY inside the COPY (one 68,708-row group; 1.5.6 wrote the same 2,048-row groups with and
+           without it, #9255), so a sorted merge drops the byte bound whatever the caller passed rather than lean on
+           a DuckDB version. */
         var selectClause = BuildSelectClause(table, sourcePaths);
         var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
         using var cmd = con.CreateCommand();
-        cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)) " +
-                          $"TO '{EscapeSqlPath(outputPath)}' ({BuildArchiveCopyOptions(rowGroupSize, rowGroupBytes ?? RowGroupBytesFor(table))})";
+        cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)" +
+                          (orderBy is null ? "" : $" ORDER BY {orderBy}") + ") " +
+                          $"TO '{EscapeSqlPath(outputPath)}' ({BuildArchiveCopyOptions(rowGroupSize, orderBy is null ? rowGroupBytes ?? RowGroupBytesFor(table) : 0)})";
         cmd.ExecuteNonQuery();
     }
 

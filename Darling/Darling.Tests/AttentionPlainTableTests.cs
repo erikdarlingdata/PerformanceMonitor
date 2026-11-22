@@ -25,7 +25,7 @@ namespace Darling.Tests;
    test's rows, so they are deliberately NOT [Collection("live-postgres")]. */
 
 /// <summary>
-/// The attention table is a hypertable with no compression policy on a TimescaleDB store (#8967) and a plain table on every
+/// The attention table is a hypertable outside the compression grid on a TimescaleDB store (#8967, its own compression policy since #9216) and a plain table on every
 /// other store (it was plain everywhere from #5640 on). It joins none of the compression grid (#3035, #3044, #3107), so the
 /// grid does not move (<see cref="TimescaleSupport.HypertableCount"/> stays 72). Pins the opt-out census (the plain tables, which
 /// no longer include this one), the deferral census (exactly this one table), the retention paths (drop_chunks on a hypertable,
@@ -49,10 +49,10 @@ public sealed class AttentionPlainTableTests
         Assert.Equal(new[] { "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity", "object_inventory", "object_dependencies", "schema_capture_passes", "column_stats_runs" }, optedOut);
 
         /* A hypertable that joins none of the compression grid is declared too, and the list is exact for the same reason. */
-        var deferred = CollectorCatalog.All.Where(c => c.CompressionDeferred).Select(c => c.TargetTable).ToArray();
+        var deferred = CollectorCatalog.All.Where(c => c.CompressionOffGrid).Select(c => c.TargetTable).ToArray();
 
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.StaysPlainTable);
-        Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.CompressionDeferred);
+        Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.CompressionOffGrid);
         Assert.DoesNotContain("attention_events", TimescaleSupport.CompressionPhaseOrder);
         Assert.Equal(CollectorCatalog.All.Count - optedOut.Length - deferred.Length, TimescaleSupport.HypertableTables.Count);
 

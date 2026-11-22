@@ -20,7 +20,7 @@ namespace PerformanceMonitorLite.Services;
 /// one to shut down. <see cref="App"/> reads the plan once and every start-up step that would put something on a screen
 /// asks it first.
 /// </summary>
-public sealed record LiteStartupPlan(bool Headless, bool Stop, bool PrintMcpToken = false)
+public sealed record LiteStartupPlan(bool Headless, bool Stop, bool PrintMcpToken = false, bool AddServer = false)
 {
     public const string HeadlessArg = "--headless";
     public const string StopArg = "--stop";
@@ -28,11 +28,16 @@ public sealed record LiteStartupPlan(bool Headless, bool Stop, bool PrintMcpToke
     /// <summary>#9185: prints the stored MCP token to standard output and exits (Darling's <c>--print-mcp-token</c>).</summary>
     public const string PrintMcpTokenArg = "--print-mcp-token";
 
+    /// <summary>#9237: adds monitored servers without the window and exits (Darling's <c>--add-server</c>). <c>--add-servers</c> is the same verb.</summary>
+    public const string AddServerArg = "--add-server";
+    public const string AddServersArg = "--add-servers";
+
     public static LiteStartupPlan FromArgs(IEnumerable<string> args)
     {
         var headless = false;
         var stop = false;
         var printMcpToken = false;
+        var addServer = false;
         foreach (var arg in args)
         {
             if (string.Equals(arg, HeadlessArg, StringComparison.OrdinalIgnoreCase))
@@ -41,18 +46,21 @@ public sealed record LiteStartupPlan(bool Headless, bool Stop, bool PrintMcpToke
                 stop = true;
             else if (string.Equals(arg, PrintMcpTokenArg, StringComparison.OrdinalIgnoreCase))
                 printMcpToken = true;
+            else if (string.Equals(arg, AddServerArg, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(arg, AddServersArg, StringComparison.OrdinalIgnoreCase))
+                addServer = true;
         }
 
-        return new LiteStartupPlan(headless, stop, printMcpToken);
+        return new LiteStartupPlan(headless, stop, printMcpToken, addServer);
     }
 
     /// <summary>
     /// A stop request starts nothing: it asks the running instance to stop and leaves. So does a token print (#9185): it reads one
     /// Credential Manager entry and leaves, with no window, no tray icon, no data folder, no log file and no single-instance lock.
     /// </summary>
-    public bool StartsServices => !Stop && !PrintMcpToken;
+    public bool StartsServices => !Stop && !PrintMcpToken && !AddServer;
 
-    /// <summary>The single-instance lock is taken by a start that runs Lite. A stop or a token print leaves a running Lite alone.</summary>
+    /// <summary>The single-instance lock is taken by a start that runs Lite. A stop, a token print or an add leaves a running Lite alone (the add refuses to run beside one, see AddServerCommand).</summary>
     public bool TakesInstanceLock => StartsServices;
 
     /// <summary>The main window is shown. Headless never shows it, and never creates a window handle for it.</summary>

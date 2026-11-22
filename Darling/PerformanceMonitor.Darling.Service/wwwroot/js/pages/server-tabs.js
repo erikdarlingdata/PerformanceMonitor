@@ -958,6 +958,9 @@ export const SERVER_TABS = [
   {
     id: "activity",
     label: "Activity",
+    /* #9220: Running Jobs words its empty state by the fleet card's is_online (ctx.offline), so a card that flips it repaints this tab's
+       panels. No other tab reads ctx.offline, and a first visit on one of them keeps the reads it started before the card arrived. */
+    readsOffline: true,
     build: (server, ctx) => [
       perfmonPanel(server, ctx),
       sessionStatsTrendPanel(server, ctx),

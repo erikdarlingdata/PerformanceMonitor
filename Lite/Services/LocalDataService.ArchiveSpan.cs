@@ -84,7 +84,7 @@ public sealed partial class LocalDataService
 
         if (hot.Count > 0)
         {
-            var result = await read(table => hot.Contains(table) ? table : "v_" + table);
+            var result = await read(table => hot.Contains(table) ? LiteTextDimensions.HotSource(table) : "v_" + table);
             if (_duckDb.ArchiveViewGeneration == generation)
             {
                 return result;

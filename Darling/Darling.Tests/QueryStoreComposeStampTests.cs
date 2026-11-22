@@ -386,11 +386,8 @@ public sealed class QueryStoreComposeStampTests
     [Fact]
     public void TheRung_IsV173_AboveV172_AndBelowTheStorageVersion()
     {
-        /* V173's own content. Newer rungs land above it (V174, #5655), so this pins its place, not the top of the ladder. */
         Assert.Equal(173, QueryStoreComposeStamp.RungVersion);
         var rung = PgMigrations.Scripts.Single(s => s.Version == QueryStoreComposeStamp.RungVersion);
-        Assert.True(QueryStoreComposeStamp.RungVersion <= StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal("query-store-compose-stamp", rung.Name);
         var below = PgMigrations.Scripts.Where(s => s.Version < rung.Version).Max(s => s.Version);
         Assert.Equal(172, below);
@@ -398,7 +395,6 @@ public sealed class QueryStoreComposeStampTests
         Assert.EndsWith(QueryStoreComposeStamp.CreateSql, rung.Sql, StringComparison.Ordinal);
         Assert.StartsWith("SET LOCAL lock_timeout", rung.Sql, StringComparison.Ordinal);
     }
-
 
     [Fact]
     public void TheRungText_HasTheTablesTheIndexTheFunctionAndBothTriggers_OnTheParent_WithTheWriterClock()

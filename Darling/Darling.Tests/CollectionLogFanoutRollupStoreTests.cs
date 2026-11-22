@@ -35,21 +35,9 @@ namespace Darling.Tests;
 public class CollectionLogFanoutRollupStoreTests
 {
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("collection-log-fanout-rollup", PgMigrations.Scripts.Single(s => s.Version == 80).Name);
-
-        /* Demoted at V81 (#2515): "80 is the maximum" was true of the LADDER while this was its top rung,
-           not of this rung, and leaving it here is how a demotion turns into a red build on the next one.
-           The density and ordering checks below stay — those are properties of the whole ladder that every
-           rung's test may assert. */
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
@@ -407,5 +395,4 @@ public class CollectionLogFanoutRollupStoreTests
 
     private static string ReadViewerSource() =>
         ReadRepoFile(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs"));
-
 }

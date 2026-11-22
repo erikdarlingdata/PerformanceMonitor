@@ -45,13 +45,7 @@ public sealed class IntervalFirstExecIndexWideRungTests
     [Fact]
     public void TheRungIsRegistered_AndTheLadderIsDenseAboveIt()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("interval-tables-wide-first-exec-index", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

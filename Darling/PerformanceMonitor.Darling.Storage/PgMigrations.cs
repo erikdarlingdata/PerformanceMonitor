@@ -3347,6 +3347,109 @@ CREATE INDEX IF NOT EXISTS idx_plan_correction_server_db_query_time
     WHERE recommendation_name IS NOT NULL;";
 
     /// <summary>
+    /// V291 (#9215): the covering <c>(server_id, bucket DESC)</c> index on <c>query_store_stats_corrected_hourly</c>'s materialization, replacing the plain
+    /// <c>(server_id, bucket)</c> group index. See <see cref="TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql"/>: a catalog read first, the
+    /// V152 lock timeout, a no-op on a store without TimescaleDB or without the view (a fresh store gets the same index when the view is created).
+    /// </summary>
+    private static readonly string V291Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql;
+
+    /// <summary>
+    /// V292 (#9223): <c>ix_qs_corrected_daily_hash_bucket</c>, <c>(query_hash, bucket DESC) INCLUDE (server_id, database_name, execution_count_sum,
+    /// cpu_us_weighted_sum, duration_us_weighted_sum)</c> on the corrected daily Query Store rollup's materialization. The <c>mid</c> arm of
+    /// <c>get_query_fleet_summary</c>'s Query Store statement filters that rollup on the hash alone, and its newest chunks are still uncompressed
+    /// (inside the rollup's compress-after window) with a bucket index and the kept <c>server_id</c> index only, so the plan scanned every row of each
+    /// one. The hourly rollup got the same index in V246 and V284, and both of the statement's edges read it.
+    ///
+    /// <para><b>Cost.</b> One build per materialization chunk, under a SHARE lock that blocks the refresh's writes and not reads, with the lock
+    /// timeout of V246 (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). A compressed chunk's index is an empty shell, so the build time follows
+    /// the uncompressed chunks (the newest days, one row per query per server per day). No narrow index of this name exists, so unlike V284 nothing is
+    /// dropped and readers are never blocked. The statement is a catalog read on a store that already has the index, and a store without TimescaleDB or
+    /// without the view returns before touching anything. A fresh store gets the same index right after the view is created. Additive for an older
+    /// build: it ignores the index, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private static readonly string V292Sql = TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql;
+
+    /// <summary>The name of the partial index the Client Timeouts counter rows are read through (#9277, V293).</summary>
+    internal const string AttentionCountIndexName = "idx_attention_events_count_time";
+
+    /// <summary>
+    /// V293 (#9277): <c>idx_attention_events_count_time</c>, <c>(server_id, collection_time) INCLUDE (attention_count) WHERE event_kind = 'count'</c> on
+    /// <c>collect.attention_events</c>. The counter rows are one per collector run, a few thousand over seven days, and sit among a million or more
+    /// sampled events. <c>get_client_timeouts</c> sums them per run, and on an uncompressed chunk it read the whole (server_id, collection_time) range of
+    /// the table and dropped the sampled events after the heap fetch.
+    /// This index holds only the counter rows and carries the count, so the same read is an index-only scan that touches no sampled row.
+    ///
+    /// <para><b>Cost.</b> One build under a SHARE lock that blocks the collector's writes and not reads, with the lock timeout of V246
+    /// (<see cref="MigrationCommandTimeoutSeconds"/> less 20 s). It has two shapes, and the rung runs under <see cref="V293CommandTimeoutSeconds"/>
+    /// for the second. On a hypertable the build is one per chunk: it reads each uncompressed chunk's heap once and writes only its counter rows, and a
+    /// compressed chunk's index is an empty shell. On a store without TimescaleDB, or one whose start-path swap to a hypertable has not yet taken its
+    /// lock, the table is one plain heap and the build reads all of it in one statement, and on such a store the service start can wait up to the
+    /// declared bound (1800 s) for this rung before collectors start. A chunk created afterwards gets the index with the chunk.
+    /// Additive for an older build: it ignores the index, and no GRANT is needed for an index. The statement is a catalog read when the index exists.</para>
+    /// </summary>
+    private static readonly string V293Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + TimescaleSupport.CreateAttentionCountIndexSql;
+
+    /// <summary>
+    /// V294 (#9284): <c>collect.query_store_stats_corrected_daily</c> compresses ordered by <c>query_hash, bucket DESC</c> instead of
+    /// <c>bucket DESC</c>, the order <see cref="TimescaleSupport.EnableAggregateCompressionSql(string)"/> gives a fresh store, and the same order V279 gave
+    /// the hourly rollup. A compressed daily chunk with no min/max metadata on <c>query_hash</c> decompresses every batch of the chunk for a read of one
+    /// hash, such as the <c>mid</c> arm of <c>get_query_fleet_summary</c>'s Query Store statement, unless the chunk has a bloom filter, and a chunk gets
+    /// one only if it was compressed after V292's hash index existed. Measured on a test store, one compressed daily chunk and one hash: 8 of 127 batches
+    /// and 536 blocks with the old order and a bloom filter, and 7 of 127 batches and 122 blocks recompressed in the new order, with the same rows.
+    ///
+    /// <para>Same shape as <see cref="V279Sql"/>: the ALTER runs only when TimescaleDB is installed and the rollup already compresses (a store whose
+    /// ensure has not enabled compression yet gets the new order from the ensure itself), it is catalog-only (chunks already compressed keep
+    /// <c>bucket DESC</c> until they age out, and every chunk compressed afterwards takes the new order), a refusal is recorded as <c>skipped</c> with the
+    /// server's message while the rollup keeps <c>bucket DESC</c> (its reads stay correct either way), and <c>lock_not_available</c> is re-raised so the
+    /// runner's lock retry handles a busy materialization. Each outcome is a row in <c>collect.aggregate_compression_order_history</c>.</para>
+    ///
+    /// <para>The rung's sentinel is <c>ix_aggregate_compression_order_history_view</c>, a <c>(view_name, changed_at DESC)</c> index on that history table
+    /// (a few rows, never purged, so the build is instant): the table exists on every store since V279, so the index is a mark the rung ran on a store
+    /// with or without TimescaleDB, found by catalog. It also serves a read of one aggregate's latest outcome. Additive for an older build, which ignores
+    /// the index.</para>
+    /// </summary>
+    private static readonly string V294Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+
+CREATE INDEX IF NOT EXISTS ix_aggregate_compression_order_history_view
+    ON collect.aggregate_compression_order_history (view_name, changed_at DESC);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        IF EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates
+                   WHERE view_schema = 'collect' AND view_name = 'query_store_stats_corrected_daily' AND compression_enabled) THEN
+            BEGIN
+                ALTER MATERIALIZED VIEW collect.query_store_stats_corrected_daily SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id', timescaledb.compress_orderby = 'query_hash, bucket DESC');
+                INSERT INTO collect.aggregate_compression_order_history (changed_at, view_name, compress_orderby, outcome)
+                VALUES (now() AT TIME ZONE 'UTC', 'query_store_stats_corrected_daily', 'query_hash, bucket DESC', 'applied');
+            EXCEPTION
+                WHEN lock_not_available THEN
+                    RAISE;
+                WHEN OTHERS THEN
+                    INSERT INTO collect.aggregate_compression_order_history (changed_at, view_name, compress_orderby, outcome)
+                    VALUES (now() AT TIME ZONE 'UTC', 'query_store_stats_corrected_daily', 'query_hash, bucket DESC', 'skipped: ' || SQLERRM);
+            END;
+        END IF;
+    END IF;
+END
+$$;";
+
+    /// <summary>
+    /// V296 (#9280): <c>collect.query_store_top_hourly</c>, the hourly summary the Query Store statement list's daily read serves its edge hours from, its
+    /// <c>(hour, server_id)</c> index, and <c>top_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text and the reasoning are on
+    /// <see cref="QueryStoreComposeStamp.TopHourlyCreateSql"/>. The service's hourly tick fills the table in the stamp's transaction and rebuilds just the
+    /// top rows of every hour whose <c>top_built_seq</c> differs from <c>late_seq</c>, which is every hour built before this rung (NULL), so the backfill is
+    /// the ordinary tick, newest first. <b>The rung scans nothing</b>: one new empty plain table, one index on it, and a nullable column with no default
+    /// on the small ledger. The column needs an ACCESS EXCLUSIVE lock on that ledger, which the wide table's late-row triggers take row locks on, so the
+    /// lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, V221's and V239's. Additive: an older build never reads the table,
+    /// and a build that rebuilds a stamp hour without writing it leaves the pair stale for the table, which this build then rebuilds. <b>No Lite twin:</b>
+    /// Lite has no compose stamp and no daily read.
+    /// </summary>
+    private static readonly string V296Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.TopHourlyCreateSql;
+
+    /// <summary>
     /// V284 (#9149): covering hash indexes for the fleet summary's hourly reads. <c>get_query_fleet_summary</c> sums three columns per
     /// (server, database) of one query hash over the newest days of the hourly rollups (the daily rollup cannot serve those days without changing
     /// the answer), and read one heap page per matching hourly row through a plain (query_hash, bucket) index. The rung gives
@@ -3822,11 +3925,33 @@ END $$;";
            stays fast, and a server with no floor row has no floor. The floor move writes one row here instead of deleting summary rows inside
            the batch. An older build ignores the table, so after a rollback with a hole it can read the summary across the hole. */
         new Migration(QueryStatsCollectionSummary.FloorRungVersion, "query-stats-collection-floor", QueryStatsCollectionSummary.FloorCreateSql),
-        /* V291 (#8784 part 2): view usage. The object_dependencies collector's table, and the per-day summary of the names Query Store
+        /* V291 (#9215): the corrected hourly Query Store rollup's one server index becomes the covering (server_id, bucket DESC) INCLUDE (database_name,
+           execution_count_sum, duration_us_weighted_sum) index under its own name, built before the plain (server_id, bucket) index is dropped. Catalog work
+           plus one index build over the uncompressed chunks of the materialization; no row moves. An older build ignores the covering index, and its
+           next convergence pass builds the plain index again beside it, which does no harm. */
+        new Migration(291, "qs-corrected-hourly-server-covering-index", V291Sql),
+        /* V292 (#9223): a covering (query_hash, bucket DESC) index on the corrected daily Query Store rollup's materialization, so the mid arm of
+           get_query_fleet_summary's Query Store statement reads the newest uncompressed daily chunks through it instead of scanning them whole.
+           Catalog-only for the data: no row moves. An older build ignores the index. */
+        new Migration(292, "query-store-corrected-daily-hash-index", V292Sql),
+        /* V293 (#9277): a partial covering index on the Client Timeouts counter rows, so get_client_timeouts' per-run counts read the newest uncompressed chunks
+           through an index-only scan instead of fetching every sampled event of the range and dropping it. No row moves. An older build ignores the index. */
+        new Migration(293, "attention-events-count-index", V293Sql),
+        /* V294 (#9284): the corrected daily Query Store rollup's compression order becomes query_hash then bucket, as V279 did for the hourly rollup, so one
+           query's days sit together in a compressed batch. A catalog-only ALTER: compressed chunks keep their order, new ones take the new one. */
+        new Migration(294, "qs-corrected-daily-compress-orderby", V294Sql),
+        /* V295 (#9225): the plan regression block tables, the pre-aggregate of collect.plan_regression_daily the PLAN_REGRESSION read will take whole blocks of days
+           from. Two plain tables and one unique index, created empty: no data moves, and the builder fills the blocks from the daily rows as it runs. An older
+           build ignores them. */
+        new Migration(PlanRegressionBlock.Version, "plan-regression-block", PlanRegressionBlock.CreateSql),
+        /* V296 (#9280): the hourly summary of the Query Store statement list (collect.query_store_top_hourly), its index and the ledger column
+           top_built_seq. An empty table and a nullable column with no default: no row moves. V295 is #9225's plan regression block. */
+        new Migration(296, "query-store-top-hourly", V296Sql),
+        /* V297 (#8784 part 2): view usage. The object_dependencies collector's table, and the per-day summary of the names Query Store
            statements referenced with its build record and per-database counts. Four new plain tables created empty: no data moves, so the
            upgrade stays fast and the housekeeping tick fills the summary from the days the daily Query Store summary still holds. An older
            build ignores them. */
-        new Migration(ObjectReferencesDaily.Version, "object-references", V291Sql),
+        new Migration(ObjectReferencesDaily.Version, "object-references", V297Sql),
     };
 
     /// <summary>
@@ -4087,7 +4212,7 @@ CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inven
 " + ObjectExecutionsDaily.CreateSql;
 
     /// <summary>
-    /// V291 (#8784 part 2): view usage from Query Store statement text.
+    /// V297 (#8784 part 2): view usage from Query Store statement text.
     ///
     /// <para><c>collect.object_dependencies</c> is <c>ObjectDependenciesCollector</c>'s table, the daily dependency list per database from
     /// <c>sys.sql_expression_dependencies</c> (Darling only). A PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE.
@@ -4099,7 +4224,7 @@ CREATE INDEX IF NOT EXISTS idx_object_inventory_database ON collect.object_inven
     /// statement counts (<see cref="ObjectReferencesDaily"/>), created empty. New tables, no data moves, no grant. Every statement is
     /// idempotent.</para>
     /// </summary>
-    private const string V291Sql = @"
+    private const string V297Sql = @"
 CREATE TABLE IF NOT EXISTS collect.object_dependencies (
     collection_id bigint NOT NULL,
     collection_time timestamp NOT NULL,
@@ -11261,6 +11386,19 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     internal const int V281CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
 
     /// <summary>
+    /// V293's command timeout (seconds), #9277: six times the default bound, equal to <see cref="V281CommandTimeoutSeconds"/>, so
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> stays as it is.
+    ///
+    /// <para><b>Why this rung needs its own.</b> On a hypertable the build reads only the uncompressed chunks and is short. Without TimescaleDB, or
+    /// while the start-path swap to a hypertable keeps losing its lock, <c>collect.attention_events</c> is one plain table, and the partial index
+    /// build reads the whole heap in one statement. The repo's own sizing puts that table at about 0.7 GB a day for 30 days (see
+    /// <c>V277Sql</c>), about 21 GB, which a cold read at 100 to 250 MB/s takes 85 to 210 s to cover. The statement's lock wait comes out of the same
+    /// bound, up to 280 s of it (the rung's own <c>lock_timeout</c>, <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, is kept). The default
+    /// 300 s leaves no room for both, and a rung that runs out of time rolls back and fails the start on every start.</para>
+    /// </summary>
+    internal const int V293CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
     /// The rungs that run under a longer command timeout than <see cref="MigrationCommandTimeoutSeconds"/>, by
     /// version, with the bound each one runs under (seconds). The applier reads this for every rung it applies
     /// (<see cref="RungCommandTimeoutSeconds"/>).
@@ -11274,6 +11412,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     internal static IReadOnlyDictionary<int, int> DeclaredRungCommandTimeoutSeconds { get; } = new Dictionary<int, int>
     {
         [281] = V281CommandTimeoutSeconds,
+        [293] = V293CommandTimeoutSeconds,
     };
 
     /// <summary>
@@ -11328,8 +11467,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// PostgreSQL 18.6, see <see cref="V281Sql"/>), and it runs under its own longer bound,
     /// <see cref="V281CommandTimeoutSeconds"/>. The budget is the larger of two sums, each with one default
     /// rung bound of margin, sized at one rung bound because that is the granularity this ladder grows by — one
-    /// new data-moving rung. The first is every floor-setting rung at the default bound: five rungs and the
-    /// margin, six default bounds. The second is the longest bound in
+    /// new data-moving rung. The first is every floor-setting rung at the default bound: six rungs (V293, #9277, is the sixth) and the
+    /// margin, seven default bounds. The second is the longest bound in
     /// <see cref="DeclaredRungCommandTimeoutSeconds"/> and the margin, which is the larger and is this constant.
     /// The two are not added together, because V281 and the three oldest floor-setting rungs are never expensive
     /// in one upgrade: V281 reads rows only on a store that already had the text table (V74), and V22, V23 and
@@ -11778,7 +11917,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                 /* A declared rung can run for minutes with nothing else logged, and collection waits behind it, so the
                    log says which rung is running and how long it may take. */
                 logger?.LogInformation(
-                    "Applying migration V{Version} ({Name}). It copies data the store already holds, so on a large " +
+                    "Applying migration V{Version} ({Name}). It reads or copies data the store already holds, so on a large " +
                     "store it can run for several minutes, and for at most {Timeout}s. Collection starts when the " +
                     "migrations finish.",
                     migration.Version, migration.Name, rungTimeoutSeconds);

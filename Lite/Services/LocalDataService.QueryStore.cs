@@ -232,30 +232,28 @@ WITH latest AS (
        join on those two for the winning rows. Running the window over the payload sorted every column of every row
        in the window, which is the part of this read that grows with the window, and DuckDB keeps a copy of it per
        thread. The join's build side is one narrow row per interval. */
-    SELECT collection_id AS latest_id, collection_time AS latest_time
-    FROM
-    (
-        SELECT
-            collection_id,
-            collection_time,
-            ROW_NUMBER() OVER
-            (
-                PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                ORDER BY collection_time DESC, execution_count DESC
-            ) AS rn
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
-           the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
-           collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
-           Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
-           bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
-        AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-        AND   COALESCE(interval_start_time_utc, collection_time) < $3
-        AND   collection_time >= $2 - INTERVAL '1 day'
-        AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
-    ) w
-    WHERE rn = 1
+    /* #9195: the newest snapshot per interval by a hash aggregate on the narrow columns, not ROW_NUMBER() over them: the window sorts
+       every row of the window (about 4x the aggregate's time on 480,000 rows) and a server-wide read has the most rows. arg_max picks
+       the greatest (collection_time, execution_count), the row the window's ORDER BY collection_time DESC, execution_count DESC put first,
+       and the NULL-safe grouping is the window partition's. execution_count is nullable and DuckDB orders a NULL struct field above every
+       value, so COALESCE(execution_count, -1) sorts a NULL count lowest (a count is never below 0), which keeps the window's NULLS LAST
+       order on an execution_count tie (#9195). collection_time cannot be NULL here, the bounds below drop those rows. */
+    SELECT
+        arg_max(collection_id, (collection_time, COALESCE(execution_count, -1))) AS latest_id,
+        MAX(collection_time) AS latest_time
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
+       the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
+       collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
+       Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
+       bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
+    AND   collection_time >= $2 - INTERVAL '1 day'
+    AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
+
+    GROUP BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
 ),
 deduped AS (
     SELECT

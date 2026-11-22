@@ -160,7 +160,9 @@ public class AnalysisService
         _collector = new DuckDbFactCollector(
             duckDb, collectorFrequencyMinutes,
             /* #5630: the same fetcher serves the plan-regression inputs check; a caller with none passes no source. */
-            planFetcher as IQueryStorePlanSource);
+            planFetcher as IQueryStorePlanSource,
+            /* #9195: a service is built per pass, so the judged plan pairs live with the store. */
+            PlanInputOutcomeCache.For(duckDb));
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
@@ -292,6 +294,24 @@ public class AnalysisService
 
                 LastAnalysisTime = DateTime.UtcNow;
                 _passFailures.Succeeded(context.ServerId);
+                return [];
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention. The coverage
+               witness reads that same table (v_wait_stats), so every fact statement below would find nothing in it and the pass would
+               land on the unobserved-window answer; one MIN says so first and the facts are not read. A window that straddles the
+               oldest row keeps the full pass. Only a replay can end that early. */
+            if (context.AsOfUtc is not null
+                && await ReadRetentionBoundaryAsync(context.ServerId, context.CancellationToken) is { } removedBoundary
+                && removedBoundary.RemovedWindow(context.TimeRangeEnd))
+            {
+                WindowEmptyMessage = WindowEmptyText.ComposeRemovedBeforeRead(context, removedBoundary);
+                WindowEmptyRemovedByRetention = true;
+                AppLogger.Info("AnalysisService",
+                    $"No collection in the analysis window for {context.ServerName} " +
+                    $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
+                    $"because retention removed it, not because collection is down (no fact was read). {removedBoundary.Describe()}");
+                LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
 

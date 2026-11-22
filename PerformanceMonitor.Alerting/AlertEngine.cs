@@ -3649,6 +3649,11 @@ public sealed class AlertEngine
 
     /* ---------------- tempdb log space (#8881) ---------------- */
 
+    /// <summary>True when tempdb's Log Reuse Wait is exactly NOTHING and the collector captured no holder (#9247). An unknown wait is false.</summary>
+    private static bool IsTempDbLogReusableWithNoHolder(TempDbSpaceInfo tempDb) =>
+        string.Equals(tempDb.LogReuseWaitDesc?.Trim(), "NOTHING", StringComparison.OrdinalIgnoreCase)
+        && tempDb.HolderSessionId is null && tempDb.HolderBeginTimeUtc is null && tempDb.HolderLogBytesUsed is null;
+
     /// <summary>
     /// The TempDB Log Space alert (#8881): a sibling of tempdb Space for the tempdb LOG. A full tempdb log stops every session that writes
     /// to tempdb, and until this alert the first sign was error 9002. It reads the same latest tempdb snapshot as the data-file check
@@ -3657,6 +3662,9 @@ public sealed class AlertEngine
     ///
     /// <para>A NULL used percent is no measurement (an engine without the view, a row stored before the log columns existed). It freezes
     /// the gate, exactly as a missing row does for the data-file alert: it is never a breach and never a clear.</para>
+    ///
+    /// <para>#9247: a sample whose Log Reuse Wait is NOTHING with no captured holder is not a breach at any used percent (the percent is
+    /// then only the active VLF of a small log). It counts as a clearing sample. An unknown wait is judged on the percent alone.</para>
     ///
     /// <para>The message names the used percent, the truncation holdup reason and, when the collector captured one, the holder: the
     /// oldest active tempdb transaction, with its session, login, program, age and log bytes.</para>
@@ -3688,7 +3696,11 @@ public sealed class AlertEngine
                 return;
             }
 
-            bool breaching = usedPercent >= logThreshold;
+            /* #9247: a high used percent with Log Reuse Wait NOTHING and no captured holder is the active VLF of a small log, not a
+               holdup: the log can be reused and tempdb writes are not stopped. Such a sample is a clearing one. An unknown reuse wait
+               (null or empty) is never read as NOTHING, so those rows keep judging on the percent alone. */
+            bool logReusable = IsTempDbLogReusableWithNoHolder(tempDb);
+            bool breaching = usedPercent >= logThreshold && !logReusable;
             var (outcome, incidentOpen) = await ObservePersistenceAsync(
                 _tempDbLogPersistence, TempDbLogSpacePersistenceMetric, key, tempDb.CollectionTimeUtc, breaching,
                 TempDbLogSpaceBreachSamples, TempDbLogSpaceClearSamples);
@@ -3729,7 +3741,9 @@ public sealed class AlertEngine
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, TempDbLogSpacePersistenceMetric,
                         "tempdb Log Space Resolved",
-                        $"{serverName}: tempdb log back to {usedPercent:F0}% of its size"), ct);
+                        logReusable && usedPercent >= logThreshold
+                            ? $"{serverName}: tempdb log can be reused again (Log Reuse Wait NOTHING, no transaction holding it, {usedPercent:F0}% of its size is the active part)"
+                            : $"{serverName}: tempdb log back to {usedPercent:F0}% of its size"), ct);
                 }
             }
             _checkFailures.Succeeded((key, "TempDB log space"));

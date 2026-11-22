@@ -59,6 +59,20 @@ public sealed class FinOpsShowReloadPolicyTests
     [Fact]
     public void ACollectionBeforeAnyLoad_Reloads() => Assert.True(FinOpsShowReloadPolicy.ShouldReloadAfterCollection(null, Now, Now));
 
+    /// <summary>
+    /// #9233: window start selects the first server on a tab nobody has opened. That selection must not run the fifteen store reads
+    /// (High Impact the heaviest) against a store the first collection has not written to. The tab's first show runs the whole load
+    /// whatever the age of any earlier one, so nothing is lost by waiting for it.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void ASelectionChange_LoadsOnlyWhileTheTabIsShown(bool tabVisible, bool loads)
+    {
+        Assert.Equal(loads, FinOpsShowReloadPolicy.ShouldLoadOnSelectionChange(tabVisible));
+        Assert.True(FinOpsShowReloadPolicy.ShouldReloadOnShow(null, Now, firstShowSinceStart: true));
+    }
+
     [Theory]
     [InlineData(0, false)]
     [InlineData(5, false)]

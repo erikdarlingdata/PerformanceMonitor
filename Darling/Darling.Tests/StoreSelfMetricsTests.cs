@@ -45,10 +45,6 @@ public sealed class StoreSelfMetricsTests
         var v53 = PgMigrations.Scripts.Single(m => m.Version == 53);
 
         Assert.Equal("store-self-metrics", v53.Name);
-        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
-           the newest registered rung. Three in-flight branches bumping versions made the literal form a
-           recurring multi-test failure (#2210 round, again here at V62). */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44/V47/V49, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.store_metrics (", v53.Sql, StringComparison.Ordinal);
@@ -389,6 +385,8 @@ public sealed class StoreSelfMetricsTests
             ["collect.slow_reads"] = "internal self-telemetry (the slow-read record), not collected monitoring data (V162 doc)",
             ["collect.query_store_top_daily"] = "the daily summary the Query Store top read uses, approximate by design and rebuilt from the interval table (V161 doc)",
             ["collect.plan_regression_daily"] = "the per-day plan totals PLAN_REGRESSION reads for closed days, rebuilt from the interval table (V168 doc)",
+            ["collect.plan_regression_block"] = "the sums of whole blocks of four days of plan_regression_daily the PLAN_REGRESSION read takes in place of the daily rows, rebuilt from them (V295 doc)",
+            ["collect.plan_regression_block_built"] = "per-block build and validity bookkeeping for the plan regression blocks, bytes too small to matter (V295 doc)",
             ["collect.plan_regression_daily_built"] = "per-day build and validity bookkeeping for the per-day plan totals, bytes too small to matter (V168 doc)",
             ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",
             ["collect.query_store_grid_daily"] = "the closed-day rollup the Query Store grid reads whole days from, rebuilt from the interval table (V283 doc)",

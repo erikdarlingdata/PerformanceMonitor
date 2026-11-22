@@ -12,6 +12,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace Lite.Tests;
@@ -212,25 +213,38 @@ public sealed class LiteRuntimePrerequisiteDocsTests
            the docs become wrong silently, which is the failure this whole file exists for. */
         var shapes = LitePublishShapes(BuildWorkflowPath);
 
+        /* #9256: one ZIP publish and one Velopack publish per RID (win-x64 and win-arm64), and one vpk pack
+           line per Velopack publish. Each pack line must match exactly one publish directory, and the ZIPs
+           must come from the publishes no pack line takes. */
         Assert.True(
-            shapes.Count == 2,
-            $"Expected exactly two Lite publishes in {BuildWorkflowPath} (the ZIP's and the Velopack one); " +
-            $"found {shapes.Count}: {string.Join(", ", shapes.Keys)}.");
+            shapes.Count == 4,
+            $"Expected exactly four Lite publishes in {BuildWorkflowPath} (the ZIP's and the Velopack one, for " +
+            $"win-x64 and win-arm64); found {shapes.Count}: {string.Join(", ", shapes.Keys)}.");
 
         var workflow = ParitySource.ReadFile(BuildWorkflowPath);
 
-        var packLine = workflow.Split('\n')
+        var packLines = workflow.Split('\n')
             .Select(l => l.Trim())
-            .Single(l => l.Contains("vpk pack -u PerformanceMonitorLite", StringComparison.Ordinal));
+            .Where(l => l.Contains("vpk pack -u PerformanceMonitorLite", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(2, packLines.Length);
 
-        var packTokens = packLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var packFlag = Array.IndexOf(packTokens, "-p");
-        Assert.True(packFlag >= 0 && packFlag + 1 < packTokens.Length, $"No '-p <dir>' on the vpk pack line: {packLine}");
+        var velopackLeaves = new List<string>();
+        foreach (var packLine in packLines)
+        {
+            var packTokens = packLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var packFlag = Array.IndexOf(packTokens, "-p");
+            Assert.True(packFlag >= 0 && packFlag + 1 < packTokens.Length, $"No '-p <dir>' on the vpk pack line: {packLine}");
 
-        var velopackLeaf = DirectoryLeaf(packTokens[packFlag + 1]);
+            var velopackLeaf = DirectoryLeaf(packTokens[packFlag + 1]);
+            velopackLeaves.Add(velopackLeaf);
+            Assert.Single(shapes.Keys, d => DirectoryLeaf(d).Equals(velopackLeaf, StringComparison.OrdinalIgnoreCase));
+        }
 
-        Assert.Single(shapes.Keys, d => DirectoryLeaf(d).Equals(velopackLeaf, StringComparison.OrdinalIgnoreCase));
-        var zipSourceDir = Assert.Single(shapes.Keys, d => !DirectoryLeaf(d).Equals(velopackLeaf, StringComparison.OrdinalIgnoreCase));
+        var zipSourceDirs = shapes.Keys
+            .Where(d => !velopackLeaves.Contains(DirectoryLeaf(d), StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        Assert.Equal(2, zipSourceDirs.Length);
 
         var zipLines = workflow.Split('\n')
             .Select(l => l.Trim())
@@ -248,10 +262,10 @@ public sealed class LiteRuntimePrerequisiteDocsTests
 
             /* Release re-zips from signed/Lite, the SignPath round-trip of publish/Lite; same leaf, and
                that is the property worth asserting - the zip must never come from the velopack tree. */
-            Assert.Equal(
-                DirectoryLeaf(zipSourceDir),
+            Assert.Contains(
                 DirectoryLeaf(zipTokens[pathFlag + 1]),
-                ignoreCase: true);
+                zipSourceDirs.Select(DirectoryLeaf),
+                StringComparer.OrdinalIgnoreCase);
         }
     }
 
@@ -275,13 +289,18 @@ public sealed class LiteRuntimePrerequisiteDocsTests
             Assert.Equal(releaseSelfContained, nightlySelfContained);
         }
 
-        var zipSourceDir = releaseShapes.Keys
-            .Single(d => !DirectoryLeaf(d).Contains("velopack", StringComparison.OrdinalIgnoreCase));
+        var zipSourceDirs = releaseShapes.Keys
+            .Where(d => !DirectoryLeaf(d).Contains("velopack", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        Assert.Equal(2, zipSourceDirs.Length);
 
-        Assert.True(
-            nightlyShapes.ContainsKey(zipSourceDir),
-            $"{NightlyWorkflowPath} does not publish Lite to {zipSourceDir}, so the nightly ZIP is built from " +
-            "a different tree than the release ZIP.");
+        foreach (var zipSourceDir in zipSourceDirs)
+        {
+            Assert.True(
+                nightlyShapes.ContainsKey(zipSourceDir),
+                $"{NightlyWorkflowPath} does not publish Lite to {zipSourceDir}, so the nightly ZIP is built from " +
+                "a different tree than the release ZIP.");
+        }
     }
 
     [Fact]
@@ -311,15 +330,19 @@ public sealed class LiteRuntimePrerequisiteDocsTests
         var csproj = ParitySource.ReadFile(LiteProjectPath);
         var lockFile = ParitySource.ReadFile(LiteLockFilePath);
 
+        /* #9256: the element holds a list ("win-x64;win-arm64"), so a publish RID has to be one of its
+           entries, and the list may hold no RID that no publish pins (a RID the lock file covers and nothing
+           publishes is dead weight in every restore). */
+        var declared = Regex.Match(csproj, "<RuntimeIdentifiers>([^<]*)</RuntimeIdentifiers>");
+        Assert.True(declared.Success, $"{LiteProjectPath} has no <RuntimeIdentifiers> element.");
+        var declaredRids = declared.Groups[1].Value
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(
+            rids.OrderBy(r => r, StringComparer.Ordinal).ToArray(),
+            declaredRids.OrderBy(r => r, StringComparer.Ordinal).ToArray());
+
         foreach (var rid in rids)
         {
-            Assert.True(
-                csproj.Contains("<RuntimeIdentifiers>", StringComparison.Ordinal) &&
-                csproj.Contains($"<RuntimeIdentifiers>{rid}</RuntimeIdentifiers>", StringComparison.Ordinal),
-                $"A Lite publish pins -r {rid}, but {LiteProjectPath} does not declare exactly that in " +
-                "<RuntimeIdentifiers>. Without it the project's RID set is empty while the committed lock " +
-                $"file's is {rid}, and every --locked-mode restore in CI fails NU1004 before the publish " +
-                "ever runs.");
 
             Assert.True(
                 lockFile.Contains($"/{rid}\"", StringComparison.Ordinal),

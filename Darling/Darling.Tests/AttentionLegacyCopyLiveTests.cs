@@ -265,6 +265,106 @@ public sealed class AttentionLegacyCopyLiveTests
         });
     }
 
+    /* About 20 rows a page, spread over 20 days in an order unrelated to the page order, so every early batch puts rows in the old chunks. */
+    private static string ScatteredSeedSql(int rows, DateTime anchor) =>
+        "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, statement_text) "
+        + "SELECT g, '" + anchor.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "'::timestamp - make_interval(secs => ((g * 7919) % " + rows + ") * (1728000 / " + rows + ") + 60), "
+        + "-8967, 'copy-test', CASE WHEN g % 3 = 0 THEN 'count' ELSE 'sample' END, g, 'db' || (g % 5), repeat('x', 200) "
+        + $"FROM generate_series(1, {rows}) AS g";
+
+    /// <summary>
+    /// #9216: the compression policy runs while the copy is still going. The policy compresses every chunk older than a day, including
+    /// chunks the copy has only partly filled, and the later batches then insert into those compressed chunks. The job runs twice, after
+    /// the 3rd and the 9th batch. Every row must arrive once: the new table matches the swapped-out one by count and hash, and the attention
+    /// reads over it return what the same reads return over an uncompressed plain copy taken before the copy started.
+    /// </summary>
+    [Fact]
+    public async Task ACompressionPolicyRunHalfwayThroughTheCopy_LosesAndDoublesNoRows_AndTheAttentionReadsAgree()
+    {
+        await RunAsync(timescale: true, async (store, ct) =>
+        {
+            var c = store.Connection;
+            var anchor = LiveClock.AnchoredEnd();
+            await ExecAsync(c, ScatteredSeedSql(2000, anchor), ct);
+            await RunRungAsync(c, ct);
+            await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
+            Assert.True(await TimescaleSupport.EnsureAttentionEventsCompressionAsync(c, null, ct), "attention_events must have compression and its policy before the copy");
+
+            var jobId = (int)(await ScalarAsync(c, "SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = 'policy_compression' AND hypertable_schema = 'collect' AND hypertable_name = 'attention_events'", ct))!;
+            var expected = (string)(await ScalarAsync(c, HashOf("collect.attention_events_legacy", insideRetention: true), ct))!;
+            Assert.StartsWith("2000:", expected, StringComparison.Ordinal);
+            await ExecAsync(c, "CREATE TABLE collect.attention_control AS SELECT * FROM collect.attention_events_legacy", ct);
+
+            string[] compressedAtFirstRun = [];
+            long rowsInThoseAtFirstRun = 0;
+            var pacer = new CountingPacer
+            {
+                AfterEachBatch = async batches =>
+                {
+                    if (batches != 3 && batches != 9)
+                    {
+                        return;
+                    }
+
+                    await ExecAsync(c, $"CALL run_job({jobId})", ct);
+                    if (batches == 3)
+                    {
+                        compressedAtFirstRun = await CompressedChunksAsync(c, ct);
+                        rowsInThoseAtFirstRun = await RowsInChunksAsync(c, compressedAtFirstRun, ct);
+                    }
+                },
+            };
+            Assert.Equal(AttentionLegacyCopy.PassOutcome.Finished, await PassAsync(store, 7, pacer, ct));
+
+            Assert.True(pacer.Batches > 9, "the copy must run past the second policy run");
+            Assert.NotEmpty(compressedAtFirstRun);
+            Assert.True(
+                await RowsInChunksAsync(c, compressedAtFirstRun, ct) > rowsInThoseAtFirstRun,
+                "the later batches must have inserted into chunks the first policy run compressed");
+
+            /* One more run recompresses what the late inserts left uncompressed. */
+            await ExecAsync(c, $"CALL run_job({jobId})", ct);
+
+            Assert.Equal(expected, await ScalarAsync(c, HashOf("collect.attention_events", insideRetention: false), ct));
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) - count(DISTINCT attention_event_id) FROM collect.attention_events", ct));
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM pg_class WHERE oid = to_regclass('collect.attention_events_legacy')", ct));
+
+            var floor = DateTime.SpecifyKind(anchor.AddDays(-30), DateTimeKind.Unspecified);
+            var ceiling = DateTime.SpecifyKind(anchor.AddHours(1), DateTimeKind.Unspecified);
+            var servers = new[] { -8967 };
+            var control = await AttentionEventsCompressionLiveTests.ReadAllAsync(c, "collect.attention_control", servers, floor, ceiling, ct);
+            var target = await AttentionEventsCompressionLiveTests.ReadAllAsync(c, "collect.attention_events", servers, floor, ceiling, ct);
+            Assert.Equal(control.Keys, target.Keys);
+            foreach (var (read, rows) in control)
+            {
+                Assert.True(rows == target[read], $"'{read}' returned different rows from the compressed target than from the plain copy");
+            }
+        });
+    }
+
+    private static async Task<string[]> CompressedChunksAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks "
+            + "WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events' AND is_compressed", connection);
+        var names = new System.Collections.Generic.List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names.ToArray();
+    }
+
+    private static async Task<long> RowsInChunksAsync(NpgsqlConnection connection, string[] chunks, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT count(*) FROM collect.attention_events WHERE tableoid::regclass::text = ANY(@chunks)", connection);
+        command.Parameters.AddWithValue("chunks", chunks);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     [Fact]
     public async Task ADropThatHitsTheLockTimeout_LeavesTheProgressRowAndLegacy_AndTheNextPassDropsThem()
     {
@@ -312,7 +412,10 @@ public sealed class AttentionLegacyCopyLiveTests
             return Task.FromResult<long?>(0);
         }
 
-        public Task AfterBatchAsync(NpgsqlConnection connection, long? before, CancellationToken cancellationToken)
+        /// <summary>Runs after each batch has committed, with the number of batches so far.</summary>
+        public Func<int, Task>? AfterEachBatch { get; init; }
+
+        public async Task AfterBatchAsync(NpgsqlConnection connection, long? before, CancellationToken cancellationToken)
         {
             Charged++;
             if (CancelAfterBatches > 0 && Charged >= CancelAfterBatches)
@@ -320,7 +423,10 @@ public sealed class AttentionLegacyCopyLiveTests
                 Source!.Cancel();
             }
 
-            return Task.CompletedTask;
+            if (AfterEachBatch is not null)
+            {
+                await AfterEachBatch(Charged);
+            }
         }
     }
 

@@ -485,6 +485,23 @@ public sealed class DarlingAnalysisService
                 return [];
             }
 
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention. The coverage
+               witness reads that same table, so every fact statement below would find nothing in it and the pass would land on the
+               unobserved-window answer; one MIN (index-ordered on server_id, collection_time) says so first, and the facts are not
+               read. A window that straddles the oldest row keeps the full pass. Only a replay can end that early. */
+            if (context.AsOfUtc is not null
+                && await ReadRetentionBoundaryAsync(CoverageTableFor(engineKind), context.ServerId, context.CancellationToken) is { } removedBoundary
+                && removedBoundary.RemovedWindow(context.TimeRangeEnd))
+            {
+                WindowEmptyMessage = WindowEmptyText.ComposeRemovedBeforeRead(context, removedBoundary);
+                WindowEmptyRemovedByRetention = true;
+                _logger?.LogInformation(
+                    "[DarlingAnalysisService] No collection in the analysis window for {Server} ({Start} to {End}) because retention removed it, not because collection is down (no fact was read). {Retention}",
+                    context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, removedBoundary.Describe());
+                LastAnalysisTime = DateTime.UtcNow;
+                return [];
+            }
+
             /* #2299: abandon BETWEEN the expensive store stages when the host is stopping. The
                fact collector's per-query catches are deliberately silent, so a stop mid-collect
                cannot unwind from inside it — these boundary checks are what turn the token into

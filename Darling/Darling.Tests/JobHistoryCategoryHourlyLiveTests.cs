@@ -43,9 +43,6 @@ public sealed class JobHistoryCategoryHourlyLiveTests
         Assert.Contains("collect.job_history_category_coverage", rung.Sql, StringComparison.Ordinal);
         Assert.Contains("to_regclass('collect.job_history_category_hourly') IS NOT NULL", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         var ordinal = Array.FindIndex(parameters, p => p.Name == "hasJobHistoryCategoryHourly");

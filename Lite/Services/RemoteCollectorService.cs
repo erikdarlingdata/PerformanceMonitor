@@ -986,6 +986,12 @@ public partial class RemoteCollectorService
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
 
+            /* #9270: a database_config capture that holds a database still restoring or recovering is retaken in minutes, not a day. */
+            if (string.Equals(collectorName, "database_config", StringComparison.Ordinal))
+            {
+                await ScheduleTransitionalRecaptureAsync(server, cancellationToken);
+            }
+
             /* #4938: a new server_properties row is the server's clock arriving or changing; a run time reads it from the next check. */
             if (string.Equals(collectorName, "server_properties", StringComparison.Ordinal))
             {

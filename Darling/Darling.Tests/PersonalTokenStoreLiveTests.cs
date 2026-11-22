@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// advisory lock, the lists without the hash, revoke, the settings sweep, the last-use stamp, the journal, the retention purge and the missing table.
 /// </summary>
 [Collection("live-postgres")]
-public sealed class PersonalTokenStoreLiveTests
+public sealed class PersonalTokenStoreLiveTests : IClassFixture<PersonalTokenStoreLiveTests.SharedStore>
 {
     private const string Actor = "person:alice";
 
@@ -49,23 +49,66 @@ public sealed class PersonalTokenStoreLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
+    /// <summary>
+    /// #9266: one migrated scratch database for the whole class. Minting a database per test cost about two seconds of the
+    /// 53-second class (the clone, the scheduler start and the drop), and a test only touches the two tables this resets.
+    /// The class's tests run one at a time, and each starts from the two tables emptied, so none sees another's rows.
+    /// The one test that needs the table gone moves it aside and puts it back, so no test needs a database of its own.
+    /// </summary>
+    public sealed class SharedStore : IAsyncLifetime
+    {
+        private ScratchPostgres? _scratch;
+
+        public string ConnectionString => _scratch?.ConnectionString ?? throw new InvalidOperationException("The shared store was not created.");
+
+        public async ValueTask InitializeAsync()
+        {
+            var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+            if (string.IsNullOrEmpty(connectionString))
+            {
+                return;
+            }
+
+            var ct = CancellationToken.None;
+            _scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+            await using var connection = new NpgsqlConnection(_scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_scratch is not null)
+            {
+                await _scratch.DisposeAsync();
+            }
+        }
+    }
+
+    private readonly SharedStore _store;
+
+    public PersonalTokenStoreLiveTests(SharedStore store) => _store = store;
+
+    private const string ResetSql = "TRUNCATE config.mcp_personal_token, config.investigation_journal";
+
+    private async Task WithStoreAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct, emptyStore: true);
+        RequireLivePostgres();
         var bodySucceeded = false;
         try
         {
-            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await using var connection = new NpgsqlConnection(_store.ConnectionString);
             await connection.OpenAsync(ct);
-            await PgMigrations.MigrateAsync(connection, ct);
-            await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(connection, ResetSql, ct);
+            await using var owner = NpgsqlDataSource.Create(_store.ConnectionString);
             await body(connection, owner, ct);
             bodySucceeded = true;
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+            await LiveStoreCleanup.RunAsync(_store.ConnectionString, bodySucceeded, (connection, _) => ExecAsync(connection, ResetSql, CancellationToken.None));
         }
     }
 
@@ -479,21 +522,29 @@ public sealed class PersonalTokenStoreLiveTests
     [Fact]
     public Task MissingTable_SurfacesAsTypedError() => WithStoreAsync(async (connection, owner, ct) =>
     {
-        /* The store as V274 leaves it: the V275 table and its trigger function are gone. */
-        await ExecAsync(connection, "DROP TABLE config.mcp_personal_token; DROP FUNCTION config.mcp_personal_token_owner_only()", ct);
+        /* The store as V274 leaves it: the V275 table and its trigger function are absent. They are renamed away here and renamed back in
+           the finally, not dropped (#9266), because this test shares its store with the others. A lookup by name finds neither, as it
+           would on a store without them. */
+        await ExecAsync(connection, "ALTER TABLE config.mcp_personal_token RENAME TO mcp_personal_token_aside; ALTER FUNCTION config.mcp_personal_token_owner_only() RENAME TO mcp_personal_token_owner_only_aside", ct);
+        try
+        {
+            var list = await Assert.ThrowsAsync<PostgresException>(() => PersonalTokenStore.ListAsync(owner, null, DateTimeOffset.UtcNow, ct));
+            Assert.Equal("42P01", list.SqlState);
+            Assert.True(PersonalTokenStore.IsMissingTable(list));
+            Assert.False(PersonalTokenStore.IsMissingTable(new InvalidOperationException("x")));
 
-        var list = await Assert.ThrowsAsync<PostgresException>(() => PersonalTokenStore.ListAsync(owner, null, DateTimeOffset.UtcNow, ct));
-        Assert.Equal("42P01", list.SqlState);
-        Assert.True(PersonalTokenStore.IsMissingTable(list));
-        Assert.False(PersonalTokenStore.IsMissingTable(new InvalidOperationException("x")));
-
-        /* M7: the snapshot's load and the start sweep run every few seconds, so they look the table up first and never send a statement
-           that would raise 42P01 in the PostgreSQL log: the server raised nothing, and the callers' one branch still holds. */
-        var load = await Assert.ThrowsAnyAsync<Exception>(() => PersonalTokenStore.LoadAllAsync(owner, ct));
-        Assert.IsNotType<PostgresException>(load);
-        Assert.True(PersonalTokenStore.IsMissingTable(load));
-        var sweep = await Assert.ThrowsAnyAsync<Exception>(() => PersonalTokenStore.ApplySettingsAsync(owner, 30, operatorAllowed: false, DateTimeOffset.UtcNow, ct));
-        Assert.IsNotType<PostgresException>(sweep);
-        Assert.True(PersonalTokenStore.IsMissingTable(sweep));
+            /* M7: the snapshot's load and the start sweep run every few seconds, so they look the table up first and never send a statement
+               that would raise 42P01 in the PostgreSQL log: the server raised nothing, and the callers' one branch still holds. */
+            var load = await Assert.ThrowsAnyAsync<Exception>(() => PersonalTokenStore.LoadAllAsync(owner, ct));
+            Assert.IsNotType<PostgresException>(load);
+            Assert.True(PersonalTokenStore.IsMissingTable(load));
+            var sweep = await Assert.ThrowsAnyAsync<Exception>(() => PersonalTokenStore.ApplySettingsAsync(owner, 30, operatorAllowed: false, DateTimeOffset.UtcNow, ct));
+            Assert.IsNotType<PostgresException>(sweep);
+            Assert.True(PersonalTokenStore.IsMissingTable(sweep));
+        }
+        finally
+        {
+            await ExecAsync(connection, "ALTER TABLE config.mcp_personal_token_aside RENAME TO mcp_personal_token; ALTER FUNCTION config.mcp_personal_token_owner_only_aside() RENAME TO mcp_personal_token_owner_only", CancellationToken.None);
+        }
     });
 }

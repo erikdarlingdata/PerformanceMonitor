@@ -49,7 +49,7 @@ public sealed class JobHistoryDedupeAndWatermarkLiteTests : IClassFixture<Shared
             GetLastCollectedInstanceIdAsync(serverId, "job_history", "instance_id", CancellationToken.None);
     }
 
-    /// <summary>The private static generic <c>WriteBatch&lt;TRow&gt;</c> in
+    /// <summary>The internal static generic <c>WriteBatch&lt;TRow&gt;</c> in
     /// RemoteCollectorService.DefinitionRunner.cs, invoked by reflection the way
     /// <c>ServerWatermarkCacheRunnerLiveTests</c> invokes Darling's twin.</summary>
     private static readonly MethodInfo WriteBatchMethod = typeof(RemoteCollectorService)

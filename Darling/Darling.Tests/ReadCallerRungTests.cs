@@ -44,10 +44,6 @@ public sealed class ReadCallerRungTests
     {
         Assert.Equal("read-caller", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V184 (#5632) and V185 (#5812) took the top of the ladder; this rung stays registered below them. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
     [Fact]

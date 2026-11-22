@@ -73,8 +73,9 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var lines = new List<string>();
         RunThemed(async () =>
         {
+            using var fast = new FastFailingStore();
             var tab = new ViewerServerTab(
-                new ViewerDataService($"Host=127.0.0.1;Port={FreePort()};Database=darling;Username=darling;Timeout=5"),
+                new ViewerDataService($"Host=127.0.0.1;Port={fast.Port};Database=darling;Username=darling;Timeout=5"),
                 new DarlingServer(8, "first-open-fast", "first-open-fast", true, null))
             {
                 FirstOpenSlowThresholdMs = 600_000,
@@ -102,8 +103,9 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var lines = new List<string>();
         RunThemed(async () =>
         {
+            using var fast = new FastFailingStore();
             var tab = new ViewerServerTab(
-                new ViewerDataService($"Host=127.0.0.1;Port={FreePort()};Database=darling;Username=darling;Timeout=5"),
+                new ViewerDataService($"Host=127.0.0.1;Port={fast.Port};Database=darling;Username=darling;Timeout=5"),
                 new DarlingServer(9, "first-open-twice", "first-open-twice", true, null))
             {
                 /* Zero makes every load that runs on a first-open clock write a line. */
@@ -331,6 +333,78 @@ public sealed class ViewerFirstOpenSlowLoadTests
         Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
     }
 
+    /* #9249: the loader awaits a read's task and then finishes the clock, and the clock's own watcher of the same task is a separate
+       continuation. When the loader's runs first, the read has ended but is not booked yet. Its run was then counted as client work. The
+       gate holds the watcher back, so the order is fixed instead of left to the thread pool. */
+    [Fact]
+    public async Task AReadThatEndedBeforeItsWatcherBookedIt_IsOnTheSlowLoadLine_NotInTheClientWork()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timer = new ViewerLoadTimer(slowThresholdMs: 3000, alreadyElapsedMs: 10000) { BookingGate = gate.Task };
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stillOut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tracked = timer.Track("grid read", ended.Task);
+        timer.Track("side read", stillOut.Task);
+        timer.Track("cancelled read", cancelled.Task);
+        ended.SetResult();
+        cancelled.SetCanceled();
+        await tracked;
+        Assert.Equal(0, timer.PhaseCount);
+
+        var line = timer.Finish("Overview");
+
+        Assert.NotNull(line);
+        Assert.Contains("store reads [", line, StringComparison.Ordinal);
+        Assert.Contains("grid read ", line, StringComparison.Ordinal);
+        Assert.Contains("cancelled read ", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("side read", line, StringComparison.Ordinal);
+        var marker = ", then ";
+        var clientMs = long.Parse(line.Substring(line.IndexOf(marker, StringComparison.Ordinal) + marker.Length).Split(' ')[0]);
+        Assert.True(clientMs < 3000, $"the ended reads' time was counted as client work: {line}");
+
+        gate.SetResult();
+        stillOut.SetResult();
+    }
+
+    /* #9249: the watcher that books late must not put the read on a line twice. Finish only copies the lists, so the first line is
+       unchanged, and a second line built after the watcher ran names the read once. */
+    [Fact]
+    public async Task AReadBookedLateByItsWatcher_IsOnTheLineOnce()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timer = new ViewerLoadTimer(slowThresholdMs: 0) { BookingGate = gate.Task };
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tracked = timer.Track("grid read", ended.Task);
+        ended.SetResult();
+        await tracked;
+
+        var before = timer.Finish("Overview");
+        gate.SetResult();
+        while (timer.PhaseCount == 0)
+        {
+            await Task.Yield();
+        }
+
+        var after = timer.Finish("Overview");
+
+        Assert.NotNull(before);
+        Assert.NotNull(after);
+        Assert.Equal(1, CountOf("grid read ", before!));
+        Assert.Equal(1, CountOf("grid read ", after!));
+    }
+
+    private static int CountOf(string text, string line)
+    {
+        var count = 0;
+        for (var at = line.IndexOf(text, StringComparison.Ordinal); at >= 0; at = line.IndexOf(text, at + text.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     [Fact]
     public void AClockStartedAfterTheTabsConstruction_CountsTheConstructionInItsTotal()
     {
@@ -343,13 +417,45 @@ public sealed class ViewerFirstOpenSlowLoadTests
         Assert.Contains("[client steps: tab construction 3500 ms]", line, StringComparison.Ordinal);
     }
 
-    private static int FreePort()
+    /// <summary>
+    /// A store that fails every read at once: it accepts a connection and closes it. #9266: the stand-in used to be a port nothing
+    /// listens on, and Windows retries a refused loopback connection twice before it gives up, so each read of a refresh cost about two
+    /// seconds and one refresh about fourteen. A closed connection ends a read in milliseconds and is the same failure to the Viewer
+    /// (a connection error that is not a server response), so what the tests check about the clock and the lines is unchanged.
+    /// </summary>
+    private sealed class FastFailingStore : IDisposable
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly Task _accepting;
+
+        public FastFailingStore()
+        {
+            _listener.Start();
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            _accepting = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        using var client = await _listener.AcceptTcpClientAsync();
+                    }
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+                    {
+                        /* The listener closed at the test's end: no more reads to fail. */
+                        return;
+                    }
+                }
+            });
+        }
+
+        public int Port { get; }
+
+        public void Dispose()
+        {
+            _listener.Stop();
+            _accepting.Wait(TimeSpan.FromSeconds(5));
+        }
     }
 
     /// <summary>Runs <paramref name="body"/> on the STA thread with the Viewer's theme resources in the application, as the tabs' cell styles need them.</summary>

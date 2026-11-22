@@ -630,6 +630,9 @@ CREATE TABLE IF NOT EXISTS investigation_evidence (
             yield return statement;
         }
 
+        /* #9241: the one query text dimension (v85). */
+        yield return LiteTextDimensions.CreateQueryTextDimTable;
+
         foreach (var statement in DuckDbSchemaGenerator.CreateTableStatements())
         {
             yield return statement;

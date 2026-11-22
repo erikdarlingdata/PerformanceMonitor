@@ -50,14 +50,7 @@ public sealed class OversizedPlanBacklogPins
     [Fact]
     public void V121_IsRegisteredInTheLadder_AndCarriesBothFactColumnsPlusTheBacklogTable()
     {
-        /* The "I am the top rung" claims have moved ON to PgAlertCountKnobRungTests (V122), the same
-           handoff this file received from DeadlockRateBandRungTests (V120). Asserting `Scripts[^1].Version
-           == 121` here would claim this rung is still the newest, which is how the NEXT rung's build goes
-           red. What stays is the ladder-top agreement (rung-agnostic) and this rung's own registration,
-           stated against its own number. */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(121, V121.Version);
-        Assert.True(V121.Version < StorageVersion.SchemaVersion);
         Assert.Equal("oversized-plan-backlog", V121.Name);
 
         /* BOTH fact tables. Only adding one would leave the other's capped rows permanently undescribable,

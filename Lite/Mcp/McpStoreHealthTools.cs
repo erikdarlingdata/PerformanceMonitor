@@ -21,7 +21,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpStoreHealthTools
 {
     internal const string StoreHealthDescription =
-        "Health of Lite's own local store, not of a monitored server. Four sections: STORE (the monitor.duckdb file against the 512 MB point where Lite archives all data and starts a fresh store, plus the data inside it and the write-ahead log), " +
+        "Health of Lite's own local store, not of a monitored server. Four sections: STORE (the data inside the monitor.duckdb file against the point (512 MB unless settings.json sets hot_store_reset_mb, and the section says which) where Lite archives all data and starts a fresh store, which it also does when the file reaches twice that point, plus the file size and the write-ahead log), " +
         "ARCHIVES (parquet archive file count, size on disk, oldest and newest month kept, and the retention period in months), " +
         "HOUSEKEEPING HISTORY (the timed archives, size resets and retention cleanups, newest first, with each outcome, rows or files moved, the error text of a failure, and the data in the store when the pass started; the history survives a restart and a size reset), " +
         "and TABLES (estimated rows per table, largest first, so you can see which collector fills the store). Use this when history looks reset, the disk is filling, or a collector's rows look short.";

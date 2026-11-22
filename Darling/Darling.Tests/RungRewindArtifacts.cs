@@ -918,13 +918,36 @@ CREATE INDEX idx_collection_log_watermark ON collect.collection_log (server_id, 
 DROP TABLE IF EXISTS collect.query_store_clutter_collections_hourly;
 DROP TABLE IF EXISTS collect.query_store_clutter_hour_built;
 DO $$ BEGIN IF to_regclass('collect.query_store_closed_day_tick') IS NOT NULL THEN ALTER TABLE collect.query_store_closed_day_tick DROP COLUMN IF EXISTS hour_ticked_at; END IF; END $$;"),
-        // V290 (#9193): the query_stats summary's per-server floor table, the probe's newest sentinel until V291 (#8784 part 2) went on top. The rewind drops it, so a re-run of V290 creates it empty
+        // V290 (#9193): the query_stats summary's per-server floor table, the probe's newest sentinel. The rewind drops it, so a re-run of V290 creates it empty
         // and a server has no floor until a batch finds a hole. Safe on a store that never had it.
         new(290, "hasQueryStatsCollectionFloor", @"DROP TABLE IF EXISTS collect.query_stats_collection_floor;"),
-        // V291 (#8784 part 2): the dependency list and the per-day referenced-names summary. The pair object_dependencies and
-        // object_references_daily_databases is the probe's newest sentinel. The rewind drops all four tables, so a re-run of V291 creates them
+        // V291 (#9215): the covering (server_id, bucket DESC) index on the corrected hourly Query Store rollup, the probe's newest sentinel until V292 (#9223) went on top. The rewind drops it by name,
+        // found by catalog (it lives in the materialization's schema), and a no-op without it. The plain (server_id, bucket) index it replaced is not put back: a re-run of V291 builds the covering one again.
+        new(291, "hasQueryStoreServerCoveringIndex",
+            @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_server_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
+        // V292 (#9223): the covering hash index on the corrected daily Query Store rollup. It is the probe's newest sentinel until V294 (#9284) went on top, found by the index's name. The rewind drops it by name, found by
+        // catalog (it lives in the materialization's schema), so a re-run of V292 builds it again. Safe on a store that never had it.
+        new(292, "hasQueryStoreCorrectedDailyHashIndex",
+            @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_daily_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
+        // V293 (#9277): the partial counter-row index on collect.attention_events. It is the probe's newest sentinel until V294 (#9284) went on top, found by the index's name. The rewind drops it by name, so a re-run of V293
+        // builds it again. Safe on a store that never had it.
+        new(293, "hasAttentionCountIndex", @"DROP INDEX IF EXISTS collect.idx_attention_events_count_time;"),
+        // V294 (#9284): the view-and-time index on the aggregate compression order history. It is the probe's newest sentinel until V295 (#9225) and V296 (#9280) went on top, found by the index's name. The rewind drops it, so a re-run of V294
+        // makes it again and moves the daily Query Store rollup's order if it is compressed. The history table stays (V279's). Safe on a store that never had it.
+        new(294, "hasAggregateCompressionOrderHistoryIndex",
+            @"DROP INDEX IF EXISTS collect.ix_aggregate_compression_order_history_view;"),
+        // V295 (#9225): the plan regression block tables, the probe's sentinel under V296's. The rewind drops both, so a re-run of V295 creates them empty and the builder
+        // sums the blocks again from the daily rows. Safe on a store that never had them.
+        new(295, "hasPlanRegressionBlock", @"DROP TABLE IF EXISTS collect.plan_regression_block; DROP TABLE IF EXISTS collect.plan_regression_block_built;"),
+        // V296 (#9280): the hourly Query Store summary table and the ledger's top_built_seq column. The table's index is the probe's sentinel under V297's (#8784 part 2) and goes
+        // with the table. The rewind drops both, so a re-run of V296 builds them again. Safe on a store that never had them.
+        new(296, "hasQueryStoreTopHourly",
+            @"DROP TABLE IF EXISTS collect.query_store_top_hourly;
+ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS top_built_seq;"),
+        // V297 (#8784 part 2): the dependency list and the per-day referenced-names summary. The pair object_dependencies and
+        // object_references_daily_databases is the probe's newest sentinel. The rewind drops all four tables, so a re-run of V297 creates them
         // empty, the collector captures the list again and the service builds the days again. Safe on a store that never had them.
-        new(291, "hasObjectReferences", @"DROP TABLE IF EXISTS collect.object_dependencies;
+        new(297, "hasObjectReferences", @"DROP TABLE IF EXISTS collect.object_dependencies;
 DROP TABLE IF EXISTS collect.object_references_daily;
 DROP TABLE IF EXISTS collect.object_references_daily_built;
 DROP TABLE IF EXISTS collect.object_references_daily_databases;"),

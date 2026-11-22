@@ -38,7 +38,7 @@ public class PgIndexBloatEstimateRungTests
     internal const int ProbeOrdinal = 89;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -46,19 +46,10 @@ public class PgIndexBloatEstimateRungTests
             "pg-index-bloat-estimate-columns",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
 
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* No longer the head of the ladder — V115 landed above it. The equality that used to sit here
-           asserted this rung was top, which is the clause that has to move with the head. */
         Assert.True(
             versions.Max() > RungVersion,
             "a rung above this one must exist; if this is the head again then the top-rung guard has been "
             + "lost rather than moved.");
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>

@@ -10,12 +10,14 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -556,12 +558,16 @@ chunk_rels AS (
     SELECT t.obj_schema, t.obj_name, t.kind, pc.oid AS rel_oid,
            EXISTS (SELECT 1 FROM _timescaledb_catalog.compression_settings AS cs
                    WHERE cs.relid::oid = pc.oid AND cs.compress_relid IS NOT NULL) AS is_compressed
-    FROM targets AS t
-    JOIN timescaledb_information.chunks AS ch
-        ON  ch.hypertable_schema = t.root_schema
-        AND ch.hypertable_name = t.root_name
-    JOIN pg_catalog.pg_namespace AS pn ON pn.nspname = ch.chunk_schema
-    JOIN pg_catalog.pg_class AS pc ON pc.relnamespace = pn.oid AND pc.relname = ch.chunk_name
+    /* Chunk membership from core inheritance, not timescaledb_information.chunks: that view joins every chunk to its dimension
+       slices and to all of pg_class, and its row count is estimated far too low, which let the planner pick the wrong join order
+       (#9224). No column of _timescaledb_catalog.chunk is named: TimescaleDB 2.29 rebuilt that catalog, so a column of it exists on
+       one side of that version only. The compression_settings reads (relid, compress_relid), here and in TimescaleMemberArms, are
+       the catalog columns still named, and both exist on 2.28.1 and on 2.29 and later. A chunk dropped by retention has no relation
+       and no pg_inherits row, as in the view. The
+       tiered-storage (OSM) chunk is a foreign table, which the view skipped.*/
+    FROM root_rels AS t
+    JOIN pg_catalog.pg_inherits AS inh ON inh.inhparent = t.rel_oid
+    JOIN pg_catalog.pg_class AS pc ON pc.oid = inh.inhrelid AND pc.relkind <> 'f'
 ),
 ";
 
@@ -612,13 +618,16 @@ chunk_rels AS (
     AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}{(timescale ? "\n    AND   " + StoreSelfMetrics.TimescaleInventoriedPredicateSql : string.Empty)}
 ),
 members AS (
-{(timescale ? TimescaleMemberArms : string.Empty)}    SELECT pr.nspname AS obj_schema, pr.relname AS obj_name, CASE WHEN pr.relkind = 'p' THEN 'partitioned' ELSE 'table' END AS kind, x.rel_oid AS rel_oid, 'heap'::text AS member_role, (pr.relkind = 'p') AS grouped, false AS is_compressed
+{(timescale ? TimescaleMemberArms : string.Empty)}    SELECT pr.nspname AS obj_schema, pr.relname AS obj_name, 'table'::text AS kind, pr.oid AS rel_oid, 'heap'::text AS member_role, false AS grouped, false AS is_compressed
     FROM plain_roots AS pr
-    CROSS JOIN LATERAL (
-        SELECT pr.oid AS rel_oid WHERE pr.relkind <> 'p'
-        UNION ALL
-        SELECT t.relid FROM pg_catalog.pg_partition_tree(pr.oid::regclass) AS t WHERE pr.relkind = 'p' AND t.isleaf
-    ) AS x
+    WHERE pr.relkind <> 'p'
+    UNION ALL
+    /* Only the partitioned roots are walked: a set-returning function in a lateral join over every root is estimated at 1000
+       rows per root, which made this CTE millions of estimated rows on a store with thousands of tables (#9224). */
+    SELECT pr.nspname, pr.relname, 'partitioned'::text, t.relid, 'heap'::text, true, false
+    FROM plain_roots AS pr
+    CROSS JOIN LATERAL pg_catalog.pg_partition_tree(pr.oid::regclass) AS t
+    WHERE pr.relkind = 'p' AND t.isleaf
 )";
 
     /// <summary>
@@ -701,7 +710,7 @@ relsz AS MATERIALIZED (
     FROM members AS m
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid{(presized ? @"
     LEFT JOIN unnest($1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[]) AS z(rel_oid, heap_bytes, index_bytes, toast_bytes)
-        ON z.rel_oid = m.rel_oid::bigint" : string.Empty)}
+        ON m.rel_oid = z.rel_oid::oid" : string.Empty)}
 ),
 est AS MATERIALIZED (
 {PgTableBloatStatsCollector.BuildQueryText(EstimateRelationFilterSql)}
@@ -941,10 +950,17 @@ ptree AS (
     WHERE t.isleaf
 )";
 
+    /// <summary>
+    /// The condition that keeps the estimate in the presized per-index read to the indexes it sized (#9224), in place of every
+    /// btree index in the database. The size column the estimate carries is not read there: the read takes it from its own list.
+    /// </summary>
+    private const string EstimateIndexFilterSql = @"
+    AND   c.oid::bigint = ANY($1::bigint[])";
+
     /// <summary>The statement for the per-index read: see <see cref="StoreIndexHealthRow"/>.</summary>
     public static string BuildIndexSql(bool timescale, bool presized = false) => $@"
 WITH est AS MATERIALIZED (
-{PgIndexBloatCollector.QueryText}
+{(presized ? PgIndexBloatCollector.BuildQueryText("0::bigint", EstimateIndexFilterSql) : PgIndexBloatCollector.QueryText)}
 ),
 {BuildMembersCtes(timescale)},
 {PartitionIndexCtes()},
@@ -970,7 +986,7 @@ ix AS (
         {(presized ? "COALESCE(zh.bytes, 0)" : "pg_catalog.pg_relation_size(c.oid)")} AS heap_bytes,
         COALESCE(s.idx_scan, 0) AS idx_scan,
         e.est_reclaimable_bytes,
-        e.index_bytes AS est_index_bytes,
+        {(presized ? "CASE WHEN e.index_oid IS NOT NULL THEN COALESCE(zi.bytes, 0) END" : "e.index_bytes")} AS est_index_bytes,
         e.skipped_reason
     FROM members AS m
     JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid
@@ -980,8 +996,8 @@ ix AS (
     LEFT JOIN pg_catalog.pg_stat_all_indexes AS s ON s.indexrelid = x.indexrelid
     LEFT JOIN ptree AS pt ON pt.leaf_index_oid = x.indexrelid
     LEFT JOIN est AS e ON e.index_oid = x.indexrelid{(presized ? @"
-    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zi(rel_oid, bytes) ON zi.rel_oid = x.indexrelid::bigint
-    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zh(rel_oid, bytes) ON zh.rel_oid = c.oid::bigint" : string.Empty)}
+    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zi(rel_oid, bytes) ON x.indexrelid = zi.rel_oid::oid
+    LEFT JOIN unnest($1::bigint[], $2::bigint[]) AS zh(rel_oid, bytes) ON c.oid = zh.rel_oid::oid" : string.Empty)}
 ),
 grp AS (
     SELECT
@@ -1470,18 +1486,8 @@ WHERE s.name IN ('autovacuum', 'autovacuum_max_workers', 'autovacuum_naptime', '
         }
     }
 
-    /// <summary>
-    /// The relations the per-table read sizes (#9170): every member relation, once each. The same <c>members</c> the read
-    /// itself groups, so the sizes cover exactly the relations it sums.
-    /// </summary>
-    private static string MemberRelationsSql(bool timescale) => $@"
-WITH {BuildMembersCtes(timescale)}
-SELECT DISTINCT m.rel_oid::bigint
-FROM members AS m
-JOIN pg_catalog.pg_class AS c ON c.oid = m.rel_oid";
-
     /// <summary>The relations the per-index read sizes (#9170): every member relation (the heap each index hangs under) and every index on one.</summary>
-    private static string IndexRelationsSql(bool timescale) => $@"
+    internal static string IndexRelationsSql(bool timescale) => $@"
 WITH {BuildMembersCtes(timescale)}
 SELECT m.rel_oid::bigint
 FROM members AS m
@@ -1491,19 +1497,27 @@ SELECT x.indexrelid::bigint
 FROM members AS m
 JOIN pg_catalog.pg_index AS x ON x.indrelid = m.rel_oid";
 
-    /// <summary>The three sizes per member relation, the same expressions the unsplit statement runs (#9170). $1 the relation oids.</summary>
-    private const string TableSizesSql = @"
+    /// <summary>
+    /// Every relation either read sizes, in one statement (#9224). A heap row carries its main-fork size and its TOAST total, the
+    /// same expressions the per-table read ran. An index row carries its main-fork size, which is the per-index read's size, and its
+    /// other forks (free space, visibility and init): the main fork plus those is what <c>pg_indexes_size</c> adds up for the heap
+    /// the index hangs under (it opens every index and stats every fork), so the per-table read takes its index bytes from the same
+    /// rows. Each file is stat'ed once for both reads. On a store with thousands of chunks the stats are the time the reads take
+    /// (about half a millisecond each on Windows), and the two reads used to stat every heap and every index's main fork twice.
+    /// $1 the relation oids.
+    /// </summary>
+    private const string RelationSizesSql = @"
 SELECT s.rel_oid,
+       COALESCE(x.indrelid, 0)::bigint,
        COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid), 0),
-       COALESCE(pg_catalog.pg_indexes_size(s.rel_oid::oid), 0),
-       COALESCE(pg_catalog.pg_total_relation_size(NULLIF(c.reltoastrelid, 0)), 0)
+       CASE WHEN x.indexrelid IS NULL THEN 0
+            ELSE COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid, 'fsm'), 0)
+               + COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid, 'vm'), 0)
+               + COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid, 'init'), 0) END,
+       CASE WHEN x.indexrelid IS NULL THEN COALESCE(pg_catalog.pg_total_relation_size(NULLIF(c.reltoastrelid, 0)), 0) ELSE 0 END
 FROM unnest($1::bigint[]) AS s(rel_oid)
-JOIN pg_catalog.pg_class AS c ON c.oid = s.rel_oid::oid";
-
-    /// <summary>The size of one relation, for the per-index read (#9170). $1 the relation oids.</summary>
-    private const string IndexSizesSql = @"
-SELECT s.rel_oid, COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid), 0)
-FROM unnest($1::bigint[]) AS s(rel_oid)";
+JOIN pg_catalog.pg_class AS c ON c.oid = s.rel_oid::oid
+LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
     /// <summary>The most connections the size read uses at once.</summary>
     private const int SizeReadParallelism = 4;
@@ -1511,34 +1525,52 @@ FROM unnest($1::bigint[]) AS s(rel_oid)";
     /// <summary>Fewest relations worth a connection of their own: a small store is sized on one.</summary>
     private const int SizeReadMinPerConnection = 200;
 
-    /// <summary>What <see cref="ReadSizesAsync"/> read: the relation oids and, per size column, the sizes in the same order.</summary>
-    private readonly record struct RelationSizes(long[] Oids, long[][] Columns);
+    /// <summary>
+    /// How long one sizing pass serves the next read (#9224). The tables read and the indexes read each hold their rows for
+    /// <see cref="DarlingStoreTableHealthCache.Lifetime"/>, so a size taken up to this much earlier is well inside what they already hold.
+    /// It is long enough for the second of the two reads, which starts when the first ends.
+    /// </summary>
+    internal static readonly TimeSpan SizePassLifetime = TimeSpan.FromSeconds(15);
 
-    private static void AddSizeParameters(NpgsqlCommand command, RelationSizes sizes)
+    /// <summary>What one pass sized: per relation its oid, the heap its index hangs under (0 for a heap), its main-fork size, the
+    /// size of its other forks (indexes only) and its TOAST total (heaps only).</summary>
+    private sealed record RelationSizePass(long[] Oids, long[] Parents, long[] Main, long[] OtherForks, long[] Toast);
+
+    /// <summary>One data source's held pass, and how many relations the passes on it have sized (what a test counts).</summary>
+    private sealed class SizePassSlot(TimeSpan lifetime)
     {
-        command.Parameters.Add(new NpgsqlParameter { Value = sizes.Oids, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        foreach (var column in sizes.Columns)
-        {
-            command.Parameters.Add(new NpgsqlParameter { Value = column, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        }
+        public readonly SingleFlightTtlCache<RelationSizePass> Cache = new(lifetime);
+        public long RelationsSized;
     }
 
+    private static readonly ConditionalWeakTable<NpgsqlDataSource, SizePassSlot> SizePasses = new();
+
+    private static SizePassSlot SlotFor(NpgsqlDataSource postgres) => SizePasses.GetValue(postgres, static _ => new SizePassSlot(SizePassLifetime));
+
+    /// <summary>How many relations the size passes on <paramref name="postgres"/> have stat'ed so far. A test reads it to see that
+    /// the two reads share one pass.</summary>
+    internal static long RelationsSizedOn(NpgsqlDataSource postgres) => SlotFor(postgres).RelationsSized;
+
     /// <summary>
-    /// Sizes the relations <paramref name="relationsSql"/> lists, on up to <see cref="SizeReadParallelism"/> connections at once
-    /// (#9170). What the read pays for on a store with thousands of chunks is the size functions, a file open and stat per
-    /// relation (about 0.3 ms each on Windows, run one after another in one backend), and not the chunk catalog. The
-    /// functions are the same, so the numbers are the same, and the read statement joins them back by oid.
-    /// A relation created after this read has no size and counts as empty. One dropped since is not read.
+    /// The sizes of every relation the two reads use: the member heaps and every index on one (<see cref="IndexRelationsSql"/>), on up
+    /// to <see cref="SizeReadParallelism"/> connections at once (#9170). The functions are the same as before, so the numbers are
+    /// the same. The pass is held for <see cref="SizePassLifetime"/> and shared by callers in flight (one pass, whichever read asks
+    /// first). A relation created after the pass has no size and counts as empty. One dropped since is not read.
     /// </summary>
-    private static async Task<RelationSizes> ReadSizesAsync(
-        NpgsqlDataSource postgres, string relationsSql, string sizesSql, int sizeColumns, CancellationToken cancellationToken)
+    private static Task<RelationSizePass> GetSizePassAsync(NpgsqlDataSource postgres, bool timescale, CancellationToken cancellationToken)
+    {
+        var slot = SlotFor(postgres);
+        return slot.Cache.GetOrStartAsync(() => ReadSizePassAsync(postgres, timescale, slot), cancellationToken);
+    }
+
+    private static async Task<RelationSizePass> ReadSizePassAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
     {
         var oids = new List<long>();
-        await using (var list = postgres.CreateCommand(relationsSql))
+        await using (var list = postgres.CreateCommand(IndexRelationsSql(timescale)))
         {
             list.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            await using var reader = await list.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using var reader = await list.ExecuteReaderAsync(CancellationToken.None);
+            while (await reader.ReadAsync(CancellationToken.None))
             {
                 oids.Add(reader.GetInt64(0));
             }
@@ -1548,35 +1580,71 @@ FROM unnest($1::bigint[]) AS s(rel_oid)";
         var slices = Enumerable.Range(0, connections)
             .Select(c => oids.Where((_, i) => i % connections == c).ToArray())
             .ToArray();
-        var parts = await Task.WhenAll(slices.Select(slice => ReadSizeSliceAsync(postgres, sizesSql, sizeColumns, slice, cancellationToken)));
-
-        return new RelationSizes(
+        var parts = await Task.WhenAll(slices.Select(slice => ReadSizeSliceAsync(postgres, slice)));
+        var pass = new RelationSizePass(
             parts.SelectMany(p => p.Oids).ToArray(),
-            Enumerable.Range(0, sizeColumns).Select(c => parts.SelectMany(p => p.Columns[c]).ToArray()).ToArray());
+            parts.SelectMany(p => p.Parents).ToArray(),
+            parts.SelectMany(p => p.Main).ToArray(),
+            parts.SelectMany(p => p.OtherForks).ToArray(),
+            parts.SelectMany(p => p.Toast).ToArray());
+        Interlocked.Add(ref slot.RelationsSized, oids.Count);
+        return pass;
     }
 
-    private static async Task<RelationSizes> ReadSizeSliceAsync(
-        NpgsqlDataSource postgres, string sizesSql, int sizeColumns, long[] slice, CancellationToken cancellationToken)
+    private static async Task<RelationSizePass> ReadSizeSliceAsync(NpgsqlDataSource postgres, long[] slice)
     {
-        var read = new List<long>(slice.Length);
-        var columns = Enumerable.Range(0, sizeColumns).Select(_ => new List<long>(slice.Length)).ToArray();
+        var oids = new List<long>(slice.Length);
+        var parents = new List<long>(slice.Length);
+        var main = new List<long>(slice.Length);
+        var other = new List<long>(slice.Length);
+        var toast = new List<long>(slice.Length);
         if (slice.Length > 0)
         {
-            await using var command = postgres.CreateCommand(sizesSql);
+            await using var command = postgres.CreateCommand(RelationSizesSql);
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             command.Parameters.Add(new NpgsqlParameter { Value = slice, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+            while (await reader.ReadAsync(CancellationToken.None))
             {
-                read.Add(reader.GetInt64(0));
-                for (var c = 0; c < sizeColumns; c++)
-                {
-                    columns[c].Add(reader.GetInt64(c + 1));
-                }
+                oids.Add(reader.GetInt64(0));
+                parents.Add(reader.GetInt64(1));
+                main.Add(reader.GetInt64(2));
+                other.Add(reader.GetInt64(3));
+                toast.Add(reader.GetInt64(4));
             }
         }
 
-        return new RelationSizes(read.ToArray(), columns.Select(c => c.ToArray()).ToArray());
+        return new RelationSizePass(oids.ToArray(), parents.ToArray(), main.ToArray(), other.ToArray(), toast.ToArray());
+    }
+
+    private static void AddSizeParameters(NpgsqlCommand command, params long[][] arrays)
+    {
+        foreach (var column in arrays)
+        {
+            command.Parameters.Add(new NpgsqlParameter { Value = column, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+        }
+    }
+
+    /// <summary>The per-table read's inputs from a pass: every member heap with its heap, index and TOAST bytes. A heap's index bytes
+    /// are the sum of its indexes' forks, which is what <c>pg_indexes_size</c> returns for it.</summary>
+    private static void AddTableSizeParameters(NpgsqlCommand command, RelationSizePass pass)
+    {
+        var indexBytes = new Dictionary<long, long>();
+        for (var i = 0; i < pass.Oids.Length; i++)
+        {
+            if (pass.Parents[i] != 0)
+            {
+                indexBytes[pass.Parents[i]] = indexBytes.GetValueOrDefault(pass.Parents[i]) + pass.Main[i] + pass.OtherForks[i];
+            }
+        }
+
+        var heaps = Enumerable.Range(0, pass.Oids.Length).Where(i => pass.Parents[i] == 0).ToArray();
+        AddSizeParameters(
+            command,
+            heaps.Select(i => pass.Oids[i]).ToArray(),
+            heaps.Select(i => pass.Main[i]).ToArray(),
+            heaps.Select(i => indexBytes.GetValueOrDefault(pass.Oids[i])).ToArray(),
+            heaps.Select(i => pass.Toast[i]).ToArray());
     }
 
     private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(
@@ -1587,11 +1655,11 @@ FROM unnest($1::bigint[]) AS s(rel_oid)";
         var (timescale, serverVersion) = await ProbeAsync(postgres, cancellationToken);
 
         var read = new List<(StoreTableHealthRow Row, TailRelation[] TailRelations)>();
-        var sizes = await ReadSizesAsync(postgres, MemberRelationsSql(timescale), TableSizesSql, 3, cancellationToken);
+        var sizes = await GetSizePassAsync(postgres, timescale, cancellationToken);
         await using (var command = postgres.CreateCommand(BuildSql(timescale, serverVersion, presized: true)))
         {
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            AddSizeParameters(command, sizes);
+            AddTableSizeParameters(command, sizes);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1771,10 +1839,10 @@ FROM unnest($1::bigint[]) AS s(rel_oid)";
 
         var (timescale, _) = await ProbeAsync(postgres, cancellationToken);
         var rows = new List<StoreIndexHealthRow>();
-        var sizes = await ReadSizesAsync(postgres, IndexRelationsSql(timescale), IndexSizesSql, 1, cancellationToken);
+        var sizes = await GetSizePassAsync(postgres, timescale, cancellationToken);
         await using var command = postgres.CreateCommand(BuildIndexSql(timescale, presized: true));
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        AddSizeParameters(command, sizes);
+        AddSizeParameters(command, sizes.Oids, sizes.Main);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

@@ -790,7 +790,36 @@ SELECT EXISTS
         NpgsqlConnection connection, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds,
         CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(LongestIntervalSpanSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        var span = await ResolveTrustedLongestSpanAsync(connection, null, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+        return span is { } trusted ? EdgeMarginFor(trusted) : PurgeEdgeMargin;
+    }
+
+    /// <summary>
+    /// The server's longest Query Store interval length for a read of <paramref name="readStart"/> through <paramref name="end"/>
+    /// (#9225), or <see cref="IntervalSpanMargin"/> (a day, the longest an interval spans) whenever
+    /// <see cref="ResolveEdgeMarginAsync"/> would fall back to <see cref="PurgeEdgeMargin"/>: the same trust test, one statement. Never
+    /// longer than a day. It is the distance below a row's <c>last_execution_time</c> that its <c>first_execution_time</c> can sit, which
+    /// is what the plan-regression read's live floor needs: both times fall inside one interval, so no interval of the server holds them
+    /// further apart than its length. Where the length cannot be trusted (an interval-length change on the server that the captures did
+    /// not see, a database with no capture) the floor keeps a whole day, so a row of a longer interval is read, never dropped. The
+    /// trust test lists databases from the wide table, so it vouches only for days that table still holds: the plan-regression caller
+    /// does not ask for a day older than <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>.
+    /// <paramref name="transaction"/> is the read's own transaction, when it has one.
+    /// </summary>
+    public static async Task<TimeSpan> ResolveLongestIntervalSpanAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var span = await ResolveTrustedLongestSpanAsync(connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
+        return span is { } trusted && trusted < IntervalSpanMargin ? trusted : IntervalSpanMargin;
+    }
+
+    /// <summary>The longest interval length <see cref="LongestIntervalSpanSql"/> reports, or null when it cannot be trusted (the fallbacks the edge margin and the live floor share).</summary>
+    private static async Task<TimeSpan?> ResolveTrustedLongestSpanAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(LongestIntervalSpanSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
@@ -800,15 +829,15 @@ SELECT EXISTS
             || reader.GetInt64(1) == 0 || reader.GetInt64(2) != 0
             || reader.GetBoolean(4))
         {
-            return PurgeEdgeMargin;
+            return null;
         }
 
         if (reader.GetDateTime(3) > DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) - IntervalSpanMargin)
         {
-            return PurgeEdgeMargin;
+            return null;
         }
 
-        return EdgeMarginFor(TimeSpan.FromMinutes(reader.GetInt64(0)));
+        return TimeSpan.FromMinutes(reader.GetInt64(0));
     }
 
     /// <summary>
@@ -874,6 +903,53 @@ SELECT EXISTS
     /// the expression the duration strip's bars are keyed on (#1892). Legacy rows have no interval start and keep <c>collection_time</c>.
     /// The Viewer's grid and the MCP top and aborts reads place their window with it, so a window's rows are the intervals its bars draw.</summary>
     public const string IntervalStartExpressionSql = "COALESCE(interval_start_time_utc, collection_time)";
+
+    /// <summary>
+    /// The interval-start-placed window of a per-server read of this table as two arms, <c>UNION ALL</c>, each with the
+    /// <c>first_execution_time</c> floor that holds for its rows (#9276). <paramref name="selectList"/> is projected from both arms
+    /// and <paramref name="trailingPredicates"/> (each line starting with <c>AND</c>) is repeated in both. $1 server_id, $2/$3 the
+    /// window (naive UTC, half-open), as the single-arm window of the top read binds them.
+    /// <list type="bullet">
+    /// <item>Rows WITH <c>interval_start_time_utc</c> are placed by it, and <c>first_execution_time</c> is an end time inside the
+    /// interval (<see cref="IntervalStartSlack"/> explains it), so the floor is the window's start less that hour, not
+    /// <see cref="PurgeEdgeMargin"/> (26 hours).</item>
+    /// <item>Rows WITHOUT it are placed by <c>collection_time</c> and keep <see cref="PurgeEdgeMarginSql"/>, which
+    /// <see cref="WithEdgeMargin"/> still narrows. Only this arm carries that text. The partial index
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> holds exactly these rows, so the arm is one short range.</item>
+    /// </list>
+    /// Every row of the one-arm window is in exactly one arm, so the rows are the same. The caller uses this statement only when
+    /// that index is built (<see cref="QueryStoreBackgroundIndexes.IsBuiltAsync"/>); without it the two arms would each walk the
+    /// server's rows. <paramref name="openEnd"/> (#9283) lets $3 be NULL, an open end that reads to now, as the Viewer grid's window
+    /// can; the end bounds of both arms are then dropped for that call.
+    /// </summary>
+    public static string IntervalStartSplitSql(string selectList, string trailingPredicates, string indent = "            ", bool openEnd = false)
+    {
+        /* #9283: the Viewer grid's window can have no end ($3 NULL, a preset that reads to now). Each end bound is then true, as the one-arm
+           statement's are, and the start bounds and floors stay. */
+        string EndBound(string predicate) => openEnd ? $"($3::timestamp IS NULL OR {predicate})" : predicate;
+
+        return $@"{indent}SELECT
+{indent}    {selectList}
+{indent}FROM query_store_interval_wide
+{indent}WHERE server_id = $1
+{indent}AND   interval_start_time_utc IS NOT NULL
+{indent}AND   interval_start_time_utc >= $2
+{indent}AND   {EndBound("interval_start_time_utc < $3")}
+{indent}AND   first_execution_time >= $2 - {IntervalStartSlackSql}
+{indent}AND   {EndBound($"first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}")}
+{trailingPredicates}
+{indent}UNION ALL
+{indent}SELECT
+{indent}    {selectList}
+{indent}FROM query_store_interval_wide
+{indent}WHERE server_id = $1
+{indent}AND   interval_start_time_utc IS NULL
+{indent}AND   collection_time >= $2
+{indent}AND   {EndBound("collection_time < $3")}
+{indent}AND   first_execution_time >= $2 - {PurgeEdgeMarginSql}
+{indent}AND   {EndBound($"first_execution_time <= $3 + {IntervalStartFirstExecMarginSql}")}
+{trailingPredicates}";
+    }
 
     /// <summary>The <c>collection_time</c> floor beside an interval-start-placed window on the raw Query Store reads (#7776, #7814): an
     /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
@@ -1085,13 +1161,16 @@ FROM (
     /// truncated.</param>
     /// <param name="DecisionFailed">True only when the source decision itself faulted and the plan is the
     /// raw fallback; a legitimate "the gate says raw" leaves it false, so a caller can tell the two apart.</param>
+    /// <param name="Source">#9287: the Viewer's Query Store reads set it to the UTC days they took from the closed-day rollups and the
+    /// days they read from the interval table, with the reason when no rollup day was taken. Null elsewhere.</param>
     public readonly record struct WideReadPlan(
         bool UseTable,
         DateTime ClampedStart,
         DateTime ReadStart,
         DateTime? BelowFloorStart,
         WideStartBound StartBound = WideStartBound.Window,
-        bool DecisionFailed = false)
+        bool DecisionFailed = false,
+        QueryStoreClosedDayRollup.ReadSource? Source = null)
     {
         /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the

@@ -20,6 +20,7 @@ namespace PerformanceMonitorLite.Services;
 internal static class ParentConsole
 {
     private const int AttachParentProcess = -1;
+    private const int StdInputHandle = -10;
     private const int StdOutputHandle = -11;
     private const int StdErrorHandle = -12;
     private const uint FileTypeUnknown = 0;
@@ -50,9 +51,11 @@ internal static class ParentConsole
            was usable before the attach is put back after it. One that was not usable (standard error when only standard output
            is redirected) keeps the console's. The attach fails with no parent console (started from Explorer or a scheduled
            task) or when one is already attached, and neither matters here, so its result is not read. */
+        var inBefore = GetStdHandle(StdInputHandle);
         var outBefore = GetStdHandle(StdOutputHandle);
         var errBefore = GetStdHandle(StdErrorHandle);
         _ = AttachConsole(AttachParentProcess);
+        Restore(StdInputHandle, inBefore);
         Restore(StdOutputHandle, outBefore);
         Restore(StdErrorHandle, errBefore);
 
@@ -66,6 +69,18 @@ internal static class ParentConsole
 
         output = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
         return true;
+    }
+
+    /// <summary>
+    /// #9237: standard input as it stands after <see cref="TryOpen"/>, for a switch that reads a piped JSON array or a piped
+    /// password. <paramref name="redirected"/> is true when it is a pipe or a file (nobody is typing), false at a console.
+    /// </summary>
+    internal static TextReader OpenInput(out bool redirected)
+    {
+        redirected = Console.IsInputRedirected;
+        return HasHandle(StdInputHandle)
+            ? new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false))
+            : TextReader.Null;
     }
 
     private static bool HasHandle(int standardHandle) => IsUsable(GetStdHandle(standardHandle));

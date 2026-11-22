@@ -727,6 +727,10 @@ HAVING COUNT(*) > 1";
             }
 
             transaction.Commit();
+
+            /* #9241: the collapse removed hot rows, so a query text no hot row references any more can leave the dimension. Under
+               the write lock this block holds, and a failure never fails the repair. */
+            TextDimensionWriter.TryRemoveUnreferenced(connection, _logger, "the Query Store slice repair");
             progress?.Report($"Hot store: {CountText.Plural(survey.HotRowsRemoved, "row")} removed from {CountText.Plural(survey.HotGroups, "split interval")}.");
         }
 
@@ -830,11 +834,7 @@ HAVING COUNT(*) > 1";
     /// </summary>
     internal static bool IsOutOfTempSpace(Exception ex)
     {
-        var text = ex.ToString();
-        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+        return ParquetCompaction.IsOutOfTempSpace(ex);
     }
 
     /// <summary>Test seam only, null in production: runs first in <see cref="SurveyAsync"/>, so a test can make the survey throw.</summary>

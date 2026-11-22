@@ -560,63 +560,7 @@ public sealed partial class DarlingWorker
                     continue;
                 }
 
-                if (effective.FrequencyMinutes == 0)
-                {
-                    var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
-
-                    /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
-                       seeded from the SAME pre-dispatch watermark used below - the run just above updates it
-                       moments from now, but seeding from the watermark read at the top of this method means a
-                       collector that already ran recently (a quick reconnect) is not re-phased a full day
-                       forward. Without this, a long-lived connection never re-captures: its on-load config
-                       snapshot ages out of retention (#3930) and a cleared trace flag has nothing to overwrite
-                       its stale ON row (#3929) until the next reconnect. */
-                    var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
-                    var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
-                    var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
-                    if (effective.RunAtMinute is int onLoadRunAt)
-                    {
-                        SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);
-                    }
-                    else
-                    {
-                        lock (server.ScheduleLock)
-                        {
-                            server.RunTimeSlots.TryRemove(name, out _);
-                            server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
-                        }
-                    }
-                }
-                else
-                {
-                    var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
-                    var jitter = SeedJitter(serverId, effective.FrequencyMinutes * 60);
-
-                    /* #4938: with a run time the seed is the slot (ComputeSeededNextDue holds the rules), on this
-                       server's clock as read above; the slot's inputs are kept beside the stamp so a reload or a clock
-                       change computes it again from the same last run. */
-                    if (effective.RunAtMinute is int runAt)
-                    {
-                        var clock = server.Clock;
-                        lock (server.ScheduleLock)
-                        {
-                            /* #5033: a daily run of the previous connection can still be recording, so its last run counts. */
-                            server.RunTimeSlots.TryGetValue(name, out var heldSlot);
-                            var seedLastRun = Newer(heldSlot?.LastRunUtc, lastRun);
-                            server.NextDue[name] = ComputeSeededNextDue(
-                                seedLastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
-                            server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, seedLastRun);
-                        }
-                    }
-                    else
-                    {
-                        lock (server.ScheduleLock)
-                        {
-                            server.RunTimeSlots.TryRemove(name, out _);
-                            server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
-                        }
-                    }
-                }
+                await SeedCollectorAtConnectAsync(server, runner, name, serverId, effective, watermarks, now, cancellationToken);
             }
 
             /* #5597: every due stamp above was seeded from the clock read before the on-load runs, and this body is the
@@ -776,6 +720,79 @@ public sealed partial class DarlingWorker
     private int _nativeLoadFailureLogged;
 
     /// <summary>
+    /// One collector's part of the connect pass (the loop body of the connect that runs after the server's clock and the collector
+    /// watermarks are read): an on-load collector (effective frequency 0) runs now and is seeded to its daily recapture, then the early
+    /// recapture of #9270 is applied AFTER that seed, which would otherwise put a transitional <c>database_config</c> capture's next run a
+    /// day out; every other collector is seeded from its watermark.
+    /// </summary>
+    internal async Task SeedCollectorAtConnectAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, string name, int serverId, EffectiveSchedule effective,
+        IReadOnlyDictionary<string, DateTime> watermarks, DateTime now, CancellationToken cancellationToken)
+    {
+        if (effective.FrequencyMinutes == 0)
+        {
+            var onLoadOutcome = new RunOutcome();
+            var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken, onLoadOutcome);
+
+            /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
+               seeded from the SAME pre-dispatch watermark used below - the run just above updates it
+               moments from now, but seeding from the watermark read at the top of this method means a
+               collector that already ran recently (a quick reconnect) is not re-phased a full day
+               forward. Without this, a long-lived connection never re-captures: its on-load config
+               snapshot ages out of retention (#3930) and a cleared trace flag has nothing to overwrite
+               its stale ON row (#3929) until the next reconnect. */
+            var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
+            var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
+            var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
+            if (effective.RunAtMinute is int onLoadRunAt)
+            {
+                SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);
+            }
+            else
+            {
+                lock (server.ScheduleLock)
+                {
+                    server.RunTimeSlots.TryRemove(name, out _);
+                    server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
+                }
+            }
+
+            /* #9270: after the seed above, which would otherwise put the next capture a day out. */
+            ApplyTransitionalRecapture(server, name, onLoadOutcome.RecaptureEarly);
+        }
+        else
+        {
+            var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
+            var jitter = SeedJitter(serverId, effective.FrequencyMinutes * 60);
+
+            /* #4938: with a run time the seed is the slot (ComputeSeededNextDue holds the rules), on this
+               server's clock as read above; the slot's inputs are kept beside the stamp so a reload or a clock
+               change computes it again from the same last run. */
+            if (effective.RunAtMinute is int runAt)
+            {
+                var clock = server.Clock;
+                lock (server.ScheduleLock)
+                {
+                    /* #5033: a daily run of the previous connection can still be recording, so its last run counts. */
+                    server.RunTimeSlots.TryGetValue(name, out var heldSlot);
+                    var seedLastRun = Newer(heldSlot?.LastRunUtc, lastRun);
+                    server.NextDue[name] = ComputeSeededNextDue(
+                        seedLastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
+                    server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, seedLastRun);
+                }
+            }
+            else
+            {
+                lock (server.ScheduleLock)
+                {
+                    server.RunTimeSlots.TryRemove(name, out _);
+                    server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// #4999: the at-connect run of ONE on-load collector (effective frequency 0), inline in
     /// <see cref="TryConnectAsync"/>. Each on-load collector's SCHEDULED run is detached (its recapture is daily), and
     /// a detached run outlives the pass that dispatched it: a fault and a reconnect while it is still going, or still
@@ -791,7 +808,7 @@ public sealed partial class DarlingWorker
     /// <returns>True when the collector ran and succeeded; false when its slot was held or the run failed.</returns>
     internal async Task<bool> RunOnLoadAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int serverId, EffectiveSchedule effective,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, RunOutcome? outcome = null)
     {
         using var slot = TryTakeInlineDailySlot(serverId, collectorName, effective);
         if (slot is null)
@@ -805,9 +822,109 @@ public sealed partial class DarlingWorker
         /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
            never resets it, so folding it in would mix a previous body's bookkeeping
            into these rows - the cross-body contamination the reset exists to prevent. */
-        var runOutcome = new RunOutcome();
+        var runOutcome = outcome ?? new RunOutcome();
         await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken, runOutcome: runOutcome);
         return runOutcome.Succeeded;
+    }
+
+    /// <summary>
+    /// #9270: a <c>database_config</c> capture taken while a database is still restoring or recovering (a connect right after a
+    /// restart or failover) holds that database's engine defaults, and the collector's next capture is a day away. When the stored captures
+    /// say the collector is due early (<paramref name="recaptureEarly"/> true, <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/>) it
+    /// becomes due again in <see cref="CollectorScheduleDefaults.TransitionalRecaptureMinutes"/> minutes; otherwise it keeps its normal due time.
+    /// The count of repeats lives in the stored captures, so nothing is held here. Null (not a <c>database_config</c> run, or the read of the
+    /// captures failed) changes nothing. A collector with a run time keeps its time of day, and one no longer scheduled stays unscheduled.
+    /// </summary>
+    internal void ApplyTransitionalRecapture(ServerLoopState server, string collectorName, bool? recaptureEarly)
+    {
+        if (recaptureEarly is not true)
+        {
+            return;
+        }
+
+        lock (server.ScheduleLock)
+        {
+            if (server.RunTimeSlots.ContainsKey(collectorName) || !server.NextDue.ContainsKey(collectorName))
+            {
+                return;
+            }
+
+            server.NextDue[collectorName] = DateTime.UtcNow.AddMinutes(CollectorScheduleDefaults.TransitionalRecaptureMinutes);
+        }
+    }
+
+    private static bool IsTransitionalCaptureCollector(string collectorName) =>
+        string.Equals(collectorName, DatabaseConfigCollector.Instance.Name, StringComparison.Ordinal);
+
+    /// <summary>
+    /// #9270: decides the early recapture after a successful <c>database_config</c> run, from the stored captures. A caller that passed a
+    /// <paramref name="runOutcome"/> (the at-connect run, which seeds the collector's due time after the run, and the in-sweep run) gets the
+    /// answer there and applies it itself; a run with no outcome (the detached daily run) applies it here, to the due time it was dispatched with.
+    /// </summary>
+    private async Task SettleTransitionalRecaptureAsync(
+        ServerLoopState server, ServerRuntime runtime, string collectorName, RunOutcome? runOutcome, CancellationToken cancellationToken)
+    {
+        var recaptureEarly = await ReadRecaptureDueAsync(runtime, cancellationToken);
+        if (runOutcome is not null)
+        {
+            runOutcome.RecaptureEarly = recaptureEarly;
+        }
+        else
+        {
+            ApplyTransitionalRecapture(server, collectorName, recaptureEarly);
+        }
+    }
+
+    /// <summary>
+    /// #9270: <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the server's stored <c>database_config</c> captures of the databases
+    /// that are transitional in its newest one. Null when the read failed: a store hiccup leaves the collector's schedule as it was, and
+    /// never fails the run that asked.
+    /// </summary>
+    private async Task<bool?> ReadRecaptureDueAsync(ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (RecaptureDueOverride is { } answer)
+        {
+            return answer(runtime.ServerId);
+        }
+
+        if (_postgres is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await QueryRecaptureDueAsync(_postgres, runtime.ServerId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug("Observability: transitional database read for server_id {ServerId} failed: {Message}", runtime.ServerId, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>#9270: the store read behind <see cref="ReadRecaptureDueAsync"/>.</summary>
+    internal static async Task<bool> QueryRecaptureDueAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var states = string.Join(", ", ConfigChangeDiff.TransitionalDatabaseStates.Select(state => "'" + state + "'"));
+        await using var command = postgres.CreateCommand(
+            "SELECT d.database_name, d.capture_time, d.state_desc FROM v_database_config AS d WHERE d.server_id = $1 " +
+            "AND d.database_name IN (SELECT n.database_name FROM v_database_config AS n WHERE n.server_id = $1 " +
+            "AND n.capture_time = (SELECT max(m.capture_time) FROM v_database_config AS m WHERE m.server_id = $1) " +
+            "AND upper(n.state_desc) IN (" + states + "))");
+        command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+        command.Parameters.AddWithValue(serverId);
+        var captures = new List<TransitionalDatabaseRuns.Capture>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0) && !reader.IsDBNull(1))
+            {
+                captures.Add(new TransitionalDatabaseRuns.Capture(reader.GetDateTime(1), reader.GetString(0), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
+        return TransitionalDatabaseRuns.RecaptureIsDue(captures);
     }
 
     /// <summary>
@@ -1173,6 +1290,7 @@ public sealed partial class DarlingWorker
                     var collectorStarted = Stopwatch.GetTimestamp();
                     var collectorOutcome = new RunOutcome();
                     await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff, runOutcome: collectorOutcome);
+                    ApplyTransitionalRecapture(server, name, collectorOutcome.RecaptureEarly);
                     var collectorMs = (long)Stopwatch.GetElapsedTime(collectorStarted).TotalMilliseconds;
                     var measuredMs = collectorOutcome.SqlMs is { } readMs && collectorOutcome.StorageMs is { } writeMs ? readMs + writeMs : collectorMs;
                     if (heldLongest is null || measuredMs > heldLongest.Value.TotalMs)
@@ -3064,6 +3182,11 @@ LIMIT 1";
                 runOutcome.Succeeded = overrideRows >= 0;
             }
 
+            if (overrideRows >= 0 && IsTransitionalCaptureCollector(collectorName))
+            {
+                await SettleTransitionalRecaptureAsync(server, runtime, collectorName, runOutcome, cancellationToken);
+            }
+
             return Math.Max(overrideRows, 0);
         }
 
@@ -3355,6 +3478,12 @@ LIMIT 1";
                 runOutcome.Succeeded = true;
                 runOutcome.SqlMs = result.SqlMs;
                 runOutcome.StorageMs = result.StorageMs;
+            }
+
+            /* #9270: a database_config capture that holds a database still restoring or recovering is retaken in minutes. */
+            if (!result.Abandoned && IsTransitionalCaptureCollector(collectorName))
+            {
+                await SettleTransitionalRecaptureAsync(server, runtime, collectorName, runOutcome, cancellationToken);
             }
 
             /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once.

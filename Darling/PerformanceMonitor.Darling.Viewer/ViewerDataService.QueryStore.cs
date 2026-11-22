@@ -260,6 +260,28 @@ public sealed partial class ViewerDataService
 
         """;
 
+    /// <summary>The select list both arms of <see cref="QueryStoreTopTableSplitPrefix"/> project: every column, and the literal <c>rn</c> of <see cref="QueryStoreTopTablePrefix"/>.</summary>
+    private const string QueryStoreTopTableSplitSelect = "*, 1 AS rn";
+
+    /// <summary>The predicate both arms repeat: the database list ($5). The grid has no execution outcome filter.</summary>
+    private const string QueryStoreTopTableSplitTrailing = "            AND   ($5::text[] IS NULL OR database_name = ANY($5))";
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTablePrefix"/> with the window as two arms (#9283), for a store whose
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built: rows with an interval start take the one hour
+    /// <c>first_execution_time</c> floor, rows without one keep the <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> floor and read
+    /// through the partial index (<see cref="QueryStoreIntervalWide.IntervalStartSplitSql"/>), as the MCP top read does since #9276. The
+    /// Viewer's window can have no end, so both arms take the helper's open end form ($3 NULL reads to now). The rows, columns and
+    /// parameters are <see cref="QueryStoreTopTablePrefix"/>'s, and a statement built on it keeps the <c>deduped</c> name the keys, tag and
+    /// self-statement slots read. The closed-day rollup prefix (<see cref="QueryStoreTopRollupPrefix"/>) keeps its own arms.
+    /// </summary>
+    private static readonly string QueryStoreTopTableSplitPrefix = $$"""
+        WITH deduped AS NOT MATERIALIZED (
+        {{QueryStoreIntervalWide.IntervalStartSplitSql(QueryStoreTopTableSplitSelect, QueryStoreTopTableSplitTrailing, openEnd: true)}}
+        ),
+
+        """;
+
     /// <summary>The select list of <c>ranked</c>: the group keys and every aggregate, one row per identity. Shared by the raw
     /// read's <see cref="QueryStoreTopSuffix"/> and the interval-table read's <see cref="QueryStoreTopTableRankedHead"/>, so the two
     /// cannot drift in what they return.</summary>
@@ -629,7 +651,15 @@ public sealed partial class ViewerDataService
     /// read's <c>keys</c> is (<see cref="QueryStoreTopTableKeysCte"/>, with the self-statement slot and the tag filter before the limit).
     /// $1 server_id, $2 the read start, $3 window end (NULL for an open end), $4 unused, $5 database filter, $6 the candidate limit.
     /// </summary>
-    public static readonly string QueryStoreTopTableKeysSql = QueryStoreTopTablePrefix + QueryStoreTopTableKeysCte + "\n"
+    public static readonly string QueryStoreTopTableKeysSql = TableKeysSql(QueryStoreTopTablePrefix);
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTableKeysSql"/> over <see cref="QueryStoreTopTableSplitPrefix"/> (#9283), chosen per call when
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built and no closed-day run is served; same parameters, rows and order.
+    /// </summary>
+    public static readonly string QueryStoreTopTableSplitKeysSql = TableKeysSql(QueryStoreTopTableSplitPrefix);
+
+    private static string TableKeysSql(string prefix) => prefix + QueryStoreTopTableKeysCte + "\n"
         + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys\n"
         + "ORDER BY rank_cost DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
 
@@ -642,7 +672,15 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the read start, $3 window end, $4 top, $5 database filter, $6 to $11 the keys' six columns as parallel arrays
     /// (database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role).
     /// </summary>
-    public static readonly string QueryStoreTopTableByKeysSql = QueryStoreTopTablePrefix
+    public static readonly string QueryStoreTopTableByKeysSql = TableByKeysSql(QueryStoreTopTablePrefix);
+
+    /// <summary>
+    /// <see cref="QueryStoreTopTableByKeysSql"/> over <see cref="QueryStoreTopTableSplitPrefix"/> (#9283), chosen per call with
+    /// <see cref="QueryStoreTopTableSplitKeysSql"/>; same parameters, rows and order.
+    /// </summary>
+    public static readonly string QueryStoreTopTableSplitByKeysSql = TableByKeysSql(QueryStoreTopTableSplitPrefix);
+
+    private static string TableByKeysSql(string prefix) => prefix
         + "keys AS (\n"
         + "    SELECT *\n"
         + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
@@ -739,15 +777,15 @@ public sealed partial class ViewerDataService
 
     /// <summary>#9111: the built run of whole UTC days this read takes from the closed-day rollups, or null to read the interval table
     /// alone: a store below the rollups' version, a server with no built day in the window, or one whose builds have stopped.</summary>
-    private async Task<QueryStoreClosedDayRollup.ServedDays?> ResolveServedDaysAsync(
+    private async Task<(QueryStoreClosedDayRollup.ServedDays? Served, QueryStoreClosedDayRollup.SourceReason Reason)> ResolveServedDaysAsync(
         Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime end, CancellationToken cancellationToken)
     {
         if (_cachedStoreSchemaVersion is not int version || version < QueryStoreClosedDayRollup.Version)
         {
-            return null;
+            return (null, QueryStoreClosedDayRollup.SourceReason.Unavailable);
         }
 
-        return await QueryStoreClosedDayRollup.ResolveServedDaysAsync(
+        return await QueryStoreClosedDayRollup.ResolveServedDaysWithReasonAsync(
             connection, transaction, serverId, readStart, end, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
 
@@ -971,12 +1009,18 @@ public sealed partial class ViewerDataService
             /* The built-day lookup itself reads the rollup bookkeeping tables, so a fault in it counts. Once it says no day is served, the
                rest of the read is the interval table alone and a fault there is not the rollups' to retry. */
             rollupsTried = useRollups && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
-            var served = rollupsTried
+            var (served, servedReason) = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken)
-                : null;
+                : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack);
             rollupsTried = served is not null;
-            var keysSql = served is null ? QueryStoreTopTableKeysSql : QueryStoreTopRollupKeysSql;
-            var topSql = served is null ? QueryStoreTopTableByKeysSql : QueryStoreTopRollupByKeysSql;
+            var source = QueryStoreClosedDayRollup.DescribeSource(plan.ReadStart, literalEndUtc ?? endUtc, served, servedReason);
+            /* #9283: the window as two arms, each with the floor that holds for its rows (the MCP top read's split, #9276), once the partial
+               index the NULL-start arm reads through is built. A served run reads the rollup statements, which keep their own arms. Until the
+               index is built the read keeps the one 26 hour floor and the statements it had. */
+            var splitBuilt = served is null && await QueryStoreBackgroundIndexes.IsBuiltAsync(
+                connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            var keysSql = served is not null ? QueryStoreTopRollupKeysSql : splitBuilt ? QueryStoreTopTableSplitKeysSql : QueryStoreTopTableKeysSql;
+            var topSql = served is not null ? QueryStoreTopRollupByKeysSql : splitBuilt ? QueryStoreTopTableSplitByKeysSql : QueryStoreTopTableByKeysSql;
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, literalEndUtc ?? DateTime.UtcNow, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
@@ -1023,7 +1067,7 @@ public sealed partial class ViewerDataService
 
             (rows, _) = await ReadTablePageByKeysAsync(connection, transaction, topSql, serverId, plan.ReadStart, literalEndUtc, top, databaseNames, keys, cancellationToken, served);
 
-            return (rows, plan);
+            return (rows, plan with { Source = source });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1768,10 +1812,11 @@ public sealed partial class ViewerDataService
             /* #9111: whole built days come from the hourly rollup when the bin is a whole number of hours, in this read's snapshot. */
             var bucketMinutes = SlicerBuckets.MinutesFor(startUtc, endUtc);
             rollupsTried = useRollups && bucketMinutes % 60 == 0 && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
-            var served = rollupsTried
+            var (served, servedReason) = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken)
-                : null;
+                : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack);
             rollupsTried = served is not null;
+            var source = QueryStoreClosedDayRollup.DescribeSource(plan.ReadStart, endUtc, served, servedReason);
             await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
@@ -1784,7 +1829,7 @@ public sealed partial class ViewerDataService
             }
 
             await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
-            return (await ReadSlicerBucketsAsync(reader, cancellationToken), plan);
+            return (await ReadSlicerBucketsAsync(reader, cancellationToken), plan with { Source = source });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -673,7 +673,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 84;
+    internal const int CurrentSchemaVersion = 85;
 
     private readonly string _archivePath;
 
@@ -1702,6 +1702,11 @@ public partial class DuckDbInitializer : IDisposable
             {
                 await AddMissingColumnsAsync(connection, AddedColumns);
             }
+
+            /* #9241: the Lite-only digest columns, on EVERY start and a fresh file too: the generated table statements do not carry
+               them, and they sit outside AddedColumns (the payload order shared with Darling). A fresh file and an upgraded one end
+               with the same columns in the same order, the digest last. */
+            await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
 
             if (existingVersion < CurrentSchemaVersion)
             {
@@ -3517,6 +3522,17 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v84: adding database_size_stats.is_autogrow_all_files");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(84));
         }
+
+        if (fromVersion < 85)
+        {
+            /* v85 (#9241): query text kept once in query_text_dim, keyed by a content digest (LiteTextDimensions). The step adds the
+               nullable query_text_digest BLOB to query_store_stats, query_stats and plan_correction and rewrites nothing: a row stored before it keeps its
+               inline text, and the vh_ views read the inline text first. Lite only, so the columns come from LiteTextDimensions and not
+               from the added-columns list that follows the payload order shared with Darling. The dimension table itself is created by
+               the table statements that run after the migrations. An older build refuses a file stamped v85 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v85: adding query_text_digest to query_store_stats, query_stats and plan_correction");
+            await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3840,9 +3856,28 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogInformation("Archive-view refresh sees {Count} tables", tableCount);
         }
 
+        /* #9241: the vh_ views first, because a v_ view over a diverted table reads the hot rows through its vh_ view. A vh_ view that
+           cannot be built (the digest column is missing after a failed add, which the next start retries) leaves that table's v_ view to
+           the table-only fallback below, which reads the inline text. */
+        foreach (var dimTable in LiteTextDimensions.All.Select(d => d.Table).Distinct())
+        {
+            try
+            {
+                using var vhCmd = connection.CreateCommand();
+                vhCmd.CommandText = LiteTextDimensions.CreateViewSql(dimTable);
+                await vhCmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to create the text view {View}; v_{Table} reads the table's inline text only", LiteTextDimensions.ViewName(dimTable), dimTable);
+            }
+        }
+
         foreach (var table in ArchivableTables)
         {
             var hasParquetFiles = false;
+            /* The hot rows of the table: its vh_ view when a text column is diverted (#9241), else the table itself. */
+            var hot = LiteTextDimensions.HotSource(table);
             try
             {
                 var parquetGlobs = ArchiveParquetGlobs(table);
@@ -3855,7 +3890,7 @@ public partial class DuckDbInitializer : IDisposable
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
-SELECT *, 'live' AS source FROM {table}
+SELECT *, 'live' AS source FROM {hot}
 UNION ALL BY NAME
 SELECT *, 'archive' AS source FROM read_parquet({parquetSource}, union_by_name=true) p
 WHERE NOT EXISTS (
@@ -3875,7 +3910,7 @@ WHERE NOT EXISTS (
 SELECT *
 FROM
 (
-    SELECT * FROM {table}
+    SELECT * FROM {hot}
     UNION ALL BY NAME
     SELECT * FROM read_parquet({parquetSource}, union_by_name=true)
 )
@@ -3883,15 +3918,15 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
                     }
                     else
                     {
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet({parquetSource}, union_by_name=true)";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {hot} UNION ALL BY NAME SELECT * FROM read_parquet({parquetSource}, union_by_name=true)";
                     }
                 }
                 else
                 {
                     if (table == "config_alert_log")
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table}";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {hot}";
                     else
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {hot}";
                 }
 
                 using var cmd = connection.CreateCommand();
@@ -4025,7 +4060,13 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
     /// Gets the actual used data size inside the database by querying pragma_database_size().
     /// Returns null if the query fails (e.g., database busy).
     /// </summary>
-    public double? GetUsedDataSizeMb()
+    public double? GetUsedDataSizeMb() => ReadUsedDataSize().Mb;
+
+    /// <summary>
+    /// <see cref="GetUsedDataSizeMb"/> with the reason when it gave nothing (#9250): the read lock was busy, or the query failed.
+    /// The per-tick size check logs a run of failures with it. The status bar and the other callers use the plain method.
+    /// </summary>
+    internal UsedDataRead ReadUsedDataSize()
     {
         /* Under the read lock (#2594). This was the one periodic connection site that opened without it,
            on the UI's 30-second timer, which put a live handle on the database file at moments the
@@ -4035,7 +4076,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
 
         if (readLock is null)
         {
-            return null;
+            return new UsedDataRead(null, UsedDataReadFailure.LockBusy);
         }
 
         try
@@ -4047,14 +4088,14 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
             var result = cmd.ExecuteScalar();
             if (result != null && result != DBNull.Value)
             {
-                return Convert.ToInt64(result) / (1024.0 * 1024.0);
+                return new UsedDataRead(Convert.ToInt64(result) / (1024.0 * 1024.0), UsedDataReadFailure.None);
             }
         }
         catch
         {
-            /* Database may be busy — fall back to null */
+            /* Database may be busy: fall back to null, with the reason for the caller that logs it */
         }
-        return null;
+        return new UsedDataRead(null, UsedDataReadFailure.QueryFailed);
     }
 
     /// <summary>

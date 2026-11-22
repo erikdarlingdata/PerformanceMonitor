@@ -267,6 +267,71 @@ CROSS JOIN LATERAL (SELECT CAST(1000 + (q * 131 + d * 17 + h * 7) % 90000 AS big
         Assert.Equal(StorageVersion.SchemaVersion, await viewer.GetStoreSchemaVersionAsync(ct));
     }
 
+    /// <summary>#9287: the read result the slow-load line and the grid banner are built from names the UTC days a read took from the
+    /// rollups and the days it read from the interval table. Asserted on the day lists, never on time.</summary>
+    [Fact]
+    public async Task TheReadsSource_NamesTheRollupDaysAndTheIntervalRemainder_AndWhyWhenNoneWereTaken()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9287 read source live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        var start = DataEnd.AddDays(-30);
+
+        async Task<(QueryStoreIntervalWide.WideReadPlan Plan, QueryStoreIntervalWide.WideReadPlan SlicerPlan)> ReadAsync()
+        {
+            var grid = await store.Viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, start, DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+            var slicer = await store.Viewer.GetQueryStoreSlicerWithReachAsync(ServerId, start, DataEnd, null, ct);
+            Assert.True(grid.Plan is { UseTable: true, Source: not null }, "the grid read did not take the interval-table route");
+            Assert.True(slicer.Plan is { UseTable: true, Source: not null }, "the slicer read did not take the interval-table route");
+            return (grid.Plan!.Value, slicer.Plan!.Value);
+        }
+
+        /* Nothing is built: every day is read from the interval table, and the source says the days are not built. */
+        var (plan, slicerPlan) = await ReadAsync();
+        var touched = DateOnly.FromDateTime(DataEnd).DayNumber - DateOnly.FromDateTime(plan.ReadStart).DayNumber;
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.Empty(p.Source!.RollupDays);
+            Assert.Equal(touched, p.Source.IntervalDays.Count);
+            Assert.Equal(QueryStoreClosedDayRollup.SourceReason.NoBuiltDays, p.Source.Reason);
+        }
+
+        /* Every day built: no closed day is read as interval rows. The only interval day left is the window's partial first day. */
+        await TickAsync(store, KeepEverything, ct);
+        (plan, slicerPlan) = await ReadAsync();
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.All(p.Source!.IntervalDays, d => Assert.Equal(DateOnly.FromDateTime(p.ReadStart), d));
+            Assert.True(p.Source.RollupDays.Count >= touched - 1, $"{p.Source.RollupDays.Count} rollup days of {touched}");
+            Assert.Equal(QueryStoreClosedDayRollup.SourceReason.Served, p.Source.Reason);
+        }
+
+        /* One built day and the rest unbuilt: one rollup day, and the interval table for the remainder. */
+        var built = DateOnly.FromDateTime(DataEnd.AddDays(-12));
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc <> @day", ct,
+            ("server_id", ServerId), ("day", built));
+        (plan, slicerPlan) = await ReadAsync();
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.Equal(new[] { built }, p.Source!.RollupDays);
+            Assert.Equal(touched - 1, p.Source.IntervalDays.Count);
+            Assert.DoesNotContain(built, p.Source.IntervalDays);
+            Assert.Contains("1 day from rollups", p.Source.Describe(), StringComparison.Ordinal);
+        }
+
+        /* Built days with a heartbeat older than two hours: no rollup day is taken, and the source says why. */
+        await TickAsync(store, KeepEverything, ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_closed_day_tick SET ticked_at = (now() AT TIME ZONE 'UTC') - interval '3 hours'", ct);
+        (plan, slicerPlan) = await ReadAsync();
+        foreach (var p in new[] { plan, slicerPlan })
+        {
+            Assert.Empty(p.Source!.RollupDays);
+            Assert.Equal(touched, p.Source.IntervalDays.Count);
+            Assert.Equal(QueryStoreClosedDayRollup.SourceReason.HeartbeatStale, p.Source.Reason);
+            Assert.NotNull(p.Source.BannerNote());
+        }
+    }
+
     [Fact]
     public async Task BuiltDaysPlusEdges_EqualTheIntervalTable_ThroughALateRow_AnUnbuiltDay_AndStoppedBuilds()
     {
@@ -612,5 +677,60 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         Assert.Equal(0, raised.Built);
         Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(firstKept.ToDateTime(TimeOnly.MinValue), DataEnd), await ServedAsync(store, DataEnd.AddDays(-30), DataEnd, ct));
         AssertSame(expected, await ReadAllAsync(store.Viewer, ct), "after retention was raised");
+    }
+
+    /// <summary>
+    /// #9221: the worker's own closed-day pass, with no fleet override row. Its clutter retention used to be looked up under the TABLE
+    /// name <c>query_store_stats</c>, the schedule defaults key the collector as <c>query_store</c>, so the lookup threw before the tick started
+    /// and no server got a heartbeat. Two servers hold a coverage claim, and each gets its row.
+    /// </summary>
+    [Fact]
+    public async Task TheWorkersClosedDayPass_WithNoFleetOverrideRow_WritesOneHeartbeatPerServerWithACoverageClaim()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        const int otherServerId = ServerId - 1;
+        await QueryStoreIntervalWideGridLiveTests.SeedGridAsync(store.Runner, otherServerId, Anchor, ct);
+        await ExecuteAsync(store.Connection, "UPDATE collect.query_store_interval_wide_coverage SET filled_since = @value WHERE server_id = @server_id", ct,
+            ("server_id", otherServerId), ("value", Anchor.AddDays(-90)));
+        await ExecuteAsync(store.Connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (@server_id, 'rollup-9221', TRUE) ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct,
+            ("server_id", otherServerId));
+        Assert.Equal(0L, await ScalarAsync<long>(store.Connection, "SELECT COUNT(*) FROM collect.query_store_closed_day_tick", ct));
+
+        var worker = SelfAlertFleetPassTests.MakeWorker();
+        worker.StoreForTests = store.Postgres;
+        worker.ScheduleOverridesForTest = Array.Empty<ScheduleOverride>();
+        await worker.RunQueryStoreClosedDayTickAsync(ct);
+
+        Assert.Equal(2L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_tick WHERE server_id IN (@a, @b)", ct, ("a", ServerId), ("b", otherServerId)));
+        Assert.Equal(2L, await ScalarAsync<long>(store.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_closed_day_tick WHERE server_id IN (@a, @b) AND ticked_at IS NOT NULL", ct, ("a", ServerId), ("b", otherServerId)));
+    }
+
+    /// <summary>
+    /// #9221: the retention the clutter step prunes on is the one the purge applies to <c>query_store_stats</c>' raw rows, with no fleet
+    /// override row and with one. The purge builds that argument for each catalog entry from its collector name, so the expected value
+    /// here is built the same way from the entry whose target table it is.
+    /// </summary>
+    [Fact]
+    public void TheClutterStepsRetention_IsThePurgesForQueryStoreStats_WithAndWithoutAFleetOverrideRow()
+    {
+        static int PurgeDays(IReadOnlyList<ScheduleOverride> overrides)
+        {
+            var owner = Assert.Single(CollectorCatalog.All, c => c.TargetTable == "query_store_stats");
+            return DarlingRetention.EffectivePurgeRetentionDays(owner.Name, StoreConfigProvider.ResolveFleetRetentionDays(owner.Name, overrides));
+        }
+
+        var entry = Assert.Single(CollectorCatalog.All, c => c.TargetTable == "query_store_stats");
+        Assert.Equal(PurgeDays(Array.Empty<ScheduleOverride>()), DarlingRetention.QueryStoreStatsPurgeRetentionDays(Array.Empty<ScheduleOverride>()));
+        Assert.Equal(CollectorScheduleDefaults.All[entry.Name].RetentionDays, DarlingRetention.QueryStoreStatsPurgeRetentionDays(Array.Empty<ScheduleOverride>()));
+
+        var fleet = new[] { new ScheduleOverride(null, entry.Name, null, 45, true) };
+        Assert.Equal(PurgeDays(fleet), DarlingRetention.QueryStoreStatsPurgeRetentionDays(fleet));
+        Assert.Equal(45, DarlingRetention.QueryStoreStatsPurgeRetentionDays(fleet));
+
+        var perServerOnly = new[] { new ScheduleOverride(7, entry.Name, null, 45, true) };
+        Assert.Equal(PurgeDays(perServerOnly), DarlingRetention.QueryStoreStatsPurgeRetentionDays(perServerOnly));
     }
 }

@@ -572,6 +572,13 @@ WITH plan_agg AS
 " + PlanRegressionDailyTail + PlanRegressionSuffix;
 
     /// <summary>
+    /// <see cref="PlanRegressionDailyBlocksSql"/> for a pass anchored at an instant (#9225). The window's end is $9: $7 and $8 are the day and
+    /// block lists, which the anchored read of whole days does not carry.
+    /// </summary>
+    internal const string PlanRegressionDailyBlocksAsOfSql = PlanRegressionDailyBlocksHead + @"        AND   l.collection_time <= $9::timestamp
+" + PlanRegressionDailyTail + PlanRegressionSuffix;
+
+    /// <summary>
     /// PLAN_REGRESSION over per-day totals for the closed days and the interval table for the rest (#5448):
     /// <see cref="PlanRegressionTableSql"/> with its <c>plan_agg</c> replaced by the sum of two reads, so everything from
     /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M, $3 the
@@ -596,10 +603,27 @@ WITH plan_agg AS
     /// </summary>
     internal const string PlanRegressionDailySql = PlanRegressionDailyPrefix + PlanRegressionSuffix;
 
+    /// <summary>
+    /// <see cref="PlanRegressionDailySql"/> reading whole valid blocks for the days they cover (#9225), and the daily rows for the others.
+    /// Everything else is the same statement, so the rows and their order are the same. $7 the days no block covers (date[]), $8 the block
+    /// starts (date[]). The read takes it only when <see cref="PlanRegressionBlock.ReadValidBlocksAsync"/> found a block it may use.
+    /// </summary>
+    internal const string PlanRegressionDailyBlocksSql = PlanRegressionDailyBlocksHead + PlanRegressionDailyTail + PlanRegressionSuffix;
+
     private const string PlanRegressionDailyPrefix = PlanRegressionDailyHead + PlanRegressionDailyTail;
 
     /// <summary><see cref="PlanRegressionDailyPrefix"/> up to the end of the interval table half's snapshot filter, where a read that ends at an instant adds its bound.</summary>
-    private const string PlanRegressionDailyHead = @"
+    private const string PlanRegressionDailyHead = PlanRegressionDailyHeadTop + "$3" + PlanRegressionDailyDaysEnd + PlanRegressionDailyLiveHalf;
+
+    /// <summary>
+    /// #9225: <see cref="PlanRegressionDailyHead"/> for the read that takes whole valid blocks (<see cref="PlanRegressionBlock"/>): the daily half
+    /// reads only the days no block covers ($7, date[]) and the block half reads the blocks ($8, date[]). $3 stays every built day, which the
+    /// live half's watermark lookup needs. Used only when at least one block is valid, so a store without the block table never plans it.
+    /// </summary>
+    private const string PlanRegressionDailyBlocksHead = PlanRegressionDailyHeadTop + "$7" + PlanRegressionDailyDaysEnd + PlanRegressionBlockHalf + PlanRegressionDailyLiveHalf;
+
+    /// <summary>The start of <c>plan_agg</c> up to the daily half's day list, which is the one place the block read differs.</summary>
+    private const string PlanRegressionDailyHeadTop = @"
 WITH plan_agg AS
 (
     -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
@@ -638,8 +662,31 @@ WITH plan_agg AS
             d.last_exec, d.is_forced_plan, d.force_failure_count
         FROM plan_regression_daily AS d
         WHERE d.server_id = $1::integer
-        AND   d.day = ANY($3::date[])
+        AND   d.day = ANY(";
 
+    private const string PlanRegressionDailyDaysEnd = @"::date[])
+";
+
+    /// <summary>
+    /// The block half (#9225). $8 the block starts (date[]). A block row is the sum of 4 whole built days at the grain <c>plan_agg</c> groups by, so
+    /// it stands where those days' daily rows stood, and is handed over in double precision as they are. Its rows figure is NULL when any of its
+    /// days has none, as <c>plan_agg</c> makes it across days.
+    /// </summary>
+    private const string PlanRegressionBlockHalf = @"
+        UNION ALL
+
+        SELECT
+            b.database_name, b.query_id, b.plan_id, b.replica_role, b.query_plan_hash,
+            b.execs::DOUBLE PRECISION AS execs, b.cpu_us_sum::DOUBLE PRECISION AS cpu_us_sum,
+            b.dur_us_sum::DOUBLE PRECISION AS dur_us_sum, b.rowcount_sum::DOUBLE PRECISION AS rowcount_sum,
+            b.last_exec, b.is_forced_plan, b.force_failure_count
+        FROM plan_regression_block AS b
+        WHERE b.server_id = $1::integer
+        AND   b.block_start = ANY($8::date[])
+";
+
+    /// <summary>The interval table half of <c>plan_agg</c>, up to the end of its snapshot filter, where a read that ends at an instant adds its bound.</summary>
+    private const string PlanRegressionDailyLiveHalf = @"
         UNION ALL
 
         SELECT
@@ -716,7 +763,8 @@ WITH plan_agg AS
     /// tomorrow, so on a store that is current the first unbuilt day is the day after tomorrow and the floor is today's
     /// watermark: the live half reads the last two or three hours of first executions, not the open days.
     /// </summary>
-    internal static DateTime PlanRegressionLiveFloorWithWatermarks(DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays)
+    internal static DateTime PlanRegressionLiveFloorWithWatermarks(
+        DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, TimeSpan? unbuiltReach = null)
     {
         var through = new Dictionary<DateOnly, DateTime>();
         foreach (var b in builtDays)
@@ -736,13 +784,62 @@ WITH plan_agg AS
             cursor = cursor.AddDays(1);
         }
 
-        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue).AddDays(-1);
+        /* #9225: how far below the first unbuilt day a live row's first execution can sit. A day (the longest an interval spans) unless the
+           caller resolved the server's longest interval length, which is shorter on a server that keeps hourly intervals. */
+        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue) - (unbuiltReach ?? QueryStoreIntervalWide.IntervalSpanMargin);
         return DateTime.SpecifyKind(unbuilt < floor ? unbuilt : floor, DateTimeKind.Unspecified);
+    }
+
+    /// <summary>
+    /// The live floor the daily read binds (#9225). The floor is one interval length below the first unbuilt day, where it was a whole day.
+    /// A live row's last execution is at or after that day's midnight and its first execution is at most one interval earlier
+    /// (<see cref="QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync"/>). A whole day below read the floor day's entire partition and
+    /// threw away every row of it but the few that cross midnight (no index finds those), which is most of what a read anchored a few
+    /// hours back read. The server's interval length is looked up only when the unbuilt day sets the floor: a partial built day's
+    /// watermark that is already lower sets it exactly, and a server whose length cannot be trusted keeps the whole day.
+    /// </summary>
+    internal static async Task<DateTime> ResolvePlanRegressionLiveFloorAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime windowFloor,
+        IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays, DateTime end, DateTime utcNow, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var wholeDay = PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays);
+        var days = builtDays.Select(b => b.Day).ToHashSet();
+        var cursor = DateOnly.FromDateTime(windowFloor);
+        while (days.Contains(cursor))
+        {
+            cursor = cursor.AddDays(1);
+        }
+
+        var firstUnbuilt = cursor.ToDateTime(TimeOnly.MinValue);
+        if (wholeDay < firstUnbuilt.AddDays(-1))
+        {
+            return wholeDay;
+        }
+
+        /* The trust test lists the server's databases from the wide table, which keeps WideHorizonDays. A day at or below that horizon
+           (counting the day the floor reaches into) may have databases only the 15-day latest table still holds, so the test cannot
+           vouch for them: the whole day stays. */
+        if (firstUnbuilt - QueryStoreIntervalWide.IntervalSpanMargin < utcNow.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays))
+        {
+            return wholeDay;
+        }
+
+        var reach = await QueryStoreIntervalWide.ResolveLongestIntervalSpanAsync(
+            connection, transaction, serverId, firstUnbuilt, end, commandTimeoutSeconds, cancellationToken);
+        return PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays, reach);
     }
 
     /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
     /// store from another connection at exactly the point a snapshot has to hold. Null in production.</summary>
     internal static readonly System.Threading.AsyncLocal<Func<System.Threading.CancellationToken, System.Threading.Tasks.Task>?> TestOnlyAfterBuiltDaysRead = new();
+
+    /// <summary>Test seam (#9225): receives the live floor the daily read binds, so a test asserts the value the collector sends and not
+    /// a count taken through <c>pg_stat_statements</c>. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Action<DateTime>?> TestOnlyLiveFloorBound = new();
+
+    /// <summary>Test seam (#9225): receives the block starts the daily read takes and the built days it still reads from the daily
+    /// rows, so a test counts the daily rows the read asks for. Not called when no built day is read. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Action<IReadOnlyList<DateOnly>, IReadOnlyList<DateOnly>>?> TestOnlyBlockPlan = new();
 
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
@@ -1027,6 +1124,24 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 }
             }
 
+            /* #9225: the whole valid blocks, in the same snapshot, and the built days no block covers. A store without the
+               block table, or with no block valid yet, answers none and the statement is the daily one as before. */
+            var blockStarts = new List<DateOnly>();
+            var leftoverDays = new List<DateOnly>();
+            if (snapshot is not null && builtDays.Count > 0)
+            {
+                var validBlocks = await PlanRegressionBlock.ReadValidBlocksAsync(
+                    connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
+                    ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+                (blockStarts, leftoverDays) = PlanRegressionBlock.Select(builtDays, validBlocks);
+            }
+
+            var readsBlocks = blockStarts.Count > 0;
+            if (snapshot is not null && builtDays.Count > 0)
+            {
+                TestOnlyBlockPlan.Value?.Invoke(blockStarts, leftoverDays);
+            }
+
             var readsDays = builtDays.Count > 0;
             if (snapshot is null)
             {
@@ -1043,7 +1158,8 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                monitor sent before #7463 are left out here too. Asked in the read's own transaction, before the read. */
             var regressionSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
                 connection, snapshot, FactCommandTimeoutSeconds,
-                readsDays ? (anchored ? PlanRegressionDailyAsOfSql : PlanRegressionDailySql)
+                readsDays ? (readsBlocks ? (anchored ? PlanRegressionDailyBlocksAsOfSql : PlanRegressionDailyBlocksSql)
+                    : anchored ? PlanRegressionDailyAsOfSql : PlanRegressionDailySql)
                 : anchored ? (readsTable ? PlanRegressionTableAsOfSql : PlanRegressionAsOfSql)
                 : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
             using var cmd = new NpgsqlCommand(regressionSql, connection, snapshot)
@@ -1058,16 +1174,35 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
                     Value = builtDays.Select(b => b.Day).ToArray()
                 });
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays));
+                /* #9225: one interval length below the first unbuilt day, not a day, where the server's interval length can be trusted. */
+                var liveFloor = await ResolvePlanRegressionLiveFloorAsync(
+                    connection, snapshot, context.ServerId, windowFloor, builtDays, AsNaive(context.TimeRangeEnd), DateTime.UtcNow, FactCommandTimeoutSeconds, context.CancellationToken);
+                TestOnlyLiveFloorBound.Value?.Invoke(liveFloor);
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, liveFloor);
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
                 cmd.Parameters.Add(new NpgsqlParameter
                 {
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp,
                     Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray()
                 });
+                if (readsBlocks)
+                {
+                    /* #9225: $7 the days no block covers, $8 the block starts. */
+                    cmd.Parameters.Add(new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
+                        Value = leftoverDays.ToArray()
+                    });
+                    cmd.Parameters.Add(new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
+                        Value = blockStarts.ToArray()
+                    });
+                }
+
                 if (anchored)
                 {
-                    /* $7, the window's end: the bound of the anchored statement's interval table half. */
+                    /* The window's end: the bound of the anchored statement's interval table half ($7, or $9 after the block lists). */
                     cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, AsNaive(context.TimeRangeEnd));
                 }
             }

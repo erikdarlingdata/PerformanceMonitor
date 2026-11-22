@@ -10,7 +10,7 @@ classes of shard K, one per line, after one comment line that starts with '#'. E
 deterministic assignment on the same list, so each class lands in exactly one shard; the script proves that before it
 prints. Classes go longest-first into the least-loaded shard (ties break on class name, then shard index) by the
 weights in the committed table (darling-shard-weights.json). A class the table does not know weighs the MEAN of the
-known ones. When the table is missing, unreadable, empty, or knows under MIN_COVERAGE of the listed classes, the cut
+known ones of its own kind (a class name ending in LiveTests, or any other; lite-shard-pack.py's missing_class_weight, #9262). When the table is missing, unreadable, empty, or knows under MIN_COVERAGE of the listed classes, the cut
 falls back to the class-name hash (SHA-256, first four bytes, modulo N), the cut the workflow used before this script.
 A weight for a class the test sources no longer declare is left out, with one warning line each on stderr (#5833).
 
@@ -38,7 +38,7 @@ mean (pack each suite's classes into the leg count, sum the measured weights per
 
 Refresh when the shards drift apart again (the slowest shard more than about 20 % over the mean), after a large batch
 of new live classes, or about once a month. A stale table only costs balance, never a class: a renamed or new class
-weighs the mean and still runs in exactly one shard.
+weighs the mean of its kind and still runs in exactly one shard.
 """
 import collections
 import glob
@@ -95,9 +95,9 @@ def pack(classes, shards, table):
         for c in unique:
             out[hash_shard(c, shards)].append(c)
         return out, "hash", loads
-    default = sum(known.values()) / len(known)
+    fill = _lite_pack().missing_class_weight(known)
     # The floor keeps a shard from staying empty while another takes several zero-time classes.
-    weight = {c: max(known.get(c, default), MIN_WEIGHT) for c in unique}
+    weight = {c: max(known[c] if c in known else fill(c), MIN_WEIGHT) for c in unique}
     for c in sorted(unique, key=lambda c: (-weight[c], c)):
         k = min(range(shards), key=lambda i: (loads[i], i))
         out[k].append(c)
@@ -245,10 +245,24 @@ def self_test():
     assert method == "duration" and reconcile(names, a) == "", (method, reconcile(names, a))
     assert pack(list(reversed(names)), 4, table)[0] == a, "the same class set must give the same assignment in any order"
     assert max(loads) - min(loads) <= max(table.values()), loads
-    # A class missing from the table weighs the mean and is still assigned exactly once.
+    # A class missing from the table is still assigned exactly once.
     more = names + ["N.NewClass"]
     b, method, _ = pack(more, 4, table)
     assert method == "duration" and reconcile(more, b) == ""
+    # #9262: a missing class weighs the mean of its own kind. Three shards, three known live classes at 100 s and many light
+    # others: a missing live class weighs 100, so two heavy classes share a shard (load 200). At the table mean (about 28) it would
+    # fit beside a light shard's load and the heaviest shard would stay at 100.
+    kinds = {f"N.Live{i}LiveTests": 100.0 for i in range(3)}
+    kinds.update({f"N.Plain{i}": 1.0 for i in range(8)})
+    k, method, kloads = pack(list(kinds) + ["N.NewLiveTests"], 3, kinds)
+    assert method == "duration" and reconcile(list(kinds) + ["N.NewLiveTests"], k) == "" and max(kloads) >= 200.0, kloads
+    fill = _lite_pack().missing_class_weight({"N.A": 2.0, "N.B": 4.0, "N.CLiveTests": 50.0})
+    assert (fill("N.NewLiveTests"), fill("N.New"), _lite_pack().missing_class_weight({})("N.X")) == (50.0, 3.0, 0.0)
+    # A skewed kind: the weight is the MEAN of its kind. Live known 1, 1 and 100 (median 1, mean 34), others 2, 4 and 12 (median 4,
+    # mean 6): the median would call an unknown live class cheap, and packing adds weights, so the expected cost is the mean.
+    skew = _lite_pack().missing_class_weight({"N.XLiveTests": 1.0, "N.YLiveTests": 1.0, "N.ZLiveTests": 100.0,
+                                              "N.A": 2.0, "N.B": 4.0, "N.C": 12.0})
+    assert (skew("N.NewLiveTests"), skew("N.New")) == (34.0, 6.0), (skew("N.NewLiveTests"), skew("N.New"))
     # Too little coverage, no table, or an all-zero table falls back to the hash cut, and still loses nothing.
     for bad in ({}, {n: 0.0 for n in names}, {names[0]: 5.0}):
         c, method, _ = pack(names, 4, bad)

@@ -28,8 +28,8 @@ namespace Darling.Tests;
 /// budget has to cover a whole multi-rung upgrade rather than one statement. It is sized from a census
 /// (#2888): of the rungs in <c>PgMigrations.Scripts</c>, only a handful touch data an EARLIER rung created,
 /// the applier wraps each rung's whole SQL in ONE <c>NpgsqlCommand</c> (so a rung's command timeout is a
-/// per-RUNG bound, not a per-statement one), and five of those rungs target objects large enough to spend
-/// it (V281, #9043, is the fifth). Each runs under the default <c>MigrationCommandTimeoutSeconds</c> unless
+/// per-RUNG bound, not a per-statement one), and six of those rungs target objects large enough to spend
+/// it (V293, #9277, is the sixth). Each runs under the default <c>MigrationCommandTimeoutSeconds</c> unless
 /// <c>PgMigrations.DeclaredRungCommandTimeoutSeconds</c> gives it a longer bound (#9089). The budget is the larger of every
 /// floor-setting rung at the default plus one default of margin, and the longest declared bound plus one
 /// default of margin.</para>
@@ -517,6 +517,21 @@ public sealed class MigrationDataMovingRungCensusPins
             + "5 uncompressed six-hour chunks holding 1,700,000 rows (40 servers, 40 collector names) plus 135 compressed chunks: 3.2 to 3.3 s for "
             + "the whole rung on PostgreSQL 18.7, every one of the 140 chunks ending with one covering index. Far inside one command timeout, so it "
             + "does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            293,
+            SetsTheFloor: true,
+            "#9277: CREATE INDEX (partial, WHERE event_kind = 'count') over collect.attention_events (created V1). On a hypertable the build reads "
+            + "only the uncompressed chunks and is short. On a store without TimescaleDB, or one whose V277 swap has not taken its lock, the table "
+            + "is one plain heap of about 0.7 GB a day for 30 days, and the build reads all of it in one statement, so it sets the floor as V22's "
+            + "and V39's index builds do. It runs under V293CommandTimeoutSeconds, equal to V281's, so the lock-wait budget is unchanged."),
+        new(
+            294,
+            SetsTheFloor: false,
+            "#9284: CREATE INDEX on collect.aggregate_compression_order_history (created V279), the rung's sentinel and a read of one aggregate's "
+            + "latest outcome. The table gets one row per rung run that reached an ALTER and is never purged, so it holds a handful of rows on any "
+            + "store and the build is instant. The rung's other statement is a catalog-only ALTER of the corrected daily rollup's compression "
+            + "settings (no chunk is rewritten) and an INSERT of one history row. Far inside one command timeout, so it does not move the "
+            + "MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

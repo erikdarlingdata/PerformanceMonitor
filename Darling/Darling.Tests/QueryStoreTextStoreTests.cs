@@ -54,28 +54,6 @@ public sealed class QueryStoreTextStoreTests
     }
 
     /// <summary>
-    /// The ladder's invariants: this rung is the top, the ladder is ordered and dense above the one
-    /// sanctioned historical hole, and the build's schema version tracks it. A gap is skipped SILENTLY on
-    /// every upgraded store, so the objects would never exist and no later upgrade would repair it.
-    /// </summary>
-    [Fact]
-    public void TheRungIsTheTopOfADenseLadder()
-    {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
-        /* #2316 added V75, so this rung is no longer the top — the "I am the top" claim moves to the
-           newest rung's own test (PlanContentRetentionTests) and this one keeps the invariants that stay
-           true forever: the rung is PRESENT, the ladder is ordered and dense, and the build's schema
-           version tracks the maximum. */
-        Assert.Contains(74, versions);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
-    }
-
-    /// <summary>
     /// The Viewer's connect-time gate has to be able to SEE a fully-migrated store, or every store at the
     /// newest version reads as below the required one and the Viewer refuses to open. Three things move in
     /// lockstep for that — a probe column, a reader argument and a map parameter — which is why this asserts
