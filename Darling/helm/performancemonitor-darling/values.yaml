@@ -280,3 +280,7 @@ metrics:
     # Extra labels of the ServiceMonitor, for example the one your Prometheus selects on (release: kube-prometheus-stack). A key the
     # chart also sets (app.kubernetes.io/name, ...) takes the value given here; the ServiceMonitor's selector keeps the chart's labels.
     labels: {}
+    # TLS settings of the scrape, used only when config.web.network.tls is set: the ServiceMonitor then scrapes with scheme https, and the
+    # metrics port serves HTTPS only. A Prometheus Operator tlsConfig, for example { serverName: darling.example.com, ca: { secret: { name: darling-ca, key: ca.crt } } }.
+    # Empty keeps Prometheus's defaults: the certificate must chain to a CA it trusts and match the Service's host name.
+    tlsConfig: {}
