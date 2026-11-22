@@ -366,6 +366,7 @@ FROM config.store_log_read_marker AS m";
            capture row's totals and the marker move together), so a budget that cancels mid-way keeps every slab it
            finished, and each slab's text is classified and released before the next is read. */
         var clock = Stopwatch.StartNew();
+        var byteBudget = new ByteBudget(MaxBytesPerCapture);
         var slabsRead = 0;
         var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups, StoreLogClassifier.CaptureBudget Budget)>();
 
@@ -378,7 +379,7 @@ FROM config.store_log_read_marker AS m";
             }
 
             var budget = new StoreLogClassifier.CaptureBudget();
-            var step = await ReadSlabAsync(connection, files, candidate, resume.Offset, detailInEnglish, budget, cancellationToken);
+            var step = await ReadSlabAsync(connection, files, candidate, resume.Offset, detailInEnglish, budget, byteBudget, cancellationToken);
             if (step is null)
             {
                 /* Nothing complete yet - one partial line at the end of a file being written. The marker
@@ -416,9 +417,10 @@ FROM config.store_log_read_marker AS m";
             var nextOffset = file.NextOffset;
             while (slabsRead < MaxSlabsPerCapture
                    && clock.Elapsed < ReadOnBudget
+                   && byteBudget.Remaining > 0
                    && file.Candidate.SizeBytes > nextOffset)
             {
-                var step = await ReadSlabAsync(connection, files, file.Candidate, nextOffset, detailInEnglish, file.Budget, cancellationToken);
+                var step = await ReadSlabAsync(connection, files, file.Candidate, nextOffset, detailInEnglish, file.Budget, byteBudget, cancellationToken);
                 if (step is null)
                 {
                     break;
@@ -607,8 +609,31 @@ FROM config.store_log_read_marker AS m";
         return rows;
     }
 
-    /// <summary>One slab read and classified: the trimmed text, and what it classified to. Null when the read held
-    /// no complete line.</summary>
+    /// <summary>The bytes one capture may still read (#9314): its slabs and the scans past a line longer than one slab
+    /// both draw on it, so the capture's total stays at <see cref="MaxBytesPerCapture"/>.</summary>
+    private sealed class ByteBudget(long remaining)
+    {
+        public long Remaining { get; set; } = remaining;
+    }
+
+    /// <summary>How much of a long line one scan read holds (#9314).</summary>
+    internal const int LongLineScanChunkBytes = 1024 * 1024;
+
+    /// <summary>
+    /// One slab read and classified: the trimmed text, and what it classified to. Null when the read held no complete
+    /// line and the marker should stay where it is.
+    ///
+    /// <para><b>A line longer than one slab (#9314).</b> A full slab with no newline in it is either a line the server is
+    /// still writing, which waits as it always did (no newline before the end of the file), or a finished line. A
+    /// finished line is handed on by its first bytes and the marker moves past its newline, found by scanning on in
+    /// chunks. The scan draws on <paramref name="byteBudget"/>: if the capture's budget runs out first, the marker moves
+    /// to where the scan stopped, so it moves forward on every capture whatever the line's length.</para>
+    ///
+    /// <para><b>A marker inside a line.</b> That stop leaves the marker mid-line, and a marker whose preceding byte is not
+    /// a newline is mid-line (a marker otherwise only ever lands after a newline, or at the start of a file). The read
+    /// starts one byte early to see that byte, and the rest of the line is dropped up to its newline before anything is
+    /// handed on, so a tail is never classified as a line.</para>
+    /// </summary>
     private static async Task<(StoreLogSlab.Slab Slab, StoreLogClassifier.Census Census)?> ReadSlabAsync(
         NpgsqlConnection connection,
         IStoreLogFiles? files,
@@ -616,20 +641,100 @@ FROM config.store_log_read_marker AS m";
         long offset,
         bool detailInEnglish,
         StoreLogClassifier.CaptureBudget budget,
+        ByteBudget byteBudget,
         CancellationToken cancellationToken)
     {
+        var probe = offset > 0 ? 1 : 0;
         var length = (int)Math.Min(StoreLogSlab.MaxBytesPerRead, candidate.SizeBytes - offset);
-        var raw = files is null
-            ? await ReadAsync(connection, candidate.LogFile, offset, length, cancellationToken)
-            : await files.ReadAsync(candidate.LogFile, offset, length, cancellationToken);
-        var slab = StoreLogSlab.TrimToLastNewline(raw);
-        if (slab.BytesConsumed == 0)
+        var raw = await ReadRangeAsync(connection, files, candidate.LogFile, offset - probe, length + probe, cancellationToken);
+        byteBudget.Remaining -= Math.Max(0, raw.Length - probe);
+        if (raw.Length <= probe)
         {
             return null;
         }
 
+        var body = raw.AsSpan(probe);
+        if (probe == 1 && raw[0] != 0x0A)
+        {
+            var tailEnd = body.IndexOf((byte)0x0A);
+            if (tailEnd >= 0)
+            {
+                return (new StoreLogSlab.Slab(string.Empty, tailEnd + 1), StoreLogClassifier.Classify(null));
+            }
+
+            if (body.Length < length || offset + body.Length >= candidate.SizeBytes)
+            {
+                /* The line has not ended by the end of the file: it is still being written, so wait. */
+                return null;
+            }
+
+            return (new StoreLogSlab.Slab(string.Empty, body.Length), StoreLogClassifier.Classify(null));
+        }
+
+        var slab = StoreLogSlab.TrimToLastNewline(body);
+        if (slab.BytesConsumed == 0)
+        {
+            if (body.Length < StoreLogSlab.MaxBytesPerRead)
+            {
+                return null;
+            }
+
+            var (lineEnd, found) = await ScanForNewlineAsync(connection, files, candidate, offset + body.Length, byteBudget, cancellationToken);
+            if (!found && lineEnd >= candidate.SizeBytes)
+            {
+                return null;
+            }
+
+            slab = StoreLogSlab.TrimLongLine(body, (int)(lineEnd - offset));
+        }
+
         return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget));
     }
+
+    /// <summary>Scans on from <paramref name="from"/> for the first newline, <see cref="LongLineScanChunkBytes"/> at a
+    /// time and keeping none of it, until the file ends or <paramref name="byteBudget"/> is spent (#9314). Returns the
+    /// offset just past the newline with Found true, or the offset the scan stopped at with Found false.</summary>
+    private static async Task<(long Offset, bool Found)> ScanForNewlineAsync(
+        NpgsqlConnection connection,
+        IStoreLogFiles? files,
+        Candidate candidate,
+        long from,
+        ByteBudget byteBudget,
+        CancellationToken cancellationToken)
+    {
+        var at = from;
+        while (at < candidate.SizeBytes && byteBudget.Remaining > 0)
+        {
+            var length = (int)Math.Min(LongLineScanChunkBytes, Math.Min(candidate.SizeBytes - at, byteBudget.Remaining));
+            var chunk = await ReadRangeAsync(connection, files, candidate.LogFile, at, length, cancellationToken);
+            if (chunk.Length == 0)
+            {
+                return (candidate.SizeBytes, false);
+            }
+
+            byteBudget.Remaining -= chunk.Length;
+            var newline = chunk.AsSpan().IndexOf((byte)0x0A);
+            if (newline >= 0)
+            {
+                return (at + newline + 1, true);
+            }
+
+            at += chunk.Length;
+        }
+
+        return (at, false);
+    }
+
+    private static Task<byte[]> ReadRangeAsync(
+        NpgsqlConnection connection,
+        IStoreLogFiles? files,
+        string logFile,
+        long offset,
+        int length,
+        CancellationToken cancellationToken) =>
+        files is null
+            ? ReadAsync(connection, logFile, offset, length, cancellationToken)
+            : files.ReadAsync(logFile, offset, length, cancellationToken);
 
     private static async Task<byte[]> ReadAsync(
         NpgsqlConnection connection,

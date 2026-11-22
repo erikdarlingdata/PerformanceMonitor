@@ -65,7 +65,8 @@ newest AS
 (
     /* Pending bytes are a LEVEL, not a total: summing them over the window would add the same backlog once
        per capture. Only the newest capture's figure means anything, so only it is read. */
-    SELECT coalesce(sum(n.bytes_pending), 0)::bigint AS bytes_pending
+    SELECT coalesce(sum(n.bytes_pending), 0)::bigint AS bytes_pending,
+           coalesce(sum(n.bytes_read), 0)::bigint    AS bytes_read
     FROM windowed AS n
     WHERE n.capture_time = (SELECT max(m.capture_time) FROM windowed AS m)
 )
@@ -85,7 +86,11 @@ SELECT
     min(w.capture_time)                                             AS first_capture_at,
     max(w.capture_time)                                             AS last_capture_at,
     (SELECT p.bytes_pending FROM newest AS p)                       AS bytes_pending,
-    coalesce(array_agg(DISTINCT w.log_file ORDER BY w.log_file), '{}'::text[]) AS log_files
+    coalesce(array_agg(DISTINCT w.log_file ORDER BY w.log_file), '{}'::text[]) AS log_files,
+    /* #9314: the newest capture's own bytes read, and when any resume marker last moved. A capture that read 0 bytes
+       with bytes pending is a marker that is not moving. */
+    (SELECT p.bytes_read FROM newest AS p)                          AS newest_bytes_read,
+    (SELECT max(m.updated_at) FROM config.store_log_read_marker AS m) AS marker_last_moved_at
 FROM windowed AS w";
 
     /// <summary>
@@ -226,6 +231,19 @@ LIMIT $3";
         /// <summary>Bytes still unread when the newest capture finished — non-zero means the per-capture
         /// read cap bit and the next capture picks it up, not that anything was lost.</summary>
         [JsonPropertyName("bytes_pending")] public long BytesPending { get; init; }
+
+        /// <summary>Bytes the newest capture in the window read (#9314). Null when not known.</summary>
+        [JsonPropertyName("newest_capture_bytes_read"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? NewestCaptureBytesRead { get; init; }
+
+        /// <summary>When a read marker last moved, as UTC ISO text (#9314). Null when no marker is stored.</summary>
+        [JsonPropertyName("marker_last_moved_at"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? MarkerLastMovedAt { get; init; }
+
+        /// <summary>True when the newest capture read 0 bytes while bytes are pending (#9314): the marker has not moved, so
+        /// the log is not being read past it. That is not the backlog <see cref="BytesPending"/> alone describes, which later
+        /// captures read down.</summary>
+        [JsonIgnore] public bool MarkerStalled => BytesPending > 0 && NewestCaptureBytesRead == 0;
 
         /// <summary>Captures that discarded a resume marker because the weekday ring truncated the file
         /// underneath it.</summary>
@@ -374,7 +392,16 @@ LIMIT $3";
         /// a retained class keeps a sample line. Null when no kept sample line carries one.</summary>
         [JsonPropertyName("newest_sample_log_stamp")] public string? NewestSampleLogStamp { get; init; }
 
-        [JsonPropertyName("note")] public string Note => "The newest hours of the log are not read yet: occurrences_last_hour counts only what was read, so 0 there is not a quiet hour.";
+        /// <summary>True when the newest capture read nothing while bytes are pending (#9314).</summary>
+        [JsonPropertyName("marker_stalled")] public bool MarkerStalled { get; init; }
+
+        /// <summary>When a read marker last moved, as UTC ISO text, while <see cref="MarkerStalled"/>. Null when unknown.</summary>
+        [JsonPropertyName("marker_last_moved_at"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? MarkerLastMovedAt { get; init; }
+
+        [JsonPropertyName("note")] public string Note => MarkerStalled
+            ? "The read marker is not moving: the newest capture read 0 bytes while the log has more past the marker, so the newest hours of the log are not read, and 0 in occurrences_last_hour is not a quiet hour."
+            : "The newest hours of the log are not read yet: occurrences_last_hour counts only what was read, so 0 there is not a quiet hour.";
     }
 
     /// <summary>What one <c>get_store_log</c> answer is.</summary>
@@ -400,6 +427,8 @@ LIMIT $3";
                 BytesPending = Captures.BytesPending,
                 PerCaptureBoundBytes = StoreLogSweep.MaxBytesPerCapture,
                 CapturesNeeded = StoreLogSweep.CapturesNeeded(Captures.BytesPending),
+                MarkerStalled = Captures.MarkerStalled,
+                MarkerLastMovedAt = Captures.MarkerStalled ? Captures.MarkerLastMovedAt : null,
                 NewestSampleLogStamp = NewestSampleLogStamp,
             }
             : null;
@@ -560,7 +589,20 @@ LIMIT $3";
 
         if (summary.BytesPending > 0)
         {
-            if (summary.BytesPending > StoreLogSweep.MaxBytesPerCapture)
+            if (summary.MarkerStalled)
+            {
+                /* #9314: a capture that read nothing while bytes are pending is not a backlog the next capture reads down. */
+                note.Append(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} {1} past the read marker, and the newest capture read none of them: the marker has {2}. "
+                    + "The log is not being read past it, so what was written after that point is missing from every count here. ",
+                    CountText.Plural(summary.BytesPending, "byte"),
+                    summary.BytesPending == 1 ? "is" : "are",
+                    summary.MarkerLastMovedAt is { } movedAt
+                        ? $"not moved since {movedAt} UTC"
+                        : "not moved in the latest capture"));
+            }
+            else if (summary.BytesPending > StoreLogSweep.MaxBytesPerCapture)
             {
                 /* #8904: more than one capture can read, so "the next capture reads them" would be untrue. */
                 var needed = StoreLogSweep.CapturesNeeded(summary.BytesPending);
@@ -585,9 +627,12 @@ LIMIT $3";
             }
 
             /* #8904: the newest hours are the unread ones, so a 0 in occurrences_last_hour is not a quiet hour. */
-            note.Append(report.NewestSampleLogStamp is { } stamp
+            if (!summary.MarkerStalled)
+            {
+                note.Append(report.NewestSampleLogStamp is { } stamp
                 ? $"The read reached at least the log's own time {stamp} (the newest stamp on a kept sample line) and how far past it is not known, so occurrences_last_hour and the newest hours of every class count only what was read and can read low. "
                 : "The newest hours of the log are not read yet (no kept sample line carries a log time to name), so occurrences_last_hour and the newest hours of every class count only what was read and can read low. ");
+            }
         }
 
         note.Append("No band is applied. Whether a class moved is its count read against the per-hour median "
@@ -693,6 +738,8 @@ WHERE e.sample_line IS NOT NULL";
             LastCaptureAt = reader.IsDBNull(9) ? null : Iso(reader.GetDateTime(9)),
             BytesPending = reader.GetInt64(10),
             LogFiles = reader.IsDBNull(11) ? [] : reader.GetFieldValue<string[]>(11),
+            NewestCaptureBytesRead = reader.IsDBNull(12) ? null : reader.GetInt64(12),
+            MarkerLastMovedAt = reader.IsDBNull(13) ? null : Iso(reader.GetDateTime(13)),
         };
     }
 
