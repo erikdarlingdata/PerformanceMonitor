@@ -480,7 +480,11 @@ public sealed class RollupChunkVisibilityLiveTests
             Assert.Equal(1, await LaggingAsync(c, ct));
             Assert.Equal(1, await PassUntilCountedAsync(c, null, ct));
             var settled = await DailyChunkAsync(c, ct);
-            Assert.Equal(settled.Pages, settled.AllVisible);
+            /* The row inserted after the seed vacuum can keep its page from being marked while a horizon outside the test is held, so this asserts the step's floor, not every page (#9315). */
+            Assert.True(
+                settled.AllVisible * 100L >= settled.Pages * (long)TimescaleSupport.RollupVacuumAllVisibleFloorPercent,
+                $"the chunk has {settled.AllVisible} of {settled.Pages} pages all-visible, under the step's {TimescaleSupport.RollupVacuumAllVisibleFloorPercent} percent floor");
+            Assert.Equal(0, await LaggingAsync(c, ct));
             bodySucceeded = true;
         }
         finally
