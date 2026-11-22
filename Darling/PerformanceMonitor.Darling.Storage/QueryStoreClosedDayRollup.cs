@@ -806,13 +806,19 @@ ORDER BY b.day_utc;";
     public sealed record ReadSource(
         IReadOnlyList<DateOnly> RollupDays, IReadOnlyList<DateOnly> IntervalDays, SourceReason Reason, bool EdgeDaysAsCollected = false)
     {
-        /// <summary>The slow-load line's words, for example <c>3 days from rollups, 7 days from the interval table</c>.</summary>
+        /// <summary>#9287: the shape the interval-table statements took, from <see cref="DescribeShape"/>, or null where the read did not say
+        /// (the slicer read). <see cref="Describe"/> appends it, so a slow-load line shows which shape a cold read got.</summary>
+        public string? Shape { get; init; }
+
+        /// <summary>The slow-load line's words, for example <c>3 days from rollups, 7 days from the interval table</c>, then the
+        /// <see cref="Shape"/> when there is one.</summary>
         public string Describe()
         {
             static string Days(int n) => n == 1 ? "1 day" : $"{n} days";
-            return RollupDays.Count == 0
+            var line = RollupDays.Count == 0
                 ? $"{Days(IntervalDays.Count)} from the interval table, no rollup days: {Why()}"
                 : $"{Days(RollupDays.Count)} from rollups{(EdgeDaysAsCollected ? EdgeDaysNote : string.Empty)}, {Days(IntervalDays.Count)} from the interval table";
+            return Shape is { Length: > 0 } shape ? $"{line}, {shape}" : line;
         }
 
         /// <summary>The grid banner's note, or null when nothing is worth saying: rollups served, or there was no whole day to take.</summary>
@@ -875,6 +881,19 @@ ORDER BY b.day_utc;";
         }
 
         return new ReadSource(rollup, interval, served is null && reason == SourceReason.Served ? SourceReason.NoBuiltDays : reason, edgeDaysAsCollected && served is not null);
+    }
+
+    /// <summary>
+    /// #9287: the shape of a Query Store grid read's interval-table statements, for its slow-load line: the edge margin the read used
+    /// (<paramref name="edgeMargin"/>, from <see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/>), "fell back to" when it is the full
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> because the interval length could not be trusted, and whether the arms are split
+    /// (<paramref name="splitBuilt"/>, the partial index is built) or the read kept its one-arm bounds.
+    /// </summary>
+    public static string DescribeShape(TimeSpan edgeMargin, bool splitBuilt)
+    {
+        var hours = edgeMargin.TotalHours.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        var margin = edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin ? $"edge margin {hours} h" : $"edge margin fell back to {hours} h";
+        return $"{margin}, {(splitBuilt ? "split arms" : "one arm, index not built")}";
     }
 
     /// <summary>The longest run of consecutive days in <paramref name="days"/> (sorted, oldest first); the newest such run on a tie.</summary>

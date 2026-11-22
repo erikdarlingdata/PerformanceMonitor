@@ -788,10 +788,23 @@ SELECT EXISTS
     /// </summary>
     public static async Task<TimeSpan> ResolveEdgeMarginAsync(
         NpgsqlConnection connection, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds,
+        CancellationToken cancellationToken) =>
+        (await ResolveEdgeMarginAndLongestSpanAsync(connection, serverId, readStart, end, commandTimeoutSeconds, cancellationToken)).EdgeMargin;
+
+    /// <summary>
+    /// <see cref="ResolveEdgeMarginAsync"/>'s answer and <see cref="ResolveLongestIntervalSpanAsync"/>'s from ONE trust statement (#9287), for a
+    /// read that needs both: the edge margin floors its rows without an interval start, and the longest span bounds from above the
+    /// <c>first_execution_time</c> of its rows with one. Where the length cannot be trusted the edge margin is <see cref="PurgeEdgeMargin"/> and
+    /// the span is <see cref="IntervalSpanMargin"/>, a day, which is what the reads used before they asked.
+    /// </summary>
+    public static async Task<(TimeSpan EdgeMargin, TimeSpan LongestSpan)> ResolveEdgeMarginAndLongestSpanAsync(
+        NpgsqlConnection connection, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds,
         CancellationToken cancellationToken)
     {
         var span = await ResolveTrustedLongestSpanAsync(connection, null, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
-        return span is { } trusted ? EdgeMarginFor(trusted) : PurgeEdgeMargin;
+        return span is { } trusted
+            ? (EdgeMarginFor(trusted), trusted < IntervalSpanMargin ? trusted : IntervalSpanMargin)
+            : (PurgeEdgeMargin, IntervalSpanMargin);
     }
 
     /// <summary>
