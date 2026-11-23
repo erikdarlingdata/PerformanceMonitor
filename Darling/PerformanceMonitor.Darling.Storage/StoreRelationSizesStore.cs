@@ -165,7 +165,13 @@ FROM collect.store_relation_sizes_latest AS l";
     /// behind V299 (no table) or one nothing has written to yet, so the caller reads live as it does today. The stamp and the rows are read in one
     /// snapshot, so a write between the two reads cannot pair an old time with new rows.
     /// </summary>
-    public static async Task<MeasuredSizePass?> ReadLastSizesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    public static Task<MeasuredSizePass?> ReadLastSizesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
+        ReadLastSizesAsync(postgres, afterStamp: null, cancellationToken);
+
+    /// <summary>The read of <see cref="ReadLastSizesAsync(NpgsqlDataSource, CancellationToken)"/>, with <paramref name="afterStamp"/> awaited between
+    /// the stamp statement and the rows statement. A test commits a write there to prove the two statements share one snapshot (#9374).</summary>
+    internal static async Task<MeasuredSizePass?> ReadLastSizesAsync(
+        NpgsqlDataSource postgres, Func<CancellationToken, Task>? afterStamp, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         try
@@ -183,6 +189,11 @@ FROM collect.store_relation_sizes_latest AS l";
                 }
 
                 measuredAt = DateTime.SpecifyKind(stored, DateTimeKind.Utc);
+            }
+
+            if (afterStamp is not null)
+            {
+                await afterStamp(cancellationToken).ConfigureAwait(false);
             }
 
             var oids = new List<long>();

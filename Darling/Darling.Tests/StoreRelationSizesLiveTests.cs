@@ -432,4 +432,88 @@ ANALYZE;";
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
     }
+
+    [Fact]
+    public async Task TheStampAndTheRows_AreReadInOneSnapshot_SoAWriteBetweenTheTwoReadsIsNotPairedWithTheOldTime()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(store, "CREATE SCHEMA zz9374; CREATE TABLE zz9374.a (id integer); CREATE TABLE zz9374.b (id integer);", ct);
+            var a = await ScalarAsync(store, "SELECT 'zz9374.a'::regclass::oid::bigint", ct);
+            var b = await ScalarAsync(store, "SELECT 'zz9374.b'::regclass::oid::bigint", ct);
+            var firstAt = new DateTime(2026, 11, 20, 8, 0, 0, DateTimeKind.Utc);
+            var secondAt = firstAt.AddMinutes(30);
+            MeasuredSizePass Pass(long mainA, long mainB, DateTime at) =>
+                new(new RelationSizePass([a, b], [a, b], [mainA, mainB], [0, 0], [0, 0]), at);
+            var first = Pass(8192, 16384, firstAt);
+            await StoreRelationSizesStore.WriteAsync(store, first, ct);
+
+            // A write commits after the stamp is read and before the rows are: the rows and the time read together are still the first pass.
+            var seen = await StoreRelationSizesStore.ReadLastSizesAsync(
+                store,
+                async token => await StoreRelationSizesStore.WriteAsync(store, Pass(24576, 32768, secondAt), token),
+                ct);
+
+            Assert.NotNull(seen);
+            Assert.True(Math.Abs((seen.MeasuredAtUtc - firstAt).Ticks) < 20, "the time is the first pass's");
+            Assert.Equal(Rows(first.Pass), Rows(seen.Pass));
+
+            // The next read, with nothing in between, sees the second pass whole.
+            var after = (await StoreRelationSizesStore.ReadLastSizesAsync(store, ct))!;
+            Assert.True(Math.Abs((after.MeasuredAtUtc - secondAt).Ticks) < 20);
+            Assert.Equal(Rows(Pass(24576, 32768, secondAt).Pass), Rows(after.Pass));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task TheViewersLastSizesRead_ReturnsTheTablesAndIndexesFromTheStoredPass_AndNullForAnEmptyTable()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(store, SeedSql, ct);
+            var asOf = DateTime.UtcNow;
+
+            // Nothing written yet: no last sizes, so the Viewer reads live.
+            Assert.Null(await PerformanceMonitor.Darling.Viewer.ViewerDataService.ReadLastSizesHealthAsync(
+                store, StoreRelationSizesStore.ReadLastSizesAsync, asOf, ct));
+
+            var rig = new Rig();
+            await rig.Cache.GetTablesAsync(store, cancellationToken: ct);
+            await rig.Cache.WhenIdleAsync();
+            var persisted = (await StoreRelationSizesStore.ReadLastSizesAsync(store, ct))!;
+
+            var last = await PerformanceMonitor.Darling.Viewer.ViewerDataService.ReadLastSizesHealthAsync(
+                store, StoreRelationSizesStore.ReadLastSizesAsync, asOf, ct);
+
+            Assert.NotNull(last);
+            Assert.Equal(persisted.MeasuredAtUtc, last.MeasuredAtUtc);
+            var table = Assert.Single(last.Tables.Rows, r => r.SchemaName == "zz9374" && r.TableName == "t1");
+            Assert.True(table.HeapBytes > 0);
+            Assert.Contains(last.Indexes.Indexes, i => i.SchemaName == "zz9374" && i.TableName == "t1");
+            Assert.Contains(last.Indexes.Coverage, c => c.SchemaName == "zz9374" && c.TableName == "pt");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
 }

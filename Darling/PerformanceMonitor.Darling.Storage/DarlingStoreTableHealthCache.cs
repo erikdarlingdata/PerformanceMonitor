@@ -186,6 +186,10 @@ public sealed class DarlingStoreTableHealthCache
         return true;
     }
 
+    /// <summary>#9374: whether this cache holds a tables read now (old or not), so a caller that would show the store's last measured sizes
+    /// first knows the tab has a read to show already. Read only: it starts nothing.</summary>
+    public bool HoldsTables => _tables.HeldRead is not null;
+
     private Func<NpgsqlDataSource, CancellationToken, Task<List<TRow>>> NoticingSizes<TRow>(
         Func<NpgsqlDataSource, CancellationToken, Task<List<TRow>>> read) =>
         async (store, ct) =>

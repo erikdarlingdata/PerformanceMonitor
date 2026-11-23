@@ -464,4 +464,28 @@ public sealed class ViewerStoreHealthTests
         Assert.Matches(@"store tables read \d+ ms \(sized 4,812 relations, measured live\)", line);
         Assert.Matches(@"store maintenance check \d+ ms(?! \()", line);
     }
+
+    /// <summary>#9374: a read of the store's last measured sizes that fails for any reason but the caller's cancel answers null, so the tab reads
+    /// live as it did before. A store with no last sizes answers null too, and a cancel still cancels.</summary>
+    [Fact]
+    public async Task AFailedLastSizesRead_AnswersNull_SoTheTabReadsLive_AndACancelStillCancels()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=never_opened;Timeout=2");
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await ViewerDataService.ReadLastSizesHealthAsync(
+            store, (_, _) => throw new InvalidOperationException("the sizes table is unreadable"), now, ct));
+        Assert.Null(await ViewerDataService.ReadLastSizesHealthAsync(
+            store, (_, _) => Task.FromResult<MeasuredSizePass?>(null), now, ct));
+
+        // The sizes read worked but the reads from it failed (no store behind the data source): still null.
+        var pass = new MeasuredSizePass(new RelationSizePass([1], [1], [8192], [0], [0]), now);
+        Assert.Null(await ViewerDataService.ReadLastSizesHealthAsync(store, (_, _) => Task.FromResult<MeasuredSizePass?>(pass), now, ct));
+
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ViewerDataService.ReadLastSizesHealthAsync(
+            store, (_, token) => Task.FromCanceled<MeasuredSizePass?>(token), now, cancelled.Token));
+    }
 }
