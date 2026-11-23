@@ -195,6 +195,62 @@ public sealed class QueryStoreReplicaRunnerLiveTests
     }
 
     /// <summary>
+    /// #9352: a replica read whose stored watermark is older than the catch-up is clamped, and when an earlier cycle that clamped the
+    /// same watermark landed after reading up to some time, the new clamp is a new gap. Its hole starts the look-back before what that
+    /// cycle read, not the look-back before the raw watermark, which overlapped the hole the earlier clamp recorded.
+    /// </summary>
+    [Fact]
+    public async Task AReplicaClampThatIsANewGapAfterALandedCycle_OpensItsHoleAtWhatTheCycleRead_MinusTheLookBack()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+
+        target.Rows.Add(Row(1, WholeSeconds(DateTime.UtcNow.AddMinutes(-20))));
+        var first = await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        Assert.Equal(1, first.Rows);
+
+        /* The stored watermark W is 3 hours old. An earlier cycle that clamped it landed after reading up to 90 minutes ago, so this
+           cycle's floor (collection time - 1 hour) lies past that read and the clamp is a new gap. */
+        var watermark = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+        var readThrough = WholeSeconds(DateTime.UtcNow.AddMinutes(-90));
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            await using var update = new NpgsqlCommand(
+                "UPDATE collect.query_store_stats SET last_execution_time = @w WHERE server_id = @s AND database_name = @d", connection);
+            update.Parameters.AddWithValue("w", DateTime.SpecifyKind(watermark, DateTimeKind.Unspecified));
+            update.Parameters.AddWithValue("s", LiveServerId);
+            update.Parameters.AddWithValue("d", Db);
+            Assert.True(await update.ExecuteNonQueryAsync(token) > 0);
+        }
+
+        rig.Runner.QueryStoreClampReportsForTests.Land(LiveServerId, Db, watermark, readThrough);
+        target.Rows.Clear();
+        await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+
+        string? encoded;
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            await using var read = new NpgsqlCommand(
+                "SELECT state_value FROM collector_state WHERE server_id = @s AND collector_name = @c AND state_key = @k", connection);
+            read.Parameters.AddWithValue("s", LiveServerId);
+            read.Parameters.AddWithValue("c", QueryStoreBackfillState.StateCollectorName);
+            read.Parameters.AddWithValue("k", QueryStoreBackfillState.HoleKeyPrefix + Db);
+            encoded = (string?)await read.ExecuteScalarAsync(token);
+        }
+
+        Assert.True(QueryStoreBackfillState.TryDecodeHoles(encoded, out var holes));
+        var hole = Assert.Single(holes);
+
+        /* The look-back is 6 minutes here (a 60 second flush plus 5 minutes). */
+        Assert.Equal(readThrough.AddMinutes(-6), hole.FromUtc);
+        Assert.True(hole.ToUtc > readThrough);
+    }
+
+    /// <summary>
     /// T6: the setting is empty and no secondary captures: no replica connection opens, nothing reads the replica, the
     /// run reports no read source, and a row older than the watermark is NOT re-read (today's cutoff exactly).
     /// </summary>

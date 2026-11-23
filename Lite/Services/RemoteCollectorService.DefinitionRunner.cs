@@ -999,7 +999,7 @@ public partial class RemoteCollectorService
                             && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             await RecordQueryStoreBackfillHoleAsync(
-                                serverId, item, _queryStoreClampReports.HoleFloor(serverId, item, cutoff.HoleFrom ?? raw!.Value), cutoff.HoleTo ?? clamped.Value, ct);
+                                serverId, item, _queryStoreClampReports.HoleFrom(serverId, item, raw!.Value, cutoff), cutoff.HoleTo ?? clamped.Value, ct);
                         }
                     }
 

@@ -70,6 +70,27 @@ public sealed class QueryStoreClampReportsTests
     }
 
     [Fact]
+    public void ALookBackClamp_ThatIsANewGap_OpensItsHoleTheLookBackBeforeWhatTheCycleRead_NotBeforeTheRawWatermark()
+    {
+        var reports = new QueryStoreClampReports();
+        var lookBack = TimeSpan.FromMinutes(20);
+        var cutoff = QueryStoreReplicaRouting.ComputeCutoff(Raw, T0 + WatermarkPolicy.MaxCatchup + TimeSpan.FromHours(1), lookBack);
+        Assert.Equal(Raw - lookBack, cutoff.HoleFrom);
+
+        /* Nothing landed yet: the look-back reads start at the raw watermark minus the look-back, as the cutoff says. */
+        Assert.Equal(Raw - lookBack, reports.HoleFrom(1, "Sales", Raw, cutoff));
+
+        /* A landed cycle read through T0, so the new gap starts there. Handing the cutoff's own HoleFrom to HoleFloor never matched the
+           landed raw watermark, so a look-back clamp kept opening its hole at Raw - lookBack and overlapping the earlier one (#9352). */
+        reports.Land(1, "Sales", Raw, T0);
+        Assert.Equal(T0 - lookBack, reports.HoleFrom(1, "Sales", Raw, cutoff));
+
+        /* No look-back on the read: the same answer HoleFloor gives. */
+        var plain = QueryStoreReplicaRouting.ComputeCutoff(Raw, T0 + WatermarkPolicy.MaxCatchup + TimeSpan.FromHours(1), TimeSpan.Zero);
+        Assert.Equal(T0, reports.HoleFrom(1, "Sales", Raw, plain));
+    }
+
+    [Fact]
     public void ACycleThatRanOnTime_OnAnIdleDatabase_LeavesNothingToRecord()
     {
         var reports = new QueryStoreClampReports();
