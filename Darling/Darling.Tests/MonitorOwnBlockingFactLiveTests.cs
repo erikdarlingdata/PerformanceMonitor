@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -37,9 +38,14 @@ public sealed class MonitorOwnBlockingFactLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private sealed record Pair(string? BlockedApp, string? BlockingApp);
+    private sealed record Pair(string? BlockedApp, string? BlockingApp, int BlockingSpid = 60);
 
-    private static async Task<List<Fact>> RunAsync(bool bpr, params Pair[] pairs)
+    private static Task<List<Fact>> RunAsync(bool bpr, params Pair[] pairs) =>
+        RunAsync(bpr, pairs, 0, (postgres, context) => new PgFactCollector(postgres).CollectFactsAsync(context));
+
+    /// <summary>Plants the pairs (and <paramref name="flood"/> monitor-only pairs, each NEWER than every listed pair), then runs <paramref name="read"/>
+    /// against the product's collector over the window.</summary>
+    private static async Task<T> RunAsync<T>(bool bpr, Pair[] pairs, int flood, Func<NpgsqlDataSource, AnalysisContext, Task<T>> read)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -72,9 +78,21 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
                 var table = bpr ? "blocked_process_reports" : "dmv_blocking_snapshots";
                 var idColumn = bpr ? "blocked_report_id" : "collection_id";
                 await Exec(connection,
-                    $"INSERT INTO {table} ({idColumn}, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, blocked_client_app, blocking_client_app) VALUES ($1,$2,$3,$4,$2,12000,60,$5,'sleeping',$6,$7)",
+                    $"INSERT INTO {table} ({idColumn}, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, blocked_client_app, blocking_client_app) VALUES ($1,$2,$3,$4,$2,12000,$8,$5,'sleeping',$6,$7)",
                     ct, CollectionIdGenerator.Next(), at, ServerId, ServerName, 70 + i,
-                    (object?)pairs[i].BlockedApp ?? DBNull.Value, (object?)pairs[i].BlockingApp ?? DBNull.Value);
+                    (object?)pairs[i].BlockedApp ?? DBNull.Value, (object?)pairs[i].BlockingApp ?? DBNull.Value, pairs[i].BlockingSpid);
+            }
+
+            /* More monitor-only pairs than a read's 5,000-row cap, all newer than the pairs above (a read keeps the newest rows first, so a filter
+               applied after the cap would keep only these): each a distinct wait, blocked spid 1000 + g, blocked by spid 61. */
+            if (flood > 0)
+            {
+                var table = bpr ? "blocked_process_reports" : "dmv_blocking_snapshots";
+                var idColumn = bpr ? "blocked_report_id" : "collection_id";
+                await Exec(connection,
+                    $"INSERT INTO {table} ({idColumn}, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, blocked_client_app, blocking_client_app) " +
+                    "SELECT -939000000 - g, $1 + g * interval '1 second', $2, $3, $1 + g * interval '1 second', 12000, 61, 1000 + g, 'sleeping', 'PerformanceMonitorDarling', 'PerformanceMonitorDarling' FROM generate_series(0, $4 - 1) AS g",
+                    ct, start.AddMinutes(60), ServerId, ServerName, flood);
             }
 
             var context = new AnalysisContext
@@ -82,9 +100,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
                 ServerId = ServerId, ServerName = ServerName, TimeRangeStart = start, TimeRangeEnd = end,
                 ServerUtcOffset = TimeSpan.Zero, CancellationToken = ct
             };
-            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+            var result = await read(postgres, context);
             bodySucceeded = true;
-            return facts;
+            return result;
         }
         finally
         {
@@ -129,6 +147,49 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
 
         var facts = await RunAsync(false, MonitorOnly, MonitorOnly, new Pair("OrderEntry", "OrderEntry"));
         Assert.Equal(1.0, Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN").Metadata["worst_chain_victim_count"]);
+    }
+
+    private const int PastTheCap = 5100;
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MoreMonitorOnlyPairsThanTheRowCap_DoNotPushTheRealChainOutOfTheRead(bool bpr)
+    {
+        var facts = await RunAsync(bpr, [new Pair("OrderEntry", "OrderEntry")], PastTheCap,
+            (postgres, context) => new PgFactCollector(postgres).CollectFactsAsync(context));
+
+        Assert.Equal(1.0, Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN").Metadata["worst_chain_victim_count"]);
+    }
+
+    private static async Task<List<int>> DrillDownIntsAsync(NpgsqlDataSource postgres, AnalysisContext context, string pathKey, string section, string field)
+    {
+        var finding = new AnalysisFinding { RootFactKey = pathKey, StoryPath = pathKey, PathKeys = [pathKey], Severity = 1.0 };
+        await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
+        return JsonSerializer.SerializeToNode(finding.DrillDown![section])!.AsArray()
+            .Select(row => row![field]!.GetValue<int>()).Order().ToList();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheTopBlockingList_ShowsTheRealPair_NotTheMonitorsOwn(bool bpr)
+    {
+        var spids = await RunAsync(bpr, [new Pair("OrderEntry", "OrderEntry"), new Pair("PerformanceMonitorDarling", "PerformanceMonitorDarling", 61)], 0,
+            (postgres, context) => DrillDownIntsAsync(postgres, context, "BLOCKING_EVENTS", "top_blocking_chains", "blocked_spid"));
+
+        Assert.Equal([70], spids);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheReconstructedChains_ShowTheRealChain_NotTheMonitorsOwn(bool bpr)
+    {
+        var apexes = await RunAsync(bpr, [new Pair("OrderEntry", "OrderEntry"), new Pair("PerformanceMonitorDarling", "PerformanceMonitorDarling", 61)], 0,
+            (postgres, context) => DrillDownIntsAsync(postgres, context, "BLOCKING_CHAIN", "reconstructed_blocking_chains", "apex_spid"));
+
+        Assert.Equal([60], apexes);
     }
 
     private static async Task Exec(NpgsqlConnection c, string sql, CancellationToken ct, params object[] p)

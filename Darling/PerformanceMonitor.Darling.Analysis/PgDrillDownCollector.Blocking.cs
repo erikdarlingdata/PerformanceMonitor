@@ -89,6 +89,8 @@ LIMIT 200";
     /* BPR + always-on DMV blocking snapshot, so the flat top-blocking list isn't empty when the
        blocked-process-report XE captured nothing (AWS RDS). Worst-by-wait surfaces regardless of
        source; on a box with both, each may contribute (this is a top-5 list, not a count).
+       #9340: both arms leave out a pair whose two sessions are both the monitor's own, as the BLOCKING_EVENTS fact does, so the
+       evidence under a finding never shows the monitor blocking itself.
        The BPR arm windows on event_time with the EventWindowFloor ($4) beside it, like the fact it explains;
        the DMV arm stays on collection_time because a snapshot's event_time IS its collection time.
 
@@ -97,6 +99,9 @@ LIMIT 200";
        seconds, each with a longer wait_time_ms, and a DMV snapshot sees a wait once per sample, so a list of
        reports ordered by wait time was five escalating reports of one wait under a finding that counted it once.
        A row is the wait's longest report, and wait_reports is how many reports it collapsed. */
+    private const string NotMonitorOnlyPair = @"
+    AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate;
+
     private static string BuildTopBlockingChainsSql(string bprWhere, string dmvWhere) => @"
 WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
@@ -106,7 +111,7 @@ WITH " + BlockingWaits.WaitsCteSql(
            blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + bprWhere, reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + NotMonitorOnlyPair + bprWhere, reportCount: true) + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT collection_time, database_name, blocked_spid, blocking_spid, event_time,
            wait_time_ms, lock_mode,
@@ -114,7 +119,7 @@ WITH " + BlockingWaits.WaitsCteSql(
            blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dmvWhere, reportCount: true) + @"
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + NotMonitorOnlyPair + dmvWhere, reportCount: true) + @"
 SELECT collection_time, database_name, blocked_spid, blocking_spid,
        wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
 FROM
@@ -199,6 +204,7 @@ FROM v_blocked_process_reports
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
 AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
+{PgBlockingPairRowQuery.NotMonitorOnlyPairFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -247,14 +253,14 @@ LIMIT 5000";
                 return dmvCommand;
             },
             rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken, includeText: false);
+            context.CancellationToken, includeText: false, excludeMonitorOnlyPairs: true);
 
         /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
         var dmvKeys = rows.Skip(bprRowCount).Select(r => r.Key).ToHashSet();
 
-        /* A master target leaves out the pairs of databases monitored as their own targets, the same rule
-           the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
+        /* A master target leaves out the pairs of databases monitored as their own targets, and both reads above leave out a pair
+           whose two sessions are both the monitor's own (#9340), the same rules the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
         if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
             rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
                 && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));

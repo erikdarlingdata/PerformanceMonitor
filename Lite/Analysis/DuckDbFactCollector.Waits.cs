@@ -445,7 +445,7 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter + " " + BlockingPairRowQuery.NotMonitorOnlyPairFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -460,14 +460,13 @@ LIMIT 5000";
                     rows.Add(BlockingPairRowQuery.Read(reader));
             }
 
-            // Always-on DMV blocking snapshot fallback (works when the blocked-process-report XE is empty,
-            // e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
+            /* Always-on DMV blocking snapshot fallback (works when the blocked-process-report XE is empty,
+               e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
+               #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out.
+               Both reads cut it inside the query, before their 5,000-row cap, so newer monitor-only rows cannot push real pairs out. */
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                context.CancellationToken, plan: plan);
-
-            /* #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out. */
-            rows.RemoveAll(r => PerformanceMonitor.Common.MonitorApplicationNames.IsMonitorOnlyBlockingPair(r.BlockedClientApp, r.BlockingClientApp));
+                context.CancellationToken, plan: plan, excludeMonitorOnlyPairs: true);
 
             /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
                skipped, so one chain does not page from both targets. A pair with no database stays. */

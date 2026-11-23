@@ -85,6 +85,9 @@ LIMIT {LIMIT}")
            blocked-process-report XE captured nothing (AWS RDS). Worst-by-wait surfaces regardless of
            source; on a box with both, each may contribute (this is a top-5 list, not a count).
 
+           #9340: both arms leave out a pair whose two sessions are both the monitor's own, as the BLOCKING_EVENTS fact does,
+           so the evidence under a finding never shows the monitor blocking itself.
+
            #7892: each arm is folded to WAITS through BlockingWaits.WaitsCteSql, the definition the BLOCKING_EVENTS
            fact counts with. SQL Server writes a report for a still-blocked session every blocked process threshold
            seconds, each with a longer wait_time_ms, and a DMV snapshot sees a wait once per sample, so a list of
@@ -98,7 +101,7 @@ WITH " + BlockingWaits.WaitsCteSql(
            blocked_sql_text AS blocked_sql,
            blocking_sql_text AS blocking_sql,
            contentious_object
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + "{SCOPE}") + @" AS ev", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
             @"SELECT collection_time, database_name, blocked_spid, blocking_spid, event_time,
            wait_time_ms, lock_mode,
@@ -106,7 +109,7 @@ WITH " + BlockingWaits.WaitsCteSql(
            blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{SCOPE}", reportCount: true) + @"
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + "{SCOPE}", reportCount: true) + @"
 SELECT collection_time, database_name, blocked_spid, blocking_spid,
        wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
 FROM
@@ -170,7 +173,9 @@ LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.Separate
 
         using var cmd = connection.CreateCommand();
         // SpidFilter keeps Lite's drill-down, fact collector, and viewer fetch in lockstep on the apex
-        // (Lite maps a missing blocker to spid 0 — see BlockingPairRowQuery). The pair-rows come back WITHOUT statement
+        // (Lite maps a missing blocker to spid 0 — see BlockingPairRowQuery). #9340: like the BLOCKING_CHAIN fact, both reads cut a pair
+        // whose two sessions are both the monitor's own, before the cap, so the evidence never shows the monitor's own chain.
+        // The pair-rows come back WITHOUT statement
         // text (#5361): up to 5,000 rows of whole text, 131 times the bytes of the 500-character cut this read carried
         // before #5320, to print the levels of three chains. The reconstruction picks the rows, and
         // BlockingPairRowQuery.ReadChainLevelTextAsync then reads the whole text of only the levels shown, by event key;
@@ -184,7 +189,7 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter + " " + BlockingPairRowQuery.NotMonitorOnlyPairFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -205,7 +210,7 @@ LIMIT 5000";
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
         await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
             connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken, includeText: false, plan);
+            context.CancellationToken, includeText: false, plan, excludeMonitorOnlyPairs: true);
 
         /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */

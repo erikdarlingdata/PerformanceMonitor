@@ -719,6 +719,7 @@ AND   event_time >= $2
 AND   event_time <= $3
 AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
+{PgBlockingPairRowQuery.NotMonitorOnlyPairFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -773,10 +774,10 @@ LIMIT 5000";
                     return dmvCommand;
                 },
                 rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                context.CancellationToken);
+                context.CancellationToken, excludeMonitorOnlyPairs: true);
 
-            /* #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out. */
-            rows.RemoveAll(r => PerformanceMonitor.Common.MonitorApplicationNames.IsMonitorOnlyBlockingPair(r.BlockedClientApp, r.BlockingClientApp));
+            /* #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out.
+               Both reads cut it inside the query, before their 5,000-row cap, so newer monitor-only rows cannot push real pairs out. */
 
             /* A master target leaves out the pairs of databases monitored as their own targets (the same
                rule the BLOCKING_EVENTS fact applies), so one chain does not page from both targets. */

@@ -70,6 +70,11 @@ internal static class PgBlockingPairRowQuery
     public const string SpidFilter = @"AND blocking_spid IS NOT NULL
 AND blocking_spid <> 0";
 
+    /// <summary>#9340: append after <see cref="SpidFilter"/> to leave out a pair whose two sessions are both the monitor's own, so the
+    /// row cap is spent on real blocking. Cut in the query: a filter applied in memory after the cap lets newer monitor-only rows push
+    /// real pairs out of the read (#3641).</summary>
+    public const string NotMonitorOnlyPairFilter = "AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate;
+
     /// <summary>
     /// The window pair-row read the block-chain views feed <see cref="BlockingChainReconstructor"/> (the Viewer's grid menu
     /// and the web's Block chain action, #6292). Full SQL text; <see cref="SpidFilter"/> drops the missing-blocker sentinel so
@@ -117,6 +122,32 @@ SELECT
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
 {SpidFilter}
+ORDER BY event_time DESC
+LIMIT 5000";
+
+    /// <summary><see cref="DmvSnapshotSql"/> with the monitor-only pairs cut before the cap (#9340): what the BLOCKING_CHAIN fact reads.</summary>
+    public const string DmvSnapshotNotMonitorOnlySql = $@"
+SELECT
+    {LeadingColumns},
+    blocked_sql_text, blocking_sql_text,
+    {IdentityColumns},
+    contentious_object,
+    {TrailingIdentityColumns}{DmvSnapshotNotMonitorOnlyTail}";
+
+    /// <summary><see cref="DmvSnapshotTextFreeSql"/> with the monitor-only pairs cut before the cap (#9340): what the BLOCKING_CHAIN drill-down reads.</summary>
+    public const string DmvSnapshotTextFreeNotMonitorOnlySql = $@"
+SELECT
+    {LeadingColumns},
+    ''::text AS blocked_sql_text, ''::text AS blocking_sql_text,
+    {IdentityColumns},
+    contentious_object,
+    {TrailingIdentityColumns}{DmvSnapshotNotMonitorOnlyTail}";
+
+    private const string DmvSnapshotNotMonitorOnlyTail = $@"
+FROM v_dmv_blocking_snapshots
+WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+{SpidFilter}
+{NotMonitorOnlyPairFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -207,6 +238,9 @@ AND   v.collection_time >= $7{ChainLevelTextTail}";
     /// signature claimed the read was abandonable. The viewer's call is the one that legitimately has
     /// no pass to abandon, and it says so at its own call site rather than here.</para>
     ///
+    /// <para>#9340: <paramref name="excludeMonitorOnlyPairs"/> cuts a pair whose two sessions are both the monitor's own inside the
+    /// read, before its cap. The fact and the drill-down set it; the viewer keeps those rows.</para>
+    ///
     /// <para><b>#2874: <paramref name="createCommand"/> MUST return a command that already carries a
     /// <c>CommandTimeout</c>.</b> This method sets only <c>CommandText</c>, so whatever the factory
     /// hands back is the command that runs - and all three callers originally passed a bare
@@ -222,14 +256,20 @@ AND   v.collection_time >= $7{ChainLevelTextTail}";
     /// </summary>
     internal static async Task AppendDmvSnapshotRowsAsync(
         Func<NpgsqlCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,
-        CancellationToken cancellationToken, bool includeText = true)
+        CancellationToken cancellationToken, bool includeText = true, bool excludeMonitorOnlyPairs = false)
     {
         var dmv = new List<BlockingPairRow>();
         using (var cmd = createCommand())
         {
             /* #5361: includeText false is the drill-down's text-free read (empty text, fetched afterwards for the levels it
                shows); the fact collector and the viewer keep the whole text. */
-            cmd.CommandText = includeText ? DmvSnapshotSql : DmvSnapshotTextFreeSql;
+            cmd.CommandText = (includeText, excludeMonitorOnlyPairs) switch
+            {
+                (true, false) => DmvSnapshotSql,
+                (false, false) => DmvSnapshotTextFreeSql,
+                (true, true) => DmvSnapshotNotMonitorOnlySql,
+                (false, true) => DmvSnapshotTextFreeNotMonitorOnlySql
+            };
             cmd.Parameters.AddWithValue(serverId);
             cmd.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
             cmd.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));

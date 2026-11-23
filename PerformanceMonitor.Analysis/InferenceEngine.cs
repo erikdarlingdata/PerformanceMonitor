@@ -404,7 +404,8 @@ public class InferenceEngine
     /// (blocked sessions pinning workers) is fixed by clearing the blocking. Mirrors the THREADPOOL
     /// amplifier peers (CXPACKET, blocking/LCK). Returns the generic "THREADPOOL" when neither
     /// co-fired (unattributed — the advice then tells the operator how to tell which it is).
-    /// factsByKey here contains only facts that scored above zero, so presence == fired.
+    /// factsByKey here contains only facts that scored above zero. A fact counts as co-fired only when it also clears the root bar
+    /// (<see cref="FactElevated"/>), so being in the dictionary is not enough.
     /// </summary>
     private static string ClassifyThreadpool(Dictionary<string, Fact> factsByKey)
     {

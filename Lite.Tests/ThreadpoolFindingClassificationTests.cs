@@ -80,7 +80,8 @@ public class ThreadpoolFindingClassificationTests
     {
         var blocking = BlockingEvents();
 
-        Assert.True(FactScorer.ClearsRootBar(blocking.BaseSeverity > 0 ? blocking : blocking) || true);
+        /* The fixture is only a test of the rule if this blocking fact clears the root bar. */
+        Assert.True(FactScorer.ClearsRootBar(blocking));
         Assert.Equal("THREADPOOL_BLOCKING", RootKeyOf(Threadpool(), blocking));
     }
 }
