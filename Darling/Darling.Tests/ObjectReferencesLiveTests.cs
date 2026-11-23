@@ -413,6 +413,94 @@ public sealed class ObjectReferencesLiveTests
         Assert.DoesNotContain(inbound, e => e.ReferencedName == "vGoneTarget");
     }
 
+    [Fact]
+    public async Task TheRetentionPurge_KeepsEveryListOnAServerWhoseNewestCaptureNamesNoUserDatabase()
+    {
+        /* #8784 follow-up: a collection login that loses VIEW ANY DATABASE sees only master, tempdb and the databases it owns, so the
+           newest database_states capture names no user database. Every list on that server is past the 3-day cutoff and its database is
+           "not named", but dropping them all would be the lost-grant case the purge exists to survive. */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var now = LiveClock.Now();
+        var blind = ServerId ^ 2;
+        foreach (var database in new[] { "Sales", "Reports" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.object_dependencies (collection_id, collection_time, server_id, server_name, database_name, referencing_schema, referencing_name, referencing_type, referenced_server, referenced_database, referenced_schema, referenced_name, is_bound, is_caller_dependent, is_ambiguous) VALUES ($1,$2,$3,'blind-sql',$4,'dbo','vList','V',NULL,NULL,'dbo','t',true,false,false)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddDays(-10)), blind, database);
+        }
+
+        /* The server's newest capture, after both lists: only master (1) and tempdb (2). An older capture that named the user databases does not count. */
+        foreach (var (at, databases) in new[]
+        {
+            (now.AddDays(-12), new[] { (1, "master"), (2, "tempdb"), (5, "Sales"), (6, "Reports") }),
+            (now.AddHours(-1), new[] { (1, "master"), (2, "tempdb") }),
+        })
+        {
+            foreach (var (id, name) in databases)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,'blind-sql',$4,$5,'ONLINE',false)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), blind, name, id);
+            }
+        }
+
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, NullLogger.Instance, ct);
+
+        Assert.Equal(2L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.object_dependencies WHERE server_id = {blind}", ct));
+    }
+
+    [Fact]
+    public async Task TheRetentionPurge_DrainsEveryExpiredDayOfAReplacedList_AndNeverStopsOnAKeptOne()
+    {
+        /* #8784 follow-up: the slice statement deletes one day per execution until a slice deletes nothing. A database whose only list is
+           old (kept) must not anchor the oldest slice and stop the drain before another database's older, replaced lists are gone. */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var now = LiveClock.Now();
+
+        /* Archive's single list is the oldest row in the table and is its newest: kept. Reports has captures 10, 8 and 6 days old:
+           the first two are replaced and go (two slices), the 6-day one is the newest and stays. Sales is current. */
+        await PlantDependencyAsync(connection, "vArchive", "V", Db, "dbo", "t", now.AddDays(-20), ct, database: "Archive");
+        foreach (var days in new[] { 10, 8, 6 })
+        {
+            await PlantDependencyAsync(connection, $"vReports{days}", "V", Db, "dbo", "t", now.AddDays(-days), ct, database: "Reports");
+        }
+        await PlantDependencyAsync(connection, "vSales", "V", Db, "dbo", "t", now.AddHours(-1), ct);
+
+        /* The newest state capture names all three databases, so the dropped-database step has nothing to remove. */
+        foreach (var (id, name) in new[] { (5, Db), (6, "Reports"), (7, "Archive") })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,$4,$5,$6,'ONLINE',false)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddHours(-1)), ServerId, Server, name, id);
+        }
+
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, NullLogger.Instance, ct);
+
+        async Task<long> Rows(string name) =>
+            await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.object_dependencies WHERE referencing_name = '{name}'", ct);
+        Assert.Equal(1L, await Rows("vArchive"));
+        Assert.Equal(0L, await Rows("vReports10"));
+        Assert.Equal(0L, await Rows("vReports8"));
+        Assert.Equal(1L, await Rows("vReports6"));
+        Assert.Equal(1L, await Rows("vSales"));
+    }
+
     /// <summary>The rows the plan's scans of <paramref name="relation"/> produced or filtered out, over all their loops.</summary>
     private static double RowsReadFrom(JsonElement node, string relation)
     {
