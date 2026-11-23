@@ -41,6 +41,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// fresh. The first tick after a gap marks the built hours that hold a row collected since the last hour heartbeat.</para>
 ///
 /// <para><b>Retention.</b> Raw's: a tick removes the hours before the first whole hour inside raw's retention from all three tables.</para>
+///
+/// <para><b>Raw floor (#9383).</b> No hour before the first whole hour at or after a server's oldest raw row is built, the way a day is not (#9287): raw
+/// holds nothing there, so a build would stamp an empty hour that the route then serves as "no plans". A tick also removes the stamp of such an
+/// hour when it holds no clutter row, so the span reads as not collected.</para>
 /// </summary>
 public static class QueryStoreClutterHourly
 {
@@ -163,9 +167,27 @@ SET rebuild_needed = true
 WHERE NOT b.rebuild_needed;";
 
     /// <summary>
+    /// #9383: the first whole hour at or after the server's oldest raw row, as a SQL expression over <c>fl.t</c> (that row's
+    /// <c>collection_time</c>). Raw is purged in whole chunks and a store may have begun collecting only recently, so an hour that starts before
+    /// the oldest row is empty or partial in raw: it is never built, and a stamp it already has (and no rows) is removed.
+    /// </summary>
+    private const string FirstWholeHourSql = "date_trunc('hour', fl.t - interval '1 microsecond') + interval '1 hour'";
+
+    /// <summary>#9383: each server's oldest raw row, one read of the raw table's <c>(server_id, collection_time)</c> index that stops at the first
+    /// entry. A server with no raw row has no row here, so it plans no hour.</summary>
+    private const string OldestRawRowSql = @"CROSS JOIN LATERAL
+(
+    SELECT f.collection_time AS t
+    FROM collect.query_store_stats AS f
+    WHERE f.server_id = s.server_id
+    ORDER BY f.collection_time
+    LIMIT 1
+) AS fl";
+
+    /// <summary>
     /// The hours due now: one row per (server, hour) with no built row or a marked one, newest hour first. $1 now, $2 raw retention in days,
-    /// $3 <see cref="Grace"/>, $4 the cap. Hours run from the first whole hour inside raw's retention through the newest closed hour, for the
-    /// enabled servers.
+    /// $3 <see cref="Grace"/>, $4 the cap. Hours run from the first whole hour inside raw's retention, or the first whole hour at or after the
+    /// server's oldest raw row when that is later (#9383), through the newest closed hour, for the enabled servers.
     /// </summary>
     public const string PlanSql = @"
 WITH span AS
@@ -177,13 +199,32 @@ WITH span AS
 SELECT s.server_id, d.hour_utc
 FROM collect.servers AS s
 CROSS JOIN span
-CROSS JOIN LATERAL generate_series(span.first_hour, span.last_hour, interval '1 hour') AS d(hour_utc)
+" + OldestRawRowSql + @"
+CROSS JOIN LATERAL generate_series(GREATEST(span.first_hour, " + FirstWholeHourSql + @"), span.last_hour, interval '1 hour') AS d(hour_utc)
 LEFT JOIN collect.query_store_clutter_hour_built AS b
   ON b.server_id = s.server_id AND b.hour_utc = d.hour_utc
 WHERE s.is_enabled
   AND (b.server_id IS NULL OR b.rebuild_needed)
 ORDER BY d.hour_utc DESC, s.server_id
 LIMIT $4;";
+
+    /// <summary>
+    /// #9383: removes the built stamp of an hour that starts before its server's oldest raw row and holds no clutter row in either hourly table
+    /// (an earlier build stamped it empty, before raw held it), so the clutter route reports the span as not collected instead of "no plans". An
+    /// hour with rows keeps its stamp. A server with no raw row is left alone.
+    /// </summary>
+    public const string UnstampBeforeFloorSql = @"
+DELETE FROM collect.query_store_clutter_hour_built AS b
+USING
+(
+    SELECT s.server_id, " + FirstWholeHourSql + @" AS first_hour
+    FROM collect.servers AS s
+    " + OldestRawRowSql + @"
+) AS f
+WHERE b.server_id = f.server_id
+  AND b.hour_utc < f.first_hour
+  AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_plan_hourly AS p WHERE p.server_id = b.server_id AND p.hour_utc = b.hour_utc)
+  AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_collections_hourly AS c WHERE c.server_id = b.server_id AND c.hour_utc = b.hour_utc);";
 
     /// <summary>The first hour raw's retention still holds whole, in the three tables' own terms. $1 now, $2 raw retention in days.</summary>
     private const string EdgeSql = "date_trunc('hour', $1::timestamp - make_interval(days => $2)) + interval '1 hour'";
@@ -496,6 +537,15 @@ ORDER BY b.hour_utc;";
         return removed;
     }
 
+    /// <summary>#9383: removes the empty built stamps of hours before each server's oldest raw row (<see cref="UnstampBeforeFloorSql"/>); returns how many.</summary>
+    public static async Task<long> UnstampBeforeFloorAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(UnstampBeforeFloorSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     /// <summary>Builds one (server, hour) in one transaction: the built row is taken first, the hour is cleared and filled again.</summary>
     public static async Task BuildHourAsync(
         NpgsqlConnection connection, int serverId, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken)
@@ -539,6 +589,7 @@ ORDER BY b.hour_utc;";
 
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
         var removed = await PruneAsync(connection, nowUtc, rawRetentionDays, cancellationToken);
+        removed += await UnstampBeforeFloorAsync(connection, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, rawRetentionDays, cancellationToken);
 
         int built = 0, failed = 0, started = 0;

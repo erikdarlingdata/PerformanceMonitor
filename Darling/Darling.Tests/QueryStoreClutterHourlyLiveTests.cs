@@ -396,4 +396,96 @@ VALUES (990173101, @at, @server_id, 'older', 'dbA', 7778, 77780, '0xQ', '0xP', '
         Assert.Equal(viaRaw[0], Lines(await ReadAsync(store, fleet, hourOnly, ct)));
         Assert.Equal(viaRaw[1], Lines(await ReadAsync(store, fleet, dayAndHours, ct)));
     }
+
+    private const string OldestRawRow = "SELECT min(collection_time) FROM collect.query_store_stats WHERE server_id = @server_id";
+
+    [Fact]
+    public async Task TheFirstFill_BuildsNoHourBeforeTheOldestRawRow_AndTheRouteHoldsThatSpanAsNotCollected()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+
+        /* Raw starts three days before the tick's newest data, well after the retention edge (twelve days back): the shape of a new store. */
+        await QueryStoreClutterRollupLiveTests.SeedServerAsync(store, A, E.AddDays(-3), 3, 48, 12, true, ct);
+        var floor = await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection, OldestRawRow, ct, ("server_id", A));
+        var firstHour = QueryStoreClutterHourly.CeilHour(floor);
+        Assert.True(firstHour > TickNow.AddDays(-RawRetention).AddDays(3), "the raw rows do not start well after the retention edge, so the test would prove nothing");
+
+        var tick = await TickAsync(store, TickNow, ct);
+        Assert.True(tick.HoursBuilt > 0, "the tick built no hour");
+
+        Assert.Equal(0L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND hour_utc < @first", ct, ("server_id", A), ("first", firstHour)));
+        Assert.Equal(firstHour, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection,
+            "SELECT min(hour_utc) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id", ct, ("server_id", A)));
+
+        /* The span before the oldest raw row is not served from the hourly rollup, so the route does not answer "no plans" for it. */
+        var served = await QueryStoreClutterHourly.ResolveServedHoursAsync(store.Connection, null, A, E.AddDays(-9), firstHour, 30, ct);
+        Assert.NotNull(served);
+        Assert.Empty(served!);
+    }
+
+    [Fact]
+    public async Task EmptyHourAndDayStampsBeforeTheOldestRawRow_AreRemovedOnTheNextTick_AndStampsWithRowsStay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await QueryStoreClutterRollupLiveTests.SeedServerAsync(store, A, E.AddDays(-3), 3, 48, 12, true, ct);
+        await TickAsync(store, TickNow, ct);
+        var floor = await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection, OldestRawRow, ct, ("server_id", A));
+
+        /* What an earlier build left: empty hours and days stamped built before raw held them, beside an hour and a day that hold clutter rows. */
+        var emptyHours = Enumerable.Range(0, 6).Select(i => E.AddDays(-8).AddHours(i)).ToArray();
+        var rowHour = E.AddDays(-7).AddHours(2);
+        var emptyDays = new[] { E.AddDays(-9), E.AddDays(-8) };
+        var rowDay = E.AddDays(-7);
+        foreach (var hour in emptyHours.Append(rowHour))
+        {
+            await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+                "INSERT INTO collect.query_store_clutter_hour_built (server_id, hour_utc, built_at, rebuild_needed) VALUES (@server_id, @hour, @at, false)", ct,
+                ("server_id", A), ("hour", hour), ("at", TickNow));
+        }
+
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+            "INSERT INTO collect.query_store_clutter_plan_hourly (server_id, hour_utc, database_name, query_id, plan_id, first_seen, last_seen) VALUES (@server_id, @hour, 'dbA', 1, 1, @hour, @hour)", ct,
+            ("server_id", A), ("hour", rowHour));
+        foreach (var day in emptyDays.Append(rowDay))
+        {
+            await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, @"
+INSERT INTO collect.query_store_closed_day_built (server_id, day_utc, built_at, source_rows, clutter_built_at) VALUES (@server_id, @day, @at, 0, @at)
+ON CONFLICT (server_id, day_utc) DO UPDATE SET built_at = EXCLUDED.built_at, clutter_built_at = EXCLUDED.clutter_built_at, rebuild_needed = false", ct,
+                ("server_id", A), ("day", day), ("at", TickNow));
+        }
+
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+            "INSERT INTO collect.query_store_clutter_plan_daily (server_id, day_utc, database_name, query_id, plan_id, first_seen, last_seen) VALUES (@server_id, @day, 'dbA', 1, 1, @day, @day)", ct,
+            ("server_id", A), ("day", rowDay));
+
+        const string StampsAtOrAfterFloor = "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND hour_utc >= @first";
+        var firstHour = QueryStoreClutterHourly.CeilHour(floor);
+        var keptBefore = await CountAsync(store, StampsAtOrAfterFloor, ct, ("server_id", A), ("first", firstHour));
+        Assert.True(keptBefore > 0);
+
+        await TickAsync(store, TickNow, ct);
+
+        foreach (var hour in emptyHours)
+        {
+            Assert.Equal(0L, await CountAsync(store,
+                "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND hour_utc = @hour", ct, ("server_id", A), ("hour", hour)));
+        }
+
+        Assert.Equal(1L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND hour_utc = @hour", ct, ("server_id", A), ("hour", rowHour)));
+        Assert.Equal(keptBefore, await CountAsync(store, StampsAtOrAfterFloor, ct, ("server_id", A), ("first", firstHour)));
+
+        const string DayStamped = "SELECT count(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day AND clutter_built_at = built_at";
+        foreach (var day in emptyDays)
+        {
+            Assert.Equal(0L, await CountAsync(store, DayStamped, ct, ("server_id", A), ("day", day)));
+        }
+
+        Assert.Equal(1L, await CountAsync(store, DayStamped, ct, ("server_id", A), ("day", rowDay)));
+    }
 }
