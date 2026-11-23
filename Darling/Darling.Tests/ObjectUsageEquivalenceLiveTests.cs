@@ -144,7 +144,6 @@ public sealed class ObjectUsageEquivalenceLiveTests
             ["late object"] = Count(f => f.Objects.Any(o => o.FirstSnapshot > f.CoveredFrom)),
             ["two named nodes"] = Count(f => f.AnsweringServerNames.Count == 2),
             ["memory optimized"] = Count(f => f.Objects.Any(o => o.IsMemoryOptimized == true)),
-            ["unknown memory flag"] = Count(f => f.Objects.Any(o => o.IsMemoryOptimized is null)),
         };
         stats.Add("coverage (histories out of " + whole.Count + "): " + string.Join(", ", coverage.Select(c => $"{c.Key} {c.Value}")));
         stats.Add("features: " + string.Join(", ", ObjectUsageHistoryGenerator.FeatureNames.Select(
