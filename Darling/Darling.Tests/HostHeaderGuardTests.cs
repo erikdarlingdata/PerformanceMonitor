@@ -162,6 +162,7 @@ public sealed class HostHeaderGuardTests
     {
         var source = ReadHostSource("DarlingMcpHostService.cs");
         Assert.True(source.Contains("app.MapMcp(\"/core\");", StringComparison.Ordinal), "/core is no longer mapped — this test needs rewriting");
+        Assert.True(source.Contains("app.MapMcp(\"/lean\");", StringComparison.Ordinal), "/lean is no longer mapped (#9388) — this test needs rewriting");
 
         var transport = source.IndexOf(".WithHttpTransport(options =>", StringComparison.Ordinal);
         var stateless = source.IndexOf("options.Stateless = true;", StringComparison.Ordinal);
@@ -171,6 +172,6 @@ public sealed class HostHeaderGuardTests
         Assert.True(
             stateless > transport && configure > stateless,
             "options.Stateless = true must be set in the same WithHttpTransport block as ConfigureSessionOptions");
-        Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core is mapped");
+        Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core and /lean are mapped");
     }
 }

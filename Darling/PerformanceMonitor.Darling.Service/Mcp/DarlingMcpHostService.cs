@@ -1714,6 +1714,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                         sessionOptions.ServerInstructions = DarlingCoreToolProfile.CoreInstructions(sessionOptions.ServerInstructions);
                     }
 
+                    /* #9388: call_tool is served on /lean only. /lean keeps the caller's whole served set (its tools/list is narrowed by
+                       DarlingLeanToolProfile.ListFilter), so find_tools and call_tool reach every tool the caller can call on /. Every other
+                       path serves a copy without it, so a call to it gets the unknown-tool answer. */
+                    if (DarlingLeanToolProfile.IsLeanPath(context.Request.Path))
+                        sessionOptions.ServerInstructions = DarlingLeanToolProfile.LeanInstructions(sessionOptions.ServerInstructions);
+                    else
+                        sessionOptions.ToolCollection = DarlingLeanToolProfile.WithoutCallTool(sessionOptions.ToolCollection);
+
                     return Task.CompletedTask;
                 };
             })
@@ -2108,6 +2116,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
                McpToolGuideTools. */
             .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
+            /* #9388: call_tool, served on /lean only (ConfigureSessionOptions removes it elsewhere). */
+            .WithGeminiCompatibleTools<DarlingMcpLeanTools>()
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             .WithGeminiCompatibleTools<DarlingMcpFinOpsInventoryTools>()
             .WithGeminiCompatibleTools<DarlingMcpFinOpsRecommendationsTools>()
@@ -2172,6 +2182,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                at the level the request is served (the McpDataDetailSetting RegisterDataDetail resolves per request; none, or full, passes through). */
             .WithRequestFilters(filters =>
             {
+                /* #9388: outermost, so a call_tool call is rewritten to a direct call of its inner tool before every filter below, the
+                   dispatch and the front door's routing see it. */
+                filters.AddCallToolFilter(DarlingLeanToolProfile.CallToolFilter);
+                filters.AddListToolsFilter(DarlingLeanToolProfile.ListFilter);
+
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
                    what it is sent), the latency record (no store here to record it in), the GCF re-encode, and the database-name filter
                    (#9065: the store it forwards to holds the database lists and resolves the name). It keeps the two masking filters,
@@ -2743,6 +2758,10 @@ public sealed class DarlingMcpHostService : BackgroundService
            guard, and in network mode the CIDR check and the bearer token) — nothing about this route is
            exempt from any gate above. / is unchanged and keeps serving every tool, for good. */
         app.MapMcp("/core");
+
+        /* #9388: /lean lists a few tools and serves the caller's whole set, with call_tool added. Mapped on the SAME app after the
+           SAME middleware: the Host, CIDR, token and JSON guards run for it as they do for / and /core. */
+        app.MapMcp("/lean");
     }
 
     /* ---------------------------------------------------------------------------------------------------
