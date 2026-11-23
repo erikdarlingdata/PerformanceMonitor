@@ -133,12 +133,9 @@ public sealed class QstopProbe
             if (Directory.Exists(vdir))
             {
                 File.WriteAllText(Path.Combine(vdir, "R0.sql"), RankSql(FindSource()));
-                File.WriteAllText(Path.Combine(vdir, "P1.sql"), "--PRAGMA SET preserve_insertion_order = false
-" + RankSql(FindSource()));
-                File.WriteAllText(Path.Combine(vdir, "P2.sql"), "--PRAGMA SET threads = 2
-" + RankSql(FindSource()));
-                File.WriteAllText(Path.Combine(vdir, "P3.sql"), "--PRAGMA SET preserve_insertion_order = false; SET threads = 2
-" + RankSql(FindSource()));
+                File.WriteAllText(Path.Combine(vdir, "P1.sql"), "--PRAGMA SET preserve_insertion_order = false" + (char)10 + RankSql(FindSource()));
+                File.WriteAllText(Path.Combine(vdir, "P2.sql"), "--PRAGMA SET threads = 2" + (char)10 + RankSql(FindSource()));
+                File.WriteAllText(Path.Combine(vdir, "P3.sql"), "--PRAGMA SET preserve_insertion_order = false; SET threads = 2" + (char)10 + RankSql(FindSource()));
                 foreach (var f in Directory.GetFiles(vdir, "*.sql").OrderBy(x => x))
                 {
                     var sql = File.ReadAllText(f);
