@@ -75,6 +75,9 @@ public static class ObjectUsageChainTick
     /// <summary>How many days of raw snapshots the server and database listings read (#9350): a pair with no raw row in this window is dead.</summary>
     public const int ListingWindowDays = 2;
 
+    /// <summary>The listing window's start: <see cref="ListingWindowDays"/> days before now, as the naive UTC timestamp the raw tables' <c>collection_time</c> holds.</summary>
+    internal static DateTime ListingWindowStart() => DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-ListingWindowDays), DateTimeKind.Unspecified);
+
     /// <summary>The store-level claim: one tick at a time per store.</summary>
     internal const string ClaimLockSql = "SELECT pg_try_advisory_lock(hashtextextended('object_usage_chain_tick', 0))";
 
@@ -110,9 +113,10 @@ public static class ObjectUsageChainTick
     /// <summary>
     /// Each server with a raw snapshot in the newest <see cref="ListingWindowDays"/> days and the time of its newest one. A recursive skip scan:
     /// the first row is the lowest server's newest entry on <c>idx_index_object_stats_server_time</c>, and each next row is the first entry past
-    /// the previous server id. The bound is a plain predicate on the chunk column, so chunks older than the window are excluded.
+    /// the previous server id. The bound is a plain predicate on the chunk column, so chunks older than the window are excluded. $1 the window
+    /// start, <see cref="ListingWindowStart"/> (a naive timestamp, bound like the other windowed reads).
     /// </summary>
-    internal static readonly string ServersSql = $"""
+    internal const string ServersSql = """
         WITH RECURSIVE servers AS
         (
             (
@@ -120,7 +124,7 @@ public static class ObjectUsageChainTick
                     s.server_id,
                     s.collection_time
                 FROM collect.index_object_stats AS s
-                WHERE s.collection_time >= now() - interval '{ListingWindowDays} days'
+                WHERE s.collection_time >= $1
                 ORDER BY
                     s.server_id,
                     s.collection_time DESC
@@ -138,7 +142,7 @@ public static class ObjectUsageChainTick
                     s.collection_time
                 FROM collect.index_object_stats AS s
                 WHERE s.server_id > p.server_id
-                AND   s.collection_time >= now() - interval '{ListingWindowDays} days'
+                AND   s.collection_time >= $1
                 ORDER BY
                     s.server_id,
                     s.collection_time DESC
@@ -162,8 +166,8 @@ public static class ObjectUsageChainTick
             u.database_name
         """;
 
-    /// <summary>One server's database names with a raw row in the newest <see cref="ListingWindowDays"/> days, one index probe per name. $1 server_id.</summary>
-    internal static readonly string DatabasesSql = $"""
+    /// <summary>One server's database names with a raw row in the newest <see cref="ListingWindowDays"/> days, one index probe per name. $1 server_id, $2 the window start (<see cref="ListingWindowStart"/>).</summary>
+    internal const string DatabasesSql = """
         WITH RECURSIVE databases AS
         (
             (
@@ -172,7 +176,7 @@ public static class ObjectUsageChainTick
                 FROM collect.index_object_stats AS s
                 WHERE s.server_id = $1
                 AND   s.database_name IS NOT NULL
-                AND   s.collection_time >= now() - interval '{ListingWindowDays} days'
+                AND   s.collection_time >= $2
                 ORDER BY
                     s.database_name
                 LIMIT 1
@@ -185,7 +189,7 @@ public static class ObjectUsageChainTick
                 FROM collect.index_object_stats AS s
                 WHERE s.server_id = $1
                 AND   s.database_name > d.database_name
-                AND   s.collection_time >= now() - interval '{ListingWindowDays} days'
+                AND   s.collection_time >= $2
                 ORDER BY
                     s.database_name
                 LIMIT 1
@@ -484,6 +488,11 @@ public static class ObjectUsageChainTick
         await using (var command = new NpgsqlCommand(allHistory ? DatabasesAllHistorySql : DatabasesSql, connection) { CommandTimeout = CommandTimeoutSeconds })
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            if (!allHistory)
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { NpgsqlDbType = NpgsqlDbType.Timestamp, TypedValue = ListingWindowStart() });
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -510,6 +519,7 @@ public static class ObjectUsageChainTick
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using (var command = new NpgsqlCommand(ServersSql, connection) { CommandTimeout = CommandTimeoutSeconds })
         {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { NpgsqlDbType = NpgsqlDbType.Timestamp, TypedValue = ListingWindowStart() });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

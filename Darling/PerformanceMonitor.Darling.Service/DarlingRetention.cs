@@ -1884,6 +1884,9 @@ public static class DarlingRetention
         }
         else
         {
+            /* Counted like the runs purge above: the pass takes every table the spent budget kept from starting back out of the count
+               (TablesNotReached, one per paced statement), so a paced statement that is not counted here makes the count too low. */
+            tablesPurged++;
             rowsDeleted += deadPairRunsDeleted.Value;
         }
 

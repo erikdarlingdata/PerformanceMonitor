@@ -43,8 +43,9 @@ public sealed class ObjectUsageChainTickLiveTests
 
     private static readonly DateTime Start = new(2026, 9, 1, 8, 0, 0);
 
-    private static readonly DateTime Anchor =
-        new(DateTime.UtcNow.AddHours(-20).Ticks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour, DateTimeKind.Unspecified);
+    /* Through LiveClock (#5608): a fixed point inside one chunk, twelve hours before the anchored end, so the hourly seeds stay inside the
+       tick's two-day listing window (which the product reads from its own clock) at any hour. */
+    private static readonly DateTime Anchor = LiveClock.AnchoredEndNotAfterNow().AddHours(-12);
 
     /// <summary>The fixture's snapshots are an hour apart and inside the tick's two-day listing window.</summary>
     private static DateTime Day(int day) => Anchor.AddHours(day);
@@ -529,6 +530,7 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         var names = new List<string>();
         await using var command = new NpgsqlCommand(ObjectUsageChainTick.DatabasesSql, connection);
         command.Parameters.AddWithValue(ServerOne);
+        command.Parameters.AddWithValue(ObjectUsageChainTick.ListingWindowStart());
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -560,8 +562,8 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
             await analyze.ExecuteNonQueryAsync(ct);
         }
 
-        var servers = await PlanOfAsync(connection, ObjectUsageChainTick.ServersSql, ct);
-        var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne);
+        var servers = await PlanOfAsync(connection, ObjectUsageChainTick.ServersSql, ct, ObjectUsageChainTick.ListingWindowStart());
+        var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne, ObjectUsageChainTick.ListingWindowStart());
         var watermarks = await PlanOfAsync(connection, ObjectUsageChainTick.WatermarksSql, ct, ServerOne);
 
         Assert.DoesNotContain("Dead", string.Join(",", await ListDatabasesAsync(connection, ct)), StringComparison.Ordinal);
