@@ -110,7 +110,8 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// <summary>
     /// Records a clamp-opened Query Store hole for the #2022 backfill worker, under the WORKER's
     /// collector_state name (not the definition's — query_store still declares no state keys).
-    /// Merged wider with any pending hole so a repeat outage cannot overwrite an unserviced one.
+    /// Added to the database's pending holes and merged only with one it overlaps, so a repeat outage cannot
+    /// overwrite an unserviced one and cannot send the dig back over a range it already filled (#9352).
     /// Best-effort: a lost record means a lost backfill opportunity, never wrong data — the live
     /// path's own WARNING already disclosed the hole.
     /// </summary>
@@ -121,10 +122,10 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         {
             var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
             var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-            var merged = QueryStoreBackfillState.MergeHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
+            var added = QueryStoreBackfillState.AddHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
             await SaveCollectorStateAsync(
                 serverId, QueryStoreBackfillState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = QueryStoreBackfillState.EncodeHole(merged.FromUtc, merged.ToUtc) },
+                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = added },
                 cancellationToken);
         }
         catch (Exception ex)

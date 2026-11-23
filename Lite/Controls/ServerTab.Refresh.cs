@@ -36,6 +36,8 @@ public partial class ServerTab : UserControl
     /// </summary>
     public async void RefreshData()
     {
+        /* #9366: the server tab opening on its tab is a pick. */
+        StampFirstLoadPick();
         await RefreshAllDataAsync();
     }
 
@@ -408,9 +410,33 @@ public partial class ServerTab : UserControl
     /// <summary>#9232: one INFO line per tab (per Queries sub-tab) the first time its load completes, so a slow first open can be read from the log.</summary>
     private TabFirstLoad? _tabFirstLoad;
 
+    /* #9366: the line runs from the pick to the first drawn row. The draw is the Dispatcher pass at Loaded priority, which runs
+       after the layout and render the grid's new rows queued. */
+    private TabFirstLoad FirstLoad => _tabFirstLoad ??= new TabFirstLoad(
+        line => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] {line}"),
+        afterRender: () => Dispatcher.InvokeAsync(static () => { }, System.Windows.Threading.DispatcherPriority.Loaded).Task);
+
+    /// <summary>The key and label the tab now showing is tracked under by <see cref="TabFirstLoad"/>. A null key is not tracked.</summary>
+    private (string? Key, string Label) CurrentFirstLoadKey()
+    {
+        var tabIndex = MainTabControl.SelectedIndex;
+        /* No sub-tab picked yet: the load is not a sub-tab's first open, so it is not tracked (#9232). */
+        string? loadKey = tabIndex != QueriesTabIndex ? $"tab {tabIndex}"
+            : QueriesSubTabControl.SelectedIndex < 0 ? null
+            : $"tab {tabIndex}/{QueriesSubTabControl.SelectedIndex}";
+        var loadLabel = (MainTabControl.SelectedItem as TabItem)?.Header as string ?? loadKey ?? "Queries";
+        if (tabIndex == QueriesTabIndex && (QueriesSubTabControl.SelectedItem as TabItem)?.Header is string subTabLabel)
+            loadLabel = $"{loadLabel} > {subTabLabel}";
+        return (loadKey, loadLabel);
+    }
+
+    /// <summary>#9366: stamps the moment the tab or sub-tab now showing was picked (or the server tab opened on it).</summary>
+    private void StampFirstLoadPick() => FirstLoad.Pick(CurrentFirstLoadKey().Key);
+
     /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
     private async System.Threading.Tasks.Task<string?> RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
     {
+        var passStartedAt = FirstLoad.Timestamp();
         await RefreshEngineEditionAsync();
         await RefreshServerDataStartAsync(hoursBack, fromDate);
 
@@ -424,19 +450,12 @@ public partial class ServerTab : UserControl
             if (ct.IsCancellationRequested) return null;
         }
 
-        /* #9232: the tab's reads are timed from here, once per tab (per Queries sub-tab), and logged when the first one completes. */
-        _tabFirstLoad ??= new TabFirstLoad(line => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] {line}"));
-        var tabIndex = MainTabControl.SelectedIndex;
-        /* No sub-tab picked yet: the load is not a sub-tab's first open, so it is not tracked (#9232). */
-        string? loadKey = tabIndex != QueriesTabIndex ? $"tab {tabIndex}"
-            : QueriesSubTabControl.SelectedIndex < 0 ? null
-            : $"tab {tabIndex}/{QueriesSubTabControl.SelectedIndex}";
-        var loadLabel = (MainTabControl.SelectedItem as TabItem)?.Header as string ?? loadKey ?? "Queries";
-        if (tabIndex == QueriesTabIndex && (QueriesSubTabControl.SelectedItem as TabItem)?.Header is string subTabLabel)
-            loadLabel = $"{loadLabel} > {subTabLabel}";
+        /* #9232: the tab's reads are timed from here, once per tab (per Queries sub-tab), and logged when the first one completes.
+           #9366: the logged total runs from the pick to the first drawn row, with the steps above and the wait before this pass split out. */
+        var (loadKey, loadLabel) = CurrentFirstLoadKey();
 
         string? failedReads = null;
-        await _tabFirstLoad.RunAsync(loadKey, loadLabel, async () =>
+        await FirstLoad.RunAsync(loadKey, loadLabel, async () =>
         {
         switch (MainTabControl.SelectedIndex)
         {
@@ -461,7 +480,7 @@ public partial class ServerTab : UserControl
             case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
             return 0;
-        }, () => ct.IsCancellationRequested);
+        }, () => ct.IsCancellationRequested, passStartedAt);
 
         /* #8647: a read that ended without being superseded has had its say; whatever still says "Loading..." never got an answer. */
         if (!ct.IsCancellationRequested) ResolveFirstPaintLoading();
@@ -588,6 +607,7 @@ public partial class ServerTab : UserControl
                         var (topQueriesStart, topQueriesEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
                         var queryStats = await ReadTopQueriesAsync(0, topQueriesStart, topQueriesEnd);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
+                        TabFirstLoad.RowsHanded();
                         UpdateQueryStatsEmptyMessage(queryStats.Count);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadQueryStatsSlicerAsync(topQueriesStart, topQueriesEnd);
@@ -602,6 +622,7 @@ public partial class ServerTab : UserControl
                     case 3: // Top Procedures by Duration
                         var (procStats, procLeftOut) = await ReadTopProceduresAsync(hoursBack, fromDate, toDate);
                         _procStatsFilterMgr!.UpdateData(procStats);
+                        TabFirstLoad.RowsHanded();
                         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadProcStatsSlicerAsync();
                         {
@@ -616,6 +637,7 @@ public partial class ServerTab : UserControl
                     case 4: // Query Store by Duration
                         var qsData = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags)));
                         _queryStoreFilterMgr!.UpdateData(qsData);
+                        TabFirstLoad.RowsHanded();
                         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
                         _ = LoadQueryStoreSlicerAsync();
                         {

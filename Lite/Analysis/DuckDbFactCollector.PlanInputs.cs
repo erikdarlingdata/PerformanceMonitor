@@ -99,7 +99,7 @@ public partial class DuckDbFactCollector
 
     /// <summary>The candidates that stay, in the detector's order, and the two counts the fact reports.</summary>
     private sealed record PlanRegressionVerification(
-        List<PlanRegressionCandidate> Kept, int CrossInputExcluded, int InputsUnverified);
+        List<PlanRegressionCandidate> Kept, int CrossInputExcluded, int InputsUnverified, int PlanFetches);
 
     /// <summary>The fetches a pass has left, shared by every candidate of that pass.</summary>
     private sealed class PlanFetchBudget
@@ -194,7 +194,7 @@ public partial class DuckDbFactCollector
 
         var unverified = kept.Count(k => k.Unverified);
         ReportSlowPlanCheck(context, candidates.Count, budget, causes, unverified, Stopwatch.GetElapsedTime(started));
-        return new PlanRegressionVerification(kept, excludedKeys.Count, unverified);
+        return new PlanRegressionVerification(kept, excludedKeys.Count, unverified, budget.Fetches);
     }
 
     /// <summary>

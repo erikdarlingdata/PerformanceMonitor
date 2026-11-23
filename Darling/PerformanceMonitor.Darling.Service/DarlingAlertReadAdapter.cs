@@ -439,7 +439,8 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// shared alert row's fields (same WHERE / ORDER BY event_time DESC / LIMIT 200 semantics).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
+    /// <remarks>#9340: leaves out a pair whose two sessions are both the monitor's own (the monitor's collectors queued behind each other), so
+    /// it raises no blocking alert. A pair with a user session on either side, or a NULL app name, stays. Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
     /// delivery cursor ("rows collected since the last sweep"). On the event time, a report collected seconds
     /// late, or hours late after an outage, would fall before the window and never alert.</remarks>
     public const string BlockedProcessReportsSql = @"
@@ -458,6 +459,7 @@ FROM blocked_process_reports
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + @"
 ORDER BY event_time DESC
 LIMIT 200";
 
@@ -481,6 +483,7 @@ FROM dmv_blocking_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + @"
 ORDER BY event_time DESC
 LIMIT 200";
 

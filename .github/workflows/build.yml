@@ -1232,32 +1232,8 @@ jobs:
             exit 1
           fi
           # #6123: the Compose files are their own release asset, because no other download holds Darling/compose/.
-          # The packed copy names THIS release's image tag instead of :latest, so a release's files pull that
-          # release's image (darling-linux-publish pushes the ghcr :<version> tag). Only tracked files ship:
-          # the checkout has no local secrets. The archive opens into one folder so a user can extract it and
-          # cd into it. Line endings are made LF, because .gitattributes checks text out as CRLF.
-          compose_dir="PerformanceMonitorDarling-compose-${version}"
-          compose_stage="$(mktemp -d)"
-          mkdir -p "${compose_stage}/${compose_dir}"
-          cp -R Darling/compose/. "${compose_stage}/${compose_dir}/"
-          find "${compose_stage}/${compose_dir}" -type f -exec sed -i 's/\r$//' {} +
-          compose_file="${compose_stage}/${compose_dir}/docker-compose.yml"
-          sed -i "s|\(image: ghcr\.io/erikdarlingdata/performancemonitor-darling\):latest|\1:${version}|" "${compose_file}"
-          if [ "$(grep -c "image: ghcr\.io/erikdarlingdata/performancemonitor-darling:${version}$" "${compose_file}")" != "1" ] || grep -q "performancemonitor-darling:latest" "${compose_file}"; then
-            echo "::error::The packed compose file does not name the darling image at :${version}."
-            exit 1
-          fi
-          # #6140: setup.sh is the quickstart's first step, so it must open with its execute bit. The checkout holds it as
-          # mode 755 already, and chmod makes that certain. The tar listing below must show it executable and the
-          # script must parse under a POSIX shell, so a bad pack fails this job and not the user's first command.
-          chmod 755 "${compose_stage}/${compose_dir}/setup.sh"
-          sh -n "${compose_stage}/${compose_dir}/setup.sh"
-          tar -C "${compose_stage}" -czf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" "${compose_dir}"
-          tar -tzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
-          if ! tar -tvzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" | grep -Eq '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$'; then
-            echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
-            exit 1
-          fi
+          # #9333: .github/scripts/pack-compose.sh packs it, and nightly.yml calls the same script.
+          bash .github/scripts/pack-compose.sh "${version}" releases
           # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
           export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)

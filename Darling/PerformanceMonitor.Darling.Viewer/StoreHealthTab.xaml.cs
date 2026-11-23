@@ -241,7 +241,10 @@ public partial class StoreHealthTab : UserControl
 
         try
         {
+            var startedUtc = DateTime.UtcNow;
             var read = await ViewerServerTab.Timed(timer, "store tables read", TablesRead?.Invoke(fresh) ?? _dataService!.GetStoreTableHealthAsync(fresh));
+            /* #9364: the slow-load line says how many relations the read sized and whether the store measured them for this open or the Viewer held them. */
+            timer.NotePhase("store tables read", StoreHealthRows.ReadNote(read.Rows.Count, read.ReadAtUtc, startedUtc, DateTime.UtcNow));
             if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
 
             var selected = (TablesDataGrid.SelectedItem as StoreTableRow)?.Table;
@@ -299,7 +302,13 @@ public partial class StoreHealthTab : UserControl
 
         try
         {
+            var startedUtc = DateTime.UtcNow;
             var read = await ViewerServerTab.Timed(timer, "store indexes read", IndexesRead?.Invoke(fresh) ?? _dataService!.GetStoreIndexHealthAsync(fresh));
+            /* #9364: as the tables read. An answer with no read time adds no note. */
+            if (read.ReadAtUtc is { } indexesAt)
+            {
+                timer.NotePhase("store indexes read", StoreHealthRows.ReadNote(read.Indexes.Count, indexesAt, startedUtc, DateTime.UtcNow));
+            }
             if (_loads.Superseded(nameof(LoadIndexesAsync), gen)) return;
 
             var indexRows = StoreHealthRows.Indexes(read.Indexes);
