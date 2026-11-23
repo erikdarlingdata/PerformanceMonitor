@@ -303,6 +303,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async void SystemEventsRefresh_Click(object sender, RoutedEventArgs e)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await LoadSystemEventsAsync();
@@ -310,7 +311,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: System Events", null, clock.ElapsedMilliseconds, ex));
         }
     }
 }

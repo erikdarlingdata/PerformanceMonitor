@@ -371,7 +371,7 @@ public sealed class ViewerStoreHealthRefreshTests
 
             failure = new InvalidOperationException("scripted settings failure");
             await tab.RefreshAsync(force: true);
-            Assert.Equal("The autovacuum settings failed to load: scripted settings failure", tab.AutovacuumSettingsTextBlock.Text);
+            Assert.Equal("The store autovacuum settings did not load.", tab.AutovacuumSettingsTextBlock.Text);
             Assert.Single(tab.TablesDataGrid.Items);
             Assert.Equal(3, calls.Count);
         });

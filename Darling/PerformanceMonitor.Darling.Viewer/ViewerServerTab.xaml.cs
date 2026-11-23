@@ -96,6 +96,18 @@ public partial class ViewerServerTab : UserControl
     private bool _refreshInFlight;
     private bool _refreshRequested;
 
+    /// <summary>#9365: set by a loader whose chart read failed after its retry while the grid read held ("The time-range chart did not load.
+    /// The grid is current."), so the load's status line says so in place of a plain "refreshed". Cleared at the start of each load.</summary>
+    private string? _partialFailureText;
+
+    /// <summary>#9365: the partial-failure text the last load left, for a test to read.</summary>
+    internal string? PartialFailureText => _partialFailureText;
+
+    /// <summary>#9365: the status line a finished load writes. A load whose chart read failed names what did not load and keeps the stamp
+    /// the grid was read at; any other load says "refreshed" and the stamp.</summary>
+    internal static string RefreshedStatus(string serverName, string? partialFailure, string stamp) =>
+        partialFailure is null ? $"{serverName}: refreshed {stamp}" : $"{serverName}: {partialFailure} ({stamp})";
+
     /* #9194: the cancellation of the sub-tab load now running, and that sub-tab's name. Null between loads. A pick of another sub-tab
        cancels it, so the picked tab's read starts at once instead of waiting behind the one being left. */
     private CancellationTokenSource? _loadPass;
@@ -630,6 +642,7 @@ public partial class ViewerServerTab : UserControl
     {
         var timer = loadTimer ?? new ViewerLoadTimer();
         var cancelled = false;
+        _partialFailureText = null;
         ViewerReadScope.Enter(cancel);
         try
         {
@@ -743,7 +756,9 @@ public partial class ViewerServerTab : UserControl
                so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
             if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
             {
-                StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
+                /* #9365: a chart read that failed after its retry leaves the grid current. The line says which part did not load, with the
+                   stamp the rest was read at, instead of a bare "refreshed" that reads as if nothing had gone wrong. */
+                StatusChanged?.Invoke(RefreshedStatus(_server.DisplayName, _partialFailureText, ViewerTimeHelper.RefreshedStamp()));
             }
         }
         catch (Exception) when (cancel.IsCancellationRequested)
@@ -753,7 +768,10 @@ public partial class ViewerServerTab : UserControl
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            var failed = timer.FailedRead(ex);
+            var surface = string.IsNullOrEmpty(timer.Surface) ? InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header) : timer.Surface;
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: {surface}", failed?.Phase, failed?.Ms ?? timer.ElapsedMs, ex));
         }
         finally
         {
