@@ -130,7 +130,7 @@ RETURNING object_id", connection))
             dataSource, ServerId, ServerName, history.Database, windowStart, differs, ct));
         var lines = differs.ToString().Split('\n').Select(l => l.TrimEnd('\r')).ToList();
         Assert.DoesNotContain(lines, l => l.StartsWith("identical", StringComparison.Ordinal));
-        var difference = Assert.Single(lines, l => l.TrimStart().StartsWith("Object ", StringComparison.Ordinal));
+        var difference = Assert.Single(lines, l => l.StartsWith("  Object ", StringComparison.Ordinal));
         Assert.StartsWith($"Object {changedObject}:", difference.TrimStart(), StringComparison.Ordinal);
         Assert.Equal(before, await CountsAsync(connection, ct));
 
