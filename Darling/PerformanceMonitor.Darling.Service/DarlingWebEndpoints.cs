@@ -287,6 +287,8 @@ public static partial class DarlingWebEndpoints
         /* #6402: the read of the fields edit_server changes; the web edit form has its own read (GET /api/admin/servers/{id}), so no /api/read page mirrors it. */
         "get_server_settings",
         "get_tool_guide",
+        /* #9388: call_tool runs another tool by name on /lean, so it reads nothing of its own and no page mirrors it. */
+        "call_tool",
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
         "get_investigation_evidence",

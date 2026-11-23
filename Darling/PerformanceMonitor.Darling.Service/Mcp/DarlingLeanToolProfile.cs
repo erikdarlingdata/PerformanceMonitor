@@ -170,6 +170,6 @@ public sealed class DarlingMcpLeanTools
     [McpServerTool(Name = "call_tool"), Description("Runs one read tool by name, with its arguments, as if it had been called directly. Find the tool and its arguments with find_tools. It runs read tools only: a tool that writes must be called on the full path.")]
     public static string CallTool(
         [Description("The name of the tool to run.")] string name,
-        [Description("The tool's arguments, as a JSON object. Omit for a tool that takes none.")] System.Text.Json.Nodes.JsonObject? arguments = null) =>
+        [Description("The tool's arguments, as a JSON object. Omit for a tool that takes none.")] JsonElement? arguments = null) =>
         throw new McpException("call_tool did not reach the tool " + name + ". Call it directly.");
 }

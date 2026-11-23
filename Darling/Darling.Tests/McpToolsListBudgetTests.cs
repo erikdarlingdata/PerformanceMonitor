@@ -253,6 +253,8 @@ internal static class McpServedSchema
 
         return !(underlying.IsPrimitive || underlying.IsEnum || underlying == typeof(string) || underlying == typeof(decimal)
             || underlying == typeof(DateTime) || underlying == typeof(DateTimeOffset) || underlying == typeof(Guid)
-            || underlying == typeof(TimeSpan));
+            || underlying == typeof(TimeSpan)
+            /* #9388: call_tool's arguments are a JSON value the client sends, not a DI service. */
+            || underlying == typeof(System.Text.Json.JsonElement));
     }
 }

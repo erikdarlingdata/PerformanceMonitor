@@ -126,6 +126,12 @@ The `http://localhost:5152/core` URL serves a subset of 75 tools. They are the d
 
 Tools from every other MCP server enabled in the same chat count toward the 128 as well. A chat that also uses other servers has less room. Turn tools off in the picker if you reach the cap.
 
+##### The /lean URL
+
+Many clients load every listed tool into the model's context before the first question. The `http://localhost:5152/lean` URL lists six tools: the four entry tools that `/core` starts from, `find_tools` and `call_tool`. Use `find_tools` to find the tool a question needs. Use `call_tool` with that tool's name and arguments to run it.
+
+`call_tool` runs read tools only. It runs the tool as a direct call would, with the same argument checks, output filters and timing records. A tool that writes is refused with a pointer to `/`. `/lean` serves the same tools as `/` for the same token, so a tool that `/lean` does not list can still be called by name. Only `call_tool` is new, and it is served on `/lean` alone.
+
 ##### A reader token for Copilot
 
 A named token with the `reader` role fits Copilot well. A `reader` token sees the reads and nothing else: no write tool, no server admin tool and no investigation tool.

@@ -61,7 +61,7 @@ const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
     this list against the registry, like the get_ list above. */
 export const MCP_ACTION_TOOL_NAMES = [
   "add_servers", "measure_store_table", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-  "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
+  "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "call_tool", "claim_investigation_request",
   "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
   "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
