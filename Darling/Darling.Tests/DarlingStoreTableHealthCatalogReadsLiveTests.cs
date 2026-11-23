@@ -549,3 +549,64 @@ ANALYZE;";
         Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
     }
 }
+
+/// <summary>
+/// The order the size-pass limit hands out its grants in (#9364). No database: the order is the gate's own, and with both passes
+/// racing for it the live reads do not settle it, so a request that arrives first can be made to wait here.
+/// </summary>
+public sealed class DarlingStoreSizePassGateTests
+{
+    [Fact]
+    public void AMainRequest_ThatArrivesAfterAnExtrasRequest_IsGrantedFirst()
+    {
+        var gate = new DarlingStoreTableHealthReader.SizeGate(1);
+        var held = gate.AcquireAsync(main: false);
+        Assert.True(held.IsCompleted);
+        var extras = gate.AcquireAsync(main: false);
+        var main = gate.AcquireAsync(main: true);
+        Assert.False(extras.IsCompleted);
+        Assert.False(main.IsCompleted);
+
+        gate.Release();
+        Assert.True(main.IsCompleted);
+        Assert.False(extras.IsCompleted);
+
+        gate.Release();
+        Assert.True(extras.IsCompleted);
+    }
+
+    [Fact]
+    public void NoExtrasRequestIsGranted_WhileACallerWaitsOnTheMainPass()
+    {
+        var gate = new DarlingStoreTableHealthReader.SizeGate(4);
+        gate.MainCallerStarted();
+
+        // Free grants are not enough: the indexes read waits for the main pass only, so the extras go after it.
+        var extras = gate.AcquireAsync(main: false);
+        Assert.False(extras.IsCompleted);
+        var main = gate.AcquireAsync(main: true);
+        Assert.True(main.IsCompleted);
+
+        gate.MainCallerFinished();
+        Assert.True(extras.IsCompleted);
+    }
+
+    [Fact]
+    public void NoMoreThanTheLimitIsHeld_AndEveryReleaseHandsOneToTheNextWaiter()
+    {
+        var gate = new DarlingStoreTableHealthReader.SizeGate(4);
+        var granted = Enumerable.Range(0, 4).Select(i => gate.AcquireAsync(main: i % 2 == 0)).ToArray();
+        Assert.All(granted, t => Assert.True(t.IsCompleted));
+
+        var fifth = gate.AcquireAsync(main: true);
+        var sixth = gate.AcquireAsync(main: false);
+        Assert.False(fifth.IsCompleted);
+        Assert.False(sixth.IsCompleted);
+
+        gate.Release();
+        Assert.True(fifth.IsCompleted);
+        Assert.False(sixth.IsCompleted);
+        gate.Release();
+        Assert.True(sixth.IsCompleted);
+    }
+}

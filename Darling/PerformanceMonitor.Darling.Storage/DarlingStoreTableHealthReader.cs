@@ -1591,7 +1591,7 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     /// is granted while a caller is waiting on the main pass (the tables read counts as one from the moment it asks for the main
     /// pass), so the indexes read, which waits for the main pass only, never waits behind the extras' slices.
     /// </summary>
-    private sealed class SizeGate(int limit)
+    internal sealed class SizeGate(int limit)
     {
         private readonly object _gate = new();
         private readonly Queue<TaskCompletionSource> _main = new();
@@ -1601,11 +1601,6 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
         public Task AcquireAsync(bool main)
         {
-            if (_mainCallers >= 0)
-            {
-                return Task.CompletedTask;
-            }
-
             var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_gate)
             {
