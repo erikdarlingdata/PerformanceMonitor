@@ -229,8 +229,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     private static string WithByKeysFilter(string prefix, int databaseParameter, int queryIdParameter) =>
         prefix.Replace(ByKeysSlot,
-            $"AND   (${databaseParameter}::text[] IS NULL OR database_name = ANY(${databaseParameter}))
-"
+            $"AND   (${databaseParameter}::text[] IS NULL OR database_name = ANY(${databaseParameter}))\n"
             + $"            AND   (${queryIdParameter}::bigint[] IS NULL OR query_id = ANY(${queryIdParameter}))", StringComparison.Ordinal);
 
     /// <summary>#9373: <paramref name="prefix"/> with <see cref="ByKeysSlot"/> left empty, for the statements that rank (the keys statements) and the one-statement read.</summary>
@@ -296,8 +295,7 @@ public sealed partial class ViewerDataService
     private const string QueryStoreTopTableSplitSelect = "*, 1 AS rn";
 
     /// <summary>The predicates both arms repeat: the database list ($5) and the by-keys slot (<see cref="ByKeysSlot"/>). The grid has no execution outcome filter.</summary>
-    private const string QueryStoreTopTableSplitTrailing = "            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            " + ByKeysSlot;
+    private const string QueryStoreTopTableSplitTrailing = "            AND   ($5::text[] IS NULL OR database_name = ANY($5))\n            " + ByKeysSlot;
 
     /// <summary>
     /// <see cref="QueryStoreTopTablePrefix"/> with the window as two arms (#9283), for a store whose
