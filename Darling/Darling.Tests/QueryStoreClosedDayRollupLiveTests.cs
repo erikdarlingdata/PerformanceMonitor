@@ -898,4 +898,42 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         var perServerOnly = new[] { new ScheduleOverride(7, entry.Name, null, 45, true) };
         Assert.Equal(PurgeDays(perServerOnly), DarlingRetention.QueryStoreStatsPurgeRetentionDays(perServerOnly));
     }
+
+    /// <summary>
+    /// #9363: a whole closed day with no built row names why in the slow-load line's source, and a built day that sits outside the longest run
+    /// says so. The statement that finds the built days already returns every one of them, so no further read is made to tell the two apart.
+    /// </summary>
+    [Fact]
+    public async Task AWholeClosedDayWithoutARollup_IsNamedInTheSource_AndABuiltDayOutsideTheRunSaysSo()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9363 source-day live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        await TickAsync(store, KeepEverything, ct);
+
+        /* Day -10 of a 30 day window loses its built row: 20 built days lie before it and 9 after it, so the longer run is the one before. */
+        var missing = DateOnly.FromDateTime(DataEnd.AddDays(-10));
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct,
+            ("server_id", ServerId), ("day", missing));
+
+        var start = DataEnd.AddDays(-30);
+        var (served, reason, built) = await QueryStoreClosedDayRollup.ResolveServedDaysWithReasonAsync(store.Connection, null, ServerId, start, DataEnd, 30, ct);
+        Assert.Equal(new QueryStoreClosedDayRollup.ServedDays(start, DataEnd.AddDays(-10)), served);
+        Assert.Equal(QueryStoreClosedDayRollup.SourceReason.Served, reason);
+        Assert.DoesNotContain(missing, built);
+        Assert.Equal(29, built.Count);
+
+        var source = QueryStoreClosedDayRollup.DescribeSourceFor(store.Connection, start, DataEnd, served, reason, built);
+
+        var notes = source.IntervalNotes!.ToDictionary(n => n.Day, n => n.Label);
+        Assert.Equal(10, notes.Count);
+        Assert.Equal("no rollup for this day", notes[missing]);
+        for (var day = missing.AddDays(1); day < DateOnly.FromDateTime(DataEnd); day = day.AddDays(1))
+        {
+            Assert.Equal("built but outside the longest run", notes[day]);
+        }
+
+        Assert.Contains($"20 days from rollups ({DateOnly.FromDateTime(start):yyyy-MM-dd} to {missing.AddDays(-1):yyyy-MM-dd})", source.Describe(), StringComparison.Ordinal);
+        Assert.Contains($"{missing:yyyy-MM-dd} no rollup for this day", source.Describe(), StringComparison.Ordinal);
+    }
 }
