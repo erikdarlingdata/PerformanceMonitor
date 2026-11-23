@@ -59,6 +59,11 @@ internal static class BlockingPairRowQuery
     public const string SpidFilter = @"AND blocking_spid IS NOT NULL
 AND blocking_spid <> 0";
 
+    /// <summary>#9340: append after <see cref="SpidFilter"/> to leave out a pair whose two sessions are both the monitor's own, so the
+    /// row cap is spent on real blocking. Cut in the query: a filter applied in memory after the cap lets newer monitor-only rows push
+    /// real pairs out of the read (#3641).</summary>
+    public const string NotMonitorOnlyPairFilter = "AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate;
+
     public static BlockingPairRow Read(DbDataReader reader) => new()
     {
         EventTime = reader.IsDBNull(0) ? default : reader.GetDateTime(0),
@@ -110,6 +115,13 @@ AND blocking_spid <> 0";
     /// signature claimed the read was abandonable. The viewer's call is the one that legitimately has
     /// no pass to abandon, and it says so at its own call site rather than here.</para>
     ///
+    /// <para>#9340: <paramref name="excludeMonitorOnlyPairs"/> cuts a pair whose two sessions are both the monitor's own inside the
+    /// read, before its cap. The fact and the drill-down set it; the viewer keeps those rows.</para>
+    ///
+    /// <para>#9346: <paramref name="separateDatabases"/>, a master target's separately monitored databases, are cut inside the read too
+    /// (<see cref="SeparatelyMonitoredScope.BprFilter"/>, the list at $4 onward). It applies only with <paramref name="excludeMonitorOnlyPairs"/>;
+    /// null or empty reads as before.</para>
+    ///
     /// <para>#7256: <paramref name="plan"/>, when the caller took one for <c>dmv_blocking_snapshots</c> before its read lock
     /// at this window's start, reads the hot table alone for a window newer than the archive, so no Parquet file is opened.
     /// <c>event_time</c> is a snapshot's collection time, so the plan's <c>collection_time</c> span bounds this
@@ -117,8 +129,10 @@ AND blocking_spid <> 0";
     /// </summary>
     internal static async Task AppendDmvSnapshotRowsAsync(
         Func<DuckDBCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,
-        CancellationToken cancellationToken, bool includeText = true, ArchiveReadPlan? plan = null)
+        CancellationToken cancellationToken, bool includeText = true, ArchiveReadPlan? plan = null, bool excludeMonitorOnlyPairs = false,
+        IReadOnlyList<string>? separateDatabases = null)
     {
+        var separate = excludeMonitorOnlyPairs ? separateDatabases : null;
         var dmv = new List<BlockingPairRow>();
         using (var cmd = createCommand())
         {
@@ -137,12 +151,15 @@ SELECT
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
 {SpidFilter}
+{(excludeMonitorOnlyPairs ? NotMonitorOnlyPairFilter : string.Empty)}
+{SeparatelyMonitoredScope.BprFilter(separate, 4)}
 ORDER BY event_time DESC
 LIMIT 5000";
             cmd.CommandText = plan is null ? sql : plan.Apply(sql);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = start });
             cmd.Parameters.Add(new DuckDBParameter { Value = end });
+            SeparatelyMonitoredScope.AddParameters(cmd, separate);
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
