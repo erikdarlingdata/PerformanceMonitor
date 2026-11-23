@@ -264,4 +264,47 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
 
         Assert.Equal(new[] { 3, 4, 5 }, kept.ToArray());
     }
+
+    /// <summary>EXPLAIN (ANALYZE, BUFFERS) of one planner statement with its server id, on a store with sequential scans switched off so a missing index shows as an error text.</summary>
+    private static async Task<string> PlanOfAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params object[] args)
+    {
+        await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) " + sql, connection);
+        foreach (var arg in args)
+        {
+            command.Parameters.AddWithValue(arg);
+        }
+
+        var lines = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            lines.Add(reader.GetString(0));
+        }
+
+        return string.Join("
+", lines);
+    }
+
+    [Fact]
+    public async Task ThePlannerStatements_ReadIndexEntriesAndNeverScanTheTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        await PlantServerAsync(connection, ServerOne, ["Alpha", "Beta", "Gamma"], 5, ct);
+        await PlantServerAsync(connection, ServerTwo, ["Alpha", "Delta"], 5, ct);
+        await using (var analyze = new NpgsqlCommand("ANALYZE collect.index_object_stats; SET enable_seqscan = off", connection))
+        {
+            await analyze.ExecuteNonQueryAsync(ct);
+        }
+
+        var servers = await PlanOfAsync(connection, ObjectUsageChainTick.ServersSql, ct);
+        var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne);
+        Assert.Fail("PLAN-SERVERS " + servers.Replace("
+", " | ", StringComparison.Ordinal) + " PLAN-DATABASES " + databases.Replace("
+", " | ", StringComparison.Ordinal));
+    }
 }
