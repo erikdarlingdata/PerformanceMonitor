@@ -971,6 +971,10 @@ DROP TABLE IF EXISTS collect.object_usage_runs;"),
         // creates them empty with a fresh counted_since. Safe on a store that never had them.
         new(300, "hasProcedureStatsHourLedger", @"DROP TABLE IF EXISTS collect.procedure_stats_hour_ledger_state;
 DROP TABLE IF EXISTS collect.procedure_stats_hour_ledger;"),
+        // V301 (#9374): the last measured relation sizes and the one-row time they were measured. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V301
+        // creates them empty. Safe on a store that never had them.
+        new(301, "hasStoreRelationSizes", @"DROP TABLE IF EXISTS collect.store_relation_sizes_latest;
+DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
     ];
 
     /// <summary>

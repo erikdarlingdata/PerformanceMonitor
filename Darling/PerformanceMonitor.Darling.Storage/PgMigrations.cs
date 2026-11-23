@@ -4008,6 +4008,10 @@ END $$;";
         /* V300 (#9357): the procedure_stats hour ledger and its state row, V164's pair for the procedure rollup's count guard. An older build
            ignores both tables. */
         new Migration(ProcedureStatsHourLedger.RungVersion, "procedure-stats-hour-ledger", V300Sql),
+        /* V301 (#9374): the newest measured size of every relation the Store Health reads size (collect.store_relation_sizes_latest) and the one-row
+           time they were measured (collect.store_relation_sizes_measured), so the Viewer's first open shows the last sizes at once. Two plain tables
+           created empty: no data moves, and the service fills them from a size pass. An older build ignores them. */
+        new Migration(StoreRelationSizesStore.Version, "store-relation-sizes-latest", StoreRelationSizesStore.CreateSql),
     };
 
     /// <summary>
