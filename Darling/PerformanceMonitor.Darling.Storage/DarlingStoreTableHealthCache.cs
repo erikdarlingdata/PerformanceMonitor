@@ -72,10 +72,20 @@ public sealed class DarlingStoreTableHealthCache
     private HeldPart<IReadOnlyList<StoreIndexHealthRow>> _indexes;
     private HeldPart<IReadOnlyList<StoreIndexCoverageRow>> _coverage;
     private HeldPart<StoreAutovacuumSettings> _autovacuumSettings;
+    private MeasuredSizePass? _lastNoted;
+    private Task _writeTail = Task.CompletedTask;
 
     /// <summary>Told once for each read that failed outside a caller's wait: a refresh behind a held part (the held part is kept) and a
     /// part of <see cref="WarmAsync"/>. The service logs it and the Viewer writes it to its log; with none set the failure is silent.</summary>
     public Action<string, Exception>? OnReadFailed { get; set; }
+
+    /// <summary>
+    /// #9374: told once for each size pass that finished under a tables or indexes read of this cache (a warm, a refresh or a fresh read), with the
+    /// data source it ran on and the pass. The service writes the pass to the store here (<see cref="StoreRelationSizesStore.WriteAsync"/>), so the
+    /// store sees no size pass of its own. Writes run one at a time in the background and never delay or fail the read that took the pass: a failed
+    /// write is reported to <see cref="OnReadFailed"/> as "relation sizes write". A pass shared by the tables read and the indexes read is told once.
+    /// </summary>
+    public Func<NpgsqlDataSource, MeasuredSizePass, CancellationToken, Task>? OnSizesMeasured { get; set; }
 
     /// <summary>A cache over the reader's own statements, on the wall clock.</summary>
     public DarlingStoreTableHealthCache()
@@ -128,12 +138,12 @@ public sealed class DarlingStoreTableHealthCache
     /// inside <see cref="Lifetime"/>. <paramref name="fresh"/> drops the held read first, for a caller that asked for a new one.</summary>
     public Task<StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>> GetTablesAsync(
         NpgsqlDataSource postgres, bool fresh = false, CancellationToken cancellationToken = default) =>
-        ReadAsync(ref _tables, "tables", _readTables, postgres, fresh, cancellationToken);
+        ReadAsync(ref _tables, "tables", NoticingSizes(_readTables), postgres, fresh, cancellationToken);
 
     /// <summary>Every store index (<see cref="DarlingStoreTableHealthReader.GetIndexesAsync"/>), held the same way.</summary>
     public Task<StoreHealthRead<IReadOnlyList<StoreIndexHealthRow>>> GetIndexesAsync(
         NpgsqlDataSource postgres, bool fresh = false, CancellationToken cancellationToken = default) =>
-        ReadAsync(ref _indexes, "indexes", _readIndexes, postgres, fresh, cancellationToken);
+        ReadAsync(ref _indexes, "indexes", NoticingSizes(_readIndexes), postgres, fresh, cancellationToken);
 
     /// <summary>The leaf index coverage of every partitioned parent (<see cref="DarlingStoreTableHealthReader.GetIndexCoverageAsync"/>), held the same way.</summary>
     public Task<StoreHealthRead<IReadOnlyList<StoreIndexCoverageRow>>> GetIndexCoverageAsync(
@@ -156,6 +166,72 @@ public sealed class DarlingStoreTableHealthCache
         await WarmPartAsync("indexes", () => GetIndexesAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
         await WarmPartAsync("partition index coverage", () => GetIndexCoverageAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
         await WarmPartAsync("autovacuum settings", () => GetAutovacuumSettingsAsync(postgres, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// #9374: takes one pass through this cache when it holds no tables read newer than <paramref name="cadence"/>, so the pass stays in the one
+    /// place a pass happens and <see cref="OnSizesMeasured"/> writes it. A held read inside the cadence is reused and no pass runs. Returns whether it
+    /// ran a pass. The pass is the tables read, dropped first (<c>fresh</c>) so it is new whatever <see cref="Lifetime"/> says.
+    /// </summary>
+    public async Task<bool> RunDueSizePassAsync(NpgsqlDataSource postgres, TimeSpan cadence, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        var held = _tables.HeldRead;
+        if (held is not null && _clock() - held.ReadAtUtc < cadence)
+        {
+            return false;
+        }
+
+        await GetTablesAsync(postgres, fresh: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>#9374: whether this cache holds a tables read now (old or not), so a caller that would show the store's last measured sizes
+    /// first knows the tab has a read to show already. Read only: it starts nothing.</summary>
+    public bool HoldsTables => _tables.HeldRead is not null;
+
+    private Func<NpgsqlDataSource, CancellationToken, Task<List<TRow>>> NoticingSizes<TRow>(
+        Func<NpgsqlDataSource, CancellationToken, Task<List<TRow>>> read) =>
+        async (store, ct) =>
+        {
+            var rows = await read(store, ct).ConfigureAwait(false);
+            NoteSizePass(store);
+            return rows;
+        };
+
+    private void NoteSizePass(NpgsqlDataSource store)
+    {
+        var write = OnSizesMeasured;
+        var last = write is null ? null : DarlingStoreTableHealthReader.LastSizePassOn(store);
+        if (write is null || last is null)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (ReferenceEquals(last, _lastNoted))
+            {
+                return;
+            }
+
+            _lastNoted = last;
+            var before = _writeTail;
+            _writeTail = Task.Run(async () =>
+            {
+                await before.ConfigureAwait(false);
+                try
+                {
+                    await write(store, last, CancellationToken.None).ConfigureAwait(false);
+                }
+#pragma warning disable CA1031 // A failed write is reported and the next pass writes again; it never fails the read that took the pass.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    Report("relation sizes write", ex);
+                }
+            });
+        }
     }
 
     private async Task WarmPartAsync(string name, Func<Task> read, CancellationToken cancellationToken)
@@ -191,7 +267,7 @@ public sealed class DarlingStoreTableHealthCache
         Task[] running;
         lock (_gate)
         {
-            running = [_tables.Running, _indexes.Running, _coverage.Running, _autovacuumSettings.Running];
+            running = [_tables.Running, _indexes.Running, _coverage.Running, _autovacuumSettings.Running, _writeTail];
         }
 
         return Task.WhenAll(running);
@@ -256,6 +332,18 @@ public sealed class DarlingStoreTableHealthCache
         private StoreHealthRead<T>? _held;
         private Task<StoreHealthRead<T>>? _inFlight;
         private DateTime _lastRefreshStartUtc = DateTime.MinValue;
+
+        /// <summary>The read held now, or null when the part holds none.</summary>
+        public StoreHealthRead<T>? HeldRead
+        {
+            get
+            {
+                lock (_partGate)
+                {
+                    return _held;
+                }
+            }
+        }
 
         /// <summary>The read running now, or a completed task when none is.</summary>
         public Task Running

@@ -64,6 +64,13 @@ public partial class StoreHealthTab : UserControl
     private DateTime? _tablesReadAtUtc;
     private DateTime? _indexesReadAtUtc;
 
+    /// <summary>#9374: when the store measured the sizes of the rows on screen, while a section still shows the store's last measured sizes
+    /// (the first open's rows, before a live read replaced them). Each flag clears when that section's live read lands. A failed live read
+    /// leaves the flag and the rows, so the strip keeps saying where the sizes are from.</summary>
+    private DateTime? _lastSizesAtUtc;
+    private bool _tablesFromLastSizes;
+    private bool _indexesFromLastSizes;
+
     /// <summary>How long after a successful refresh another one that nothing forced is skipped (#8819). The tables read takes seconds on a
     /// large store, and a trigger queued behind a running load starts the moment it ends. The Refresh button is never skipped.</summary>
     internal TimeSpan FreshFor { get; set; } = TimeSpan.FromSeconds(5);
@@ -83,6 +90,11 @@ public partial class StoreHealthTab : UserControl
     internal Func<bool, Task<StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>>>>? TablesRead { get; set; }
     internal Func<bool, Task<StoreIndexHealth>>? IndexesRead { get; set; }
     internal Func<Task<DarlingStoreMaintenanceReadinessReader.StoreMaintenanceReadiness>>? ReadinessRead { get; set; }
+
+    /// <summary>#9374: test seams for the first open's read of the store's last measured sizes and for whether the data service already holds
+    /// a tables read. Null reads through the data service; with no data service, no last sizes are read.</summary>
+    internal Func<Task<StoreLastSizesHealth?>>? LastSizesRead { get; set; }
+    internal Func<bool>? HoldsTablesRead { get; set; }
 
     /// <summary>Test seam for the autovacuum settings read (#8950), which runs beside the tables read and fills the line under the header.
     /// Null reads the store through the data service; with no data service either, the line stays hidden.</summary>
@@ -134,7 +146,15 @@ public partial class StoreHealthTab : UserControl
         try
         {
             ShowRefreshing();
-            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), LoadReadinessAsync(timer));
+            /* #9374: the first open, with nothing on screen and no read held, shows the store's last measured sizes at once and the live read
+               below replaces them. The maintenance check does not wait for the sizes. */
+            var readiness = LoadReadinessAsync(timer);
+            if (!force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false))
+            {
+                await ShowLastSizesAsync(timer);
+            }
+
+            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness);
             if (!StampIfLoaded())
             {
                 ShowStamp();
@@ -163,11 +183,46 @@ public partial class StoreHealthTab : UserControl
 
     /// <summary>The strip beside Refresh while a refresh runs: it keeps the last stamp, so the page is still read against the time it was true.</summary>
     private void ShowRefreshing() =>
-        LastRefreshedIndicator.Text = _lastStamp is null ? "Loading…" : $"Refreshing… (last refreshed {_lastStamp}{CatalogsReadText()})";
+        LastRefreshedIndicator.Text = OnLastSizes() ? LastSizesText() + " A live read is running…"
+            : _lastStamp is null ? "Loading…" : $"Refreshing… (last refreshed {_lastStamp}{CatalogsReadText()})";
 
     /// <summary>The strip beside Refresh when no refresh runs: the last stamp, or nothing before the first.</summary>
     private void ShowStamp() =>
-        LastRefreshedIndicator.Text = _lastStamp is null ? "" : "Last refreshed " + _lastStamp + CatalogsReadText();
+        LastRefreshedIndicator.Text = OnLastSizes() ? LastSizesText() + " The live read failed."
+            : _lastStamp is null ? "" : "Last refreshed " + _lastStamp + CatalogsReadText();
+
+    /// <summary>#9374: whether a section still shows the store's last measured sizes.</summary>
+    private bool OnLastSizes() => _lastSizesAtUtc is not null && (_tablesFromLastSizes || _indexesFromLastSizes);
+
+    /// <summary>#9374: what the strip says while the rows on screen are the store's last measured sizes, with when they were measured.</summary>
+    private string LastSizesText() =>
+        "Sizes are from the store's last measurement, taken " + ViewerTimeHelper.RefreshedStamp(_lastSizesAtUtc!.Value, ViewerTimeHelper.CurrentDisplayMode) + ".";
+
+    /// <summary>#9374: reads the store's last measured sizes and puts their rows on screen, with the strip saying so. Returns false, and
+    /// leaves the screen alone, when the store has none to give (the live read then runs as it always did).</summary>
+    private async Task<bool> ShowLastSizesAsync(ViewerLoadTimer timer)
+    {
+        var read = LastSizesRead?.Invoke() ?? _dataService?.GetStoreLastSizesHealthAsync();
+        if (read is null)
+        {
+            return false;
+        }
+
+        var last = await ViewerServerTab.Timed(timer, "store last sizes read", read);
+        if (last is null)
+        {
+            return false;
+        }
+
+        ShowTables(last.Tables.Rows);
+        ShowIndexes(last.Indexes);
+        _lastSizesAtUtc = last.MeasuredAtUtc;
+        _tablesFromLastSizes = true;
+        _indexesFromLastSizes = true;
+        timer.NotePhase("store last sizes read", StoreHealthRows.LastSizesNote(last.Tables.Rows.Count, last.MeasuredAtUtc, DateTime.UtcNow));
+        ShowRefreshing();
+        return true;
+    }
 
     /// <summary>What follows the stamp: when the store answered the tables and indexes on screen, the older of the two. The rows are held
     /// between store reads, so this time can be minutes before the refresh stamp. A section whose read failed shows no rows, so the time
@@ -249,14 +304,9 @@ public partial class StoreHealthTab : UserControl
             timer.NotePhase("store tables read", StoreHealthRows.ReadNote(read.Rows.Count, read.ReadAtUtc, startedUtc, DateTime.UtcNow));
             if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
 
-            var selected = (TablesDataGrid.SelectedItem as StoreTableRow)?.Table;
-            var rows = StoreHealthRows.Tables(read.Rows);
-            TablesDataGrid.ItemsSource = rows;
-            TablesDataGrid.SelectedItem = selected is null ? null : rows.Find(r => r.Table == selected);
-            HeaderText.Text = StoreHealthRows.HeaderText(read.Rows);
+            ShowTables(read.Rows);
             _tablesReadAtUtc = read.ReadAtUtc;
-            TablesMessage.Text = "The store has no tables to show.";
-            TablesMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _tablesFromLastSizes = false;
             _tablesLoaded = true;
         }
         catch (Exception ex)
@@ -265,12 +315,17 @@ public partial class StoreHealthTab : UserControl
 
             _tablesLoaded = false;
             _tablesReadAtUtc = null;
-            TablesDataGrid.ItemsSource = null;
-            HeaderText.Text = "The store tables failed to load.";
             /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
             var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
-            TablesMessage.Text = text;
-            TablesMessage.Visibility = Visibility.Visible;
+            if (!_tablesFromLastSizes)
+            {
+                /* #9374: rows that are the store's last measured sizes stay when the live read fails, and the strip keeps saying so. */
+                TablesDataGrid.ItemsSource = null;
+                HeaderText.Text = "The store tables failed to load.";
+                TablesMessage.Text = text;
+                TablesMessage.Visibility = Visibility.Visible;
+            }
+
             StatusChanged?.Invoke(text);
         }
 
@@ -286,6 +341,36 @@ public partial class StoreHealthTab : UserControl
         }
 
         UpdateMeasureButton();
+    }
+
+    /// <summary>Puts <paramref name="tableRows"/> in the tables grid and the header, keeping the selected table.</summary>
+    private void ShowTables(IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow> tableRows)
+    {
+        var selected = (TablesDataGrid.SelectedItem as StoreTableRow)?.Table;
+        var rows = StoreHealthRows.Tables(tableRows);
+        TablesDataGrid.ItemsSource = rows;
+        TablesDataGrid.SelectedItem = selected is null ? null : rows.Find(r => r.Table == selected);
+        HeaderText.Text = StoreHealthRows.HeaderText(tableRows);
+        TablesMessage.Text = "The store has no tables to show.";
+        TablesMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Puts the index rows and the coverage rows of <paramref name="read"/> on screen.</summary>
+    private void ShowIndexes(StoreIndexHealth read)
+    {
+        var indexRows = StoreHealthRows.Indexes(read.Indexes);
+        IndexesDataGrid.ItemsSource = indexRows;
+        IndexHeaderText.Text = StoreHealthRows.IndexHeaderText(read.Indexes);
+        IndexesMessage.Text = "The store has no indexes to show.";
+        IndexesMessage.Visibility = indexRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        var coverageRows = StoreHealthRows.CoverageRows(read.Coverage);
+        CoverageDataGrid.ItemsSource = coverageRows;
+        CoverageDataGrid.Visibility = coverageRows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        CoverageMessage.Text = read.CoverageLeftOutNote is null
+            ? "No partitioned tables in the store have indexes to check."
+            : "The partition index coverage was left out. " + read.CoverageLeftOutNote;
+        CoverageMessage.Visibility = coverageRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async Task LoadIndexesAsync(ViewerLoadTimer timer, bool fresh)
@@ -315,20 +400,9 @@ public partial class StoreHealthTab : UserControl
             }
             if (_loads.Superseded(nameof(LoadIndexesAsync), gen)) return;
 
-            var indexRows = StoreHealthRows.Indexes(read.Indexes);
-            IndexesDataGrid.ItemsSource = indexRows;
-            IndexHeaderText.Text = StoreHealthRows.IndexHeaderText(read.Indexes);
-            IndexesMessage.Text = "The store has no indexes to show.";
-            IndexesMessage.Visibility = indexRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-
-            var coverageRows = StoreHealthRows.CoverageRows(read.Coverage);
-            CoverageDataGrid.ItemsSource = coverageRows;
-            CoverageDataGrid.Visibility = coverageRows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-            CoverageMessage.Text = read.CoverageLeftOutNote is null
-                ? "No partitioned tables in the store have indexes to check."
-                : "The partition index coverage was left out. " + read.CoverageLeftOutNote;
-            CoverageMessage.Visibility = coverageRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ShowIndexes(read);
             _indexesReadAtUtc = read.ReadAtUtc;
+            _indexesFromLastSizes = false;
             _indexesLoaded = true;
         }
         catch (Exception ex)
@@ -337,16 +411,20 @@ public partial class StoreHealthTab : UserControl
 
             _indexesLoaded = false;
             _indexesReadAtUtc = null;
-            IndexesDataGrid.ItemsSource = null;
-            CoverageDataGrid.ItemsSource = null;
-            CoverageDataGrid.Visibility = Visibility.Collapsed;
-            IndexHeaderText.Text = "The store indexes failed to load.";
             /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
             var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
-            IndexesMessage.Text = text;
-            IndexesMessage.Visibility = Visibility.Visible;
-            CoverageMessage.Text = "Partition index coverage failed to load.";
-            CoverageMessage.Visibility = Visibility.Visible;
+            if (!_indexesFromLastSizes)
+            {
+                IndexesDataGrid.ItemsSource = null;
+                CoverageDataGrid.ItemsSource = null;
+                CoverageDataGrid.Visibility = Visibility.Collapsed;
+                IndexHeaderText.Text = "The store indexes failed to load.";
+                IndexesMessage.Text = text;
+                IndexesMessage.Visibility = Visibility.Visible;
+                CoverageMessage.Text = "Partition index coverage failed to load.";
+                CoverageMessage.Visibility = Visibility.Visible;
+            }
+
             StatusChanged?.Invoke(text);
         }
     }
