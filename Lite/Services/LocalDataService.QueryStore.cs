@@ -188,6 +188,11 @@ ORDER BY bucket";
 
         async Task<List<QueryStoreRow>> ReadAsync(string relation)
         {
+        /* #9195: a window that reaches into the archive reads the view, and the newest-row and text lookups below would scan the archive's files
+           for the page's keys. The archive's newest time is read here, before the connection (a span miss takes the read lock itself). */
+        var archiveNewest = relation == "v_query_store_stats"
+            ? (await GetArchiveSpanAsync("query_store_stats", "collection_time", CancellationToken.None))?.Newest
+            : null;
         using var connection = await OpenConnectionAsync();
 
         /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
@@ -504,10 +509,35 @@ ORDER BY p.page_ord";
            as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
         /* #7256: with the window read from the hot table alone, a candidate's newest row is in the hot table (it has a row in the window,
            and the archive holds nothing that new), so the latest row and its text are read there. */
-        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)), relation,
-            /* #9195: every candidate has a row collected at or after this floor (the ranking's own), so its newest row is too. */
-            startTime.AddDays(-1));
-        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values, relation);
+        var candidateKeys = candidateRows.Select(r => (r.DatabaseName, r.QueryId)).ToList();
+        /* #9195: every candidate has a row collected at or after this floor (the ranking's own), so its newest row is too. */
+        var latestFloor = startTime.AddDays(-1);
+        var latestRows = new Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>();
+        var texts = new Dictionary<(long CollectionId, DateTime CollectionTime), string?>();
+        var remainingKeys = candidateKeys;
+        if (archiveNewest is DateTime newestArchived)
+        {
+            /* #9195: a hot row newer than everything archived is the newest row of its key in the view too, so the keys the hot table answers
+               never open the archive's files, for the row or for its text. A key with no such row (its hot rows are all older than the archive's
+               newest: a backfilled slice stays in the hot table until the next archive pass) takes the view, as before. */
+            var hotRelation = PerformanceMonitorLite.Database.LiteTextDimensions.HotSource("query_store_stats");
+            var hotLatest = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateKeys, hotRelation, latestFloor);
+            var fromHot = hotLatest.Where(kv => kv.Value.CollectionTime > newestArchived).ToDictionary(kv => kv.Key, kv => kv.Value);
+            if (fromHot.Count > 0)
+            {
+                foreach (var kv in fromHot) latestRows[kv.Key] = kv.Value;
+                texts = await ReadQueryStoreTextByRowAsync(connection, serverId, fromHot.Values, hotRelation);
+                remainingKeys = candidateKeys.Where(k => !fromHot.ContainsKey(k)).ToList();
+            }
+        }
+
+        if (remainingKeys.Count > 0)
+        {
+            var viewLatest = await ReadQueryStoreLatestRowsAsync(connection, serverId, remainingKeys, relation, latestFloor);
+            foreach (var kv in viewLatest) latestRows[kv.Key] = kv.Value;
+            foreach (var kv in await ReadQueryStoreTextByRowAsync(connection, serverId, viewLatest.Values, relation)) texts[kv.Key] = kv.Value;
+        }
+
         var items = new List<QueryStoreRow>();
         foreach (var row in candidateRows)
         {
