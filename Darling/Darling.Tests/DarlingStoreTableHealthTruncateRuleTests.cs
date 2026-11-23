@@ -261,7 +261,7 @@ public sealed class DarlingStoreJobCrashLiveTests
             {
                 await sleeping;
             }
-            catch (PostgresException ex) when (ex.SqlState == "57014")
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 /* the cancel we asked for */
             }
