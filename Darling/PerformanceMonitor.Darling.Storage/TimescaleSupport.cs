@@ -7476,7 +7476,7 @@ WITH NO DATA";
                        inside their own migration transaction). On this plain connection that statement is outside any transaction,
                        PostgreSQL ignores it with a warning, and the index build then waits on the refresh's lock with no timeout.
                        The transaction gives it the scope the blocks were written for. */
-                    using var keptIndexes = new NpgsqlCommand(keptIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds }; await keptIndexes.ExecuteNonQueryAsync(cancellationToken);
+                    await ExecuteInTransactionAsync(connection, keptIndexesSql, cancellationToken);
                 }
 
                 /* #9149: the plan cache hourly rollups' covering hash indexes, a catalog read when they are there. */
@@ -14926,12 +14926,13 @@ END $$;";
     /// </summary>
     internal static async Task ExecuteInTransactionAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
     {
-        using (var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds })
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        using (var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
         {
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await Task.CompletedTask;
+        await transaction.CommitAsync(cancellationToken);
     }
 
     /// <summary>Concatenates one <see cref="KeptIndexesSql(string, string)"/> block per kept column on <paramref name="view"/>.</summary>
