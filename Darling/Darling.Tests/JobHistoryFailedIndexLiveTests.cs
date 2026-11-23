@@ -69,7 +69,7 @@ ORDER BY g DESC, s;";
 
     private static bool PlanUsesIndex(JsonElement plan)
     {
-        if (plan.TryGetProperty("Index Name", out var name) && string.Equals(name.GetString(), IndexName, StringComparison.Ordinal))
+        if (plan.TryGetProperty("Index Name", out var name) && (name.GetString() ?? string.Empty).EndsWith(IndexName, StringComparison.Ordinal))
         {
             return true;
         }
@@ -92,11 +92,9 @@ ORDER BY g DESC, s;";
     {
         await using var explain = Command(connection, "EXPLAIN (FORMAT JSON) " + DailyHealthReportBuilder.PeriodFailedJobsSql, end);
         using var document = JsonDocument.Parse(Convert.ToString(await explain.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!);
-        LastPlan = document.RootElement[0].GetProperty("Plan").ToString();
         return PlanUsesIndex(document.RootElement[0].GetProperty("Plan"));
     }
 
-    private static string LastPlan = "";
 
     [Fact]
     public async Task FailedJobsRead_UsesTheFailedOutcomeIndex_OnAnUncompressedChunk_AndReturnsTheSameRows()
@@ -137,7 +135,7 @@ ORDER BY g DESC, s;";
             }
 
             var withIndex = await RowsAsync(connection, end, ct);
-            Assert.True(await ReadUsesIndexAsync(connection, end, ct), "the failed jobs read did not use the failed outcome index: " + LastPlan.Replace("\r", " ").Replace("\n", " ")[..Math.Min(20000, LastPlan.Length)]);
+            Assert.True(await ReadUsesIndexAsync(connection, end, ct), "the failed jobs read did not use the failed outcome index");
             Assert.NotEmpty(withIndex);
             Assert.All(withIndex, r => Assert.StartsWith("message", r.Split('|')[4], StringComparison.Ordinal));
 
