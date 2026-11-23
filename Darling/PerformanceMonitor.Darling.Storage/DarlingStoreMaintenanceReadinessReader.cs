@@ -236,7 +236,7 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         foreach (var job in crashes.Crashing)
         {
             reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"The background job {job.ProcName}{(job.HypertableName is null ? string.Empty : " on " + job.HypertableName)} (job {job.JobId}) has crashed {CountText.Plural(job.ConsecutiveCrashes, "time")} in a row.{(crashes.RunningNote is null ? string.Empty : " The store could not say whether it is running, so this may be the start of a run that is going normally.")}"));
+                $"The background job {job.ProcName}{(job.HypertableName is null ? string.Empty : " on " + job.HypertableName)} (job {job.JobId}) has crashed {CountText.Plural(job.ConsecutiveCrashes, "time")} in a row."));
         }
 
         var safe = reasons.Count == 0;

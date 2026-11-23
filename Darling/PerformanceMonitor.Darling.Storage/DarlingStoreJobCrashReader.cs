@@ -30,31 +30,25 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingStoreJobCrashReader
 {
-    /// <summary>The read. One row per job TimescaleDB has run at least once (a job that never ran has no stat row).</summary>
+    /// <summary>
+    /// The read. One row per job TimescaleDB has run at least once (a job that never ran has no stat row).
+    ///
+    /// <para><c>running</c> is true when a backend in this database carries the job's <c>application_name</c> (#9391). It is not read from
+    /// <c>timescaledb_information.job_stats</c>: that view matches the job's backend in <c>pg_stat_activity</c> on <c>state</c>, a column
+    /// PostgreSQL hides from a role that is neither a member of the backend's role nor of <c>pg_read_all_stats</c>, and the store's
+    /// <c>mcp</c> and <c>viewer</c> roles are neither, so for them the view never says a job runs. <c>datid</c> and <c>application_name</c>
+    /// are shown to every role, and a TimescaleDB job worker sets its <c>application_name</c> to the job's <c>jobs.application_name</c>.</para>
+    /// </summary>
     public const string Sql = @"
 SELECT s.job_id, j.proc_name, j.hypertable_name, s.consecutive_crashes, s.total_crashes, s.consecutive_failures,
        CASE WHEN pg_catalog.isfinite(s.next_start) THEN s.next_start END AS next_start,
        (s.next_start = '-infinity' AND s.consecutive_crashes > 0) AS crash_backoff,
-       COALESCE(js.job_status = 'Running', false) AS running
-FROM _timescaledb_internal.bgw_job_stat AS s
-JOIN timescaledb_information.jobs AS j USING (job_id)
-LEFT JOIN timescaledb_information.job_stats AS js ON js.job_id = s.job_id";
-
-    /// <summary>
-    /// The same read without the running flag (#9391), for a store whose <c>job_stats</c> view cannot be read. Every job then reads as
-    /// not running, so a job in the middle of a run shows the one provisional crash TimescaleDB adds when a run starts.
-    /// </summary>
-    public const string SqlWithoutRunning = @"
-SELECT s.job_id, j.proc_name, j.hypertable_name, s.consecutive_crashes, s.total_crashes, s.consecutive_failures,
-       CASE WHEN pg_catalog.isfinite(s.next_start) THEN s.next_start END AS next_start,
-       (s.next_start = '-infinity' AND s.consecutive_crashes > 0) AS crash_backoff,
-       false AS running
+       EXISTS (SELECT 1
+               FROM pg_catalog.pg_stat_activity AS a
+               WHERE a.datid = (SELECT d.oid FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
+               AND   a.application_name = j.application_name) AS running
 FROM _timescaledb_internal.bgw_job_stat AS s
 JOIN timescaledb_information.jobs AS j USING (job_id)";
-
-    /// <summary>What a read says when it could not tell which jobs are running (#9391).</summary>
-    public const string RunningUnknownNote =
-        "could not tell which jobs are running, so a job in the middle of a run may show one crash that is not real";
 
     /// <summary>One job's crash counters (<see cref="Sql"/>).</summary>
     /// <param name="JobId">TimescaleDB's job id.</param>
@@ -95,9 +89,7 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// <param name="Available">True when the counters were read (a store without TimescaleDB reads as available with no jobs).</param>
     /// <param name="UnavailableReason">Why they could not be read, one sentence with the SQLSTATE, null when <paramref name="Available"/>.</param>
     /// <param name="Jobs">One row per job, most crashes first. Empty when not available.</param>
-    /// <param name="RunningNote">Set (to <see cref="RunningUnknownNote"/>) when the counters were read but the running state was not, so
-    /// the counts are the stored ones. Null on a normal read.</param>
-    public sealed record StoreJobCrashRead(bool Available, string? UnavailableReason, IReadOnlyList<StoreJobCrash> Jobs, string? RunningNote = null)
+    public sealed record StoreJobCrashRead(bool Available, string? UnavailableReason, IReadOnlyList<StoreJobCrash> Jobs)
     {
         /// <summary>The jobs whose consecutive crash count is above zero.</summary>
         public IEnumerable<StoreJobCrash> Crashing
@@ -115,10 +107,10 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
         }
     }
 
-    private static async Task<IReadOnlyList<StoreJobCrash>> ReadJobsAsync(NpgsqlDataSource postgres, string sql, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<StoreJobCrash>> ReadJobsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var jobs = new List<StoreJobCrash>();
-        await using var command = postgres.CreateCommand(sql);
+        await using var command = postgres.CreateCommand(Sql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -167,16 +159,7 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
                 }
             }
 
-            try
-            {
-                return new StoreJobCrashRead(true, null, await ReadJobsAsync(postgres, Sql, cancellationToken));
-            }
-            catch (PostgresException ex) when (ex.SqlState is "42P01" or "42703" or "42501" or "3F000" or "42883")
-            {
-                /* job_stats is the only new part of the read (#9391). When it cannot be read, fall back to the stored counters and say
-                   so. A failure again here is the counters themselves being unreadable: the catch below says "not available". */
-                return new StoreJobCrashRead(true, null, await ReadJobsAsync(postgres, SqlWithoutRunning, cancellationToken), RunningUnknownNote);
-            }
+            return new StoreJobCrashRead(true, null, await ReadJobsAsync(postgres, cancellationToken));
         }
         catch (PostgresException ex) when (ex.SqlState is "42P01" or "42703" or "42501" or "3F000" or "42883")
         {

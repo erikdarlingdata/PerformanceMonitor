@@ -160,7 +160,9 @@ public sealed class DarlingStoreJobCrashLiveTests
     /// <summary>
     /// A running job carries one provisional crash (#9391): TimescaleDB adds it when the run starts and takes it back when the run
     /// finishes. The read must not call that a crash while the job has a live backend, and must still call a job that died mid-run
-    /// (the same stored shape, no backend) crashed.
+    /// (the same stored shape, no backend) crashed. It must say so to a role that is not a member of the worker's role and not in
+    /// <c>pg_read_all_stats</c> too, as the <c>mcp</c> and <c>viewer</c> roles are: PostgreSQL hides <c>state</c> from such a role, and
+    /// <c>timescaledb_information.job_stats</c> reads <c>state</c>.
     /// </summary>
     [Fact]
     public async Task ARunningJob_ReadsOneCrashLess_AndNotInBackoff_WhileADeadJobWithTheSameRowStaysCrashed()
@@ -199,14 +201,20 @@ public sealed class DarlingStoreJobCrashLiveTests
             await write.ExecuteNonQueryAsync(ct);
         }
 
-        var dead = await DarlingStoreJobCrashReader.ReadAsync(dataSource, ct);
-        Assert.True(dead.Available, dead.UnavailableReason);
-        Assert.Null(dead.RunningNote);
-        var deadJob = Assert.Single(dead.Jobs, j => j.JobId == jobId);
-        Assert.False(deadJob.Running);
-        Assert.Equal(1, deadJob.ConsecutiveCrashes);
-        Assert.Equal(1, deadJob.TotalCrashes);
-        Assert.True(deadJob.CrashBackoff);
+        var plainRole = await CreatePlainRoleAsync(connection, scratch, ct);
+        await using var plainSource = NpgsqlDataSource.Create(plainRole.ConnectionString);
+        try
+        {
+        foreach (var source in new[] { dataSource, plainSource })
+        {
+            var dead = await DarlingStoreJobCrashReader.ReadAsync(source, ct);
+            Assert.True(dead.Available, dead.UnavailableReason);
+            var deadJob = Assert.Single(dead.Jobs, j => j.JobId == jobId);
+            Assert.False(deadJob.Running);
+            Assert.Equal(1, deadJob.ConsecutiveCrashes);
+            Assert.Equal(1, deadJob.TotalCrashes);
+            Assert.True(deadJob.CrashBackoff);
+        }
 
         /* A live backend that answers to the job's application name and is active is what job_stats calls Running. */
         await using var worker = new NpgsqlConnection(scratch.ConnectionString);
@@ -238,15 +246,27 @@ public sealed class DarlingStoreJobCrashLiveTests
             while (!active && DateTime.UtcNow < deadline);
             Assert.True(active, "the stand-in worker never showed as active");
 
-            var running = await DarlingStoreJobCrashReader.ReadAsync(dataSource, ct);
-            Assert.True(running.Available, running.UnavailableReason);
-            Assert.Null(running.RunningNote);
-            var runningJob = Assert.Single(running.Jobs, j => j.JobId == jobId);
-            Assert.True(runningJob.Running);
-            Assert.Equal(0, runningJob.ConsecutiveCrashes);
-            Assert.Equal(0, runningJob.TotalCrashes);
-            Assert.False(runningJob.CrashBackoff);
-            Assert.DoesNotContain(running.Crashing, j => j.JobId == jobId);
+            /* The precondition of the plain-role read: this role cannot see the worker's state, only its datid and application_name. */
+            await using (var hidden = plainSource.CreateCommand(
+                "SELECT state, application_name FROM pg_catalog.pg_stat_activity WHERE application_name = $1 AND pid <> pg_catalog.pg_backend_pid()"))
+            {
+                hidden.Parameters.AddWithValue(applicationName);
+                await using var seen = await hidden.ExecuteReaderAsync(ct);
+                Assert.True(await seen.ReadAsync(ct), "the plain role should see the worker's row, with the columns PostgreSQL shows to every role");
+                Assert.True(seen.IsDBNull(0), "the plain role must not see the worker's state, or this test does not stand in for mcp and viewer");
+            }
+
+            foreach (var source in new[] { dataSource, plainSource })
+            {
+                var running = await DarlingStoreJobCrashReader.ReadAsync(source, ct);
+                Assert.True(running.Available, running.UnavailableReason);
+                var runningJob = Assert.Single(running.Jobs, j => j.JobId == jobId);
+                Assert.True(runningJob.Running);
+                Assert.Equal(0, runningJob.ConsecutiveCrashes);
+                Assert.Equal(0, runningJob.TotalCrashes);
+                Assert.False(runningJob.CrashBackoff);
+                Assert.DoesNotContain(running.Crashing, j => j.JobId == jobId);
+            }
 
             using var readiness = JsonDocument.Parse(await DarlingMcpStoreMaintenanceReadinessTools.GetStoreMaintenanceReadiness(dataSource, ct));
             Assert.DoesNotContain(
@@ -268,6 +288,96 @@ public sealed class DarlingStoreJobCrashLiveTests
         }
 
         Assert.True(bodySucceeded);
+        }
+        finally
+        {
+            await DropPlainRoleAsync(connection, plainRole);
+        }
+    }
+
+    /// <summary>
+    /// The same read against a real TimescaleDB job worker, as a role that cannot see its state (#9391). The stand-in above takes the
+    /// job's application name from <c>jobs.application_name</c>: this one proves a worker really carries that name.
+    /// </summary>
+    [Fact]
+    public async Task ARealJobWorker_ReadsAsRunning_ToARoleThatCannotSeeItsState()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9391 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        await using (var make = new NpgsqlCommand(
+            "CREATE PROCEDURE public.sleep_9391(job_id int, config jsonb) LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(60); END $$", connection))
+        {
+            await make.ExecuteNonQueryAsync(ct);
+        }
+
+        int jobId;
+        await using (var add = new NpgsqlCommand("SELECT add_job('public.sleep_9391', '1 hour', initial_start => now())", connection))
+        {
+            jobId = (int)(await add.ExecuteScalarAsync(ct))!;
+        }
+
+        var plainRole = await CreatePlainRoleAsync(connection, scratch, ct);
+        await using var plainSource = NpgsqlDataSource.Create(plainRole.ConnectionString);
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(60);
+            DarlingStoreJobCrashReader.StoreJobCrash? job = null;
+            while (DateTime.UtcNow < deadline)
+            {
+                var read = await DarlingStoreJobCrashReader.ReadAsync(plainSource, ct);
+                Assert.True(read.Available, read.UnavailableReason);
+                job = read.Jobs.SingleOrDefault(j => j.JobId == jobId);
+                if (job is { Running: true })
+                {
+                    break;
+                }
+
+                await Task.Delay(500, ct);
+            }
+
+            Assert.NotNull(job);
+            Assert.True(job.Running, "the job's worker never read as running to the plain role");
+            Assert.Equal(0, job.ConsecutiveCrashes);
+            Assert.False(job.CrashBackoff);
+        }
+        finally
+        {
+            await using (var stop = new NpgsqlCommand(
+                "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE application_name = $1", connection))
+            {
+                stop.Parameters.AddWithValue("User-Defined Action [" + jobId.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]");
+                await stop.ExecuteNonQueryAsync(System.Threading.CancellationToken.None);
+            }
+
+            await DropPlainRoleAsync(connection, plainRole);
+        }
+    }
+
+    /// <summary>A role that is not the store owner, not a member of any other role and not in <c>pg_read_all_stats</c>: it may only connect.</summary>
+    private static async Task<(string Name, string ConnectionString)> CreatePlainRoleAsync(NpgsqlConnection owner, ScratchPostgres scratch, System.Threading.CancellationToken ct)
+    {
+        var name = "plain9391_" + Guid.NewGuid().ToString("N")[..8];
+        await using (var create = new NpgsqlCommand(
+            $"CREATE ROLE {name} LOGIN PASSWORD 'Plain9391Pw'; GRANT CONNECT ON DATABASE \"{scratch.DatabaseName}\" TO {name};", owner))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = name, Password = "Plain9391Pw" };
+        return (name, builder.ConnectionString);
+    }
+
+    private static async Task DropPlainRoleAsync(NpgsqlConnection owner, (string Name, string ConnectionString) role)
+    {
+        NpgsqlConnection.ClearAllPools();
+        await using var drop = new NpgsqlCommand($"DROP OWNED BY {role.Name}; DROP ROLE IF EXISTS {role.Name};", owner);
+        await drop.ExecuteNonQueryAsync(System.Threading.CancellationToken.None);
     }
 
     [Theory]

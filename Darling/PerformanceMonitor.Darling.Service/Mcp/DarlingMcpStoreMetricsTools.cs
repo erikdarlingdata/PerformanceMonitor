@@ -578,7 +578,7 @@ public sealed class DarlingMcpStoreMetricsTools
                    over the window, and the background jobs ranked failing-first then by cadence. */
                 fastest_growing = fastestGrowing,
                 background_jobs = backgroundJobs,
-                job_crash_read = crashRead is null ? null : crashRead.Available ? crashRead.RunningNote is { } note ? "live, but " + note : "live" : crashRead.UnavailableReason,
+                job_crash_read = crashRead is null ? null : crashRead.Available ? "live" : crashRead.UnavailableReason,
                 note = ViewNote(view, kind, name, ranked.Count, page.Count, truncated, limit, series?.Count),
             }, McpHelpers.JsonOptions);
         }
