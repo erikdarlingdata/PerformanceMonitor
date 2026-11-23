@@ -100,17 +100,14 @@ public static class ObjectUsageChainBuilder
             collection_time
         """;
 
-    /// <summary>The pair's newest snapshots row: its watermark and the version it was built under. $1 server_id, $2 database_name. One probe of the primary key.</summary>
+    /// <summary>The pair's watermark and the oldest step version in its snapshots rows (null, null when it has none). $1 server_id, $2 database_name. Reads the primary key's range of one pair.</summary>
     private const string LastSnapshotSql = """
         SELECT
-            collection_time,
-            step_version
+            max(collection_time),
+            min(step_version)
         FROM collect.object_usage_snapshots
         WHERE server_id = $1
         AND   database_name = $2
-        ORDER BY
-            collection_time DESC
-        LIMIT 1
         """;
 
     /// <summary>One raw row after the watermark, if there is any. $1 server_id, $2 database_name, $3 the watermark.</summary>
@@ -424,7 +421,8 @@ public static class ObjectUsageChainBuilder
         command.Parameters.Add(Param(NpgsqlDbType.Integer, serverId));
         command.Parameters.Add(Param(NpgsqlDbType.Text, databaseName));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) ? (reader.GetDateTime(0), reader.GetInt16(1)) : null;
+        await reader.ReadAsync(cancellationToken);
+        return reader.IsDBNull(0) ? null : (reader.GetDateTime(0), reader.GetInt16(1));
     }
 
     private static async Task<bool> HasRawAfterAsync(
