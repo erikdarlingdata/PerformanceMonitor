@@ -60,7 +60,7 @@ SELECT (SELECT string_agg(c.relname || '.' || a.attname || ':' || format_type(a.
 
             await RungRewindArtifacts.DropSentinelsAboveAsync(connection, ObjectUsageChain.Version - 1, ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ObjectUsageChain.Version.ToString(CultureInfo.InvariantCulture), ct);
-            Assert.Null(await ScalarAsync(connection, "SELECT to_regclass('collect.object_usage_snapshots')", ct));
+            Assert.Null(await ScalarAsync(connection, "SELECT to_regclass('collect.object_usage_snapshots')::text", ct));
 
             await PgMigrations.MigrateAsync(connection, ct);
 
