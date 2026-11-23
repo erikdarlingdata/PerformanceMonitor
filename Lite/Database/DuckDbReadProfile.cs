@@ -202,6 +202,7 @@ internal static class DuckDbReadProfile
         /// <summary>Profiling off on the connection, the file named on the current trail, and the read's older files pruned.</summary>
         internal void End()
         {
+            TryDisable(_connection);
             DuckDbProfileTrail.Add(Path.GetFileName(_path));
             try
             {
