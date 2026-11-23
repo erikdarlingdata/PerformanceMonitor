@@ -72,6 +72,8 @@ public static class ViewerLogger
 
     public static void Warn(string source, string message) => Log("WARN", source, message);
 
+    public static void Debug(string source, string message) => Log("DEBUG", source, message);
+
     public static void Error(string source, string message, Exception? ex = null)
     {
         if (ex is not null)

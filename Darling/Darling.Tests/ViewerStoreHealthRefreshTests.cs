@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -513,5 +514,182 @@ public sealed class ViewerStoreHealthRefreshTests
         {
             ViewerTimeHelper.CurrentDisplayMode = previous;
         }
+    }
+
+    /* #9374: the first open from the store's last measured sizes. */
+
+    private static readonly DateTime SizesMeasured = new(2026, 11, 14, 9, 30, 0, DateTimeKind.Utc);
+
+    private static string MeasuredStamp() => ViewerTimeHelper.RefreshedStamp(SizesMeasured, ViewerTimeHelper.CurrentDisplayMode);
+
+    /// <summary>The store's last measured sizes as the data service answers them: two tables (the live read answers one) and one index.</summary>
+    private static StoreLastSizesHealth LastSizes(ScriptedReads reads) =>
+        new(
+            new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>([TableRow("store_things"), TableRow("old_things")], reads.ReadAt),
+            new StoreIndexHealth([IndexRow("ix_last")], [], ReadAtUtc: reads.ReadAt),
+            SizesMeasured);
+
+    private static async Task UntilAsync(Func<bool> condition)
+    {
+        for (var i = 0; i < 300 && !condition(); i++)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.True(condition());
+    }
+
+    [Fact]
+    public void TheFirstOpen_ShowsTheLastMeasuredSizesAtOnce_ThenSwapsInTheLiveRows_KeepingTheSelection()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var lastCalls = 0;
+            tab.LastSizesRead = () => { lastCalls++; return Task.FromResult<StoreLastSizesHealth?>(LastSizes(reads)); };
+            reads.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => tab.TablesDataGrid.Items.Count == 2);
+
+            /* The live read is held at its gate: what is on screen is the store's last measurement, and the strip says so. */
+            Assert.Equal(1, lastCalls);
+            Assert.Single(tab.IndexesDataGrid.Items);
+            Assert.Equal(
+                "Sizes are from the store's last measurement, taken " + MeasuredStamp() + ". A live read is running…",
+                tab.LastRefreshedIndicator.Text);
+            var before = tab.TablesDataGrid.Items.Cast<StoreTableRow>().First(r => r.Table.Contains("store_things", StringComparison.Ordinal));
+            tab.TablesDataGrid.SelectedItem = before;
+
+            reads.Gate.SetResult();
+            await refresh;
+
+            Assert.Equal(1, reads.Tables);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("last measurement", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+            Assert.Equal("ix_things", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
+            Assert.Equal(1, lastCalls);
+            /* The live rows are new objects, and the table that was selected is still the selected one. */
+            var after = Assert.IsType<StoreTableRow>(tab.TablesDataGrid.SelectedItem);
+            Assert.Equal(before.Table, after.Table);
+            Assert.NotSame(before, after);
+        });
+    }
+
+    [Fact]
+    public void TheFirstOpen_WithNoLastSizes_RunsOneLiveRead_AsItAlwaysDid()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var lastCalls = 0;
+            tab.LastSizesRead = () => { lastCalls++; return Task.FromResult<StoreLastSizesHealth?>(null); };
+
+            await tab.RefreshAsync();
+
+            Assert.Equal(1, lastCalls);
+            Assert.Equal((1, 1), (reads.Tables, reads.Indexes));
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void ARefreshClickedDuringTheLiveRead_StartsNoSecondRead_AndTheLiveRowsLand()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            tab.LastSizesRead = () => Task.FromResult<StoreLastSizesHealth?>(LastSizes(reads));
+            reads.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => tab.TablesDataGrid.Items.Count == 2 && reads.Tables == 1);
+
+            /* The running refresh answers the click, so the last measured rows are not replaced by a stale live read. */
+            await tab.RefreshAsync(force: true);
+            Assert.Equal(1, reads.Tables);
+
+            reads.Gate.SetResult();
+            await refresh;
+            Assert.Equal(1, reads.Tables);
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void AFailedLiveRead_KeepsTheLastMeasuredRowsAndText_ReportsTheFailure_AndALaterRefreshReplacesThem()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var status = new List<string>();
+            tab.StatusChanged += status.Add;
+            tab.LastSizesRead = () => Task.FromResult<StoreLastSizesHealth?>(LastSizes(reads));
+            tab.FreshFor = TimeSpan.Zero;
+            reads.FailTables = true;
+
+            await tab.RefreshAsync();
+
+            Assert.Equal(2, tab.TablesDataGrid.Items.Count);
+            Assert.Equal(
+                "Sizes are from the store's last measurement, taken " + MeasuredStamp() + ". The live read failed.",
+                tab.LastRefreshedIndicator.Text);
+            Assert.Contains("The store tables did not load.", status);
+            Assert.DoesNotContain(status, m => m.StartsWith("store health: refreshed", StringComparison.Ordinal));
+
+            /* The refresh the timer runs next reads live again: the last measured rows are not read again, and the live rows replace them. */
+            reads.FailTables = false;
+            await tab.RefreshAsync();
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void AReopenWithAHeldRead_SkipsTheLastMeasuredSizes_AndSoDoesARefreshOfLoadedRows()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var lastCalls = 0;
+            tab.LastSizesRead = () => { lastCalls++; return Task.FromResult<StoreLastSizesHealth?>(LastSizes(reads)); };
+            tab.FreshFor = TimeSpan.Zero;
+            var held = true;
+            tab.HoldsTablesRead = () => held;
+
+            await tab.RefreshAsync();
+            Assert.Equal(0, lastCalls);
+            Assert.Equal(1, reads.Tables);
+
+            /* Nothing held, but rows are on screen from the first load: the timer's refresh does not go back to the last measured sizes. */
+            held = false;
+            await tab.RefreshAsync();
+            Assert.Equal(0, lastCalls);
+            Assert.Equal(2, reads.Tables);
+        });
+    }
+
+    [Fact]
+    public void TheFirstOpensSlowLoadLine_NamesTheStoresLastMeasurementAndItsAge()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var lines = new List<string>();
+            tab.SlowLoadSink = lines.Add;
+            tab.SlowLoadThresholdMs = 0;
+            tab.LastSizesRead = () => Task.FromResult<StoreLastSizesHealth?>(LastSizes(reads));
+
+            await tab.RefreshAsync();
+
+            var line = Assert.Single(lines);
+            Assert.Contains("store last sizes read", line, StringComparison.Ordinal);
+            Assert.Contains("sized 2 relations, from the store's last measurement taken ", line, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void TheLastSizesNote_SaysHowOldTheMeasurementIs()
+    {
+        var now = new DateTime(2026, 11, 15, 12, 0, 0, DateTimeKind.Utc);
+        Assert.Equal("sized 1 relation, from the store's last measurement taken 45 s ago", StoreHealthRows.LastSizesNote(1, now.AddSeconds(-45), now));
+        Assert.Equal("sized 3 relations, from the store's last measurement taken 2 min 5 s ago", StoreHealthRows.LastSizesNote(3, now.AddSeconds(-125), now));
+        Assert.Equal("sized 3 relations, from the store's last measurement taken 26 h 30 min ago", StoreHealthRows.LastSizesNote(3, now.AddMinutes(-1590), now));
     }
 }
