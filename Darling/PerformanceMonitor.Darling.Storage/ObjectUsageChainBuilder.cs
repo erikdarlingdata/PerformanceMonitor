@@ -309,7 +309,7 @@ public static class ObjectUsageChainBuilder
         }
 
         /* A step whose node is new to the chain writes no delta rows: every window holding it recomputes it from the raw rows. */
-        var deltas = node.ComparedWith is null ? new List<ObjectUsageIndexStep>() : step.Indexes.FindAll(i => i.Moved);
+        var deltas = node.ComparedWith is null ? new List<ObjectUsageIndexStep>() : step.Indexes.FindAll(i => i.Moved && !i.Whole);
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await ExecuteAsync(
@@ -429,7 +429,7 @@ public static class ObjectUsageChainBuilder
             kv.Key,
             kv.Value.Time,
             kv.Value.KeptStart,
-            byTime.TryGetValue(kv.Value.Time, out var counters) ? counters : new Dictionary<(int ObjectId, int IndexId), ObjectUsageCounters>()));
+            false ? default! : new Dictionary<(int ObjectId, int IndexId), ObjectUsageCounters>()));
         stepper.Nodes.Restore(nodes, chain[^1].NodeKey, server, chain[0].Time, chain[^1].Time);
     }
 
