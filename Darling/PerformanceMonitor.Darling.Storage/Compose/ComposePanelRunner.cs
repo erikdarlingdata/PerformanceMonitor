@@ -190,9 +190,7 @@ internal static class ComposePanelRunner
     /// and both become this marker: a stalled send of the query (the write timeout is the command's
     /// <c>CommandTimeout</c>), and a pooled connection whose peer went away, whose first I/O happens inside
     /// <c>ExecuteReaderAsync</c>. A failure to open the connection never becomes this marker (see
-    /// <see cref="ComposeStoreOpenException"/>). One limit: with <c>Multiplexing=true</c> in a bring-your-own
-    /// store connection string, a connect failure surfaces from <c>ExecuteReaderAsync</c> and becomes this
-    /// marker; the managed store's connection string does not set it (Npgsql's default is off).</summary>
+    /// <see cref="ComposeStoreOpenException"/>).</summary>
     internal sealed class ComposeStatementClientTimeoutException : Exception
     {
         internal ComposeStatementClientTimeoutException(NpgsqlException inner)
