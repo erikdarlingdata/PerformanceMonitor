@@ -9275,6 +9275,35 @@ AND   j.hypertable_name = '{relation}'";
         RawTierCoverage.Select(t => t.Relation).ToArray();
 
     /// <summary>
+    /// The raw relations (<see cref="RawRelations"/>) that are hypertables in this database: the ones only the gated raw purge drops, at
+    /// <see cref="RawRetentionSpan"/>. Empty when the timescaledb extension is not created here, so a store without it has no hypertable. One
+    /// catalog read, shared by the retention sweep's probe and the clutter rollups' unstamp.
+    /// </summary>
+    public static async Task<IReadOnlySet<string>> ReadRawHypertablesAsync(NpgsqlConnection connection, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var hypertables = new HashSet<string>(StringComparer.Ordinal);
+        if (!await DetectAsync(connection, cancellationToken))
+        {
+            return hypertables;
+        }
+
+        await using var command = new NpgsqlCommand(
+            "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = ANY($1)",
+            connection) { CommandTimeout = timeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = RawRelations.ToArray() });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            hypertables.Add(reader.GetString(0));
+        }
+
+        return hypertables;
+    }
+
+    /// <summary>
     /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
     /// arming is safe (#1680). The rule this list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED
     /// YET. Iterated by <see cref="EnsureRetentionPoliciesAsync"/>, which used to build it as a local.
@@ -10494,11 +10523,19 @@ AND   j.hypertable_name = '{relation}'";
     /// <summary>Which <c>compress_after</c> <paramref name="view"/> takes, decided by its refresh tier — the
     /// hourly one for every hourly-refreshed aggregate (including the baselines), the daily one for the
     /// daily tier. A daily-parented daily's refresh window is a bucket wider (#6070), so its
-    /// <c>compress_after</c> is a bucket longer: the same <c>start_offset + margin</c> rule.</summary>
+    /// <c>compress_after</c> is a bucket longer: the same <c>start_offset + margin</c> rule.
+    ///
+    /// <para>One hourly is held to the daily window instead (#8570): <see cref="QueryStatsIntervalHourlyView"/>
+    /// is the source the daily re-reads for its whole <see cref="DailyRefreshStartSpan"/>, and the fleet summary's
+    /// plan-cache mid route reads the same days. At the hourly tier's 2 days, two of those days were compressed,
+    /// so the read decompressed whole chunks. At the daily's own span every day of that window is an uncompressed
+    /// index-only scan. Only this view moves, and the Query Store twin keeps the hourly tier's window.</para></summary>
     public static TimeSpan AggregateCompressAfterSpanFor(string view)
-        => AggregateCompressionTargetFor(view).Hourly
-            ? HourlyAggregateCompressAfterSpan
-            : DailyRefreshStartSpanFor(view) + AggregateCompressMarginSpan;
+        => string.Equals(view, QueryStatsIntervalHourlyView, StringComparison.Ordinal)
+            ? DailyAggregateCompressAfterSpan
+            : AggregateCompressionTargetFor(view).Hourly
+                ? HourlyAggregateCompressAfterSpan
+                : DailyRefreshStartSpanFor(view) + AggregateCompressMarginSpan;
 
     /// <summary>The INTERVAL literal of <see cref="AggregateCompressAfterSpanFor"/>.</summary>
     public static string AggregateCompressAfterFor(string view)
@@ -10869,7 +10906,7 @@ LEFT JOIN eligible AS e
 
     /// <summary>
     /// Applies the size rows of <see cref="AggregateCompressionSizeSql"/> to the aggregates about to be staged (#6648).
-    /// The tier picks the chunk count: an hourly target takes <c>EligibleHourly</c>, a daily or baseline one
+    /// The window picks the chunk count: a target on the hourly window takes <c>EligibleHourly</c>, any other
     /// <c>EligibleDaily</c>. A view the rows do not name is returned as unread and is NOT in the sized list: its
     /// 0 bytes and 0 eligible chunks mean "not read", and staging them would read as "nothing eligible, night zero is
     /// harmless" and put a full backlog on night zero, the thing #3581 staged against. That is what a failed read does
@@ -10892,7 +10929,7 @@ LEFT JOIN eligible AS e
                 sized.Add(state with
                 {
                     MaterializationBytes = size.Bytes,
-                    EligibleChunksNow = AggregateCompressionTargetFor(state.View).Hourly ? size.EligibleHourly : size.EligibleDaily,
+                    EligibleChunksNow = AggregateCompressAfterSpanFor(state.View) == HourlyAggregateCompressAfterSpan ? size.EligibleHourly : size.EligibleDaily,
                 });
             }
             else
@@ -11712,11 +11749,13 @@ ORDER BY i.index_name";
         }
 
         var inPlace = states.Values.Count(s => s.JobId is not null) + added;
-        var hourlyTier = AggregateCompressionTargets.Where(t => t.Hourly).Select(t => t.View).ToArray();
+        var hourlyTier = AggregateCompressionTargets.Where(t => t.Hourly && AggregateCompressAfterFor(t.View) == HourlyAggregateCompressAfter).Select(t => t.View).ToArray();
         /* #6070: a daily-parented daily compresses a bucket later than the rest of the tier (its refresh window is
            a bucket wider), so it is named with its own window rather than folded into the tier's. */
-        var dailyTier = AggregateCompressionTargets.Where(t => !t.Hourly)
-            .Select(t => AggregateCompressAfterFor(t.View) == DailyAggregateCompressAfter ? t.View : $"{t.View} at {AggregateCompressAfterFor(t.View)}")
+        var dailyTier = AggregateCompressionTargets.Where(t => !t.Hourly || AggregateCompressAfterFor(t.View) != HourlyAggregateCompressAfter)
+            .Select(t => AggregateCompressAfterFor(t.View) == DailyAggregateCompressAfter
+                ? (t.Hourly ? $"{t.View}, an hourly held to the daily window" : t.View)
+                : $"{t.View} at {AggregateCompressAfterFor(t.View)}")
             .ToArray();
 
         /* EVERY aggregate is named with its window, and the windows are interpolated rather than restated

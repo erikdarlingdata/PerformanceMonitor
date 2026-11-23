@@ -206,6 +206,9 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
     /// <summary>
     /// Each server's volumes at its newest disk snapshot inside the period (the same per-mount-point shape the Low Disk Space alert
     /// reads), so a day with no snapshot reports no disk section rather than a volume from before the period.
+    /// The outer read repeats the period bounds (#8570): a joined row's time equals <c>newest</c>'s, which is already inside the
+    /// period, so no row changes, but the bound lets the planner leave out every chunk wholly outside the period instead of
+    /// hashing them all.
     /// </summary>
     internal const string PeriodVolumesSql = @"
 WITH newest AS (
@@ -223,7 +226,9 @@ SELECT
     MAX(d.collection_time) AS newest_collection_time
 FROM database_size_stats AS d
 JOIN newest AS n ON n.server_id = d.server_id AND n.collection_time = d.collection_time
-WHERE " + VolumeKey.Sql + @" IS NOT NULL
+WHERE d.collection_time >= $1
+AND   d.collection_time <= $2
+AND   " + VolumeKey.Sql + @" IS NOT NULL
 AND   d.volume_total_mb > 0
 GROUP BY d.server_id, " + VolumeKey.Sql + @"";
 
