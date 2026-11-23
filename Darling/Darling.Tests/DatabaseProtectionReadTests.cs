@@ -203,8 +203,6 @@ public sealed class DatabaseProtectionBandsTests
     [Theory]
     [InlineData("model")]
     [InlineData("master")]
-    [InlineData("MODEL")]
-    [InlineData("Master")]
     public void ASystemDatabasesMissingLogBackup_IsNotExpected_AndNotOverdue(string name)
     {
         var band = DatabaseProtectionBands.Evaluate(NoLogBackup(name), Now, Limits);
@@ -242,6 +240,10 @@ public sealed class DatabaseProtectionBandsTests
     [InlineData("Model_Archive")]
     [InlineData("model2")]
     [InlineData("tempmodel")]
+    [InlineData("Model")]
+    [InlineData("MODEL")]
+    [InlineData("Master")]
+    [InlineData("MASTER")]
     public void MsdbAndUserDatabases_AreStillJudgedOnTheirLogBackup(string name)
     {
         var band = DatabaseProtectionBands.Evaluate(NoLogBackup(name), Now, Limits);

@@ -151,10 +151,11 @@ public static class DatabaseProtectionBands
     public const string DetailSystemDatabase = "system database: log backups are not needed";
 
     /// <summary>#9376: <c>master</c> cannot take a log backup (SQL Server allows only full backups of it) and nothing writes to <c>model</c>, which is only the
-    /// template for new databases. Their names cannot be changed. msdb and every user database, whatever its name, are judged.</summary>
+    /// template for new databases. Their names cannot be changed and sys.databases always spells them in lowercase, so the match is exact: on a case-sensitive server a user database named
+    /// <c>Model</c> or <c>MASTER</c> is still judged. msdb and every other user database are judged.</summary>
     internal static bool IsLogBackupExempt(string? databaseName) =>
-        string.Equals(databaseName, "master", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(databaseName, "model", StringComparison.OrdinalIgnoreCase);
+        string.Equals(databaseName, "master", StringComparison.Ordinal)
+        || string.Equals(databaseName, "model", StringComparison.Ordinal);
 
     /// <summary>The log fact: banded as any backup, except that a late or missing log backup of <c>master</c> or <c>model</c> reads <c>not_expected</c> with a
     /// detail, whatever the recovery model (#9376). The full backup and CHECKDB of both are judged as before.</summary>
