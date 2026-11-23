@@ -95,7 +95,7 @@ public sealed class DarlingMcpStoreMaintenanceReadinessTools
                 }),
                 job_crashes = new
                 {
-                    read = r.JobCrashes.Available ? "available" : r.JobCrashes.UnavailableReason,
+                    read = r.JobCrashes.Available ? r.JobCrashes.RunningNote is { } note ? "available, but " + note : "available" : r.JobCrashes.UnavailableReason,
                     jobs = r.JobCrashes.Crashing.Select(j => new
                     {
                         job_id = j.JobId,

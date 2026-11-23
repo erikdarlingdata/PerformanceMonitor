@@ -156,6 +156,137 @@ public sealed class DarlingStoreJobCrashLiveTests
         Assert.True(crashed.GetProperty("crash_backoff").GetBoolean());
         Assert.DoesNotContain("0001-01-01", readiness.RootElement.GetRawText(), StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A running job carries one provisional crash (#9391): TimescaleDB adds it when the run starts and takes it back when the run
+    /// finishes. The read must not call that a crash while the job has a live backend, and must still call a job that died mid-run
+    /// (the same stored shape, no backend) crashed.
+    /// </summary>
+    [Fact]
+    public async Task ARunningJob_ReadsOneCrashLess_AndNotInBackoff_WhileADeadJobWithTheSameRowStaysCrashed()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9391 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        int jobId;
+        string applicationName;
+        await using (var pick = new NpgsqlCommand("SELECT job_id, application_name FROM timescaledb_information.jobs ORDER BY job_id LIMIT 1", connection))
+        await using (var picked = await pick.ExecuteReaderAsync(ct))
+        {
+            Assert.True(await picked.ReadAsync(ct));
+            jobId = picked.GetInt32(0);
+            applicationName = picked.GetString(1);
+        }
+
+        /* The shape TimescaleDB writes when a run starts: one crash counted, last_finish and next_start at -infinity. */
+        await using (var write = new NpgsqlCommand(
+            "INSERT INTO _timescaledb_internal.bgw_job_stat (job_id, last_start, last_finish, next_start, last_successful_finish, last_run_success, total_runs, total_duration, total_duration_failures, total_successes, total_failures, total_crashes, consecutive_failures, consecutive_crashes, flags) "
+            + "VALUES ($1, now(), '-infinity', '-infinity', now(), false, 3, '0', '0', 0, 0, 1, 0, 1, 0) "
+            + "ON CONFLICT (job_id) DO UPDATE SET last_finish = '-infinity', next_start = '-infinity', consecutive_crashes = 1, total_crashes = 1", connection))
+        {
+            write.Parameters.AddWithValue(jobId);
+            await write.ExecuteNonQueryAsync(ct);
+        }
+
+        var dead = await DarlingStoreJobCrashReader.ReadAsync(dataSource, ct);
+        Assert.True(dead.Available, dead.UnavailableReason);
+        Assert.Null(dead.RunningNote);
+        var deadJob = Assert.Single(dead.Jobs, j => j.JobId == jobId);
+        Assert.False(deadJob.Running);
+        Assert.Equal(1, deadJob.ConsecutiveCrashes);
+        Assert.Equal(1, deadJob.TotalCrashes);
+        Assert.True(deadJob.CrashBackoff);
+
+        /* A live backend that answers to the job's application name and is active is what job_stats calls Running. */
+        await using var worker = new NpgsqlConnection(scratch.ConnectionString);
+        await worker.OpenAsync(ct);
+        await using (var name = new NpgsqlCommand("SELECT pg_catalog.set_config('application_name', $1, false)", worker))
+        {
+            name.Parameters.AddWithValue(applicationName);
+            await name.ExecuteScalarAsync(ct);
+        }
+
+        await using var sleep = new NpgsqlCommand("SELECT pg_catalog.pg_sleep(60)", worker);
+        var sleeping = sleep.ExecuteNonQueryAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            bool active;
+            do
+            {
+                await using var look = new NpgsqlCommand(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name = $1 AND state = 'active' AND pid <> pg_catalog.pg_backend_pid())", connection);
+                look.Parameters.AddWithValue(applicationName);
+                active = (bool)(await look.ExecuteScalarAsync(ct))!;
+                if (!active)
+                {
+                    await Task.Delay(100, ct);
+                }
+            }
+            while (!active && DateTime.UtcNow < deadline);
+            Assert.True(active, "the stand-in worker never showed as active");
+
+            var running = await DarlingStoreJobCrashReader.ReadAsync(dataSource, ct);
+            Assert.True(running.Available, running.UnavailableReason);
+            Assert.Null(running.RunningNote);
+            var runningJob = Assert.Single(running.Jobs, j => j.JobId == jobId);
+            Assert.True(runningJob.Running);
+            Assert.Equal(0, runningJob.ConsecutiveCrashes);
+            Assert.Equal(0, runningJob.TotalCrashes);
+            Assert.False(runningJob.CrashBackoff);
+            Assert.DoesNotContain(running.Crashing, j => j.JobId == jobId);
+
+            using var readiness = JsonDocument.Parse(await DarlingMcpStoreMaintenanceReadinessTools.GetStoreMaintenanceReadiness(dataSource, ct));
+            Assert.DoesNotContain(
+                readiness.RootElement.GetProperty("job_crashes").GetProperty("jobs").EnumerateArray(),
+                j => j.GetProperty("job_id").GetInt32() == jobId);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            sleep.Cancel();
+            try
+            {
+                await sleeping;
+            }
+            catch (PostgresException ex) when (ex.SqlState == "57014")
+            {
+                /* the cancel we asked for */
+            }
+        }
+
+        Assert.True(bodySucceeded);
+    }
+
+    [Theory]
+    [InlineData(1, 1, true, 0, 0, false)]
+    [InlineData(3, 7, true, 2, 6, false)]
+    [InlineData(0, 0, true, 0, 0, false)]
+    [InlineData(1, 1, false, 1, 1, true)]
+    public void Adjust_TakesTheProvisionalCrashOutOfARunningJob_AndLeavesAStoppedOneAlone(
+        int consecutive, long total, bool running, int expectedConsecutive, long expectedTotal, bool expectedBackoff)
+    {
+        var stored = new DarlingStoreJobCrashReader.StoreJobCrash(7, "policy_x", null, consecutive, total, 0, null, CrashBackoff: consecutive > 0);
+
+        var adjusted = DarlingStoreJobCrashReader.Adjust(stored, running);
+
+        Assert.Equal(expectedConsecutive, adjusted.ConsecutiveCrashes);
+        Assert.Equal(expectedTotal, adjusted.TotalCrashes);
+        Assert.Equal(expectedBackoff, adjusted.CrashBackoff);
+        Assert.Equal(running, adjusted.Running);
+    }
 }
 
 /// <summary>Measure reads <c>vacuum_truncate</c> in every spelling and judges by the shared rule (#8787).</summary>

@@ -578,7 +578,7 @@ public sealed class DarlingMcpStoreMetricsTools
                    over the window, and the background jobs ranked failing-first then by cadence. */
                 fastest_growing = fastestGrowing,
                 background_jobs = backgroundJobs,
-                job_crash_read = crashRead is null ? null : crashRead.Available ? "live" : crashRead.UnavailableReason,
+                job_crash_read = crashRead is null ? null : crashRead.Available ? crashRead.RunningNote is { } note ? "live, but " + note : "live" : crashRead.UnavailableReason,
                 note = ViewNote(view, kind, name, ranked.Count, page.Count, truncated, limit, series?.Count),
             }, McpHelpers.JsonOptions);
         }
@@ -652,6 +652,8 @@ public sealed class DarlingMcpStoreMetricsTools
                 total_crashes = CrashFor(r, crashesByJob)?.TotalCrashes,
                 next_start = CrashFor(r, crashesByJob)?.NextStart?.ToString("o", CultureInfo.InvariantCulture),
                 crash_backoff = CrashFor(r, crashesByJob)?.CrashBackoff,
+                /* #9391: true while the job has a live backend. Its crash counts then leave out the provisional crash its start added. */
+                running = CrashFor(r, crashesByJob)?.Running,
             };
         }
 

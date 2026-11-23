@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// of WAL, and an abandoned slot keeps all of it. The slot check covers the whole server, not this database, because any slot holds WAL
 /// for the cluster. An active slot, or a small one, is listed and is not a reason.</item>
 /// <item><b>A TimescaleDB background job crashing</b> (<see cref="DarlingStoreJobCrashReader"/>, <c>consecutive_crashes</c> above
-/// zero): a crashed job backs off, and maintenance on top of it hides whether the cause was the maintenance.</item>
+/// zero, not counting the provisional crash a running job carries, #9391): a crashed job backs off, and maintenance on top of it hides whether the cause was the maintenance.</item>
 /// <item><b>A check that could not run</b> (a refused read), named, never counted as clear.</item>
 /// </list>
 ///
@@ -236,7 +236,7 @@ SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'),
         foreach (var job in crashes.Crashing)
         {
             reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"The background job {job.ProcName}{(job.HypertableName is null ? string.Empty : " on " + job.HypertableName)} (job {job.JobId}) has crashed {CountText.Plural(job.ConsecutiveCrashes, "time")} in a row."));
+                $"The background job {job.ProcName}{(job.HypertableName is null ? string.Empty : " on " + job.HypertableName)} (job {job.JobId}) has crashed {CountText.Plural(job.ConsecutiveCrashes, "time")} in a row.{(crashes.RunningNote is null ? string.Empty : " The store could not say whether it is running, so this may be the start of a run that is going normally.")}"));
         }
 
         var safe = reasons.Count == 0;
