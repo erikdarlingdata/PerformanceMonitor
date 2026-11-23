@@ -85,6 +85,12 @@ internal static class ComposeHybridColumns
         ["delta_elapsed_time"] = "elapsed_time",
         ["delta_execution_count"] = "execution_count",
     };
+
+    /// <summary>The sources whose hourly-raw-edges FROM item carries the raw restart-rows arm. <c>procedure_stats</c> does not (#9357):
+    /// see <c>ComposeCompiler.HourlyRawEdgesRelation</c> for why a restart row can add no value there.</summary>
+    private static readonly HashSet<string> s_restartRowArmSources = new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+
+    public static bool ReadsRestartRows(string source) => s_restartRowArmSources.Contains(source);
 }
 
 /// <summary>A window the hourly-raw-edges route could serve: the source, its interval-honest hourly successor,
