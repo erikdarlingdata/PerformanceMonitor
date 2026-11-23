@@ -213,7 +213,7 @@ internal static class StartupFailureTriage
     /// <para><b>Why an attempt cap alone is not a bound, measured rather than assumed.</b> An attempt is
     /// not instantaneous just because a refused connect is: a peer instance holding the migration advisory
     /// lock makes <c>PgMigrations.MigrateAsync</c> BLOCK inside <c>pg_advisory_lock</c> for as long as
-    /// <c>MigrationLockWaitTimeoutSeconds</c> allows, which is 2100 s. Observed against a live store: a
+    /// <c>MigrationLockWaitTimeoutSeconds</c> allows, which is 2400 s. Observed against a live store: a
     /// second session took that lock and the service waited 38 s inside a SINGLE attempt, silently, and
     /// never retried — correct behaviour, and exactly the shape that makes an attempt cap misleading.
     /// Twenty-five attempts each free to block for 35 minutes is over fourteen hours of retrying, which is not

@@ -161,14 +161,13 @@ public sealed class DarlingAlertReadAdapterTests
     {
         var sql = DarlingAlertReadAdapter.PoisonWaitsSql;
 
-        Assert.DoesNotContain("delta_waiting_tasks > 0", sql);
         Assert.DoesNotContain("LIMIT", sql);
         Assert.DoesNotContain("avg_ms_per_wait", sql);
 
         Assert.Contains("SUM(delta_wait_time_ms)::bigint AS accumulated_wait_ms", sql);
         Assert.Contains("SUM(delta_waiting_tasks)::bigint AS accumulated_waits", sql);
         Assert.Contains("COUNT(*)::bigint AS observed_intervals", sql);
-        Assert.Contains("MAX(collection_time) AS newest_collection_time", sql);
+        Assert.Contains("AS newest_collection_time", sql);
         Assert.Contains("GROUP BY wait_type", sql);
         /* No interval handling: the V128 lane owns sample_interval_seconds and rebases onto this text. */
         Assert.DoesNotContain("sample_interval", sql);
@@ -177,6 +176,63 @@ public sealed class DarlingAlertReadAdapterTests
         foreach (var waitType in PoisonWaitEvaluator.SqlServerWaitTypes)
         {
             Assert.Contains($"'{waitType}'", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #9338: the freshness marker the engine's same-evidence guard compares is the newest row that added wait. The collector keeps
+    /// writing (0, 0) rows after a spike, and the marker used to follow them, so one spike re-fired at every cooldown. Live: a spike
+    /// then two zero rows leaves the marker on the spike while the interval count still grows (the clear arm needs it), and a later row
+    /// with a new delta moves the marker.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWaitsRead_NewestCollectionTime_IgnoresZeroRows_AndFollowsANewDelta_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live poison wait marker test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -717172;
+        var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
+        const string insertSql = "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        using (var clean = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {serverId}", connection))
+        {
+            await clean.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        try
+        {
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var spike = now.AddMinutes(-4);
+
+            await InsertAsync(connection, insertSql, 1L, spike, serverId, "poison-marker", "THREADPOOL", 12L, 8_131_000L);
+            await InsertAsync(connection, insertSql, 2L, now.AddMinutes(-3), serverId, "poison-marker", "THREADPOOL", 0L, 0L);
+            await InsertAsync(connection, insertSql, 3L, now.AddMinutes(-2), serverId, "poison-marker", "THREADPOOL", 0L, 0L);
+
+            var afterZeroRows = Assert.Single(await adapter.GetPoisonWaitAccumulationAsync(serverKey, PoisonWaitEvaluator.WindowMinutes, ct));
+            Assert.Equal(8_131_000L, afterZeroRows.AccumulatedWaitMs);
+            Assert.Equal(3L, afterZeroRows.ObservedIntervals);
+            Assert.Equal(spike.Ticks / 10, afterZeroRows.NewestCollectionTime.Ticks / 10);
+
+            var newDelta = now.AddMinutes(-1);
+            await InsertAsync(connection, insertSql, 4L, newDelta, serverId, "poison-marker", "THREADPOOL", 0L, 250L);
+
+            var afterNewDelta = Assert.Single(await adapter.GetPoisonWaitAccumulationAsync(serverKey, PoisonWaitEvaluator.WindowMinutes, ct));
+            Assert.Equal(4L, afterNewDelta.ObservedIntervals);
+            Assert.Equal(newDelta.Ticks / 10, afterNewDelta.NewestCollectionTime.Ticks / 10);
+        }
+        finally
+        {
+            using var clean = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {serverId}", connection);
+            await clean.ExecuteNonQueryAsync(System.Threading.CancellationToken.None);
         }
     }
 

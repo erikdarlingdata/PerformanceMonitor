@@ -628,6 +628,15 @@ public sealed partial class DarlingCollectorRunner
            at procedure_stats that is not the catalog's ProcedureStatsCollector (an import or backfill) writes its totals too. */
         var totalsBatch = string.Equals(definition.TargetTable, ProcedureStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
 
+        /* #9357: a procedure_stats batch also adds its non-restart row count to the procedure hour ledger (V300), tallied and written exactly
+           as the query_stats ledger above is: the writer's tally of the value sent into sample_interval_seconds, one upsert on the COPY's own
+           transaction. Chosen by the table this COPY writes, so an import or backfill aimed at procedure_stats is counted too, or fails loudly. */
+        var procedureLedgerBatch = totalsBatch; /* the same table test, so the transaction the totals already open is the ledger's too */
+        if (procedureLedgerBatch)
+        {
+            writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
+        }
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -756,6 +765,11 @@ public sealed partial class DarlingCollectorRunner
                         QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
                     }
 
+                    if (procedureLedgerBatch)
+                    {
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
+                    }
+
                     await importer.CompleteAsync(cancellationToken);
                 }
             }
@@ -848,6 +862,16 @@ public sealed partial class DarlingCollectorRunner
                         writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
                 }
 
+                /* #9357: the procedure_stats batch's count joins its own hourly ledger on THIS transaction, with the query_stats ledger's contract:
+                   after the COPY, before the commit, no savepoint and no catch, so a fault rolls the batch back and a rolled-back COPY leaves no
+                   ledger change. A count of 0 writes nothing. */
+                if (procedureLedgerBatch)
+                {
+                    await QueryStatsHourLedgerWriter.AddProcedureStatsBatchAsync(
+                        pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
+                        writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
                 /* #9147: the collection's per-database summary (QueryStatsCollectionSummary, V286), read back from the rows the store now holds
                    for this collection_time and set, on THIS transaction right after the ledger and with its failure behaviour: no savepoint and
                    no catch, so a fault throws out of the batch, the transaction rolls back and the rows are not stored, because rows the summary
@@ -936,6 +960,14 @@ public sealed partial class DarlingCollectorRunner
                         pgConnection, transaction, server.ServerId, storedCollectionTime,
                         rows.OfType<QueryStoreCollector.Row>().Select(static r => new QueryStoreWatermarks.BatchRow(r.DatabaseName, r.QueryId, r.PlanId, r.LastExecutionTime)),
                         ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
+                }
+
+                /* #9359: the caller's own writes (the Query Store backfill's state for this slice) join THIS transaction, so the rows and
+                   the state commit together or not at all. No savepoint and no catch, deliberately: a fault throws out of the batch, the
+                   transaction rolls back with the COPY in it, and the next pass walks the slice from a clean store. */
+                if (context.StoreTransactionWrite is { } transactionWrite)
+                {
+                    await transactionWrite(pgConnection, transaction, cancellationToken);
                 }
 
                 commitSent = true;

@@ -25,8 +25,8 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.1.0",
-        "contentHash": "7a4eOI65Mn4dzc9kmRiI+y3EiS80NCMnu/j3ZR9H2dyO3d597eVPVV+ClzSFXnQkA0r8n2iig+Vg/Q/mozh5MQ==",
+        "resolved": "4.1.1.2",
+        "contentHash": "RETCWprYHiCwwL6mgLnhCF/w7gwpHaGVIKU+Th+xDs0yzs2b7rgz09nicLT5+k0qm7OJxze6fqiU4ZdmC3tu5A==",
         "dependencies": {
           "AWSSDK.Extensions.Numerics": "[4.1.0, 5.0.0)",
           "System.IO.Hashing": "11.0.0"
@@ -34,10 +34,10 @@
       },
       "AWSSDK.Extensions.CborProtocol": {
         "type": "Transitive",
-        "resolved": "4.1.0",
-        "contentHash": "9+fPrnpO+cESoGzHIO3feMoQttZ8RB/DFy3ZtF6jR4LvyQ0jqHl8P4Id2o9rQWcFyuxpbrElUEQWh4Fm5uCizA==",
+        "resolved": "4.1.0.2",
+        "contentHash": "gyRY7PIeChytcB090K1t6gIQUfrvnH2as4x2K0Ki99j8b5QqRrg9M06JHa9R+tP9jyyJzAEcLEKLAttNP7qlgg==",
         "dependencies": {
-          "AWSSDK.Core": "4.1.0",
+          "AWSSDK.Core": "4.1.1.1",
           "System.Formats.Cbor": "11.0.0"
         }
       },
@@ -218,8 +218,8 @@
       },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.15",
-        "contentHash": "KczR2nV7ooeimtZxAawPht/FJUHnX+uoWy7y4pba+iaRQBwUM2NwtiqZg+/FpZDHUf2RkkzveGkhMTWDNzmDUA=="
+        "resolved": "11.0.0",
+        "contentHash": "a2c4Kp55miXT6G+DSb75pczXQJHgNMzPyZEyMxrrKxuQrgvctcDWJWD9fVe/uGbQdu4Z0c3B7AVKp1DXmD64nQ=="
       },
       "Microsoft.Extensions.Diagnostics": {
         "type": "Transitive",
@@ -657,6 +657,11 @@
           "System.Memory.Data": "10.0.1"
         }
       },
+      "System.Diagnostics.DiagnosticSource": {
+        "type": "Transitive",
+        "resolved": "11.0.0",
+        "contentHash": "+boRR9uSKiIPtFeRLGwO5xylhDF80xpwM+dmk5jgIqqeUKLbujGkGICMTKqQrBzKO6fIp8BU8DV6YZkQukqo3A=="
+      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Transitive",
         "resolved": "8.16.0",
@@ -773,7 +778,7 @@
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.140.0, )",
+          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.154.0, )",
           "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
@@ -787,7 +792,7 @@
         "type": "Project",
         "dependencies": {
           "CredentialManagement": "[1.0.2, )",
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.15, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
           "ModelContextProtocol": "[2.4.0, )"
         }
       },
@@ -809,8 +814,8 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.2, )",
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.15, )",
-          "Npgsql": "[10.0.3, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
+          "Npgsql": "[11.0.0, )",
           "PerformanceMonitor.Common": "[3.13.0, )",
           "PerformanceMonitor.Darling.Storage": "[3.13.0, )"
         }
@@ -818,9 +823,9 @@
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.PI": "[4.1.0, )",
-          "AWSSDK.RDS": "[4.1.0, )",
-          "AWSSDK.SecurityToken": "[4.1.0, )",
+          "AWSSDK.PI": "[4.1.0.2, )",
+          "AWSSDK.RDS": "[4.1.1.1, )",
+          "AWSSDK.SecurityToken": "[4.1.1.1, )",
           "BlackwellSystems.Gcf": "[1.1.0, )",
           "Microsoft.Data.SqlClient": "[7.1.2, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.2, )",
@@ -843,9 +848,9 @@
       "performancemonitor.darling.storage": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.15, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
           "ModelContextProtocol": "[2.4.0, )",
-          "Npgsql": "[10.0.3, )",
+          "Npgsql": "[11.0.0, )",
           "PerformanceMonitor.Alerting": "[3.13.0, )",
           "PerformanceMonitor.Analysis": "[3.13.0, )",
           "PerformanceMonitor.Collectors": "[3.13.0, )",
@@ -875,7 +880,7 @@
       "performancemonitor.notifications": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.15, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
           "PerformanceMonitor.Analysis": "[3.13.0, )"
         }
       },
@@ -896,30 +901,30 @@
       },
       "AWSSDK.PI": {
         "type": "CentralTransitive",
-        "requested": "[4.1.0, )",
-        "resolved": "4.1.0",
-        "contentHash": "vnxIKzPtaZsoZ1N5IlkYt45LqoiwCxXOMZaCIV+BWozAQpgL7I7dxXd34deBNnqPPZglAhXw+nNg4lOV4zkatg==",
+        "requested": "[4.1.0.2, )",
+        "resolved": "4.1.0.2",
+        "contentHash": "ltpcBozKN0C7xdPYsr+noOFYP8BrXdk4C1j8+wFbhaiE+3YxRM9CWeazzThCzdZEE5SkNnvGNiE2i5M4H2bU4Q==",
         "dependencies": {
-          "AWSSDK.Core": "[4.1.0, 5.0.0)",
-          "AWSSDK.Extensions.CborProtocol": "[4.1.0, 5.0.0)"
+          "AWSSDK.Core": "[4.1.1.1, 5.0.0)",
+          "AWSSDK.Extensions.CborProtocol": "[4.1.0.2, 5.0.0)"
         }
       },
       "AWSSDK.RDS": {
         "type": "CentralTransitive",
-        "requested": "[4.1.0, )",
-        "resolved": "4.1.0",
-        "contentHash": "CorcRHPJynGje/yuxNPbMcnifSpDK4hsvjOg5PLbqOEp30KH9RJWd93XatMYUXTXxhdLu51Dof+xHqv6xYo0gQ==",
+        "requested": "[4.1.1.1, )",
+        "resolved": "4.1.1.1",
+        "contentHash": "nQtUQBGWbKDIrgGF6P3WIt1rFuTH3AnVhff6F78C/5bg+ZD5gUNbZfx+qC56MQMGu9fqpZqUxtjdTEtglmxaAw==",
         "dependencies": {
-          "AWSSDK.Core": "[4.1.0, 5.0.0)"
+          "AWSSDK.Core": "[4.1.1.2, 5.0.0)"
         }
       },
       "AWSSDK.SecurityToken": {
         "type": "CentralTransitive",
-        "requested": "[4.1.0, )",
-        "resolved": "4.1.0",
-        "contentHash": "O5/3Qu3K6Ds1x7Cn7XrxqPagqiq+JQ8vSAaLpceH/gBWhLQ0YTr/TxC6WGstdPomDrNGmoeFk7Wg4uFHr8eE3w==",
+        "requested": "[4.1.1.1, )",
+        "resolved": "4.1.1.1",
+        "contentHash": "kPtMCvLbVqG/vwsdXwNlwVTkxNcfIBh9MnXacfv8rrdZaZrbLCxRqdGCdGY2Ccc08ySqkwThMLHKu6jUyA88OA==",
         "dependencies": {
-          "AWSSDK.Core": "[4.1.0, 5.0.0)"
+          "AWSSDK.Core": "[4.1.1.2, 5.0.0)"
         }
       },
       "BlackwellSystems.Gcf": {
@@ -1048,18 +1053,19 @@
       },
       "Microsoft.Extensions.Logging.Abstractions": {
         "type": "CentralTransitive",
-        "requested": "[10.0.15, )",
-        "resolved": "10.0.15",
-        "contentHash": "s5xzXGWqqlmmThMnQ1rnmL7QLwbluB2JqX9NaK8C9HPuHzN7kfmiddTRbwts5rQssATkh2B18RrofjeUD8g14A==",
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "MTMO2V1eT9Dm5VIpJGLNwIjAjoBErUlfuB+DEaZ0tb8J+Nf/Xlj8he5AztK9p1iOJPIyuBeOrVy2u/CSdsfzPw==",
         "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.15"
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "11.0.0",
+          "System.Diagnostics.DiagnosticSource": "11.0.0"
         }
       },
       "Microsoft.SqlServer.TransactSql.ScriptDom": {
         "type": "CentralTransitive",
-        "requested": "[180.140.0, )",
-        "resolved": "180.140.0",
-        "contentHash": "qdSHJPR3t2mqLcYQ31E9hBhQfuHo34jOtMEOrCKHBNuV+IShlLfDR8/tDzXR7MeI2ZhlZ+8wCVRMACifoAepAA=="
+        "requested": "[180.154.0, )",
+        "resolved": "180.154.0",
+        "contentHash": "epYZJ+0ZSx/u1KZwF8e8wfqPO3KS67EijVJi+EgveLuQaU3a4GRNP5R6kOUrGBv8K+kDpAtCcGBjn5c9NwWW6A=="
       },
       "ModelContextProtocol": {
         "type": "CentralTransitive",
@@ -1083,11 +1089,12 @@
       },
       "Npgsql": {
         "type": "CentralTransitive",
-        "requested": "[10.0.3, )",
-        "resolved": "10.0.3",
-        "contentHash": "7nb5YzXuvWWJxB0J8DiyL3we+X4FOctZrt0fIBnucOIaIevFEEwGQVZKtiu9olXdlNAK1eNgqSral6r/jlhI4w==",
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "ozQ8GJcEAiW6XSKz2RUpdJDvM4l380BdHx/MRB7QJHL2cTH/0js7f/cisCaYMrZvVUj4/HIW80UjXxI+ikQQzQ==",
         "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.0"
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "11.0.0",
+          "Microsoft.Extensions.Logging.Abstractions": "11.0.0"
         }
       },
       "ScottPlot.WPF": {

@@ -406,7 +406,20 @@ ORDER BY sample_time";
     /// <summary>The page (time order, oldest first), whether the window held more, and the whole window's counts.</summary>
     public sealed record MemoryPressureEventsPage(
         List<MemoryPressureEventRow> Rows, bool Truncated, long TotalEvents, long MediumOrWorseEvents,
-        IReadOnlyList<MemoryPressureNotificationCount> ByNotification);
+        IReadOnlyList<MemoryPressureNotificationCount> ByNotification, long ShownEvents = 0);
+
+    /// <summary>
+    /// #9337: how many events (one per notification and one-second bucket, the unit the summary query counts in) the page's rows cover.
+    /// Rows can share an event, so the row count is not an event count and set against the window's event total it could exceed it
+    /// and print a negative "left out" figure. The page's rows are a subset of the window's, so this never exceeds the total.
+    /// </summary>
+    public static long CountMemoryPressureEvents(IEnumerable<MemoryPressureEventRow> rows)
+    {
+        var seen = new HashSet<(string, long)>();
+        foreach (var r in rows)
+            seen.Add((r.MemoryNotification, r.SampleTime.Ticks / TimeSpan.TicksPerSecond));
+        return seen.Count;
+    }
 
     /// <summary>
     /// #7516: the newest <paramref name="limit"/> memory pressure events of the window, put back in time order, with the whole
@@ -478,8 +491,8 @@ ORDER BY memory_notification";
             }
         }
 
-        var truncated = fetched.Count > limit;
-        var page = truncated ? fetched.GetRange(0, limit) : fetched;
+        var rowsCut = fetched.Count > limit;
+        var page = rowsCut ? fetched.GetRange(0, limit) : fetched;
         page.Reverse();
         long total = 0, medium = 0;
         foreach (var n in byNotification)
@@ -488,7 +501,9 @@ ORDER BY memory_notification";
             medium += n.MediumOrWorseEvents;
         }
 
-        return new MemoryPressureEventsPage(page, truncated, total, medium, byNotification);
+        var shown = CountMemoryPressureEvents(page);
+        /* #9337: truncated only when an event was left out, in events, the unit the note and the total use. */
+        return new MemoryPressureEventsPage(page, rowsCut && total > shown, total, medium, byNotification, shown);
     }
 
     /// <summary>

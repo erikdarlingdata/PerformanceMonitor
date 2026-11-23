@@ -91,45 +91,55 @@ AND   collection_time <= $5";
     /// <summary>Most (database, query_id) keys one latest-row statement carries; each key is two parameters.</summary>
     internal const int QueryStoreLatestRowKeyChunk = 100;
 
+    /// <summary>Most (database, query_id) keys one <see cref="ReadQueryStoreLatestRowsAsync"/> statement carries, two parameters each (#9195).</summary>
+    internal const int QueryStoreLatestRowStatementKeys = 500;
+
     /// <summary>
     /// For each (database_name, query_id), the key (collection_id, collection_time) of its LATEST <c>v_query_store_stats</c>
     /// row over ALL history, whatever that row's text is: the row the old top-queries lateral picked, found on narrow
     /// columns only and for the named keys only. A key with no row is absent from the result.
+    ///
+    /// <para>#9195: <paramref name="notBefore"/>, when given, is a bound the caller knows every key has a row at or after (the top read's
+    /// candidates all have one at or after the window start less a day), so each key's newest row is at or after it too and the
+    /// answer is the same. It lets the scan skip every Parquet row group older than it, where the unbounded statement read the
+    /// whole archive's key columns. The newest row is one aggregate over the keys' rows, not a window that sorts them, and a top
+    /// read's candidates travel in one statement (<see cref="QueryStoreLatestRowStatementKeys"/>), so the archive is scanned once.</para>
     /// </summary>
     internal static async Task<Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>> ReadQueryStoreLatestRowsAsync(
         LockedConnection connection, int serverId, IEnumerable<(string DatabaseName, long QueryId)> keys,
-        string relation = "v_query_store_stats")
+        string relation = "v_query_store_stats", DateTime? notBefore = null)
     {
         var result = new Dictionary<(string, long), (long, DateTime)>();
         var distinct = keys.Distinct().ToList();
-        for (var i = 0; i < distinct.Count; i += QueryStoreLatestRowKeyChunk)
+        for (var i = 0; i < distinct.Count; i += QueryStoreLatestRowStatementKeys)
         {
-            var slice = distinct.Skip(i).Take(QueryStoreLatestRowKeyChunk).ToList();
+            var slice = distinct.Skip(i).Take(QueryStoreLatestRowStatementKeys).ToList();
             using var command = connection.CreateCommand();
-            /* The key list is parameters, never text: a database name is user data. $1 is the server; key n is ($2n, $2n+1). */
+            /* The key list is parameters, never text: a database name is user data. $1 is the server; key n is ($2n, $2n+1), and the bound follows the last key. */
             /* #7256: the latest row is searched in the relation the caller names, the hot table when the window did not reach the archive. */
             command.CommandText = SwapArchiveView(@"
-SELECT x.database_name, x.query_id, x.collection_id, x.collection_time
-FROM
-(
-    SELECT
-        v.database_name,
-        v.query_id,
-        v.collection_id,
-        v.collection_time,
-        ROW_NUMBER() OVER (PARTITION BY v.database_name, v.query_id ORDER BY v.collection_time DESC, v.collection_id DESC) AS lr
-    FROM v_query_store_stats v
-    INNER JOIN (VALUES " + string.Join(", ", slice.Select((_, n) => $"(CAST(${2 + 2 * n} AS VARCHAR), CAST(${3 + 2 * n} AS BIGINT))")) + @") k(database_name, query_id)
-      ON  k.database_name = v.database_name
-      AND k.query_id = v.query_id
-    WHERE v.server_id = $1
-) x
-WHERE x.lr = 1", "query_store_stats", relation);
+SELECT
+    v.database_name,
+    v.query_id,
+    arg_max(v.collection_id, (v.collection_time, v.collection_id)) AS collection_id,
+    MAX(v.collection_time) AS collection_time
+FROM v_query_store_stats v
+INNER JOIN (VALUES " + string.Join(", ", slice.Select((_, n) => $"(CAST(${2 + 2 * n} AS VARCHAR), CAST(${3 + 2 * n} AS BIGINT))")) + @") k(database_name, query_id)
+  ON  k.database_name = v.database_name
+  AND k.query_id = v.query_id
+WHERE v.server_id = $1" + (notBefore is null ? "" : $@"
+AND   v.collection_time >= ${2 + 2 * slice.Count}") + @"
+GROUP BY v.database_name, v.query_id", "query_store_stats", relation);
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             foreach (var (databaseName, queryId) in slice)
             {
                 command.Parameters.Add(new DuckDBParameter { Value = databaseName });
                 command.Parameters.Add(new DuckDBParameter { Value = queryId });
+            }
+
+            if (notBefore is not null)
+            {
+                command.Parameters.Add(new DuckDBParameter { Value = notBefore.Value });
             }
 
             using var reader = await command.ExecuteReaderAsync();

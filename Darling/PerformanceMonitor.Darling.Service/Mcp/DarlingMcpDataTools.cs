@@ -445,12 +445,14 @@ public sealed class DarlingMcpDataTools
     /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Words in
     /// <see cref="CollectorRunFacts.RanFoundNothing"/>, shared with Lite. Names the database when the read was scoped to one.</summary>
     internal static string? EmptyCollectorRan(
-        CollectorRunFacts facts, string collectorName, int hoursBack, string found, DatabaseFilter databases, bool requireDeltaBaseline = false)
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, DatabaseFilter databases, bool requireDeltaBaseline = false,
+        string? storedRowsExplanation = null)
     {
         var chosen = databases.Describe();
         var scope = chosen is null ? null : chosen == DatabaseFilter.ManyDatabasesDescription ? chosen : $"database '{chosen}'";
-        var message = facts.RanFoundNothing(collectorName, hoursBack, found, scope, requireDeltaBaseline);
-        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
+        var message = facts.RanFoundNothing(collectorName, hoursBack, found, scope, requireDeltaBaseline, storedRowsExplanation);
+        /* #9341: when the runs stored rows, the count beside the run count says what the sentence rests on. */
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow, rows_collected_in_window = facts.RowsCollectedInWindow });
     }
 
     /// <summary>#5633 item 3: the empty-page envelope of the procedure tools, from the collector's own run history. Two cycles only while
@@ -1796,10 +1798,13 @@ public sealed class DarlingMcpDataTools
                     /* #6226: the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. Only when the
                        raw tier answered and the window is inside what it keeps (raw is dropped at RawRetentionSpan on a store with the
                        rollups armed, and collection_log outlives it, so a longer window's runs prove nothing about the dropped part). */
-                    ?? (tablePlan is null && read.DailyDaysUsed == 0 && now - requestedStart <= TimescaleSupport.RawRetentionSpan
+                    /* #9341: the interval table that answered (a database filter has no minimum window, so it asks the gate and often lands
+                       on the table) is a tier of its own: its proven-complete history starts at the plan's read start, so the runs counted
+                       are the ones inside what it reached, and the raw tier's retention test does not apply to it. */
+                    ?? (read.DailyDaysUsed == 0 && (tablePlan is not null || now - requestedStart <= TimescaleSupport.RawRetentionSpan)
                         ? EmptyCollectorRan(
-                            ranFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_store", requestedStart, now, cancellationToken),
-                            "query_store", hours_back, "Query Store intervals", databases)
+                            ranFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_store", tablePlan is null || effectiveStart <= requestedStart ? requestedStart : effectiveStart, now, cancellationToken),
+                            "query_store", hours_back, "Query Store intervals", databases, storedRowsExplanation: McpHelpers.QueryStoreNoIntervalInWindow)
                         : null)
                     ?? McpHelpers.Status(
                         "unavailable",

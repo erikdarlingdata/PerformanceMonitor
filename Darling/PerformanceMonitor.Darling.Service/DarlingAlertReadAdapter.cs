@@ -439,7 +439,8 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// shared alert row's fields (same WHERE / ORDER BY event_time DESC / LIMIT 200 semantics).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
+    /// <remarks>#9340: leaves out a pair whose two sessions are both the monitor's own (the monitor's collectors queued behind each other), so
+    /// it raises no blocking alert. A pair with a user session on either side, or a NULL app name, stays. Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
     /// delivery cursor ("rows collected since the last sweep"). On the event time, a report collected seconds
     /// late, or hours late after an outage, would fall before the window and never alert.</remarks>
     public const string BlockedProcessReportsSql = @"
@@ -458,6 +459,7 @@ FROM blocked_process_reports
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + @"
 ORDER BY event_time DESC
 LIMIT 200";
 
@@ -481,6 +483,7 @@ FROM dmv_blocking_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + @"
 ORDER BY event_time DESC
 LIMIT 200";
 
@@ -745,6 +748,13 @@ LIMIT 50";
     /// "known quiet" claim. Deltas are never negative (the calculator returns 0 on a reset), so no floor is
     /// applied; a defensive one would only hide a calculator regression.</para>
     ///
+    /// <para><b>newest_collection_time (#9338).</b> It is the newest row that ADDED wait (a positive delta in time or
+    /// tasks), not the newest row of any kind. The engine refuses to re-fire on evidence it already fired on by comparing
+    /// this time, and the collector keeps writing (0, 0) rows after a spike. Taken over every row, each zero row looked like
+    /// new evidence, so one spike re-fired at every cooldown while it stayed in the window. A type with no wait in the
+    /// window returns NULL here, which the reader turns into <see cref="DateTime.MinValue"/>; it is under the bar and
+    /// never fires.</para>
+    ///
     /// <para><b>Cost, under the alert pass's 10-second read deadline while the hourly CAGG refresh runs</b>
     /// (#3597: 4–7 minutes on the largest store). Cheap by SHAPE, not by any index the planner may or may not
     /// pick: the WHERE is predicate-identical to the retired read's — one server_id, the three wait_type
@@ -765,7 +775,7 @@ SELECT
     SUM(delta_wait_time_ms)::bigint AS accumulated_wait_ms,
     SUM(delta_waiting_tasks)::bigint AS accumulated_waits,
     COUNT(*)::bigint AS observed_intervals,
-    MAX(collection_time) AS newest_collection_time
+    MAX(collection_time) FILTER (WHERE delta_wait_time_ms > 0 OR delta_waiting_tasks > 0) AS newest_collection_time
 FROM wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')

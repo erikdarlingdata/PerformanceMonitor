@@ -46,6 +46,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **A failed export prints the whole exception** ([#9351]) - The exporter printed only the exception message, and a bare "The operation has timed out" can come from a connection open, a read or an upload. The whole exception now goes to stdout, and the one stderr line gains the exception types.
 - **The threshold override store parses the global threshold row with `JsonElement.Parse`** ([#9076]) - The old form built a `JsonDocument` and never disposed it, and analyzer rule CA2026 failed a downstream Linux build of the exporter tests on that line. Behaviour does not change.
 
 - **The exporter now exports store columns its hand-written reads used to drop, and a test fails when a new store column is left out** ([#9069]) - `query_stats_hourly` and `procedure_stats_hourly` carry each plan's DMV attributes as of the hour's last sample (the per-execution `min_`/`max_` pairs, creation or cached time, handles, statement offsets, lifetime totals, plan size; these are lifetime values since the plan was cached, not the per-sample `worker_time_max` deltas), `pg_statement_stats_hourly` has `database_name`, `query_store_stats` has `interval_end_time_utc`, `pg_statement_text` has `own_entries`, and five other hourly tables gained the columns their rollups left out. Row counts are unchanged.
@@ -7739,3 +7740,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9066]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9066
 [#9069]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9069
 [#9076]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9076
+[#9351]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9351

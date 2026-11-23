@@ -312,12 +312,17 @@ function checkDbCell(r) {
   const tip = f && f.detail ? f.detail : r.replica_readable === false ? "This replica is not readable, so CHECKDB cannot run on it." : null;
   return el("span", { text, title: tip });
 }
+/* #9376: the log backup cell carries the service's sentence as its tooltip, so a system database that expects no log backup says why. */
+function logBackupCell(r) {
+  const f = r.log_backup;
+  return el("span", { text: protectionFactText(f), title: f && f.detail ? f.detail : null });
+}
 const sourceLabel = (f) => (!f || !f.source ? "" : f.source === "error_log" ? "Error log" : "Boot page");
 const DATABASE_PROTECTION_COLUMNS = [
   { key: "database", label: "Database", name: true },
   { key: "state", label: "State", small: true },
   protectionFact("full_backup", "Last full backup"),
-  protectionFact("log_backup", "Last log backup"),
+  { ...protectionFact("log_backup", "Last log backup"), render: logBackupCell },
   { ...protectionFact("checkdb", "Last good CHECKDB"), render: checkDbCell },
   /* #8865: where the CHECKDB time came from (the replica's own error log, or the boot page) and the options its line named. */
   { key: "checkdb_source", label: "CHECKDB source", small: true, hint: "Error log: the replica's own SQL Server error log. Boot page: the database boot page, which every replica of an Availability Group shares." },

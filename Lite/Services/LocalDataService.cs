@@ -65,6 +65,12 @@ public partial class LocalDataService
     internal Action<DuckDBConnection>? ConnectionOpened { get; set; }
 
     /// <summary>
+    /// Test seam (#9195): called once for every command a read connection of this service creates, so a test can count the statements
+    /// a public read issues. Null in the shipped app.
+    /// </summary>
+    internal Action? CommandCreated { get; set; }
+
+    /// <summary>
     /// Creates and opens a DuckDB connection wrapped in a read lock.
     /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
     /// while this connection is reading from it.
@@ -99,7 +105,7 @@ public partial class LocalDataService
                 var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(cancellationToken);
                 ConnectionOpened?.Invoke(connection);
-                return new LockedConnection(connection, readLock);
+                return new LockedConnection(connection, readLock, CommandCreated);
             }
         }
         catch

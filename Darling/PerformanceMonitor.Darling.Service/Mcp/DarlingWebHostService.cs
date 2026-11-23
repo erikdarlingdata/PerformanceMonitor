@@ -218,7 +218,7 @@ public sealed class DarlingWebHostService : BackgroundService
     private CancellationToken _hostStopping = CancellationToken.None;
 
     /* #8737: the revokes a sign-in could not make, drained on the supervisor tick while the web host runs. */
-    private readonly PersonalTokenPendingRevokes _pendingPersonalRevokes = new();
+    private readonly PersonalTokenPendingRevokes _pendingPersonalRevokes;
 
     /// <summary>The sign-in revokes waiting for the store (#8737). A test reads it.</summary>
     internal PersonalTokenPendingRevokes PendingPersonalRevokes => _pendingPersonalRevokes;
@@ -228,6 +228,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// </summary>
     internal async Task DrainPersonalRevokesAsync(PersonalTokenSettings? settings, CancellationToken cancellationToken)
     {
+        _pendingPersonalRevokes.SaveIfDirty();
         if (_personalSnapshot is null || _ownerSource is null)
         {
             return;
@@ -279,6 +280,8 @@ public sealed class DarlingWebHostService : BackgroundService
     {
         _services = services;
         _personalSnapshot = services?.GetService<DarlingPersonalTokenSnapshot>();
+        /* #9325: the process's one queue, the one the snapshot's token check reads; a host built outside the service's DI keeps its own. */
+        _pendingPersonalRevokes = services?.GetService<PersonalTokenPendingRevokes>() ?? new PersonalTokenPendingRevokes();
         _pseudonymKeys = pseudonymKeys;
         _ownerSource = ownerSource;
         _slowReads = slowReads;
@@ -3688,6 +3691,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             await StopServerAsync(cancellationToken);
         }
 
+        _pendingPersonalRevokes.SaveIfDirty();
         await base.StopAsync(cancellationToken);
     }
 }

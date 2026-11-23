@@ -656,6 +656,16 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
     /// <summary>
+    /// V300 (#9357): <c>collect.procedure_stats_hour_ledger</c> and its one-row state table, V164's ledger for
+    /// <c>collect.procedure_stats</c>. The hourly-plus-raw-edges read of a procedure cell compares this ledger with
+    /// <c>collect.procedure_stats_interval_hourly</c> instead of counting raw. The text and the counted population are on
+    /// <see cref="ProcedureStatsHourLedger"/>, which the rung embeds. Both tables are empty when created, and the rung inserts only
+    /// the state row (<c>counted_since</c>, the next whole hour), so an existing store takes the route only once the ledger covers the
+    /// window. No GRANT and no provisioning change, as for V164. The rung is V300 because #9350 took V299.
+    /// </summary>
+    private const string V300Sql = ProcedureStatsHourLedger.CreateSql;
+
+    /// <summary>
     /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
     /// one <c>current</c> row at most), <c>config.password_key_service</c> (what each service host holds and its state),
     /// <c>config.legacy_secret_pin</c> and the one-row <c>config.legacy_secret_pin_marker</c>, seeded <c>pending</c>. The
@@ -3545,6 +3555,42 @@ BEGIN
     ALTER INDEX collect.idx_collection_log_watermark_new RENAME TO idx_collection_log_watermark;
 END $$;";
 
+    /// <summary>
+    /// V298 (#9304): <c>collect.query_text_dim_seen</c> and <c>collect.query_plan_dim_seen</c>, the narrow tables that hold the
+    /// payload dimension tables' liveness stamp (<see cref="PayloadDimensionSeen"/>), so the refresh that runs every collection
+    /// writes a row of about 70 bytes instead of a new copy of a text or plan row (and, for the text, its trigrams). It is V281's
+    /// rung (<see cref="V281Sql"/>) applied to the two dimensions.
+    ///
+    /// <para><b>Order, in the rung's one transaction.</b> The lock timeout. Then, per dimension: the stamp table with no key, the
+    /// statement trigger on the dimension that writes the stamp row of every inserted row, the backfill of the rows stored before
+    /// the rung, the primary key, the foreign key to the dimension row (<c>ON DELETE CASCADE</c>), and the index on the stamp's
+    /// <c>last_seen</c>. Last, the drop of each dimension's own <c>idx_{dim}_last_seen</c>: from the rung's commit the GC
+    /// (<see cref="PayloadDimensions.CursoredDeleteSql"/>) orders by the stamp table's index, so nothing needs the dimension's.
+    /// The dimension's own <c>last_seen</c> column stays, as V281 kept the text row's, for an older build.
+    /// <c>CREATE TRIGGER</c> takes a SHARE ROW EXCLUSIVE lock on the dimension, held to the commit, so a writer of the dimension
+    /// waits for the rung and no insert falls between the trigger and the backfill. The lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V281's.</para>
+    ///
+    /// <para><b>An older build against this store.</b> It keeps stamping and pruning on the dimension row's own <c>last_seen</c>
+    /// and never reads the stamp tables. Its prune has no index to order by, so it scans the dimension. The triggers stay, so the
+    /// rows it inserts get stamp rows, and the cascade removes the stamp rows of the rows it prunes. See
+    /// <see cref="PayloadDimensionSeen.WideRowRefreshHours"/> for what keeps its first prune from retiring live content.</para>
+    /// </summary>
+    private static readonly string V298Sql = PayloadDimensionSeen.RungSql(MigrationCommandTimeoutSeconds - 20);
+
+    /// <summary>
+    /// V299 (#9349): the persisted object usage chain. <c>collect.object_usage_snapshots</c> (one row per snapshot of a database: the chain step's facts),
+    /// <c>collect.object_usage_deltas</c> (one row per index the step contributed to or moved) and <c>collect.object_usage_runs</c> (index presence and
+    /// identity), as <see cref="ObjectUsageChain.CreateSql"/> has them. Created empty, so no data moves and the rung scans nothing. Every statement is
+    /// idempotent. Plain tables here on every store: the service turns the two per-snapshot tables into compressed hypertables on a TimescaleDB store after
+    /// the extension exists (<see cref="TimescaleSupport.EnsureObjectUsageHypertablesAsync"/>), and the retention pass purges them at the horizon of
+    /// <c>index_object_stats</c>, which they derive from. No GRANT: the <c>collect</c> schema's blanket SELECT covers them.
+    ///
+    /// <para><b>An older build against this store.</b> It does not know the tables: it neither reads, fills nor purges them, and every read it makes names
+    /// its own columns. Nothing it reads changes.</para>
+    /// </summary>
+    private const string V299Sql = ObjectUsageChain.CreateSql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3952,6 +3998,16 @@ END $$;";
            upgrade stays fast and the housekeeping tick fills the summary from the days the daily Query Store summary still holds. An older
            build ignores them. */
         new Migration(ObjectReferencesDaily.Version, "object-references", V297Sql),
+        /* V298 (#9304): the payload dimension tables' liveness stamp moves to collect.query_text_dim_seen and collect.query_plan_dim_seen, so the
+           refresh no longer rewrites a text or plan row. Per dimension: the table, the insert trigger, the backfill, the two constraints and the
+           index, then the drop of the dimension's own last_seen index. */
+        new Migration(298, "payload-dimension-seen", V298Sql),
+        /* V299 (#9349): the persisted object usage chain, three tables created empty (snapshots, deltas, runs). The two per-snapshot tables become compressed
+           hypertables on a TimescaleDB store at service start, and are purged with index_object_stats. */
+        new Migration(ObjectUsageChain.Version, "object-usage-chain", V299Sql),
+        /* V300 (#9357): the procedure_stats hour ledger and its state row, V164's pair for the procedure rollup's count guard. An older build
+           ignores both tables. */
+        new Migration(ProcedureStatsHourLedger.RungVersion, "procedure-stats-hour-ledger", V300Sql),
     };
 
     /// <summary>
@@ -11404,6 +11460,17 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     internal const int V293CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
 
     /// <summary>
+    /// V298's command timeout (seconds), #9304: six times the default bound, equal to <see cref="V281CommandTimeoutSeconds"/>, so
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> stays as it is.
+    ///
+    /// <para><b>Why this rung needs its own.</b> V298 is silent for its whole run and has V281's shape for both dimension tables: the backfill reads the
+    /// main heap of each dimension (about 18 GB on the largest store, often read cold), the foreign key validation then reads both sides again, and the
+    /// primary key sorts about 27M digests. The default 300 s bound limits the rung's total time, and a rung that runs out of time rolls back and fails
+    /// the start on every start.</para>
+    /// </summary>
+    internal const int V298CommandTimeoutSeconds = 6 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
     /// The rungs that run under a longer command timeout than <see cref="MigrationCommandTimeoutSeconds"/>, by
     /// version, with the bound each one runs under (seconds). The applier reads this for every rung it applies
     /// (<see cref="RungCommandTimeoutSeconds"/>).
@@ -11418,6 +11485,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     {
         [281] = V281CommandTimeoutSeconds,
         [293] = V293CommandTimeoutSeconds,
+        [298] = V298CommandTimeoutSeconds,
     };
 
     /// <summary>
@@ -11553,6 +11621,9 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// unit, since each rung is one transaction, but it is PostgreSQL 17+ against readers here that gate
     /// as low as 13, and it ends the session with FATAL rather than failing the statement.</para>
     ///
+    /// <para>V298 (#9304) is the seventh floor-setting rung, so the margin of one default bound this constant carried became a second
+    /// one: the census derives 2,400 s, the larger of eight default bounds and the longest declared bound plus one default.</para>
+    ///
     /// <para>A sum of the two rung bounds rather than a literal so the budgets cannot drift apart if a rung bound moves.
     /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A new
     /// FLOOR-SETTING rung is pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans
@@ -11570,7 +11641,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// per poll on the store being migrated, to buy a case that needs the pending rungs to outlast this budget
     /// while each stays inside its own bound, on a ladder measured at 0.301 s.</para>
     /// </summary>
-    private const int MigrationLockWaitTimeoutSeconds = V281CommandTimeoutSeconds + MigrationCommandTimeoutSeconds;
+    private const int MigrationLockWaitTimeoutSeconds = V281CommandTimeoutSeconds + (2 * MigrationCommandTimeoutSeconds);
 
     /// <summary>
     /// Gap (seconds) between <c>pg_try_advisory_lock</c> attempts while a sibling migrator holds the lock.

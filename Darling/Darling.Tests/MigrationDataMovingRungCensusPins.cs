@@ -532,6 +532,17 @@ public sealed class MigrationDataMovingRungCensusPins
             + "store and the build is instant. The rung's other statement is a catalog-only ALTER of the corrected daily rollup's compression "
             + "settings (no chunk is rewritten) and an INSERT of one history row. Far inside one command timeout, so it does not move the "
             + "MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            298,
+            SetsTheFloor: true,
+            "#9304: for each of collect.query_text_dim and collect.query_plan_dim (created by the payload dimension rung), an INSERT ... SELECT "
+            + "that reads every row of the populated dimension into the new collect.{dimension}_seen, then builds that table's primary key, "
+            + "validates its foreign key against the dimension and builds its last_seen index, and last drops the dimension's own last_seen "
+            + "index. V281's shape for the same kind of table (a backfill of a narrow table from every row of a wide one, loaded before the "
+            + "constraints), so the rung also puts a statement trigger on each dimension and its function body names an INSERT into the seen "
+            + "table from the transition table, which is the function text and not a statement the rung runs. The backfill reads the "
+            + "dimension's main heap only, never its TOAST. It runs under V298CommandTimeoutSeconds (1,800 s, equal to V281's), because it is silent and reads about 18 GB of main heap on "
+            + "the largest store, so the lock-wait budget is unchanged. The rung's own timing is measured separately and is not part of this declaration."),
     ];
 
     /// <summary>

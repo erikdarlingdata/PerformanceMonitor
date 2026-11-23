@@ -790,9 +790,10 @@ public static class PgTableTuning
            dogfood store that is ~2.4 M rows, and it showed: 1,223,777 dead tuples with the last autovacuum
            two days earlier, while its own TOAST table (which has its own thresholds against 57 M chunks) had
            been vacuumed 152 times. The parent is the half that matters here, because the dead rows a purge
-           leaves behind are precisely the idx_query_plan_dim_last_seen entries the NEXT purge has to visit
-           and test for visibility before discarding. Untuned, each purge makes the following one slower and
-           then waits days for cleanup.
+           leaves behind are precisely the index entries the NEXT purge has to visit and test for visibility
+           before discarding (from V298, #9304, those are the idx_query_plan_dim_seen_last_seen entries of the
+           narrow stamp table, which cascades with the row; the wide row's own last_seen is no longer indexed).
+           Untuned, each purge makes the following one slower and then waits days for cleanup.
 
            0.02 + 10000 sizes the trigger to roughly one purge's worth of deletions rather than to the
            table's total size, so cleanup follows the work that created it. */
@@ -807,17 +808,18 @@ public static class PgTableTuning
              indexes lead on observed_bytes and on expired_at, so a deleted row leaves half-empty pages in the middle of the
              index that VACUUM never merges (#8570). Fillfactor 80 lets an update that leaves those columns alone stay on its
              page (HOT), and 0.02 + 1000 starts cleanup after about 2% of the rows are dead instead of 20%.
-           - query_stats_hour_ledger: UPDATE-heavy. Every collection adds its count to the current hour's row, so one row is
+           - query_stats_hour_ledger and procedure_stats_hour_ledger (#9357): UPDATE-heavy. Every collection adds its count to the current hour's row, so one row is
              updated about once a minute per server for an hour. n is not indexed, so those updates can be HOT with room on
              the page. The table grows with servers x 24 x the rollup's retention days, so at the stock 0.2 the dead rows of
              a large fleet wait a long time for a vacuum; 0.02 + 1000 keeps that trigger near a few minutes of updates.
            - collector_state: UPDATE-heavy. SaveCollectorStateAsync upserts each state key after every collection cycle, and
              only the key is indexed. Fillfactor 80 is the whole change: the table is small, so the stock trigger (50 + 20%
              of a few hundred rows) already fires within a cycle or two, and a lower scale factor would add nothing.
-           - query_text_dim: DELETE-heavy, the same shape as query_plan_dim above. The guarded last_seen refresh touches a row
-             at most every PayloadDimensions.LastSeenRefreshGuardHours, and retention deletes by last_seen. last_seen is
-             indexed, so the refresh can never be HOT and fillfactor would not help; only the vacuum trigger matters. Its
-             rows are far fewer than the plan dimension's, so the threshold is 1000 and not 10000.
+           - query_text_dim: DELETE-heavy, the same shape as query_plan_dim above. Since V298 (#9304) the guarded last_seen refresh
+             writes the narrow collect.query_text_dim_seen row, not this one: this row is rewritten only every
+             PayloadDimensionSeen.WideRowRefreshHours, for an older build, and retention deletes it by the stamp table's
+             order. Its own last_seen is no longer indexed, but the rewrite is rare, so fillfactor would not help; only the
+             vacuum trigger matters. Its rows are far fewer than the plan dimension's, so the threshold is 1000 and not 10000.
            - pg_statement_text: DELETE-heavy, with a few updates. The hourly refresh writes a statement only when its text or
              own-entry list changed or its last_seen is more than PayloadDimensions.LastSeenRefreshGuardHours behind (#8988), so
              an unchanged statement is no longer rewritten each hour. last_seen is indexed twice, so the updates that remain can
@@ -830,6 +832,7 @@ public static class PgTableTuning
            stamp stays heap-only where the page has room, and its rows are deleted with their text row. */
         "ALTER TABLE collect.oversized_plan_backlog SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.query_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.procedure_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.collector_state SET (fillfactor = 80)",
         "ALTER TABLE collect.query_text_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.pg_statement_text SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",

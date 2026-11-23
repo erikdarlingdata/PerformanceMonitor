@@ -302,6 +302,21 @@ public sealed class QueryTextReferenceScannerTests
     }
 
     [Fact]
+    public void ASameViewNameInTwoSchemasOrCases_IsCountedOncePerStatement_UnderItsFirstSpelling()
+    {
+        var calls = 0;
+        var aggregator = new ObjectReferenceAggregator(_ => { calls++; return ["vOrders", "VORDERS", "vOrders"]; });
+        aggregator.Add("Sales", "SELEC * FROM dbo.vOrders", 4, null);
+        aggregator.Add("Sales", "SELEC * FROM dbo.vorders", 6, null);
+
+        var hit = Assert.Single(aggregator.References);
+        Assert.Equal("vOrders", hit.ObjectName);
+        Assert.Equal(2, hit.Statements);
+        Assert.Equal(10, hit.Executions);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
     public void AnUnparsedStatement_IsSplitIntoWordsOnce_AndTheCacheKeepsThem()
     {
         /* #8784 review: the text search ran once per view over the whole text, with nothing kept. The cache now keeps an unparsed statement's

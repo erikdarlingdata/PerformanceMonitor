@@ -116,11 +116,12 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
         await con.OpenAsync(TestContext.Current.CancellationToken);
 
         /* A time-ordered archive like the archiver writes, built from the real table's own columns so the file has
-           the real shape: 18,000 rows, plus 40 extra slices of the first intervals, which are the split rows. */
+           the real shape: 18,000 rows, plus 40 extra slices of the first intervals, which are the split rows. A slice carries its
+           sibling's count plus one, so it is never an exact copy of it (#9352: an exact copy is dropped, not summed). */
         await ExecAsync(con, $"CREATE TEMP TABLE gen AS SELECT * FROM {await GeneratedSourceAsync(con)}");
         await ExecAsync(con,
             "INSERT INTO gen SELECT * REPLACE (CAST(collection_id + 10000000 AS BIGINT) AS collection_id, " +
-            "CAST(3 AS BIGINT) AS execution_count) FROM gen WHERE collection_id < 40");
+            "CAST(execution_count + 1 AS BIGINT) AS execution_count) FROM gen WHERE collection_id < 40");
         await ExecAsync(con,
             $"COPY (SELECT * FROM gen ORDER BY collection_time, collection_id) TO '{sql}' ({ParquetCompaction.ArchiveCopyOptions})");
 

@@ -66,6 +66,9 @@ object_inventory,collected,yes,
 object_references_daily,derived,derived,per-day names Query Store statements referenced
 object_references_daily_built,internal,no,which days are built
 object_references_daily_databases,derived,derived,statements looked at per database per day
+object_usage_deltas,derived,derived,per-snapshot index counts that get_object_usage reads
+object_usage_runs,derived,derived,spans over which each index was present
+object_usage_snapshots,derived,derived,per-snapshot facts that get_object_usage reads
 oversized_plan_backlog,internal,no,queue of oversized plans
 oversized_plan_backlog_drops,internal,no,plans dropped from the queue
 perfmon_interval_baseline,derived,derived,rollup view
@@ -111,6 +114,8 @@ plan_regression_daily,derived,derived,per-day plan regression summary
 plan_regression_daily_built,internal,no,which days are built
 procedure_stats,collected,yes,
 procedure_stats_daily,derived,derived,rollup view
+procedure_stats_hour_ledger,internal,no,hours already folded into the rollup
+procedure_stats_hour_ledger_state,internal,no,ledger progress
 procedure_stats_hourly,derived,derived,rollup view
 procedure_stats_interval_daily,derived,derived,rollup view
 procedure_stats_interval_hourly,derived,derived,rollup view
@@ -118,6 +123,7 @@ procedure_stats_io_hourly,derived,derived,rollup view
 procedure_stats_totals,derived,derived,per-collection totals of procedure_stats
 pvs_stats,collected,yes,
 query_plan_dim,collected,yes,query plan text shared by the Query Store rows
+query_plan_dim_seen,internal,no,liveness stamp of each stored query plan
 query_snapshots,collected,yes,
 query_stats,collected,yes,
 query_stats_baseline,derived,derived,rollup view
@@ -183,6 +189,7 @@ query_store_watermarks,internal,no,Query Store read progress
 query_store_watermarks_coverage,internal,no,Query Store read coverage
 query_tag_sightings,derived,derived,tag map built from collected rows
 query_text_dim,collected,yes,query text shared by the Query Store rows
+query_text_dim_seen,internal,no,liveness stamp of each stored query text
 raw_chunk_interval_reconcile_runs,internal,no,chunk interval migration history
 raw_chunk_interval_rung_history,internal,no,chunk interval migration history
 read_latency,internal,no,read latency telemetry

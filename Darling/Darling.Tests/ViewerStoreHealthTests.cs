@@ -432,4 +432,36 @@ public sealed class ViewerStoreHealthTests
         Assert.Contains(selected.MeasureTarget!.Split('.')[1], result.Measure!.QualifiedName);
         Assert.Contains(selected.MeasureTarget, StoreHealthRows.MeasureText(selected.MeasureTarget, result, TimeSpan.FromSeconds(1)));
     }
+
+    /* #9364: the slow-load line's note on a tables or indexes read. The call began 5 s before "now", so a read stamped within the last 5 s was
+       taken for it, and an older stamp is a held measurement whose age is counted to "now". */
+    [Theory]
+    [InlineData(4812, 0, "sized 4,812 relations, measured live")]
+    [InlineData(1, 5, "sized 1 relation, measured live")]
+    [InlineData(0, 3, "sized 0 relations, measured live")]
+    [InlineData(4812, 42, "sized 4,812 relations, from the held measurement taken 42 s ago")]
+    [InlineData(4812, 60, "sized 4,812 relations, from the held measurement taken 1 min 0 s ago")]
+    [InlineData(2, 251, "sized 2 relations, from the held measurement taken 4 min 11 s ago")]
+    public void TheReadNote_SaysHowManyRelationsWereSized_AndWhetherTheyWereMeasuredLiveOrHeld(int relations, int readSecondsAgo, string expected)
+    {
+        var now = new DateTime(2026, 11, 23, 10, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(expected, StoreHealthRows.ReadNote(relations, now.AddSeconds(-readSecondsAgo), now.AddSeconds(-5), now));
+    }
+
+    [Fact]
+    public void ASlowLoadLine_ShowsTheReadNoteAfterTheReadTime_AndLeavesAReadWithNoNoteAsItWas()
+    {
+        var timer = new ViewerLoadTimer(0);
+        timer.Track("store tables read", Task.FromResult(1));
+        timer.Track("store maintenance check", Task.FromResult(2));
+        var now = new DateTime(2026, 11, 23, 10, 0, 0, DateTimeKind.Utc);
+        timer.NotePhase("store tables read", StoreHealthRows.ReadNote(4812, now, now.AddSeconds(-5), now));
+
+        var line = timer.Finish("Store Health");
+
+        Assert.NotNull(line);
+        Assert.Matches(@"store tables read \d+ ms \(sized 4,812 relations, measured live\)", line);
+        Assert.Matches(@"store maintenance check \d+ ms(?! \()", line);
+    }
 }

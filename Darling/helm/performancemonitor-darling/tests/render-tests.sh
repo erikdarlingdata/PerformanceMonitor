@@ -910,6 +910,20 @@ assert_eq "$(grep -c '^    helm.sh/chart:' <<<"${sm_doc}")" "1" "helm.sh/chart o
 assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.metadata.labels."app.kubernetes.io/name"')" "custom" "the user's value wins"
 assert_eq "$(doc ServiceMonitor "${DEPLOY}-metrics" | yq '.spec.selector.matchLabels."app.kubernetes.io/name"')" "performancemonitor-darling" "the selector keeps the chart's labels"
 
+t service_monitor_scheme_follows_web_certificate
+# With a web certificate the metrics port serves HTTPS only, so the endpoint scrapes https and keeps the tlsConfig it is given.
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true
+assert_eq "$(sm '.spec.endpoints[0] | has("scheme")')" "false" "no scheme without a web certificate"
+assert_eq "$(sm '.spec.endpoints[0] | has("tlsConfig")')" "false" "no tlsConfig without a web certificate"
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set metrics.serviceMonitor.tlsConfig.serverName=darling.example.com
+assert_eq "$(sm '.spec.endpoints[0] | has("tlsConfig")')" "false" "tlsConfig stays off without a web certificate"
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set config.web.network.tls.certPath=cert.pem
+assert_eq "$(sm '.spec.endpoints[0].scheme')" '"https"' "scheme https with a web certificate"
+assert_eq "$(sm '.spec.endpoints[0] | has("tlsConfig")')" "false" "no tlsConfig when none is given"
+render --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set config.web.network.tls.certPath=cert.pem --set metrics.serviceMonitor.tlsConfig.serverName=darling.example.com
+assert_eq "$(sm '.spec.endpoints[0].scheme')" '"https"' "scheme https with tlsConfig"
+assert_eq "$(sm '.spec.endpoints[0].tlsConfig')" '{"serverName":"darling.example.com"}' "tlsConfig reaches the endpoint"
+
 t service_monitor_off
 render --set metrics.enabled=true
 assert_eq "$(yq 'select(.kind == "ServiceMonitor") | .kind' "${OUT}")" "" "no ServiceMonitor while off"

@@ -35,6 +35,23 @@ public class AnalysisContext
     /// null or empty, so the filter fails open.
     /// </summary>
     public IReadOnlySet<string>? SecondaryReplicaDatabases { get; set; }
+
+    /// <summary>
+    /// True for an on-demand read a person or an agent is waiting on (Lite's <c>get_analysis_facts</c> and
+    /// <c>compare_analysis</c>, #9195). The plan regression inputs check then answers from the outcomes an earlier
+    /// background pass cached, and for a pair with no cached answer makes at most the live plan fetches
+    /// <see cref="InteractiveFetches"/> allows the whole call (3 fetches, 3 s). A candidate the allowance does not reach
+    /// stays in the fact and is counted unverified, as one the background pass's fetch budget never reached is. Fetched
+    /// answers are cached as the background pass's are. Default false, the background pass, which has its own budget.
+    /// Darling does not read it.
+    /// </summary>
+    public bool InteractiveRead { get; set; }
+
+    /// <summary>
+    /// The live plan fetches an interactive read may make, shared by every context of one call so that
+    /// <c>compare_analysis</c>'s two windows together stay inside one allowance (#9195). Created on first use when the caller set none.
+    /// </summary>
+    public InteractivePlanFetchAllowance? InteractiveFetches { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }

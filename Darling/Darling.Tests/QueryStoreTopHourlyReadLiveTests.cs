@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -286,6 +287,22 @@ WHERE hour = @hour AND query_id = @q;";
             Assert.NotEqual(QueryStoreTopDailyReadLiveTests.Format(before.Rows), QueryStoreTopDailyReadLiveTests.Format(after.Rows));
             Assert.True(TotalExecutions(after, 1) >= 1_000_000);
             Assert.True(TotalExecutions(after, 2) >= 1_000_000);
+        });
+    }
+
+    /// <summary>#9310: a read answered by the hourly-edges statement names it in the scope, with its summary hours and the daily span's days.</summary>
+    [Fact]
+    public async Task TheHourlyStatement_IsNamedInTheReadScope_WithItsSummaryHoursAndDays()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            using var scope = ReadScope.Open(null);
+            var read = await QueryStoreTopDailyReadLiveTests.RouteAsync(
+                source, QueryStoreTopDailyReadLiveTests.End.AddHours(-72), QueryStoreTopDailyReadLiveTests.End, null, null, null, ct);
+
+            Assert.Equal(2, read.DailyDaysUsed);
+            Assert.Equal(ReadScope.SourceHourlyEdges, scope.Scope.Source);
+            Assert.Equal("24 summary hours, 2 days", scope.Scope.SourceReason);
         });
     }
 

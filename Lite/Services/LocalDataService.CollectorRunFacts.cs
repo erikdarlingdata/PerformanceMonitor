@@ -107,10 +107,11 @@ UNION ALL
         return times;
     }
 
-    /// <summary>Successful runs of one collector inside a window, and the earliest of them (#7442; NULL when there is none). $1 server_id,
-    /// $2 collector_name, $3/$4 window. Twin of <c>DarlingCollectorRunFactsReader.RunsInWindowSql</c>.</summary>
+    /// <summary>Successful runs of one collector inside a window, the earliest of them (#7442; NULL when there is none) and the rows they
+    /// stored (#9341; NULL when no run recorded a count). $1 server_id, $2 collector_name, $3/$4 window. Twin of
+    /// <c>DarlingCollectorRunFactsReader.RunsInWindowSql</c>.</summary>
     public const string CollectorRunsInWindowSql = @"
-SELECT COUNT(*), MIN(collection_time)
+SELECT COUNT(*), MIN(collection_time), CAST(SUM(rows_collected) AS BIGINT)
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
@@ -161,6 +162,7 @@ AND   collection_time <= $4";
 
         long? inWindow = null;
         DateTime? firstInWindow = null;
+        long? rowsInWindow = null;
         if (window is not null || hoursBack is not null)
         {
             /* #6651: a grid's custom range or slicer window counts the runs inside that exact window (GetQueriesTabWindowUtc), not the
@@ -177,9 +179,10 @@ AND   collection_time <= $4";
             {
                 inWindow = Convert.ToInt64(windowReader.GetValue(0));
                 firstInWindow = windowReader.IsDBNull(1) ? null : DateTime.SpecifyKind(windowReader.GetDateTime(1), DateTimeKind.Utc);
+                rowsInWindow = windowReader.IsDBNull(2) ? null : Convert.ToInt64(windowReader.GetValue(2));
             }
         }
 
-        return new CollectorRunFacts(runs, inWindow, last, lastRows, firstInWindow);
+        return new CollectorRunFacts(runs, inWindow, last, lastRows, firstInWindow, rowsInWindow);
     }
 }

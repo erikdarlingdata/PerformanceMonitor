@@ -675,7 +675,7 @@ public sealed class PayloadDimensionLiveTests
 
             async Task<DateTime> LastSeenAsync()
                 => (DateTime)(await ScalarAsync(
-                    connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, digest))!;
+                    connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, digest))!;
 
             await FlushAtAsync(t0);
             Assert.Equal(t0, await LastSeenAsync());
@@ -788,19 +788,22 @@ public sealed class PayloadDimensionLiveTests
                a byte[][] argument there is covariantly assignable to object[], so C# spreads it
                across the params array (one digest per parameter) instead of binding it as ONE
                bytea[] array parameter. Explicit typing sidesteps that entirely. */
-            async Task<long> LockedRowCountAsync(byte[][] digests)
+            /* The wide rows' xmax values, one string. A row's xmax is not 0 once its stamp row was inserted (the stamp row's
+               foreign key takes a key-share lock on it, #9304), so "no lock taken" is read as "no xmax changed since the
+               rows landed", not as "xmax is 0". */
+            async Task<string> XmaxesAsync(byte[][] digests)
             {
                 await using var command = new NpgsqlCommand(
-                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND xmax <> 0", connection);
+                    "SELECT coalesce(string_agg(xmax::text, ',' ORDER BY digest), '') FROM query_plan_dim WHERE digest = ANY($1)", connection);
                 command.Parameters.Add(new NpgsqlParameter
                 { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
-                return (long)(await command.ExecuteScalarAsync(ct))!;
+                return (string)(await command.ExecuteScalarAsync(ct))!;
             }
 
             async Task<long> ChangedLastSeenCountAsync(byte[][] digests, DateTime expected)
             {
                 await using var command = new NpgsqlCommand(
-                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND last_seen <> $2", connection);
+                    "SELECT count(*) FROM collect.query_plan_dim_seen WHERE digest = ANY($1) AND last_seen <> $2", connection);
                 command.Parameters.Add(new NpgsqlParameter
                 { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
                 command.Parameters.Add(new NpgsqlParameter
@@ -810,14 +813,14 @@ public sealed class PayloadDimensionLiveTests
 
             // The initial collection cycle: 50 "hot" plans plus one that will go stale.
             await FlushAsync(freshPairs.Append((staleDigest, stalePayload)), t0);
-            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+            var xmaxesAtLanding = await XmaxesAsync(freshDigests);
 
             // (1) Same batch, same digests, 3 hours later -- still inside the guard's freshness
             // window (#4503: 6 hours). The pre-filter excludes every one of them before the statement
             // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change.
             await FlushAsync(freshPairs, t0.AddHours(3));
 
-            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+            Assert.Equal(xmaxesAtLanding, await XmaxesAsync(freshDigests));
             Assert.Equal(0, await ChangedLastSeenCountAsync(freshDigests, t0));
 
             // (2) and (3): 7 hours after t0 (past the guard window), the stale row is refreshed and a
@@ -825,11 +828,11 @@ public sealed class PayloadDimensionLiveTests
             await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(7));
 
             var refreshedStale = (DateTime)(await ScalarAsync(
-                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, staleDigest))!;
+                connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, staleDigest))!;
             Assert.Equal(t0.AddHours(7), refreshedStale);
 
             var insertedNew = (DateTime)(await ScalarAsync(
-                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, newDigest))!;
+                connection, "SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", ct, newDigest))!;
             Assert.Equal(t0.AddHours(7), insertedNew);
 
             bodySucceeded = true;

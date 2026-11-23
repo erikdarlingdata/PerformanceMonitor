@@ -1498,18 +1498,29 @@ FROM members AS m
 JOIN pg_catalog.pg_index AS x ON x.indrelid = m.rel_oid";
 
     /// <summary>
-    /// Every relation either read sizes, in one statement (#9224). A heap row carries its main-fork size and its TOAST total, the
-    /// same expressions the per-table read ran. An index row carries its main-fork size, which is the per-index read's size, and its
-    /// other forks (free space, visibility and init): the main fork plus those is what <c>pg_indexes_size</c> adds up for the heap
-    /// the index hangs under (it opens every index and stats every fork), so the per-table read takes its index bytes from the same
-    /// rows. Each file is stat'ed once for both reads. On a store with thousands of chunks the stats are the time the reads take
-    /// (about half a millisecond each on Windows), and the two reads used to stat every heap and every index's main fork twice.
+    /// The main-fork size of every relation either read sizes, in one statement (#9364). A row carries the relation's oid, the heap
+    /// it hangs under (0 for a heap) and <c>pg_relation_size(oid)</c>, which is the per-index read's size for an index and its heap
+    /// and the per-table read's heap bytes. One stat per relation. This is the part of the sizing the per-index read waits for.
     /// $1 the relation oids.
     /// </summary>
-    private const string RelationSizesSql = @"
+    private const string MainSizesSql = @"
 SELECT s.rel_oid,
        COALESCE(x.indrelid, 0)::bigint,
-       COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid), 0),
+       COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid), 0)
+FROM unnest($1::bigint[]) AS s(rel_oid)
+JOIN pg_catalog.pg_class AS c ON c.oid = s.rel_oid::oid
+LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
+
+    /// <summary>
+    /// What only the per-table read needs, in one statement (#9364). An index row carries its other forks (free space, visibility and
+    /// init): the main fork plus those is what <c>pg_indexes_size</c> adds up for the heap the index hangs under (it opens every index
+    /// and stats every fork). A heap row carries its TOAST total, the same expression the per-table read ran. On a store with
+    /// thousands of chunks the stats are the time the reads take (about half a millisecond each on Windows), and the forks other
+    /// than the main one are most of them, so the per-index read does not wait for this statement.
+    /// $1 the relation oids.
+    /// </summary>
+    private const string ExtraSizesSql = @"
+SELECT s.rel_oid,
        CASE WHEN x.indexrelid IS NULL THEN 0
             ELSE COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid, 'fsm'), 0)
                + COALESCE(pg_catalog.pg_relation_size(s.rel_oid::oid, 'vm'), 0)
@@ -1519,7 +1530,7 @@ FROM unnest($1::bigint[]) AS s(rel_oid)
 JOIN pg_catalog.pg_class AS c ON c.oid = s.rel_oid::oid
 LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
-    /// <summary>The most connections the size read uses at once.</summary>
+    /// <summary>The most store connections the size passes of one data source hold at once, both passes together (#9364).</summary>
     private const int SizeReadParallelism = 4;
 
     /// <summary>Fewest relations worth a connection of their own: a small store is sized on one.</summary>
@@ -1532,89 +1543,355 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     /// </summary>
     internal static readonly TimeSpan SizePassLifetime = TimeSpan.FromSeconds(15);
 
-    /// <summary>What one pass sized: per relation its oid, the heap its index hangs under (0 for a heap), its main-fork size, the
-    /// size of its other forks (indexes only) and its TOAST total (heaps only).</summary>
-    private sealed record RelationSizePass(long[] Oids, long[] Parents, long[] Main, long[] OtherForks, long[] Toast);
+    /// <summary>The main pass: per relation its oid, the heap its index hangs under (0 for a heap) and its main-fork size.</summary>
+    private sealed record MainSizePass(long[] Oids, long[] Parents, long[] Main);
 
-    /// <summary>One data source's held pass, and how many relations the passes on it have sized (what a test counts).</summary>
+    /// <summary>The extras pass: per relation its oid, the size of its other forks (indexes only) and its TOAST total (heaps only).</summary>
+    private sealed record ExtraSizePass(long[] Oids, long[] OtherForks, long[] Toast);
+
+    /// <summary>One data source's held list and passes, and how many relations each pass on it has sized (what a test counts).
+    /// The relation list is read once for the main pass and the extras pass, which each hold their own result so that a failure
+    /// of one never reaches the other.</summary>
     private sealed class SizePassSlot(TimeSpan lifetime)
     {
-        public readonly SingleFlightTtlCache<RelationSizePass> Cache = new(lifetime);
-        public long RelationsSized;
+        public readonly SizeGate Gate = new(SizeReadParallelism);
+        public readonly object HeldLock = new();
+        public int Held;
+        public int PeakHeld;
+        public Func<SizePassPart, Task>? SliceHook;
+        public readonly SingleFlightTtlCache<long[]> List = new(lifetime);
+        public readonly SingleFlightTtlCache<MainSizePass> Main = new(lifetime);
+        public readonly SingleFlightTtlCache<ExtraSizePass> Extras = new(lifetime);
+        public long MainRelationsSized;
+        public long ExtraRelationsSized;
+        public Exception? ExtrasFault;
+    }
+
+    /// <summary>Which read of a size pass holds a store connection (what a test seam reports).</summary>
+    internal enum SizePassPart
+    {
+        /// <summary>The relation list read both passes share.</summary>
+        RelationList,
+
+        /// <summary>One slice of the main pass.</summary>
+        Main,
+
+        /// <summary>One slice of the extras pass.</summary>
+        Extras,
+    }
+
+    /// <summary>
+    /// The one limit on the store connections the size passes of a data source hold (#9364). The main pass and the extras pass each
+    /// run their slices on up to <see cref="SizeReadParallelism"/> connections, and the tables read starts both together, so without
+    /// a shared limit a cold read holds twice that. The size cache is one per data source and the data source's pool is shared (the
+    /// service's worker pool carries collection too, and the web admin pool is small), so the passes together stay inside the one
+    /// limit a single pass held before the split. A waiter holds nothing while it waits: the caller takes its connection after it is granted
+    /// and returns the grant after the connection is closed.
+    /// The main pass goes first, in two ways. A queued main slice is granted ahead of every queued extras slice. And no extras slice
+    /// is granted while a caller is waiting on the main pass (the tables read counts as one from the moment it asks for the main
+    /// pass), so the indexes read, which waits for the main pass only, never waits behind the extras' slices.
+    /// </summary>
+    internal sealed class SizeGate(int limit)
+    {
+        private readonly object _gate = new();
+        private readonly Queue<TaskCompletionSource> _main = new();
+        private readonly Queue<TaskCompletionSource> _extras = new();
+        private int _free = limit;
+        private int _mainCallers;
+
+        public Task AcquireAsync(bool main)
+        {
+            var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_gate)
+            {
+                (main ? _main : _extras).Enqueue(waiter);
+                Grant();
+            }
+
+            return waiter.Task;
+        }
+
+        public void Release()
+        {
+            lock (_gate)
+            {
+                _free++;
+                Grant();
+            }
+        }
+
+        public void MainCallerStarted()
+        {
+            lock (_gate)
+            {
+                _mainCallers++;
+            }
+        }
+
+        public void MainCallerFinished()
+        {
+            lock (_gate)
+            {
+                _mainCallers--;
+                Grant();
+            }
+        }
+
+        /// <summary>Hands out the free grants, main slices first. Runs under the lock.</summary>
+        private void Grant()
+        {
+            while (_free > 0)
+            {
+                if (_main.Count > 0)
+                {
+                    _free--;
+                    _main.Dequeue().SetResult();
+                }
+                else if (_extras.Count > 0 && _mainCallers == 0)
+                {
+                    _free--;
+                    _extras.Dequeue().SetResult();
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// <summary>Runs <paramref name="read"/> holding one grant of the data source's size limit, whatever way it ends. The read opens
+    /// and closes its connection inside, so the grant is returned after the connection is closed. The wait for the grant is not
+    /// cancellable: a pass is shared work that no caller's cancellation stops.</summary>
+    private static async Task<T> HoldingAGrantAsync<T>(SizePassSlot slot, SizePassPart part, Func<Task<T>> read)
+    {
+        await slot.Gate.AcquireAsync(part != SizePassPart.Extras);
+        try
+        {
+            lock (slot.HeldLock)
+            {
+                slot.Held++;
+                slot.PeakHeld = Math.Max(slot.PeakHeld, slot.Held);
+            }
+
+            try
+            {
+                var hook = slot.SliceHook;
+                if (hook is not null)
+                {
+                    await hook(part);
+                }
+
+                return await read();
+            }
+            finally
+            {
+                lock (slot.HeldLock)
+                {
+                    slot.Held--;
+                }
+            }
+        }
+        finally
+        {
+            slot.Gate.Release();
+        }
     }
 
     private static readonly ConditionalWeakTable<NpgsqlDataSource, SizePassSlot> SizePasses = new();
 
     private static SizePassSlot SlotFor(NpgsqlDataSource postgres) => SizePasses.GetValue(postgres, static _ => new SizePassSlot(SizePassLifetime));
 
-    /// <summary>How many relations the size passes on <paramref name="postgres"/> have stat'ed so far. A test reads it to see that
-    /// the two reads share one pass.</summary>
-    internal static long RelationsSizedOn(NpgsqlDataSource postgres) => SlotFor(postgres).RelationsSized;
+    /// <summary>How many relations the main size passes on <paramref name="postgres"/> have stat'ed so far. A test reads it to see
+    /// which reads shared a pass.</summary>
+    internal static long MainRelationsSizedOn(NpgsqlDataSource postgres) => SlotFor(postgres).MainRelationsSized;
 
-    /// <summary>
-    /// The sizes of every relation the two reads use: the member heaps and every index on one (<see cref="IndexRelationsSql"/>), on up
-    /// to <see cref="SizeReadParallelism"/> connections at once (#9170). The functions are the same as before, so the numbers are
-    /// the same. The pass is held for <see cref="SizePassLifetime"/> and shared by callers in flight (one pass, whichever read asks
-    /// first). A relation created after the pass has no size and counts as empty. One dropped since is not read.
-    /// </summary>
-    private static Task<RelationSizePass> GetSizePassAsync(NpgsqlDataSource postgres, bool timescale, CancellationToken cancellationToken)
+    /// <summary>How many relations the extras size passes on <paramref name="postgres"/> have stat'ed so far.</summary>
+    internal static long ExtraRelationsSizedOn(NpgsqlDataSource postgres) => SlotFor(postgres).ExtraRelationsSized;
+
+    /// <summary>Makes every extras pass on <paramref name="postgres"/> fail with <paramref name="fault"/> (null clears it), so a test
+    /// can see the per-index read does not depend on it.</summary>
+    internal static void FailExtrasPassesOn(NpgsqlDataSource postgres, Exception? fault) => SlotFor(postgres).ExtrasFault = fault;
+
+    /// <summary>How many size-pass grants (one per store connection) are held on <paramref name="postgres"/> now.</summary>
+    internal static int SizeConnectionsHeldOn(NpgsqlDataSource postgres)
     {
         var slot = SlotFor(postgres);
-        return slot.Cache.GetOrStartAsync(() => ReadSizePassAsync(postgres, timescale, slot), cancellationToken);
+        lock (slot.HeldLock)
+        {
+            return slot.Held;
+        }
     }
 
-    private static async Task<RelationSizePass> ReadSizePassAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
+    /// <summary>The most size-pass grants held at once on <paramref name="postgres"/> so far.</summary>
+    internal static int PeakSizeConnectionsHeldOn(NpgsqlDataSource postgres)
     {
-        var oids = new List<long>();
-        await using (var list = postgres.CreateCommand(IndexRelationsSql(timescale)))
+        var slot = SlotFor(postgres);
+        lock (slot.HeldLock)
         {
-            list.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            await using var reader = await list.ExecuteReaderAsync(CancellationToken.None);
-            while (await reader.ReadAsync(CancellationToken.None))
-            {
-                oids.Add(reader.GetInt64(0));
-            }
+            return slot.PeakHeld;
         }
+    }
 
-        var connections = Math.Clamp(oids.Count / SizeReadMinPerConnection, 1, SizeReadParallelism);
-        var slices = Enumerable.Range(0, connections)
+    /// <summary>Runs <paramref name="hook"/> (null clears it) each time a read of a size pass on <paramref name="postgres"/> has its
+    /// grant and before it opens its connection. A test uses it to slow the reads so they overlap, to record the order they got
+    /// the limit in, and to fail one.</summary>
+    internal static void OnSizePassGrantOn(NpgsqlDataSource postgres, Func<SizePassPart, Task>? hook) => SlotFor(postgres).SliceHook = hook;
+
+    /// <summary>
+    /// The main-fork size of every relation the two reads use: the member heaps and every index on one (<see cref="IndexRelationsSql"/>),
+    /// on up to <see cref="SizeReadParallelism"/> connections at once (#9170). The pass is held for <see cref="SizePassLifetime"/> and
+    /// shared by callers in flight (one pass, whichever read asks first). A relation created after the pass has no size and counts
+    /// as empty. One dropped since is not read. The per-index read waits for this pass only (#9364).
+    /// </summary>
+    private static Task<MainSizePass> GetMainSizePassAsync(NpgsqlDataSource postgres, bool timescale, CancellationToken cancellationToken)
+    {
+        var slot = SlotFor(postgres);
+
+        /* The tables read asks for this pass before it asks for the extras, so the gate knows a caller is waiting on the main pass
+           before any extras slice can ask for a grant. The count drops when the shared pass ends, not when this caller's wait is
+           cancelled: the pass keeps running for the others. */
+        slot.Gate.MainCallerStarted();
+        var shared = slot.Main.GetOrStartAsync(() => ReadMainSizePassAsync(postgres, timescale, slot), CancellationToken.None);
+        _ = shared.ContinueWith(
+            static (done, state) =>
+            {
+                _ = done.Exception;
+                ((SizeGate)state!).MainCallerFinished();
+            },
+            slot.Gate,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return shared.WaitAsync(cancellationToken);
+    }
+
+    /// <summary>The other forks and TOAST totals of the same relations, held and shared the same way. The per-table read waits for
+    /// this pass as well as the main one, and starts both together.</summary>
+    private static Task<ExtraSizePass> GetExtraSizePassAsync(NpgsqlDataSource postgres, bool timescale, CancellationToken cancellationToken)
+    {
+        var slot = SlotFor(postgres);
+        return slot.Extras.GetOrStartAsync(() => ReadExtraSizePassAsync(postgres, timescale, slot), cancellationToken);
+    }
+
+    /// <summary>The relations both passes size, listed once per pair of passes: whichever pass starts first lists them and the other
+    /// takes the held list.</summary>
+    private static Task<long[]> GetRelationListAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
+        => slot.List.GetOrStartAsync(() => ReadRelationListAsync(postgres, timescale, slot), CancellationToken.None);
+
+    /// <summary>Whichever pass starts the list, it takes a main grant: the main pass waits for the list, and an extras grant would
+    /// wait for the main pass.</summary>
+    private static Task<long[]> ReadRelationListAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
+        => HoldingAGrantAsync(slot, SizePassPart.RelationList, async () =>
+        {
+            var oids = new List<long>();
+            await using (var list = postgres.CreateCommand(IndexRelationsSql(timescale)))
+            {
+                list.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                await using var reader = await list.ExecuteReaderAsync(CancellationToken.None);
+                while (await reader.ReadAsync(CancellationToken.None))
+                {
+                    oids.Add(reader.GetInt64(0));
+                }
+            }
+
+            return oids.ToArray();
+        });
+
+    private static long[][] SliceForConnections(long[] oids)
+    {
+        var connections = Math.Clamp(oids.Length / SizeReadMinPerConnection, 1, SizeReadParallelism);
+        return Enumerable.Range(0, connections)
             .Select(c => oids.Where((_, i) => i % connections == c).ToArray())
             .ToArray();
-        var parts = await Task.WhenAll(slices.Select(slice => ReadSizeSliceAsync(postgres, slice)));
-        var pass = new RelationSizePass(
+    }
+
+    private static async Task<MainSizePass> ReadMainSizePassAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
+    {
+        var oids = await GetRelationListAsync(postgres, timescale, slot);
+        var parts = await Task.WhenAll(SliceForConnections(oids).Select(slice => ReadMainSliceAsync(postgres, slot, slice)));
+        var pass = new MainSizePass(
             parts.SelectMany(p => p.Oids).ToArray(),
             parts.SelectMany(p => p.Parents).ToArray(),
-            parts.SelectMany(p => p.Main).ToArray(),
-            parts.SelectMany(p => p.OtherForks).ToArray(),
-            parts.SelectMany(p => p.Toast).ToArray());
-        Interlocked.Add(ref slot.RelationsSized, oids.Count);
+            parts.SelectMany(p => p.Main).ToArray());
+        Interlocked.Add(ref slot.MainRelationsSized, oids.Length);
         return pass;
     }
 
-    private static async Task<RelationSizePass> ReadSizeSliceAsync(NpgsqlDataSource postgres, long[] slice)
+    private static async Task<ExtraSizePass> ReadExtraSizePassAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
     {
-        var oids = new List<long>(slice.Length);
-        var parents = new List<long>(slice.Length);
-        var main = new List<long>(slice.Length);
-        var other = new List<long>(slice.Length);
-        var toast = new List<long>(slice.Length);
-        if (slice.Length > 0)
+        var fault = slot.ExtrasFault;
+        if (fault is not null)
         {
-            await using var command = postgres.CreateCommand(RelationSizesSql);
-            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter { Value = slice, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-            await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
-            while (await reader.ReadAsync(CancellationToken.None))
-            {
-                oids.Add(reader.GetInt64(0));
-                parents.Add(reader.GetInt64(1));
-                main.Add(reader.GetInt64(2));
-                other.Add(reader.GetInt64(3));
-                toast.Add(reader.GetInt64(4));
-            }
+            throw fault;
         }
 
-        return new RelationSizePass(oids.ToArray(), parents.ToArray(), main.ToArray(), other.ToArray(), toast.ToArray());
+        var oids = await GetRelationListAsync(postgres, timescale, slot);
+        var parts = await Task.WhenAll(SliceForConnections(oids).Select(slice => ReadExtraSliceAsync(postgres, slot, slice)));
+        var pass = new ExtraSizePass(
+            parts.SelectMany(p => p.Oids).ToArray(),
+            parts.SelectMany(p => p.OtherForks).ToArray(),
+            parts.SelectMany(p => p.Toast).ToArray());
+        Interlocked.Add(ref slot.ExtraRelationsSized, oids.Length);
+        return pass;
+    }
+
+    private static Task<MainSizePass> ReadMainSliceAsync(NpgsqlDataSource postgres, SizePassSlot slot, long[] slice)
+    {
+        if (slice.Length == 0)
+        {
+            return Task.FromResult(new MainSizePass([], [], []));
+        }
+
+        return HoldingAGrantAsync(slot, SizePassPart.Main, async () =>
+        {
+            var oids = new List<long>(slice.Length);
+            var parents = new List<long>(slice.Length);
+            var main = new List<long>(slice.Length);
+            await using (var command = postgres.CreateCommand(MainSizesSql))
+            {
+                command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                command.Parameters.Add(new NpgsqlParameter { Value = slice, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+                await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+                while (await reader.ReadAsync(CancellationToken.None))
+                {
+                    oids.Add(reader.GetInt64(0));
+                    parents.Add(reader.GetInt64(1));
+                    main.Add(reader.GetInt64(2));
+                }
+            }
+
+            return new MainSizePass(oids.ToArray(), parents.ToArray(), main.ToArray());
+        });
+    }
+
+    private static Task<ExtraSizePass> ReadExtraSliceAsync(NpgsqlDataSource postgres, SizePassSlot slot, long[] slice)
+    {
+        if (slice.Length == 0)
+        {
+            return Task.FromResult(new ExtraSizePass([], [], []));
+        }
+
+        return HoldingAGrantAsync(slot, SizePassPart.Extras, async () =>
+        {
+            var oids = new List<long>(slice.Length);
+            var other = new List<long>(slice.Length);
+            var toast = new List<long>(slice.Length);
+            await using (var command = postgres.CreateCommand(ExtraSizesSql))
+            {
+                command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                command.Parameters.Add(new NpgsqlParameter { Value = slice, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+                await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+                while (await reader.ReadAsync(CancellationToken.None))
+                {
+                    oids.Add(reader.GetInt64(0));
+                    other.Add(reader.GetInt64(1));
+                    toast.Add(reader.GetInt64(2));
+                }
+            }
+
+            return new ExtraSizePass(oids.ToArray(), other.ToArray(), toast.ToArray());
+        });
     }
 
     private static void AddSizeParameters(NpgsqlCommand command, params long[][] arrays)
@@ -1625,26 +1902,36 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         }
     }
 
-    /// <summary>The per-table read's inputs from a pass: every member heap with its heap, index and TOAST bytes. A heap's index bytes
-    /// are the sum of its indexes' forks, which is what <c>pg_indexes_size</c> returns for it.</summary>
-    private static void AddTableSizeParameters(NpgsqlCommand command, RelationSizePass pass)
+    /// <summary>The per-table read's inputs from the two passes: every member heap with its heap, index and TOAST bytes. A heap's
+    /// index bytes are the sum of its indexes' forks, which is what <c>pg_indexes_size</c> returns for it. The extras are matched
+    /// to the main rows by oid: a relation the extras pass did not size (it was listed after the main pass's list) has no other
+    /// forks and no TOAST, the same as one created after a pass.</summary>
+    private static void AddTableSizeParameters(NpgsqlCommand command, MainSizePass main, ExtraSizePass extras)
     {
-        var indexBytes = new Dictionary<long, long>();
-        for (var i = 0; i < pass.Oids.Length; i++)
+        var otherForks = new Dictionary<long, long>(extras.Oids.Length);
+        var toast = new Dictionary<long, long>(extras.Oids.Length);
+        for (var i = 0; i < extras.Oids.Length; i++)
         {
-            if (pass.Parents[i] != 0)
+            otherForks[extras.Oids[i]] = extras.OtherForks[i];
+            toast[extras.Oids[i]] = extras.Toast[i];
+        }
+
+        var indexBytes = new Dictionary<long, long>();
+        for (var i = 0; i < main.Oids.Length; i++)
+        {
+            if (main.Parents[i] != 0)
             {
-                indexBytes[pass.Parents[i]] = indexBytes.GetValueOrDefault(pass.Parents[i]) + pass.Main[i] + pass.OtherForks[i];
+                indexBytes[main.Parents[i]] = indexBytes.GetValueOrDefault(main.Parents[i]) + main.Main[i] + otherForks.GetValueOrDefault(main.Oids[i]);
             }
         }
 
-        var heaps = Enumerable.Range(0, pass.Oids.Length).Where(i => pass.Parents[i] == 0).ToArray();
+        var heaps = Enumerable.Range(0, main.Oids.Length).Where(i => main.Parents[i] == 0).ToArray();
         AddSizeParameters(
             command,
-            heaps.Select(i => pass.Oids[i]).ToArray(),
-            heaps.Select(i => pass.Main[i]).ToArray(),
-            heaps.Select(i => indexBytes.GetValueOrDefault(pass.Oids[i])).ToArray(),
-            heaps.Select(i => pass.Toast[i]).ToArray());
+            heaps.Select(i => main.Oids[i]).ToArray(),
+            heaps.Select(i => main.Main[i]).ToArray(),
+            heaps.Select(i => indexBytes.GetValueOrDefault(main.Oids[i])).ToArray(),
+            heaps.Select(i => toast.GetValueOrDefault(main.Oids[i])).ToArray());
     }
 
     private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(
@@ -1655,11 +1942,14 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         var (timescale, serverVersion) = await ProbeAsync(postgres, cancellationToken);
 
         var read = new List<(StoreTableHealthRow Row, TailRelation[] TailRelations)>();
-        var sizes = await GetSizePassAsync(postgres, timescale, cancellationToken);
+        // Both passes start together: the per-table read needs the other forks and the TOAST totals as well as the main sizes.
+        var mainPass = GetMainSizePassAsync(postgres, timescale, cancellationToken);
+        var extraPass = GetExtraSizePassAsync(postgres, timescale, cancellationToken);
+        await Task.WhenAll(mainPass, extraPass);
         await using (var command = postgres.CreateCommand(BuildSql(timescale, serverVersion, presized: true)))
         {
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            AddTableSizeParameters(command, sizes);
+            AddTableSizeParameters(command, await mainPass, await extraPass);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1839,7 +2129,7 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
         var (timescale, _) = await ProbeAsync(postgres, cancellationToken);
         var rows = new List<StoreIndexHealthRow>();
-        var sizes = await GetSizePassAsync(postgres, timescale, cancellationToken);
+        var sizes = await GetMainSizePassAsync(postgres, timescale, cancellationToken);
         await using var command = postgres.CreateCommand(BuildIndexSql(timescale, presized: true));
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddSizeParameters(command, sizes.Oids, sizes.Main);

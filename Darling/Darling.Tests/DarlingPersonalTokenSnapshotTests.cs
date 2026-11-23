@@ -8,10 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -24,8 +29,9 @@ public sealed class DarlingPersonalTokenSnapshotTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 11, 16, 12, 0, 0, TimeSpan.Zero);
 
-    private static PersonalTokenSecretRow Row(MintedToken token, DateTimeOffset expiresAt, DateTimeOffset? revokedAt = null) =>
-        new(new PersonalTokenRow(token.TokenId, "owner", "subject", "name", "viewer", T0.AddDays(-1), expiresAt, null, revokedAt,
+    private static PersonalTokenSecretRow Row(MintedToken token, DateTimeOffset expiresAt, DateTimeOffset? revokedAt = null, string owner = "owner",
+        string role = "viewer") =>
+        new(new PersonalTokenRow(token.TokenId, owner, "subject", "name", role, T0.AddDays(-1), expiresAt, null, revokedAt,
             revokedAt is null ? null : "admin", revokedAt is null ? null : "revoked"), token.SecretSha256);
 
     private static StoreOwnerSource Published()
@@ -46,7 +52,7 @@ public sealed class DarlingPersonalTokenSnapshotTests
         public DarlingPersonalTokenSnapshot Snapshot;
         public StoreOwnerSource Owner = Published();
 
-        public Rig()
+        public Rig(PersonalTokenPendingRevokes? pending = null)
         {
             Snapshot = new DarlingPersonalTokenSnapshot(
                 _ =>
@@ -64,7 +70,10 @@ public sealed class DarlingPersonalTokenSnapshotTests
                     Touches.Add(new Dictionary<string, DateTimeOffset>(batch));
                     return Task.CompletedTask;
                 },
-                Clock);
+                Clock)
+            {
+                Pending = pending,
+            };
         }
 
         public Task Refresh() => Snapshot.RefreshAsync(Owner, Log, CancellationToken.None);
@@ -145,6 +154,161 @@ public sealed class DarlingPersonalTokenSnapshotTests
 
         await rig.Refresh();
         Assert.Equal(PersonalTokenOutcome.NotPersonal, rig.Snapshot.Check("a-file-token", T0).Outcome);
+    }
+
+    [Fact]
+    public async Task Check_FullPendingRevoke_RefusesEveryTokenOfThatOwnerAndNoOneElses()
+    {
+        var pending = new PersonalTokenPendingRevokes();
+        var rig = new Rig(pending);
+        var reader = PersonalTokenFormat.Mint();
+        var oper = PersonalTokenFormat.Mint();
+        var other = PersonalTokenFormat.Mint();
+        rig.Rows = () => new[]
+        {
+            Row(reader, T0.AddDays(1), owner: "alice", role: "reader"),
+            Row(oper, T0.AddDays(1), owner: "alice", role: "operator"),
+            Row(other, T0.AddDays(1), owner: "bob", role: "operator"),
+        };
+        await rig.Refresh();
+        Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(reader.Value, T0).Outcome);
+
+        pending.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check(reader.Value, T0).Outcome);
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check(oper.Value, T0).Outcome);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(other.Value, T0).Outcome);
+
+        /* The drain commits and the entry leaves: the gate now follows the store rows alone. */
+        pending.Complete(pending.Snapshot().Single());
+        Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(reader.Value, T0).Outcome);
+    }
+
+    [Fact]
+    public async Task Check_OperatorOnlyPendingRevoke_RefusesTheOwnersOperatorTokenAndPassesTheirReader()
+    {
+        var pending = new PersonalTokenPendingRevokes();
+        var rig = new Rig(pending);
+        var reader = PersonalTokenFormat.Mint();
+        var oper = PersonalTokenFormat.Mint();
+        rig.Rows = () => new[]
+        {
+            Row(reader, T0.AddDays(1), owner: "alice", role: "reader"),
+            Row(oper, T0.AddDays(1), owner: "alice", role: "operator"),
+        };
+        await rig.Refresh();
+
+        pending.Add("alice", operatorOnly: true, PersonalTokenStore.SeatLoweredReason);
+
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check(oper.Value, T0).Outcome);
+        Assert.Equal(PersonalTokenOutcome.Live, rig.Snapshot.Check(reader.Value, T0).Outcome);
+    }
+
+    [Fact]
+    public async Task ProcessContainer_GivesTheSnapshotTheQueueTheHostsShare()
+    {
+        var services = new ServiceCollection();
+        DarlingProcessServices.Add(services, stoppedMarkerPath: null);
+        /* An in-memory queue in place of the one that saves beside the service logs, so this test writes no file there. */
+        var queue = new PersonalTokenPendingRevokes();
+        services.AddSingleton(queue);
+        await using var provider = services.BuildServiceProvider();
+
+        var snapshot = provider.GetRequiredService<DarlingPersonalTokenSnapshot>();
+
+        Assert.Same(queue, snapshot.Pending);
+        var host = new DarlingWebHostService(Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(),
+            new CollectorRuntimeState(), new WebTlsCertificateState(), services: provider);
+        Assert.Same(queue, host.PendingPersonalRevokes);
+    }
+
+    private static string TempFolder()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "pending-revokes-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    [Fact]
+    public void PendingRevokes_ANewInstanceOnTheSameFile_HoldsTheQueueTheOldOneSaved()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var file = Path.Combine(folder, "queue.json");
+            var first = new PersonalTokenPendingRevokes(stateFile: file);
+            first.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+            first.Add("bob", operatorOnly: true, PersonalTokenStore.SeatLoweredReason);
+            first.Add("carol", operatorOnly: true, PersonalTokenStore.SeatLoweredReason);
+            first.Remove("carol");
+            first.Complete(first.Snapshot().Single(e => e.OwnerKey == "bob"));
+            first.Add("dave", operatorOnly: true, PersonalTokenStore.OperatorsDisabledReason);
+
+            var log = new CapturingTestLogger();
+            var second = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            var entries = second.Snapshot().OrderBy(e => e.OwnerKey, StringComparer.Ordinal).ToList();
+            Assert.Equal(new[] { "alice", "dave" }, entries.Select(e => e.OwnerKey));
+            Assert.False(entries[0].OperatorOnly);
+            Assert.Equal(PersonalTokenStore.SignInRefusedReason, entries[0].Reason);
+            Assert.True(entries[1].OperatorOnly);
+            Assert.Equal(PersonalTokenStore.OperatorsDisabledReason, entries[1].Reason);
+            Assert.True(second.Refuses("alice", "reader"));
+            Assert.True(second.Refuses("dave", "operator"));
+            Assert.False(second.Refuses("dave", "reader"));
+            Assert.False(second.Refuses("bob", "operator"));
+            Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+            Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AnUnreadableFile_StartsEmptyWithOneWarning_AndTheNextChangeSavesAgain()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var file = Path.Combine(folder, "queue.json");
+            File.WriteAllText(file, "{ this is not json");
+            var log = new CapturingTestLogger();
+
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            Assert.Equal(0, queue.Count);
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+
+            queue.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+            var reloaded = new PersonalTokenPendingRevokes(stateFile: file);
+            Assert.Equal("alice", Assert.Single(reloaded.Snapshot()).OwnerKey);
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_NoFileYet_StartsEmptyWithoutAWarning()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var log = new CapturingTestLogger();
+
+            var queue = new PersonalTokenPendingRevokes(stateFile: Path.Combine(folder, "missing.json"), logger: log);
+
+            Assert.Equal(0, queue.Count);
+            Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
     }
 
     [Fact]
@@ -405,5 +569,102 @@ public sealed class DarlingPersonalTokenSnapshotTests
 
         Assert.Equal(2, rig.Log.CountAtLevel(LogLevel.Information));
         Assert.Equal(2, rig.Log.CountAtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
+    public void PendingRevokes_ForConfig_SavesInTheKeyFolder_AndANewQueueFromTheSameConfigLoadsIt()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var configPath = Path.Combine(folder, "darling.json");
+            var config = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}}");
+            var keys = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
+
+            var first = PersonalTokenPendingRevokes.ForConfig(config, configPath, new CapturingTestLogger());
+            first.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+
+            Assert.True(File.Exists(Path.Combine(keys, PersonalTokenPendingRevokes.StateFileName)));
+            var second = PersonalTokenPendingRevokes.ForConfig(config, configPath, new CapturingTestLogger());
+            Assert.Equal("alice", Assert.Single(second.Snapshot()).OwnerKey);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AFailedSave_IsWrittenByTheNextSaveIfDirty_OnceTheFileCanBeWritten()
+    {
+        var folder = TempFolder();
+        try
+        {
+            /* The folder the file belongs in is a plain file, so the first save cannot create it. */
+            var blocker = Path.Combine(folder, "state");
+            File.WriteAllText(blocker, "in the way");
+            var file = Path.Combine(blocker, "queue.json");
+            var log = new CapturingTestLogger();
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            queue.Add("alice", operatorOnly: false, PersonalTokenStore.SignInRefusedReason);
+            queue.SaveIfDirty();
+            Assert.False(File.Exists(file));
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+
+            File.Delete(blocker);
+            queue.SaveIfDirty();
+
+            Assert.Equal("alice", Assert.Single(new PersonalTokenPendingRevokes(stateFile: file).Snapshot()).OwnerKey);
+            Assert.True(queue.Refuses("alice", "reader"));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AFileWithARepeatedKey_StartsEmptyWithOneWarning_AndDoesNotThrow()
+    {
+        var folder = TempFolder();
+        try
+        {
+            var file = Path.Combine(folder, "queue.json");
+            File.WriteAllText(file, "{\"entries\":[],\"entries\":[{\"owner_key\":\"alice\",\"operator_only\":false,\"reason\":\"x\"}]}");
+            var log = new CapturingTestLogger();
+
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            Assert.Equal(0, queue.Count);
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PendingRevokes_AFileOverTheSizeLimit_StartsEmptyWithOneWarning_WithoutBeingParsed()
+    {
+        var folder = TempFolder();
+        try
+        {
+            /* Valid JSON with one entry: parsed, it would load that entry. The padding takes it past the limit. */
+            var file = Path.Combine(folder, "queue.json");
+            File.WriteAllText(file, "{\"entries\":[{\"owner_key\":\"alice\",\"operator_only\":false,\"reason\":\"x\"}]}"
+                + new string(' ', (int)PersonalTokenPendingRevokes.MaxStateFileBytes));
+            var log = new CapturingTestLogger();
+
+            var queue = new PersonalTokenPendingRevokes(stateFile: file, logger: log);
+
+            Assert.Equal(0, queue.Count);
+            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
     }
 }

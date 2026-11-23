@@ -329,7 +329,21 @@ internal static class DarlingMemoryGrantReader
     /// <summary>The page (time order, oldest first), whether the window held more, and the whole window's counts.</summary>
     public sealed record MemoryPressureEventsPage(
         List<MemoryPressureEventRow> Rows, bool Truncated, long TotalEvents, long MediumOrWorseEvents,
-        IReadOnlyList<MemoryPressureNotificationCount> ByNotification);
+        IReadOnlyList<MemoryPressureNotificationCount> ByNotification, long ShownEvents = 0);
+
+    /// <summary>
+    /// #9337: how many events (one per notification and one-second bucket, the unit <see cref="MemoryPressureSummarySql"/> counts in)
+    /// the page's rows cover. A page holds raw rows, and several rows can share an event (one per memory node, or samples inside
+    /// one second), so the row count is not an event count: set against the window's event total it could exceed it and print a
+    /// negative "left out" figure. The page's rows are a subset of the window's, so this never exceeds the total.
+    /// </summary>
+    public static long CountEvents(IEnumerable<MemoryPressureEventRow> rows)
+    {
+        var seen = new HashSet<(string, long)>();
+        foreach (var r in rows)
+            seen.Add((r.MemoryNotification, r.SampleTime.Ticks / TimeSpan.TicksPerSecond));
+        return seen.Count;
+    }
 
     /// <param name="limit">The newest rows to return, or null for every row in the window (the web chart).</param>
     public static async Task<MemoryPressureEventsPage> GetMemoryPressureEventsAsync(
@@ -370,10 +384,15 @@ internal static class DarlingMemoryGrantReader
             }
         }
 
-        var truncated = limit is { } cap && fetched.Count > cap;
-        var page = truncated ? fetched.Take(limit!.Value).ToList() : fetched;
+        var rowsCut = limit is { } cap && fetched.Count > cap;
+        var page = rowsCut ? fetched.Take(limit!.Value).ToList() : fetched;
         page.Reverse();
+        var total = byNotification.Sum(n => n.Events);
+        var shown = CountEvents(page);
+        /* #9337: truncated only when an event was left out, in events, the unit the note and the total use. Rows cut that only repeat an
+           event already shown (another node's record of it) leave nothing out. */
+        var truncated = rowsCut && total > shown;
         return new MemoryPressureEventsPage(
-            page, truncated, byNotification.Sum(n => n.Events), byNotification.Sum(n => n.MediumOrWorseEvents), byNotification);
+            page, truncated, total, byNotification.Sum(n => n.MediumOrWorseEvents), byNotification, shown);
     }
 }

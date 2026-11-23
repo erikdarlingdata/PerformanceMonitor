@@ -257,12 +257,15 @@ public sealed class McpMemoryTools
                    page's count; total_events is the window's. */
                 limit,
                 truncated = page.Truncated,
-                events_returned = rows.Count,
+                events_returned = page.ShownEvents,
+                /* #9337: the page's raw rows. events_returned counts events (a notification and one second), the unit total_events uses, so
+                   it never exceeds total_events; several rows can share an event. */
+                rows_returned = rows.Count,
                 order = "oldest_first",
                 oldest_returned_at = McpHelpers.FormatEffectiveStart(rows[0].SampleTime),
                 newest_returned_at = McpHelpers.FormatEffectiveStart(rows[^1].SampleTime),
                 limit_note = page.Truncated
-                    ? $"Showing the newest {rows.Count} of {page.TotalEvents} events in the window (limit {limit}); the older {page.TotalEvents - rows.Count} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
+                    ? $"Showing the newest {page.ShownEvents} of {page.TotalEvents} events in the window (limit {limit}); the older {Math.Max(0, page.TotalEvents - page.ShownEvents)} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
                     : null,
                 summary = new
                 {

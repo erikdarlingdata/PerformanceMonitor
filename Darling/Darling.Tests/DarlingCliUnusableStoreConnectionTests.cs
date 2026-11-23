@@ -208,7 +208,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     }
 
     /// <summary>
-    /// A setting conflict that Npgsql rejects when it builds a connection (Multiplexing without Pooling) is named by a
+    /// A setting conflict that Npgsql rejects when it builds a connection (a Maximum Pool Size below the Minimum Pool Size) is named by a
     /// sentence of our own, not by the hint that a value with ';' or '=' must be quoted, and Npgsql's own message is not
     /// passed through.
     /// </summary>
@@ -221,16 +221,16 @@ public sealed class DarlingCliUnusableStoreConnectionTests
         try
         {
             var path = WriteByoConfig(
-                root, "Host=127.0.0.1;Port=5432;Username=darling;Password=pw;Database=darlingtest;Multiplexing=true;Pooling=false");
+                root, "Host=127.0.0.1;Port=5432;Username=darling;Password=pw;Database=darlingtest;Minimum Pool Size=10;Maximum Pool Size=5");
 
             var (exit, output, error) = await RunVerbAsync(verb, path);
 
             Assert.Equal(1, exit);
             Assert.Contains(
-                "postgres.connectionString could not be used: Npgsql rejected the settings: Multiplexing needs Pooling to be on.",
+                "postgres.connectionString could not be used: Npgsql rejected the settings: Maximum Pool Size is smaller than Minimum Pool Size.",
                 error, StringComparison.Ordinal);
             Assert.DoesNotContain("must be quoted", error, StringComparison.Ordinal);
-            Assert.DoesNotContain("Pooling must be on to use multiplexing", error + output, StringComparison.Ordinal);
+            Assert.DoesNotContain("Connection can't have", error + output, StringComparison.Ordinal);
         }
         finally
         {

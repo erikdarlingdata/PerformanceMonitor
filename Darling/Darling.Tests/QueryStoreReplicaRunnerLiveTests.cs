@@ -195,6 +195,268 @@ public sealed class QueryStoreReplicaRunnerLiveTests
     }
 
     /// <summary>
+    /// #9352: a replica read whose stored watermark is older than the catch-up is clamped, and when an earlier cycle that clamped the
+    /// same watermark landed after reading up to some time, the new clamp is a new gap. Its hole starts the look-back before what that
+    /// cycle read, not the look-back before the raw watermark, which overlapped the hole the earlier clamp recorded.
+    /// </summary>
+    [Fact]
+    public async Task AReplicaClampThatIsANewGapAfterALandedCycle_OpensItsHoleAtWhatTheCycleRead_MinusTheLookBack()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+
+        target.Rows.Add(Row(1, WholeSeconds(DateTime.UtcNow.AddMinutes(-20))));
+        var first = await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        Assert.Equal(1, first.Rows);
+
+        /* The stored watermark W is 3 hours old. An earlier cycle that clamped it landed after reading up to 90 minutes ago, so this
+           cycle's floor (collection time - 1 hour) lies past that read and the clamp is a new gap. */
+        var watermark = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+        var readThrough = WholeSeconds(DateTime.UtcNow.AddMinutes(-90));
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            await using var update = new NpgsqlCommand(
+                "UPDATE collect.query_store_stats SET last_execution_time = @w WHERE server_id = @s AND database_name = @d", connection);
+            update.Parameters.AddWithValue("w", DateTime.SpecifyKind(watermark, DateTimeKind.Unspecified));
+            update.Parameters.AddWithValue("s", LiveServerId);
+            update.Parameters.AddWithValue("d", Db);
+            Assert.True(await update.ExecuteNonQueryAsync(token) > 0);
+        }
+
+        /* A second runner over the same store, as after a restart: the first one cached the watermark it saw, and the update above
+           goes around that cache. */
+        var restarted = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var provider = new FakeTargetProvider(target);
+        restarted.TargetProviderOverrideForTests = _ => provider;
+        restarted.QueryStoreReplicaConnectionStringOverrideForTests = _ => ReplicaConnection;
+        restarted.QueryStoreClampReportsForTests.Land(LiveServerId, Db, watermark, readThrough);
+        target.Rows.Clear();
+        await restarted.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+
+        string? encoded;
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            await using var read = new NpgsqlCommand(
+                "SELECT state_value FROM collector_state WHERE server_id = @s AND collector_name = @c AND state_key = @k", connection);
+            read.Parameters.AddWithValue("s", LiveServerId);
+            read.Parameters.AddWithValue("c", QueryStoreBackfillState.StateCollectorName);
+            read.Parameters.AddWithValue("k", QueryStoreBackfillState.HoleKeyPrefix + Db);
+            encoded = (string?)await read.ExecuteScalarAsync(token);
+        }
+
+        Assert.True(QueryStoreBackfillState.TryDecodeHoles(encoded, out var holes));
+        var hole = Assert.Single(holes);
+
+        /* The look-back is 6 minutes here (a 60 second flush plus 5 minutes). */
+        Assert.Equal(readThrough.AddMinutes(-6), hole.FromUtc);
+        Assert.True(hole.ToUtc > readThrough);
+    }
+
+    private DarlingCollectorRunner RestartedRunner(Rig rig, Target target)
+    {
+        var restarted = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var provider = new FakeTargetProvider(target);
+        restarted.TargetProviderOverrideForTests = _ => provider;
+        restarted.QueryStoreReplicaConnectionStringOverrideForTests = _ => ReplicaConnection;
+        return restarted;
+    }
+
+    private static async Task SetStoredWatermarkAsync(Rig rig, DateTime watermark, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        await using var update = new NpgsqlCommand(
+            "UPDATE collect.query_store_stats SET last_execution_time = @w WHERE server_id = @s AND database_name = @d", connection);
+        update.Parameters.AddWithValue("w", DateTime.SpecifyKind(watermark, DateTimeKind.Unspecified));
+        update.Parameters.AddWithValue("s", LiveServerId);
+        update.Parameters.AddWithValue("d", Db);
+        Assert.True(await update.ExecuteNonQueryAsync(token) > 0);
+    }
+
+    private static async Task<string?> ReadBackfillStateAsync(Rig rig, string key, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        await using var read = new NpgsqlCommand(
+            "SELECT state_value FROM collector_state WHERE server_id = @s AND collector_name = @c AND state_key = @k", connection);
+        read.Parameters.AddWithValue("s", LiveServerId);
+        read.Parameters.AddWithValue("c", QueryStoreBackfillState.StateCollectorName);
+        read.Parameters.AddWithValue("k", key);
+        return (string?)await read.ExecuteScalarAsync(token);
+    }
+
+    private static async Task WriteBackfillStateAsync(Rig rig, string key, string? value, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        await using var write = new NpgsqlCommand(
+            value is null
+                ? "DELETE FROM collector_state WHERE server_id = @s AND collector_name = @c AND state_key = @k"
+                : "INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES (@s, @c, @k, @v, now() AT TIME ZONE 'UTC') "
+                  + "ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = EXCLUDED.state_value",
+            connection);
+        write.Parameters.AddWithValue("s", LiveServerId);
+        write.Parameters.AddWithValue("c", QueryStoreBackfillState.StateCollectorName);
+        write.Parameters.AddWithValue("k", key);
+        if (value is not null)
+        {
+            write.Parameters.AddWithValue("v", value);
+        }
+
+        await write.ExecuteNonQueryAsync(token);
+    }
+
+    /// <summary>
+    /// #9359: an idle database whose clamp an earlier process already reported and read. After a restart its first clamp opens no
+    /// hole, because the stored entry says the range up to the last cycle was read. Once the database stops clamping, the entry is
+    /// retired.
+    /// </summary>
+    [Fact]
+    public async Task AnIdleDatabaseAfterARestart_OpensNoHole_AndItsStoredEntryIsRetiredWhenItStopsClamping()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+        var landedKey = QueryStoreBackfillState.LandedKeyPrefix + Db;
+        var holeKey = QueryStoreBackfillState.HoleKeyPrefix + Db;
+
+        target.Rows.Add(Row(1, WholeSeconds(DateTime.UtcNow.AddMinutes(-20))));
+        Assert.Equal(1, (await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token)).Rows);
+
+        /* The stored watermark goes stale and the source has nothing new: the first clamp records its hole and its entry. */
+        await SetStoredWatermarkAsync(rig, WholeSeconds(DateTime.UtcNow.AddHours(-3)), token);
+        target.Rows.Clear();
+        var beforeRestart = RestartedRunner(rig, target);
+        await beforeRestart.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        Assert.NotNull(await ReadBackfillStateAsync(rig, holeKey, token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, landedKey, token));
+
+        /* The backfill digs and retires that hole. A restarted process then clamps the same watermark. */
+        await WriteBackfillStateAsync(rig, holeKey, null, token);
+        var afterRestart = RestartedRunner(rig, target);
+        await afterRestart.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        Assert.Null(await ReadBackfillStateAsync(rig, holeKey, token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, landedKey, token));
+
+        /* A row arrives: that cycle still read the stale watermark and keeps the entry, and the next one clamps nothing and retires it. */
+        target.Rows.Add(Row(2, WholeSeconds(DateTime.UtcNow.AddMinutes(-5))));
+        await afterRestart.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        Assert.NotNull(await ReadBackfillStateAsync(rig, landedKey, token));
+        target.Rows.Clear();
+        await afterRestart.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        Assert.Null(await ReadBackfillStateAsync(rig, landedKey, token));
+    }
+
+    /// <summary>
+    /// #9359: a delete of the stored entry whose write fails is returned again by the next cycle that does not clamp, and once a
+    /// delete lands nothing more is returned. The failing write goes to a store nobody listens on, so it fails for certain.
+    /// </summary>
+    [Fact]
+    public async Task AFailedDeleteOfTheStoredEntry_IsReturnedAgainNextCycle_AndOnceItLandsNothingMoreIs()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+        var landedKey = QueryStoreBackfillState.LandedKeyPrefix + Db;
+        var raw = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=darling;Database=darlingtest;Timeout=2;Command Timeout=2");
+        var failing = new DarlingCollectorRunner(unreachable, new CollectorDeltaCalculator(), rig.Log);
+        failing.QueryStoreClampReportsForTests.Land(LiveServerId, Db, raw, DateTime.UtcNow);
+        var failed = failing.QueryStoreClampReportsForTests.Land(LiveServerId, Db, null, DateTime.UtcNow);
+        Assert.NotNull(failed);
+        await failing.PersistQueryStoreLandedAsync(LiveServerId, [failed!.Value], token);
+        Assert.NotNull(failing.QueryStoreClampReportsForTests.Land(LiveServerId, Db, null, DateTime.UtcNow));
+
+        /* The same sequence on the live store: the entry is written, retired by the first cycle that stops clamping, and then
+           asked for no more. */
+        var runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var reports = runner.QueryStoreClampReportsForTests;
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, [reports.Land(LiveServerId, Db, raw, DateTime.UtcNow)!.Value], token);
+        Assert.NotNull(await ReadBackfillStateAsync(rig, landedKey, token));
+
+        var delete = reports.Land(LiveServerId, Db, null, DateTime.UtcNow);
+        Assert.NotNull(delete);
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, [delete!.Value], token);
+        Assert.Null(await ReadBackfillStateAsync(rig, landedKey, token));
+        Assert.Null(reports.Land(LiveServerId, Db, null, DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// #9359: every clamping database of a server stores its entry in one write, and the first cycle that stops clamping retires the
+    /// entries of several databases in one write too, upserts and deletes together.
+    /// </summary>
+    [Fact]
+    public async Task SeveralDatabasesLandedInOneCycle_AreStoredAndRetiredInOneWrite()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+        var runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var reports = runner.QueryStoreClampReportsForTests;
+        var raw = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+        var key = (string name) => QueryStoreBackfillState.LandedKeyPrefix + name;
+
+        var landed = new List<QueryStoreLandedChange>
+        {
+            reports.Land(LiveServerId, "alpha", raw, DateTime.UtcNow)!.Value,
+            reports.Land(LiveServerId, "beta", raw, DateTime.UtcNow)!.Value,
+        };
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, landed, token);
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("alpha"), token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("beta"), token));
+
+        /* Alpha stops clamping while a third database starts: one call carries the delete and the upsert. */
+        var mixed = new List<QueryStoreLandedChange>
+        {
+            reports.Land(LiveServerId, "alpha", null, DateTime.UtcNow)!.Value,
+            reports.Land(LiveServerId, "gamma", raw, DateTime.UtcNow)!.Value,
+        };
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, mixed, token);
+        Assert.Null(await ReadBackfillStateAsync(rig, key("alpha"), token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("beta"), token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("gamma"), token));
+        Assert.Null(reports.Land(LiveServerId, "alpha", null, DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// #9359: a real gap after a restart still opens its hole, at what the stored entry says the last cycle read.
+    /// </summary>
+    [Fact]
+    public async Task ARealGapAfterARestart_OpensItsHoleAtTheStoredReadThrough_MinusTheLookBack()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+
+        target.Rows.Add(Row(1, WholeSeconds(DateTime.UtcNow.AddMinutes(-20))));
+        Assert.Equal(1, (await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token)).Rows);
+
+        var watermark = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+        var readThrough = WholeSeconds(DateTime.UtcNow.AddMinutes(-90));
+        await SetStoredWatermarkAsync(rig, watermark, token);
+        await WriteBackfillStateAsync(
+            rig, QueryStoreBackfillState.LandedKeyPrefix + Db, QueryStoreBackfillState.EncodeLanded(watermark, readThrough), token);
+        target.Rows.Clear();
+        await RestartedRunner(rig, target).RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+
+        Assert.True(QueryStoreBackfillState.TryDecodeHoles(
+            await ReadBackfillStateAsync(rig, QueryStoreBackfillState.HoleKeyPrefix + Db, token), out var holes));
+        var hole = Assert.Single(holes);
+
+        /* The look-back is 6 minutes here (a 60 second flush plus 5 minutes). */
+        Assert.Equal(readThrough.AddMinutes(-6), hole.FromUtc);
+    }
+
+    /// <summary>
     /// T6: the setting is empty and no secondary captures: no replica connection opens, nothing reads the replica, the
     /// run reports no read source, and a row older than the watermark is NOT re-read (today's cutoff exactly).
     /// </summary>

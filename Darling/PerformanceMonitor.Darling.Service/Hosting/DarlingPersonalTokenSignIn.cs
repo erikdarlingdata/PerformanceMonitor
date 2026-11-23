@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -95,16 +96,17 @@ internal static class DarlingPersonalTokenSignIn
     }
 
     /// <summary>The revoke has committed, so a failed refresh is not a reason to revoke again: it is logged, and the snapshot's own tick reloads
-    /// within 5 seconds.</summary>
-    private static async Task RefreshAfterRevokeAsync(StoreOwnerSource owner, DarlingPersonalTokenSnapshot snapshot, ILogger logger, CancellationToken ct)
+    /// within 5 seconds. True when the refresh loaded the rows, so the snapshot now shows the revoke.</summary>
+    private static async Task<bool> RefreshAfterRevokeAsync(StoreOwnerSource owner, DarlingPersonalTokenSnapshot snapshot, ILogger logger, CancellationToken ct)
     {
         try
         {
-            await snapshot.RefreshAsync(owner, logger, ct);
+            return await snapshot.RefreshAsync(owner, logger, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "MCP personal tokens were revoked, but the snapshot refresh failed; the next snapshot tick picks the revoke up.");
+            return false;
         }
     }
 
@@ -129,12 +131,15 @@ internal static class DarlingPersonalTokenSignIn
     /// <summary>
     /// Makes the revokes a sign-in could not make: one store write per queued owner. An entry leaves the queue only after its revoke commits;
     /// a store failure stops the pass and leaves the rest for the next tick (a debug line, the pending case was already warned about). A store with no personal token table
-    /// has no tokens to revoke, so its entries are dropped. The snapshot is refreshed once after a pass that revoked rows, as the sign-in does.
-    /// With the feature off (<paramref name="settings"/> null) nothing is drained and the queue is kept.
+    /// has no tokens to revoke, so its entries are dropped. An entry whose revoke changed no rows leaves at once. An entry whose revoke changed rows
+    /// stays, and keeps refusing the owner's tokens, until the snapshot refresh after the pass succeeds, so the snapshot never lags a token the queue
+    /// has already stopped refusing. A failed refresh leaves those entries for the next pass, where the same revoke changes nothing and they leave.
+    /// Every call first retries a queue file save that failed. With the feature off (<paramref name="settings"/> null) nothing is drained and the queue is kept.
     /// </summary>
     internal static async Task DrainPendingAsync(PersonalTokenSettings? settings, StoreOwnerSource owner, DarlingPersonalTokenSnapshot snapshot,
         PersonalTokenPendingRevokes pending, ILogger logger, CancellationToken ct)
     {
+        pending.SaveIfDirty();
         if (settings is null || pending.Count == 0)
         {
             return;
@@ -146,18 +151,21 @@ internal static class DarlingPersonalTokenSignIn
             return;
         }
 
-        var revokedAny = false;
+        var awaitingRefresh = new List<PersonalTokenPendingRevokes.Entry>();
         foreach (var entry in pending.Snapshot())
         {
             try
             {
                 var revoked = await PersonalTokenStore.RevokeForOwnerAsync(
                     source, entry.OwnerKey, entry.OperatorOnly, SignInActor, entry.Reason, DateTimeOffset.UtcNow, ct);
-                pending.Complete(entry);
                 if (revoked > 0)
                 {
-                    revokedAny = true;
+                    awaitingRefresh.Add(entry);
                     logger.LogInformation("Revoked {Count} MCP personal token(s) from the queued sign-in revoke ({Reason}).", revoked, entry.Reason);
+                }
+                else
+                {
+                    pending.Complete(entry);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -179,9 +187,12 @@ internal static class DarlingPersonalTokenSignIn
             }
         }
 
-        if (revokedAny)
+        if (awaitingRefresh.Count > 0 && await RefreshAfterRevokeAsync(owner, snapshot, logger, ct))
         {
-            await RefreshAfterRevokeAsync(owner, snapshot, logger, ct);
+            foreach (var entry in awaitingRefresh)
+            {
+                pending.Complete(entry);
+            }
         }
     }
 

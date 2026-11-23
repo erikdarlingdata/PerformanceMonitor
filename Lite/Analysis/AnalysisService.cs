@@ -633,22 +633,36 @@ public class AnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            /* #9195: get_analysis_facts is an interactive read. The plan check answers from what the background pass cached and
+               fetches at most the allowance's few plans (3 fetches, 3 s). */
+            InteractiveRead = true,
+            InteractiveFetches = new InteractivePlanFetchAllowance()
         };
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        /* #9195: the read lock wait of every store read this call makes, for the slow-read line. */
+        using var lockWaits = ReadLockWaitTally.Begin();
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
+        var scopeTime = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted);
 
         try
         {
+            var passStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             var facts = await _collector.CollectFactsAsync(context);
+            var passTime = System.Diagnostics.Stopwatch.GetElapsedTime(passStarted);
+            var detectorTime = TimeSpan.Zero;
             if (context.ObservedDurationMs > 0)
             {
                 /* Same detector, same context, same position as the pass (#3691). A collector that
                    observed the window but emitted no fact does not short-circuit this: the detector reads
                    the store on its own and its facts are part of what this read shows. */
+                var detectorStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
                 facts.AddRange(anomalies);
+                detectorTime = System.Diagnostics.Stopwatch.GetElapsedTime(detectorStarted);
             }
+            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime, lockWaits, context.InteractiveFetches);
             if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
@@ -660,6 +674,26 @@ public class AnalysisService
             AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
             return ([], null, CollectionCaveatState.From(context));
         }
+    }
+
+    /// <summary>
+    /// #9195: one Information line when the facts read took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>, with the time
+    /// split between its steps. The "Fact collection took" line times the fact pass alone, and a field read ran about 2 s longer
+    /// than that pass: this line says whether the rest went to the secondary replica read, the anomaly detector or neither
+    /// (the scope and the other small steps before the pass). Scoring runs after the line and is in memory.
+    /// </summary>
+    private static void ReportSlowFactsRead(
+        string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector, ReadLockWaitTally lockWaits,
+        InteractivePlanFetchAllowance? planFetches)
+    {
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        AppLogger.Info("AnalysisService",
+            $"Analysis facts read took {Ms(total)} ms for {serverName} (server {serverId}): secondary replica scope {Ms(scope)} ms, " +
+            $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, other {Ms(total - scope - pass - detector)} ms, " +
+            $"plan fetches {planFetches?.Fetches ?? 0} in {Ms(planFetches?.FetchTime ?? TimeSpan.Zero)} ms (inside the fact pass), " +
+            $"{lockWaits.DescribeLockWait()} (inside those)");
     }
 
     /// <summary>
@@ -719,20 +753,34 @@ public class AnalysisService
     /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
     /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
     /// the facts did not make.</para>
+    ///
+    /// <para>#9195: <paramref name="interactive"/> is true for <c>compare_analysis</c>, a read someone is waiting on: both windows'
+    /// plan checks then answer from the outcomes a background pass cached, and share one allowance of at most 3 live plan
+    /// fetches in 3 s for the pairs it lacks. The config-change attribution inside the pass leaves it false, so the pass keeps
+    /// fetching under its own budget.</para>
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "The token stays where it was: callers pass it positionally, and a bool ahead of it would turn that " +
+                        "argument into a compile error at each of them. Appending the flag is the edit that cannot rebind a call.")]
     public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool interactive = false)
     {
+        /* #9195: one allowance for the whole call, so the two windows together make at most 3 fetches in 3 s. */
+        var allowance = interactive ? new InteractivePlanFetchAllowance() : null;
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var lockWaits = ReadLockWaitTally.Begin();
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            InteractiveRead = interactive,
+            InteractiveFetches = allowance
         };
 
         var comparisonContext = new AnalysisContext
@@ -741,7 +789,9 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            InteractiveRead = interactive,
+            InteractiveFetches = allowance
         };
         baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
@@ -757,6 +807,7 @@ public class AnalysisService
                read that never yields cannot overlap another. */
             var baselineFacts = await _collector.CollectFactsAsync(baselineContext);
             var comparisonFacts = await _collector.CollectFactsAsync(comparisonContext);
+            if (interactive) ReportSlowComparisonRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), lockWaits, allowance);
 
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
@@ -773,6 +824,22 @@ public class AnalysisService
             AppLogger.Error("AnalysisService", $"Period comparison failed for {serverName}: {ex.Message}");
             return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
+    }
+
+    /// <summary>
+    /// #9195: the compare read's counterpart of <see cref="ReportSlowFactsRead"/>: one Information line when the two windows' fact
+    /// passes took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>, with the plan fetches the call made and their time.
+    /// </summary>
+    private static void ReportSlowComparisonRead(
+        string serverName, int serverId, TimeSpan total, ReadLockWaitTally lockWaits, InteractivePlanFetchAllowance? planFetches)
+    {
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        AppLogger.Info("AnalysisService",
+            $"Analysis comparison read took {Ms(total)} ms for {serverName} (server {serverId}): " +
+            $"plan fetches {planFetches?.Fetches ?? 0} in {Ms(planFetches?.FetchTime ?? TimeSpan.Zero)} ms (inside the fact passes), " +
+            $"{lockWaits.DescribeLockWait()} (inside those)");
     }
 
     /// <summary>

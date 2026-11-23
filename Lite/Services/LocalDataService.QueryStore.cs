@@ -504,7 +504,9 @@ ORDER BY p.page_ord";
            as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
         /* #7256: with the window read from the hot table alone, a candidate's newest row is in the hot table (it has a row in the window,
            and the archive holds nothing that new), so the latest row and its text are read there. */
-        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)), relation);
+        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)), relation,
+            /* #9195: every candidate has a row collected at or after this floor (the ranking's own), so its newest row is too. */
+            startTime.AddDays(-1));
         var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values, relation);
         var items = new List<QueryStoreRow>();
         foreach (var row in candidateRows)

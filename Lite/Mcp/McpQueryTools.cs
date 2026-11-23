@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -280,11 +281,12 @@ public sealed class McpQueryTools
     /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Twin of
     /// <c>DarlingMcpDataTools.EmptyCollectorRan</c>; the words are shared in <see cref="CollectorRunFacts.RanFoundNothing"/>.</summary>
     internal static string? EmptyCollectorRan(
-        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName)
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName, string? storedRowsExplanation = null)
     {
         var message = facts.RanFoundNothing(collectorName, hoursBack, found,
-            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }));
-        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
+            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }), storedRowsExplanation: storedRowsExplanation);
+        /* #9341: when the runs stored rows, the count beside the run count says what the sentence rests on. */
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow, rows_collected_in_window = facts.RowsCollectedInWindow });
     }
 
     /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
@@ -534,10 +536,13 @@ public sealed class McpQueryTools
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        /* #9195: the call's read lock wait and phases, for the slow-read line the finally block writes. */
+        using var lockWaits = ReadLockWaitTally.Begin();
+        var phases = new ReadPhaseSplit();
         try
         {
             /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
-            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            var tagScope = await phases.TimeAsync("tag scope", () => dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag));
             if (tagScope.Unknown)
             {
                 return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
@@ -563,13 +568,13 @@ public sealed class McpQueryTools
             var requestedStart = nowUtc.AddHours(-hours_back);
             /* Read for top + 1 queries: the extra row is the observed signal that the window held more queries than top, and the first
                top are the same rows in the same order. */
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(
+            var rows = await phases.TimeAsync("top read", () => dataService.GetQueryStoreTopQueriesAsync(
                 resolved.ServerId, hours_back, top + 1,
                 databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
                 asOfUtc: windowEnd,
                 executionType: execution_type,
                 moduleName: module_name,
-                tags: tagScope);
+                tags: tagScope));
             var moreThanTop = rows.Count > top;
             if (moreThanTop) rows = rows.GetRange(0, top);
 
@@ -578,7 +583,7 @@ public sealed class McpQueryTools
                has no rollup fallback (the only one that keeps query_id/plan_id would approach raw's own size),
                so the honest move is to report what was served rather than echo what was asked for. Deliberately
                unfiltered: the floor is a property of the tier, not narrowed by database/execution_type/module. */
-            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc);
+            var floor = await phases.TimeAsync("window floor", () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc));
             var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
@@ -631,7 +636,7 @@ public sealed class McpQueryTools
                     /* #6226 (Darling's twin): the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. */
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_store", hours_back, asOfUtc: windowEnd),
-                        "query_store", hours_back, "Query Store intervals", database_name)
+                        "query_store", hours_back, "Query Store intervals", database_name, McpHelpers.QueryStoreNoIntervalInWindow)
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
@@ -685,8 +690,8 @@ public sealed class McpQueryTools
             var topPayload = System.Text.Json.Nodes.JsonNode.Parse(topJson)!.AsObject();
 
             /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
-            if (await McpRuntimePrecondition.QueryStoreErrorNoteAsync(
-                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName)) is { } storeErrorNote)
+            if (await phases.TimeAsync("database state", () => McpRuntimePrecondition.QueryStoreErrorNoteAsync(
+                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName))) is { } storeErrorNote)
             {
                 topPayload[McpRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
@@ -700,6 +705,26 @@ public sealed class McpQueryTools
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
+        finally
+        {
+            ReportSlowQueryStoreTopRead(resolved.DisplayName, resolved.ServerId, phases, lockWaits);
+        }
+    }
+
+    /// <summary>
+    /// #9195: one Information line when a <c>get_query_store_top</c> call took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
+    /// the way the facts read says it. The line gives the time of each phase in the order it ran, the wait for the store's read
+    /// lock added up over every connection the call opened, and the time the archive span reads took. The lock wait and the
+    /// archive span are inside the phases, not beside them, and "other" is what no phase accounts for (the empty-answer checks).
+    /// </summary>
+    private static void ReportSlowQueryStoreTopRead(string serverName, int serverId, ReadPhaseSplit phases, ReadLockWaitTally lockWaits)
+    {
+        var total = phases.Total;
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        AppLogger.Info("McpQueryTools",
+            $"Query Store top read took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}): " +
+            $"{lockWaits.DescribeLockWait()}, archive span {(long)lockWaits.ArchiveSpan.TotalMilliseconds} ms (both inside the phases), {phases.Describe(total)}");
     }
 
     /// <summary>
@@ -749,7 +774,9 @@ public sealed class McpQueryTools
             /* #6750: the store's data start, probed once. The window notice below reports it as effective_start, and the read divides
                each per-hour rate by the hours from it, so the two cannot disagree. */
             var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd);
-            var rows = await dataService.GetQueryStoreRegressionsAsync(
+            /* #9362: the read also answers the coverage facts the empty answer needs (for database_name when one is named), so an
+               empty answer makes no second pass over the archive for them. */
+            var (rows, readHasBaseline, readHasRecent) = await dataService.GetQueryStoreRegressionsWithCoverageAsync(
                 resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList(),
                 dataStartUtc: EffectiveWindowStart(floor, baselineStart));
 
@@ -767,7 +794,7 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of)), leftOut)!;
+                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of), readHasBaseline, readHasRecent), leftOut)!;
 
             var truncated = rows.Count > limit;
 
@@ -921,19 +948,24 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay) =>
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay, bool readHasBaseline, bool readHasRecent) =>
         /* #7167: the all-clear rungs below are true negatives only while the server is being collected. */
         await OfflineInsteadOfEmptyAsync(
             dataService, serverId, windowEnd,
-            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay), windowEnd.AddHours(-hours_back));
+            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay, readHasBaseline, readHasRecent), windowEnd.AddHours(-hours_back));
 
     private static async Task<string> EmptyRegressionRungsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay)
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay, bool readHasBaseline, bool readHasRecent)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
-           exist for this window", and a window it computed for itself would be a different one. */
-        var (hasBaseline, hasRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
+           exist for this window", and a window it computed for itself would be a different one.
+           #9362: with no database named, the read's own facts are the server-wide answer (the read folds them from the rows the
+           probe reads), so there is no probe. With one named they are that database's, and the server-wide question is still
+           asked once. */
+        var (hasBaseline, hasRecent) = databases is null
+            ? (readHasBaseline, readHasRecent)
+            : await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
 
         if (!hasBaseline && !hasRecent)
         {
@@ -988,8 +1020,7 @@ public sealed class McpQueryTools
            it the same. */
         if (databases is not null)
         {
-            var (filteredBaseline, filteredRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(
-                serverId, hours_back, asOfUtc: windowEnd, databaseNames: databases);
+            var (filteredBaseline, filteredRecent) = (readHasBaseline, readHasRecent);
 
             if (!filteredBaseline && !filteredRecent)
             {
@@ -1889,8 +1920,8 @@ public sealed class McpQueryTools
     /// word, and the window wrappers add none (<see cref="AnswerStatus.IsOffline"/>).
     /// </summary>
     internal static async Task<string> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null) =>
-        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart)).Answer;
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null, string? snapshotCollector = null) =>
+        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart, snapshotCollector)).Answer;
 
     /// <summary>
     /// <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> over a status the caller has already read, so a
@@ -1898,7 +1929,8 @@ public sealed class McpQueryTools
     /// (read again only when the answer changed, which only an <c>empty</c> one does).
     /// </summary>
     private static async Task<(string Answer, AnswerStatus Status)> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null)
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null,
+        string? snapshotCollector = null)
     {
         if (!status.IsEmpty)
         {
@@ -1906,7 +1938,22 @@ public sealed class McpQueryTools
         }
 
         var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd, windowStart);
-        return offline is null ? (answer, status) : (offline, ReadStatus(offline));
+        if (offline is not null)
+        {
+            return (offline, ReadStatus(offline));
+        }
+
+        /* #9339: a server that is online now can still have skipped or failed collection inside the window (a THREADPOOL episode starves
+           the collector's own connection). A snapshot read that passes its collector says so, with the count and the span, so an empty
+           answer does not read as "nothing was waiting". Darling's twin is DarlingServerOfflineNote.EmptyAsync. */
+        if (snapshotCollector is not null && windowStart is { } start)
+        {
+            var gaps = await dataService.GetCollectionGapsAsync(serverId, snapshotCollector, start, windowEnd);
+            var noted = CollectionGapNote.Apply(answer, snapshotCollector, gaps);
+            return ReferenceEquals(noted, answer) ? (answer, status) : (noted, ReadStatus(noted));
+        }
+
+        return (answer, status);
     }
 
     /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>

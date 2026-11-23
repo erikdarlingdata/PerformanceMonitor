@@ -66,6 +66,10 @@ Cross-reference `README.md` against the changelog and ensure all user-facing cha
 
 Do NOT add internal/implementation changes — only user-facing features and behavior.
 
+### 2c. Refresh the code map
+
+Run `python tools/codemap/codemap.py` and commit `docs/codemap.json`, `docs/CODEMAP.md` and `docs/codemap.html` if they changed. The script fails when `tools/codemap/areas.json` lists a file or folder that no longer exists. Fix that list, then run it again.
+
 ### 3. Upgrade Scripts — Schema Change Audit (conditional)
 
 Applies ONLY when `install/` or `upgrades/` changed since the last release. The frozen Dashboard in the zip reads this schema, so its schema discipline still holds when it IS touched:
@@ -185,13 +189,13 @@ Also read the two pins at the top of the workflow, `DARLING_CURRENT_RELEASE` and
 Do the whole procedure twice: once from the last release, and once from the oldest release still supported.
 
 - **Which release is the oldest supported:** the oldest `Darling/Darling.Tests/Fixtures/migration-ladder-v<version>.sql` in the tree. `MigrationUpgradeLadderLiveTests` climbs the current ladder over every fixture in that folder. Its `TheMostRecentRelease_HasALadderFixture` check keeps the newest shipped release in the set. So the oldest fixture is the oldest store the tests vouch for. Read the folder at release time, and do not copy a version number into this file. Deleting a fixture drops that release from support, so make it a deliberate decision and not a tidy-up.
-- **Set up the old install:** download that release's Darling zip and extract it to `C:\Program Files\PerformanceMonitorDarling`. Write a `darling.json` that points at one throwaway test instance. Install it the way that release documented: its `install-darling.ps1`, or the manual steps in the README's "Upgrading from a build that predates the script" section when that release has no script. Let it collect for at least two cycles. Before upgrading, record `MAX(version)` from `darling_schema_version` and the account the service runs as. Also record the row counts of two or three `collect.*` tables.
+- **Set up the old install:** download that release's Darling zip and extract it to the folder that release documented. Early releases (3.3.0 among them) used `C:\PerformanceMonitorDarling`: under `C:\Program Files\` their managed PostgreSQL bootstrap fails with "Access to the path ... pg-runtime is denied". Early releases are also framework-dependent, so install the .NET 10 runtime first on a machine that has none. From an install under `C:\`, `upgrade-darling.ps1` refuses the in-place upgrade and prints the steps that move the install. Follow them, then run the upgrade. Write a `darling.json` that points at one throwaway test instance. Install it the way that release documented: its `install-darling.ps1`, or the manual steps in the README's "Upgrading from a build that predates the script" section when that release has no script. Let it collect for at least two cycles. Before upgrading, record `MAX(version)` from `darling_schema_version` and the account the service runs as. Also record the row counts of two or three `collect.*` tables.
 - **Upgrade:** extract the new release zip to a staging folder under `C:\Program Files\` that only administrators can write to. From an elevated PowerShell, run that copy's `upgrade-darling.ps1 -Source <staging folder>`. On one of the two runs, point `-Source` at the downloaded zip with `-Sha256` from the release page, so the hash path runs too. When the old release predates the script, the new zip's script still runs over it, because it finds the install through the registered service. If the README still tells those users to take the manual procedure, walk that once as well. Record which path worked.
 - **Pass, at the script:** it exits 0 without a refusal. It prints that the SHA256 was verified (zip run), that `darling.json` is byte-identical, that the install manifest was written, and "Service is Running".
 - **Pass, 10 to 15 minutes later:** work the five checks the script prints against the store.
   1. `MAX(version)` equals the new build's top rung.
   2. `collect.collection_log` has rows for every configured server in the last 15 minutes.
-  3. The collector count is in the mid-30s, not single digits.
+  3. The collector count is about 50 (47 to 52 on 3.13.0), not single digits.
   4. Every non-SUCCESS row since the restart gets read. YIELDED is the lock-timeout guard working. Anything else is a finding.
   5. One table the release added or changed shows new rows.
 

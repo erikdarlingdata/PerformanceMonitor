@@ -415,6 +415,14 @@ public static partial class TimescaleSupport
             return CollectionLogSegmentBy;
         }
 
+        foreach (var objectUsageTable in ObjectUsageChain.PerSnapshotTables)
+        {
+            if (bare.Equals(objectUsageTable, StringComparison.Ordinal))
+            {
+                return ObjectUsageChain.CompressionSegmentBy;
+            }
+        }
+
         if (bare.Equals(AttentionEventsTable, StringComparison.Ordinal))
         {
             return AttentionEventsSegmentBy;
@@ -7472,8 +7480,13 @@ WITH NO DATA";
                    name to guard with one), so every start after the first is a read with no write. */
                 if (QueryStoreRollupKeptIndexesSql.TryGetValue(view, out var keptIndexesSql))
                 {
-                    using var keptIndexes = new NpgsqlCommand(keptIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await keptIndexes.ExecuteNonQueryAsync(cancellationToken);
+                    /* #9343: these blocks open with SET LOCAL lock_timeout (shared with V246, V284, V291 and V292, which run them
+                       inside their own migration transaction). On this plain connection that statement is outside any transaction,
+                       PostgreSQL warns "SET LOCAL can only be used in transaction blocks" for it: a fresh-store setup on PostgreSQL 17.12 raised it
+                       three times, once per block. Measured on 17.12 and 18.7: the lock timeout still held for the later statements of the SAME command,
+                       so a build did give up at the set value, but the setting is gone for the next command. The transaction gives the blocks the scope
+                       they were written for and ends the warning. */
+                    await ExecuteInTransactionAsync(connection, keptIndexesSql, cancellationToken);
                 }
 
                 /* #9149: the plan cache hourly rollups' covering hash indexes, a catalog read when they are there. */
@@ -14913,6 +14926,25 @@ BEGIN
         EXECUTE format('CREATE INDEX ON %s ({column}, bucket DESC)', v_mat_oid);
     END IF;
 END $$;";
+
+    /// <summary>
+    /// #9343: runs <paramref name="sql"/> in one transaction of its own on <paramref name="connection"/>, so a leading
+    /// <c>SET LOCAL lock_timeout</c> applies to the statements after it and ends with the commit. A <c>SET LOCAL</c> sent on a plain connection is outside
+    /// any transaction block: PostgreSQL warns "can only be used in transaction blocks" (measured on 17.12 and 18.7), the setting reaches the rest of that one
+    /// command and is gone for the next command.
+    /// The connection must not already be inside a transaction. Not for <c>CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)</c>, which
+    /// cannot run in one.
+    /// </summary>
+    internal static async Task ExecuteInTransactionAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        using (var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+    }
 
     /// <summary>Concatenates one <see cref="KeptIndexesSql(string, string)"/> block per kept column on <paramref name="view"/>.</summary>
     private static string KeptIndexesSql(string view, params string[] columns) =>

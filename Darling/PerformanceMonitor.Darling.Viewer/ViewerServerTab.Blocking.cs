@@ -449,10 +449,11 @@ public partial class ViewerServerTab
     /// <summary>The slicer sends UTC bounds; the viewer's reads take naive UTC directly (no clock shift).</summary>
     private async void OnBlockingSlicerChanged(object? sender, SlicerRangeEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = Timed(timer, "grid read", _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter));
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Blocked Process Reports");
             var read = dataReadTask.Result;
             var rows = read.Rows;
@@ -461,16 +462,18 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"blocking slicer failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Blocking > Blocked Process Reports", timer, ex));
         }
     }
 
     private async void OnDeadlockSlicerChanged(object? sender, SlicerRangeEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var dataStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc);
+            var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc));
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Deadlocks");
             var rows = dataReadTask.Result;
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(rows));
@@ -478,7 +481,8 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"deadlock slicer failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Blocking > Deadlocks", timer, ex));
         }
     }
 

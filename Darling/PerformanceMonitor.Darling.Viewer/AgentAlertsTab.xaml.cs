@@ -76,7 +76,8 @@ public partial class AgentAlertsTab : UserControl
         {
             if (_loads.Superseded(nameof(RefreshAsync), gen)) return;
 
-            StatusChanged?.Invoke($"failed to load the server list for agent alerts: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Agent Alerts", timer, ex));
         }
         finally
         {
@@ -111,7 +112,8 @@ public partial class AgentAlertsTab : UserControl
         {
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
-            StatusChanged?.Invoke($"failed to load agent alerts for {server.DisplayName}: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Agent Alerts", timer, ex));
         }
         finally
         {

@@ -380,6 +380,12 @@ if (args.Length > 0 && DarlingCliCommands.IsPrepareProvisionRolesVerb(args[0]))
     return await DarlingCliCommands.PrepareProvisionRolesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* #9349: read one database's object usage from the stored chain and from every snapshot, and print the difference. Reads only. */
+if (args.Length > 0 && DarlingCliCommands.IsObjectUsageCompareVerb(args[0]))
+{
+    return await DarlingCliCommands.ObjectUsageCompareAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
 {
     return await DarlingCliCommands.ExportInvestigationsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);

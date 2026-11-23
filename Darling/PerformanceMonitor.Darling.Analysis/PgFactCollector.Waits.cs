@@ -281,7 +281,8 @@ WITH " + BlockingWaits.WaitsCteSql(
     FROM blocked_process_reports
     WHERE server_id = $1
     AND   event_time >= $2
-    AND   event_time <= $3" + extraWhere) + @",
+    AND   event_time <= $3
+    AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + extraWhere) + @",
 reports AS (
     SELECT
         wait_time_ms,
@@ -704,7 +705,17 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
 
     // SpidFilter keeps this in lockstep with the drill-down + viewer fetch on the apex
     // (Lite maps a missing blocker to spid 0 — see PgBlockingPairRowQuery).
-    public const string BlockingChainSql = $@"
+    public const string BlockingChainSql = $@"{BlockingChainHead}
+ORDER BY event_time DESC
+LIMIT 5000";
+
+    /// <summary>#9346: <see cref="BlockingChainSql"/> with a master target's separately monitored databases cut before the cap too; the list is $5.</summary>
+    public const string BlockingChainSkippingSeparateSql = $@"{BlockingChainHead}
+{PgBlockingPairRowQuery.SeparateDatabasesBprFilter}
+ORDER BY event_time DESC
+LIMIT 5000";
+
+    private const string BlockingChainHead = $@"
 SELECT
     {PgBlockingPairRowQuery.LeadingColumns},
     blocked_sql_text,
@@ -718,8 +729,7 @@ AND   event_time >= $2
 AND   event_time <= $3
 AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
-ORDER BY event_time DESC
-LIMIT 5000";
+{PgBlockingPairRowQuery.NotMonitorOnlyPairFilter}";
 
     /// <summary>
     /// Reconstructs blocking chains from blocked_process_reports (per-pair rows) and emits
@@ -736,12 +746,16 @@ LIMIT 5000";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var command = new NpgsqlCommand(BlockingChainSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            /* #9346: a master target leaves out the pairs of databases monitored as their own targets (the rule the BLOCKING_EVENTS fact applies), so one chain
+               does not page from both targets. Both reads cut them inside the query, before their 5,000-row cap, like the monitor-only pairs. */
+            var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
+            using var command = new NpgsqlCommand(separate is null ? BlockingChainSql : BlockingChainSkippingSeparateSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             command.Parameters.AddWithValue(context.ServerId);
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
             /* The partition-column floor, so a late-collected report still counts and old chunks stay closed. */
             command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
+            if (separate is not null) command.Parameters.AddWithValue(separate);
 
             var rows = new List<BlockingPairRow>();
             using (var reader = await command.ExecuteReaderAsync(context.CancellationToken))
@@ -772,13 +786,10 @@ LIMIT 5000";
                     return dmvCommand;
                 },
                 rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                context.CancellationToken);
+                context.CancellationToken, excludeMonitorOnlyPairs: true, separateDatabases: separate);
 
-            /* A master target leaves out the pairs of databases monitored as their own targets (the same
-               rule the BLOCKING_EVENTS fact applies), so one chain does not page from both targets. */
-            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
-                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
-                    && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
+            /* #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out.
+               Both reads cut it inside the query, before their 5,000-row cap, so newer monitor-only rows cannot push real pairs out. */
 
             if (rows.Count == 0) return;
 

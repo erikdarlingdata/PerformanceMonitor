@@ -61,6 +61,7 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 
 ## Reference
 
+- [Code map](CODEMAP.md): where each part of the code lives and which files to open first. It is generated, and also comes as [HTML](codemap.html) and [JSON](codemap.json).
 - [How collection works](how-collection-works.md): a tour of the collection pipeline.
 - [Support and sponsorship](support.md): commercial support and sponsorship.
 - [Third-party components](third-party-components.md): components that ship with the product, and their licenses.

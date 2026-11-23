@@ -226,6 +226,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
         await using var twoStatement = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableByKeysSql, connection) { CommandTimeout = 300 };
         AddShared(twoStatement);
         keys.AddParameters(twoStatement);
+        keys.AddFilterParameters(twoStatement);
         var actual = await ReadAllAsync(twoStatement);
 
         Assert.True(expected.Count > 40, $"the page holds the kept keys: {expected.Count}");

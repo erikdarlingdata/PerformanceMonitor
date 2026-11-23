@@ -172,8 +172,10 @@ public sealed class TopProceduresHourlyMidLiveTests
         }, SeedShape.NullKeys);
 
     /// <summary>
-    /// #9280: the routed read answers the same page before and after the index exists, and still by the hourly mid (the production boundary
-    /// is a day before the clock, so a window of the seed's age is read by the one-statement arm: the page must not change).
+    /// #9280: the routed read answers the same page before and after the index exists, and still by the hourly mid. The seed's window is
+    /// the 24 hours ending 22:20 yesterday, and the routed read binds its boundary at the clock minus 24 hours. That boundary falls inside
+    /// the window on most runs, so the routed read then splits the window through the seek arms, and once the index exists it always uses
+    /// the seek statement. Whichever arm the hour of the run picks, the page must not change.
     /// </summary>
     [Fact]
     public Task MidRoute_RoutedPage_IsTheSameBeforeAndAfterTheNameIndex() =>

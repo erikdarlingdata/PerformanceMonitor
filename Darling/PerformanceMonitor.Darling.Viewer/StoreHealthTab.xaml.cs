@@ -222,8 +222,10 @@ public partial class StoreHealthTab : UserControl
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"failed to load the store autovacuum settings: {ex.Message}");
-            return ($"The autovacuum settings failed to load: {ex.Message}", null);
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
+            var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
+            StatusChanged?.Invoke(text);
+            return (text, null);
         }
     }
 
@@ -241,7 +243,10 @@ public partial class StoreHealthTab : UserControl
 
         try
         {
+            var startedUtc = DateTime.UtcNow;
             var read = await ViewerServerTab.Timed(timer, "store tables read", TablesRead?.Invoke(fresh) ?? _dataService!.GetStoreTableHealthAsync(fresh));
+            /* #9364: the slow-load line says how many relations the read sized and whether the store measured them for this open or the Viewer held them. */
+            timer.NotePhase("store tables read", StoreHealthRows.ReadNote(read.Rows.Count, read.ReadAtUtc, startedUtc, DateTime.UtcNow));
             if (_loads.Superseded(nameof(LoadTablesAsync), gen)) return;
 
             var selected = (TablesDataGrid.SelectedItem as StoreTableRow)?.Table;
@@ -262,9 +267,11 @@ public partial class StoreHealthTab : UserControl
             _tablesReadAtUtc = null;
             TablesDataGrid.ItemsSource = null;
             HeaderText.Text = "The store tables failed to load.";
-            TablesMessage.Text = $"The store tables failed to load: {ex.Message}";
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
+            var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
+            TablesMessage.Text = text;
             TablesMessage.Visibility = Visibility.Visible;
-            StatusChanged?.Invoke($"failed to load the store tables: {ex.Message}");
+            StatusChanged?.Invoke(text);
         }
 
         /* The settings are held and read beside the tables, so the strip's "tables read" time is the older of the two answers. */
@@ -299,7 +306,13 @@ public partial class StoreHealthTab : UserControl
 
         try
         {
+            var startedUtc = DateTime.UtcNow;
             var read = await ViewerServerTab.Timed(timer, "store indexes read", IndexesRead?.Invoke(fresh) ?? _dataService!.GetStoreIndexHealthAsync(fresh));
+            /* #9364: as the tables read. An answer with no read time adds no note. */
+            if (read.ReadAtUtc is { } indexesAt)
+            {
+                timer.NotePhase("store indexes read", StoreHealthRows.ReadNote(read.Indexes.Count, indexesAt, startedUtc, DateTime.UtcNow));
+            }
             if (_loads.Superseded(nameof(LoadIndexesAsync), gen)) return;
 
             var indexRows = StoreHealthRows.Indexes(read.Indexes);
@@ -328,11 +341,13 @@ public partial class StoreHealthTab : UserControl
             CoverageDataGrid.ItemsSource = null;
             CoverageDataGrid.Visibility = Visibility.Collapsed;
             IndexHeaderText.Text = "The store indexes failed to load.";
-            IndexesMessage.Text = $"The store indexes failed to load: {ex.Message}";
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
+            var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
+            IndexesMessage.Text = text;
             IndexesMessage.Visibility = Visibility.Visible;
             CoverageMessage.Text = "Partition index coverage failed to load.";
             CoverageMessage.Visibility = Visibility.Visible;
-            StatusChanged?.Invoke($"failed to load the store indexes: {ex.Message}");
+            StatusChanged?.Invoke(text);
         }
     }
 
@@ -358,8 +373,10 @@ public partial class StoreHealthTab : UserControl
             if (_loads.Superseded(nameof(LoadReadinessAsync), gen)) return;
 
             _readinessLoaded = false;
-            ReadinessTextBlock.Text = $"The maintenance check failed: {ex.Message}";
-            StatusChanged?.Invoke($"failed to run the store maintenance check: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
+            var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
+            ReadinessTextBlock.Text = text;
+            StatusChanged?.Invoke(text);
         }
     }
 

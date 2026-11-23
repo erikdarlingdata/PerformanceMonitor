@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
@@ -10,6 +12,7 @@ using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
 using PerformanceMonitorLite;
+using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DuckDbFactCollector
@@ -379,6 +382,43 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
         }
     }
 
+    /// <summary>One statement of the plan regression pass: the wait for its read lock, the statement alone, the whole hold and the rows it returned.</summary>
+    private struct PlanRegressionStatementTime
+    {
+        public TimeSpan Wait;
+        public TimeSpan Statement;
+        public TimeSpan Held;
+        public int Rows;
+    }
+
+    /// <summary>
+    /// A test seam: runs after the failures read has let go of the store's read lock and before the cost read asks for it, so a
+    /// test can see what the lock allows in between (#9353). Null in production.
+    /// </summary>
+    internal Action? AfterPlanRegressionFailuresReadForTests { get; set; }
+
+    /// <summary>
+    /// #9195, #9353: one Information line when the plan regression pass took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
+    /// with the time split between its steps: the archive read plan, each statement (its read lock wait, its own time and its rows),
+    /// the longest single hold of the read lock, and the plan check that follows once the lock is let go with the plan fetches it
+    /// made. A fast pass logs nothing. Counts and times only.
+    /// </summary>
+    private static void ReportSlowPlanRegressionPass(
+        AnalysisContext context, TimeSpan total, TimeSpan archivePlan, PlanRegressionStatementTime failures, PlanRegressionStatementTime cost,
+        TimeSpan verify, int planFetches)
+    {
+        if (total <= ReadLockWaitTally.SlowReadThreshold) return;
+
+        static long Ms(TimeSpan t) => (long)t.TotalMilliseconds;
+        var longestHold = failures.Held > cost.Held ? failures.Held : cost.Held;
+        AppLogger.Info("DuckDbFactCollector",
+            string.Create(CultureInfo.InvariantCulture,
+                $"Plan regression read took {Ms(total)} ms for {context.ServerName} (server {context.ServerId}): archive read plan {Ms(archivePlan)} ms, " +
+                $"failures read {Ms(failures.Statement)} ms for {failures.Rows} rows (read lock wait {Ms(failures.Wait)} ms), " +
+                $"cost read {Ms(cost.Statement)} ms for {cost.Rows} candidates (read lock wait {Ms(cost.Wait)} ms), " +
+                $"longest single read lock hold {Ms(longestHold)} ms, plan check {Ms(verify)} ms with {planFetches} plan fetches"));
+    }
+
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
     /// cost >= 2x the best plan that query is known to perform well with. Emits one
@@ -390,7 +430,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// or whose two plans differ in compiled values alone, is dropped before the fact
     /// (<see cref="VerifyPlanRegressionInputsAsync"/>).
     /// </summary>
-    private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
+    internal async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
            than a list some earlier pass stamped on a reused context. */
@@ -399,16 +439,29 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
         try
         {
+            var passStarted = Stopwatch.GetTimestamp();
             var candidates = new List<PlanRegressionCandidate>();
             var failures = new List<PlanRegressionFailureRule.Failure>();
+            var failuresRead = default(PlanRegressionStatementTime);
+            var costRead = default(PlanRegressionStatementTime);
+
+            var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
+            var archivePlanTime = Stopwatch.GetElapsedTime(passStarted);
+
+            /* #9353: one lock acquisition and one connection per statement, not one across both. The two reads are independent
+               facts, so a write that lands between them changes neither's meaning, and a housekeeping writer waiting on its 5 s
+               budget now gets in between the statements instead of waiting out both. */
             {
-                var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
+                var waitStarted = Stopwatch.GetTimestamp();
                 using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+                var heldFrom = Stopwatch.GetTimestamp();
+                failuresRead.Wait = Stopwatch.GetElapsedTime(waitStarted, heldFrom);
                 using var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(context.CancellationToken);
 
                 /* #6267: the queries whose timeouts or errors rose. The cost read below counts Regular runs only, so a plan
                    that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
+                var statementFrom = Stopwatch.GetTimestamp();
                 try
                 {
                     failures = await ReadPlanRegressionFailuresAsync(connection, context, plan);
@@ -418,12 +471,35 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ReportCollectionFailure(ex, context);
                 }
 
+                failuresRead.Statement = Stopwatch.GetElapsedTime(statementFrom);
+                failuresRead.Rows = failures.Count;
+                failuresRead.Held = Stopwatch.GetElapsedTime(heldFrom);
+            }
+
+            AfterPlanRegressionFailuresReadForTests?.Invoke();
+
+            {
+                var waitStarted = Stopwatch.GetTimestamp();
+                using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+                var heldFrom = Stopwatch.GetTimestamp();
+                costRead.Wait = Stopwatch.GetElapsedTime(waitStarted, heldFrom);
+                using var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync(context.CancellationToken);
+
+                var statementFrom = Stopwatch.GetTimestamp();
                 candidates = await ReadPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql);
+                costRead.Statement = Stopwatch.GetElapsedTime(statementFrom);
+                costRead.Rows = candidates.Count;
+                costRead.Held = Stopwatch.GetElapsedTime(heldFrom);
             }
 
             /* #5630: the lock and the connection are released before any plan is fetched: a fetch is a network
                call to the monitored server and must not hold the store's read lock. */
+            var verifyStarted = Stopwatch.GetTimestamp();
             var verification = await VerifyPlanRegressionInputsAsync(context, candidates);
+            ReportSlowPlanRegressionPass(
+                context, Stopwatch.GetElapsedTime(passStarted), archivePlanTime, failuresRead, costRead,
+                Stopwatch.GetElapsedTime(verifyStarted), verification.PlanFetches);
             var kept = verification.Kept;
 
             var offenderCount = kept.Count;

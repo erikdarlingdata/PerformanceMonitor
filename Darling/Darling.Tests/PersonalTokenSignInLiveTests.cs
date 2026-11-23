@@ -431,6 +431,47 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         Assert.Equal(4, rig.Host.PendingPersonalRevokes.Count);
     }
 
+    private static DarlingPersonalTokenSnapshot SnapshotThatCannotRefresh() =>
+        new(_ => throw new InvalidOperationException("the refresh failed"), (_, _) => Task.CompletedTask);
+
+    [Fact]
+    public async Task Drain_ThatRevokedRows_KeepsTheEntryUntilTheSnapshotRefreshSucceeds()
+    {
+        await using var rig = await StartAsync(Settings());
+        var key = OwnerKeyFor("kept-until-refresh");
+        var op = await rig.MakeTokenAsync(key, "ops", "operator");
+        var pending = new PersonalTokenPendingRevokes();
+        pending.Add(key, operatorOnly: true, PersonalTokenStore.SeatLoweredReason);
+        using var failing = SnapshotThatCannotRefresh();
+
+        await DarlingPersonalTokenSignIn.DrainPendingAsync(Settings(), rig.OwnerSource, failing, pending, rig.Logger, TestContext.Current.CancellationToken);
+
+        /* The rows are revoked in the store, but the snapshot has not seen it, so the queue still refuses the token. */
+        Assert.Equal("1", await rig.ScalarAsync($"SELECT count(*) FROM config.mcp_personal_token WHERE token_id = '{op.Id}' AND revoked_at IS NOT NULL"));
+        Assert.Equal(1, pending.Count);
+        Assert.True(pending.Refuses(key, "operator"));
+
+        await DarlingPersonalTokenSignIn.DrainPendingAsync(Settings(), rig.OwnerSource, rig.Snapshot, pending, rig.Logger, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, pending.Count);
+        /* The snapshot the failing one stood in for reloads on its own tick, and then shows the revoke. */
+        await rig.Snapshot.RefreshAsync(rig.OwnerSource, rig.Logger, TestContext.Current.CancellationToken);
+        Assert.Equal(PersonalTokenOutcome.Dead, rig.StateOf(op.Value));
+    }
+
+    [Fact]
+    public async Task Drain_ThatRevokedNoRows_CompletesTheEntryAtOnce_EvenWhenTheRefreshWouldFail()
+    {
+        await using var rig = await StartAsync(Settings());
+        var pending = new PersonalTokenPendingRevokes();
+        pending.Add(OwnerKeyFor("nothing-to-revoke"), operatorOnly: true, PersonalTokenStore.SeatLoweredReason);
+        using var failing = SnapshotThatCannotRefresh();
+
+        await DarlingPersonalTokenSignIn.DrainPendingAsync(Settings(), rig.OwnerSource, failing, pending, rig.Logger, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, pending.Count);
+    }
+
     [Fact]
     public async Task LaterSignIn_ThatLeavesNothingToRevoke_ClearsTheOwnersPendingEntry()
     {
@@ -608,7 +649,8 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
 
         Assert.True(done);
         var expiry = DateTimeOffset.Parse(
-            (await rig.ScalarAsync($"SELECT expires_at FROM config.mcp_personal_token WHERE token_id = '{made.Id}'"))!, System.Globalization.CultureInfo.InvariantCulture);
+            (await rig.ScalarAsync($"SELECT expires_at FROM config.mcp_personal_token WHERE token_id = '{made.Id}'"))!, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal);
         Assert.True(expiry < DateTimeOffset.UtcNow.AddDays(5).AddMinutes(1), "the expiry is cut to five days from creation");
         Assert.Equal("1", await rig.ScalarAsync(
             $"SELECT count(*) FROM config.investigation_journal WHERE event = 'mcp_personal_token_expiry_cut' AND actor = 'config' AND detail::text LIKE '%{made.Id}%'"));

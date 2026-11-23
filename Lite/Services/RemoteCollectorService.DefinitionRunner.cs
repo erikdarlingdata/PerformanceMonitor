@@ -192,6 +192,9 @@ public partial class RemoteCollectorService
            the open interval", which is today's behavior exactly. */
         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
         {
+            /* #9359: the clamp memory a previous process stored, before any clamp decision of this server. */
+            await SeedQueryStoreClampReportsAsync(serverId, cancellationToken);
+
             var openIntervalState = await GetCollectorStateAsync(
                 serverId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
 
@@ -357,6 +360,9 @@ public partial class RemoteCollectorService
             using var duckConnection = _duckDb.CreateConnection();
             await duckConnection.OpenAsync(cancellationToken);
 
+            /* #9359: the stored clamp entry changes the landed databases call for, written once after the loop. */
+            var azureLandedChanges = new List<QueryStoreLandedChange>();
+
             foreach (var databaseName in databases)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -516,7 +522,8 @@ public partial class RemoteCollectorService
                                 && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
-                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
+                                await RecordQueryStoreBackfillHoleAsync(
+                                    serverId, databaseName, _queryStoreClampReports.HoleFloor(serverId, databaseName, context.Watermark.Value), azureClampedFloor, dbToken);
                             }
                         }
                     }
@@ -599,7 +606,10 @@ public partial class RemoteCollectorService
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(serverId, databaseName);
-                        _queryStoreClampReports.Land(serverId, databaseName, stagedClampRaw, collectionTime);
+                        if (_queryStoreClampReports.Land(serverId, databaseName, stagedClampRaw, collectionTime) is { } azureLandedChange)
+                        {
+                            azureLandedChanges.Add(azureLandedChange);
+                        }
 
                         /* #2312: read and flush both landed — the staged open-interval stamp may too. */
                         if (stagedOpenIntervalStamp is not null)
@@ -716,6 +726,8 @@ public partial class RemoteCollectorService
             }
 
             context.CurrentDatabaseName = null;
+
+            await PersistQueryStoreLandedAsync(serverId, azureLandedChanges, cancellationToken);
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
@@ -953,6 +965,10 @@ public partial class RemoteCollectorService
                    _queryStoreClampReports from onItemComplete, after the read and flush succeeded. */
                 var stagedClampRaws = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
+                /* #9359: the stored clamp entry changes the landed items call for. onItemComplete cannot await, so they are written once the
+                   driver returns. */
+                var landedClampChanges = new List<QueryStoreLandedChange>();
+
                 /* One database's cutoff, hole records and open-interval decision for the given routing decision (null for every
                    collector but query_store). Also the retry on the primary after a replica read fails (#6254). */
                 async Task PrepareItemAsync(string item, QueryStoreRouteDecision? decision, CancellationToken ct)
@@ -997,7 +1013,8 @@ public partial class RemoteCollectorService
                         if (clamped.HasValue
                             && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
-                            await RecordQueryStoreBackfillHoleAsync(serverId, item, cutoff.HoleFrom ?? raw!.Value, cutoff.HoleTo ?? clamped.Value, ct);
+                            await RecordQueryStoreBackfillHoleAsync(
+                                serverId, item, _queryStoreClampReports.HoleFrom(serverId, item, raw!.Value, cutoff), cutoff.HoleTo ?? clamped.Value, ct);
                         }
                     }
 
@@ -1233,8 +1250,12 @@ public partial class RemoteCollectorService
                                 OnQueryStoreItemSucceeded(serverId, item);
                             }
 
-                            _queryStoreClampReports.Land(
-                                serverId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime);
+                            if (_queryStoreClampReports.Land(
+                                    serverId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime)
+                                is { } landedClampChange)
+                            {
+                                landedClampChanges.Add(landedClampChange);
+                            }
 
                             /* #2312: NOW the open-interval stamp may land — this hook only fires after
                                the item's read and flush both succeeded. Remove, not read: a stamp left
@@ -1323,6 +1344,8 @@ public partial class RemoteCollectorService
                    enumeration already left; EVERY item lost rethrows the first failure so RunCollectorAsync
                    classifies the cycle from the real exception (PERMISSIONS / transient / ERROR). Mirrors
                    Darling's runner. */
+                await PersistQueryStoreLandedAsync(serverId, landedClampChanges, cancellationToken);
+
                 telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, driverResult.PartialFailureNote);
 
                 /* #6254: where this run read Query Store (null with no replica set). */

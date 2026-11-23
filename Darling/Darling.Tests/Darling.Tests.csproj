@@ -9,9 +9,10 @@
     <!-- #2347: xunit.v3 under Microsoft.Testing.Platform builds the suite as its own executable. -->
     <OutputType>Exe</OutputType>
     <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
-         hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
-         ambient token through every call. -->
-    <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
+         hundreds of short-lived test calls (still fires in about 2800 places); suppressed rather than
+         threading the ambient token through every call.
+         CS4014: still fires where a test discards the Task that Assert.Single returns for an in-flight run.
+         NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
     <NoWarn>$(NoWarn);CS4014;NU1701;xUnit1051</NoWarn>
   </PropertyGroup>
 

@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to the SQL Server Performance Monitor! This guide will help you understand the project structure, set up your development environment, and submit high-quality contributions.
 
+New here? Start with the code map: [docs/CODEMAP.md](docs/CODEMAP.md), also as [docs/codemap.html](docs/codemap.html) and [docs/codemap.json](docs/codemap.json) for tools.
+
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
