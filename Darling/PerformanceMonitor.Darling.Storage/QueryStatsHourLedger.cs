@@ -102,11 +102,7 @@ ON CONFLICT (id) DO NOTHING;";
     /// equal that. Run it on the COPY's own transaction and after the COPY, so the ledger and the raw rows commit
     /// together or not at all.
     /// </summary>
-    public const string UpsertSql = @"
-INSERT INTO collect.query_stats_hour_ledger AS ledger (server_id, server_name, bucket, n)
-SELECT $1::integer, $2::text, date_trunc('hour', $3::timestamp), $4::bigint
-WHERE $4::bigint > 0
-ON CONFLICT (bucket, server_id, server_name) DO UPDATE SET n = ledger.n + EXCLUDED.n;";
+    public static readonly string UpsertSql = HourLedgerStatements.Upsert(LedgerTable);
 
     /// <summary>
     /// Recomputes the ledger from raw for a range of hours: <c>$1</c> is the start and <c>$2</c> the end (exclusive),
@@ -121,31 +117,7 @@ ON CONFLICT (bucket, server_id, server_name) DO UPDATE SET n = ledger.n + EXCLUD
     /// Tests use it to seed the ledger from raw rows they insert, and a backfill uses it before it moves
     /// <c>counted_since</c> back.</para>
     /// </summary>
-    public const string RecountSql = @"
-WITH raw AS (
-    SELECT server_id, server_name, date_trunc('hour', collection_time) AS bucket, count(*) AS n
-    FROM collect.query_stats
-    WHERE collection_time >= date_trunc('hour', $1::timestamp)
-      AND collection_time < date_trunc('hour', $2::timestamp - interval '1 microsecond') + interval '1 hour'
-      AND sample_interval_seconds IS DISTINCT FROM 0
-    GROUP BY 1, 2, 3
-),
-cleared AS (
-    DELETE FROM collect.query_stats_hour_ledger AS stale
-    WHERE stale.bucket >= date_trunc('hour', $1::timestamp)
-      AND stale.bucket < date_trunc('hour', $2::timestamp - interval '1 microsecond') + interval '1 hour'
-      AND NOT EXISTS (
-          SELECT 1 FROM raw
-          WHERE raw.bucket = stale.bucket AND raw.server_id = stale.server_id AND raw.server_name = stale.server_name)
-    RETURNING 1
-),
-written AS (
-    INSERT INTO collect.query_stats_hour_ledger AS ledger (server_id, server_name, bucket, n)
-    SELECT server_id, server_name, bucket, n FROM raw
-    ON CONFLICT (bucket, server_id, server_name) DO UPDATE SET n = EXCLUDED.n
-    RETURNING 1
-)
-SELECT (SELECT count(*) FROM written)::bigint AS rows_written, (SELECT count(*) FROM cleared)::bigint AS rows_deleted;";
+    public static readonly string RecountSql = HourLedgerStatements.Recount(LedgerTable, "collect.query_stats");
 
     /// <summary>
     /// The retention prune (#4605): deletes every ledger bucket below <c>$1</c> (naive UTC <c>timestamp</c>, truncated to
@@ -157,7 +129,5 @@ SELECT (SELECT count(*) FROM written)::bigint AS rows_written, (SELECT count(*) 
     /// the primary key leads with <c>bucket</c>, so the predicate is an index range scan. Idempotent, and a table with
     /// nothing below the cutoff deletes nothing.
     /// </summary>
-    public const string PruneSql = @"
-DELETE FROM collect.query_stats_hour_ledger
-WHERE bucket < date_trunc('hour', $1::timestamp);";
+    public static readonly string PruneSql = HourLedgerStatements.Prune(LedgerTable);
 }

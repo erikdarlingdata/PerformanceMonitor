@@ -67,11 +67,14 @@ public static class ComposeLimits
 
     /// <summary>
     /// The most raw <c>collect.procedure_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811).
-    /// MEASURED in the field like <see cref="MaxRawQueryStatsRows"/>, and calibrated the same way: the limit is the 45 s budget over the
-    /// worst measured per-row read cost of a raw procedure_stats panel, applied to this estimate (which counts collected rows, so it runs
-    /// above the rows the store keeps). A window the route cannot serve, because its count guard tripped or the source is not yet on the
-    /// route, then refuses at once with the narrower-window text instead of running to the statement timeout (#9357). Same rule: the
-    /// refusal is only for windows that would have run to the statement timeout.
+    /// The cap is a calibration, not a lab figure. The in-tree lab measurement is a 24 h fleet procedure_stats panel that read
+    /// 17.3 M to 20.5 M rows (19.7 M on the last full day) and finished in at most 20.8 s, about 1.1 us per row; at that cost the
+    /// 45 s budget would allow about 40 million rows. 15 million is the same budget at 3 us per row instead. The cap uses that
+    /// figure because per-row costs measured on large stores under collection load reach it (query_stats, <see cref="MaxRawQueryStatsRows"/>,
+    /// measured about 2.9 us per row), and the lab figure does not. The estimate counts collected rows, so it runs above the rows
+    /// the store keeps. A panel past the cap refuses at once with the narrower-window text instead of running past the budget, and
+    /// that covers a window the route cannot serve, because its count guard tripped or the source is not yet on the route (#9357).
+    /// A false refusal is user-visible breakage, so the cap only refuses windows that would have run past the budget at the loaded cost.
     /// </summary>
     public const long MaxRawProcedureStatsRows = 15_000_000;
 
