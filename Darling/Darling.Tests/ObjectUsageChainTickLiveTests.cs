@@ -27,6 +27,11 @@ namespace Darling.Tests;
 /// backfills every pair, a second tick with no new raw rows calls the builder for nothing, and a new raw snapshot on one pair builds only that
 /// pair. A step cap smaller than the backlog finishes the backfill in two ticks with the rows an uncapped build stores. A builder that throws for
 /// one pair fails that pair only. The purge deletes closed runs past the horizon and keeps open ones.
+///
+/// <para>#9350 review round 1, part T: the tick's listings read the newest two days of raw rows, so the fixture's snapshots are hours apart
+/// ending a few hours ago (<see cref="Day"/>), and a pair whose rows are all older than the window is planted with <see cref="OldDay"/>. A
+/// dead pair is never handed to the builder, a never-built server with old rows is still backfilled, the builder stops at its probe when
+/// the pair has no new raw rows, a capped tick resumes after the pair it stopped at, and two ticks on one store build each pair once.</para>
 /// </summary>
 public sealed class ObjectUsageChainTickLiveTests
 {
@@ -38,7 +43,14 @@ public sealed class ObjectUsageChainTickLiveTests
 
     private static readonly DateTime Start = new(2026, 9, 1, 8, 0, 0);
 
-    private static DateTime Day(int day) => new DateTime(2026, 10, 1, 2, 0, 0).AddDays(day - 1);
+    private static readonly DateTime Anchor =
+        new(DateTime.UtcNow.AddHours(-20).Ticks / TimeSpan.TicksPerHour * TimeSpan.TicksPerHour, DateTimeKind.Unspecified);
+
+    /// <summary>The fixture's snapshots are an hour apart and inside the tick's two-day listing window.</summary>
+    private static DateTime Day(int day) => Anchor.AddHours(day);
+
+    /// <summary>The same spacing, ten days back: a pair whose raw rows are all this old is outside the window.</summary>
+    private static DateTime OldDay(int day) => Anchor.AddDays(-10).AddHours(day);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -47,33 +59,44 @@ public sealed class ObjectUsageChainTickLiveTests
         ObjectUsageChainTick.RunTickAsync(dataSource, maxSteps, TimeSpan.FromMinutes(5), build, NullLogger.Instance, ct);
 
     /// <summary>The snapshot of one day for one database: two indexes whose counters grow by day.</summary>
-    private static async Task PlantAsync(NpgsqlConnection connection, int serverId, string database, int day, CancellationToken ct)
+    private static async Task PlantAsync(NpgsqlConnection connection, int serverId, string database, int day, CancellationToken ct, Func<int, DateTime>? time = null)
     {
+        time ??= Day;
         foreach (var (indexId, factor) in new[] { (1, 10L), (2, 3L) })
         {
             await using var command = new NpgsqlCommand(
                 @"INSERT INTO collect.index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_type_desc, user_seeks, user_scans, user_lookups, user_updates, last_user_seek, last_user_update, is_indexed_view, answering_server_name, is_memory_optimized)
 VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8,$9,$9,false,'n1',false)", connection);
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());
-            command.Parameters.AddWithValue(Day(day));
+            command.Parameters.AddWithValue(time(day));
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(Start);
             command.Parameters.AddWithValue(database);
             command.Parameters.AddWithValue(indexId);
             command.Parameters.AddWithValue(factor * day);
             command.Parameters.AddWithValue(factor * day);
-            command.Parameters.AddWithValue(Day(day).AddHours(-1));
+            command.Parameters.AddWithValue(time(day).AddHours(-1));
             await command.ExecuteNonQueryAsync(ct);
         }
     }
 
-    private static async Task PlantServerAsync(NpgsqlConnection connection, int serverId, string[] databases, int days, CancellationToken ct)
+    private static async Task PlantServerAsync(
+        NpgsqlConnection connection, int serverId, string[] databases, int days, CancellationToken ct, Func<int, DateTime>? time = null)
     {
+        /* The server's registry row, which the backfill reads to find a server whose raw rows are all older than the listing window. */
+        await using (var register = new NpgsqlCommand(
+            "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) "
+            + "VALUES ($1, 'tick-' || $1::text, 'tick', TRUE, 15, now(), now()) ON CONFLICT DO NOTHING", connection))
+        {
+            register.Parameters.AddWithValue(serverId);
+            await register.ExecuteNonQueryAsync(ct);
+        }
+
         foreach (var database in databases)
         {
             for (var day = 1; day <= days; day++)
             {
-                await PlantAsync(connection, serverId, database, day, ct);
+                await PlantAsync(connection, serverId, database, day, ct, time);
             }
         }
     }
@@ -263,6 +286,147 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         }
 
         Assert.Equal(new[] { 3, 4, 5 }, kept.ToArray());
+    }
+
+    [Fact]
+    public async Task ADeadPair_IsNeverHandedToTheBuilder_AndANeverBuiltServerWithOldRowsIsStillBackfilled()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        // Server one is live: Alpha has fresh rows, Dead has only old ones and is already built up to its last snapshot. Server two was
+        // never built and has old rows only.
+        await PlantServerAsync(connection, ServerOne, ["Alpha"], 3, ct);
+        await PlantServerAsync(connection, ServerOne, ["Dead"], 3, ct, OldDay);
+        await PlantServerAsync(connection, ServerTwo, ["Old"], 3, ct, OldDay);
+        await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerOne, "Dead", int.MaxValue, ct);
+        await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerOne, "Alpha", int.MaxValue, ct);
+        await PlantAsync(connection, ServerOne, "Alpha", 4, ct);
+
+        // A later raw row for the dead pair that the chain has not folded: the pair is dead because it has no row in the window, so the
+        // steady tick leaves it alone. Its watermark is behind its newest row, which is what a listing without the bound would hand over.
+        await PlantAsync(connection, ServerOne, "Dead", 4, ct, OldDay);
+
+        var calls = new List<(int Server, string Database, int Built)>();
+        async Task<int> Recording(NpgsqlDataSource ds, int server, string database, int maxSteps, CancellationToken token)
+        {
+            var built = await ObjectUsageChainBuilder.BuildPairAsync(ds, server, database, maxSteps, token);
+            calls.Add((server, database, built));
+            return built;
+        }
+
+        var tick = await TickAsync(dataSource, int.MaxValue, Recording, ct);
+        Assert.DoesNotContain(calls, c => c.Server == ServerOne && c.Database == "Dead");
+        Assert.Equal(new[] { (ServerOne, "Alpha"), (ServerTwo, "Old") }, calls.Where(c => c.Built > 0).Select(c => (c.Server, c.Database)).OrderBy(c => c.Database, StringComparer.Ordinal).ToArray());
+        Assert.Equal(new ObjectUsageChainTick.TickResult(2, 4, 0, false), tick);
+        Assert.Equal(3L, await SnapshotsAsync(connection, ServerTwo, "Old", ct));
+        Assert.Equal(3L, await SnapshotsAsync(connection, ServerOne, "Dead", ct));
+    }
+
+    [Fact]
+    public async Task ABuiltLivePairWithNoNewRawRows_StopsAtTheProbeAndReadsNoChainRows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantServerAsync(connection, ServerOne, ["Alpha"], 4, ct);
+        var reads = new int[1];
+        ObjectUsageChainBuilder.ChainReadCount.Value = reads;
+        try
+        {
+            // The backfill (no watermark) skips the probe and reads the chain rows once.
+            Assert.Equal(4, await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerOne, "Alpha", int.MaxValue, ct));
+            Assert.Equal(1, reads[0]);
+
+            // A built pair with nothing new stops at the probe.
+            Assert.Equal(0, await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerOne, "Alpha", int.MaxValue, ct));
+            Assert.Equal(1, reads[0]);
+
+            // A new raw row passes the probe and reads the chain.
+            await PlantAsync(connection, ServerOne, "Alpha", 5, ct);
+            Assert.Equal(1, await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerOne, "Alpha", int.MaxValue, ct));
+            Assert.Equal(2, reads[0]);
+        }
+        finally
+        {
+            ObjectUsageChainBuilder.ChainReadCount.Value = null;
+        }
+    }
+
+    [Fact]
+    public async Task AStepCapOfOne_BuildsADifferentPairEachTick_ByResumingAfterThePairItStoppedAt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantServerAsync(connection, ServerOne, ["Alpha", "Beta", "Gamma"], 3, ct);
+
+        var state = new ObjectUsageChainTick.TickState();
+        var order = new List<string>();
+        async Task<int> Recording(NpgsqlDataSource ds, int server, string database, int maxSteps, CancellationToken token)
+        {
+            var built = await ObjectUsageChainBuilder.BuildPairAsync(ds, server, database, maxSteps, token);
+            if (built > 0)
+            {
+                order.Add(database);
+            }
+
+            return built;
+        }
+
+        // Three snapshots a pair and a cap of one step: without a cursor every tick would start at Alpha and fold only Alpha.
+        for (var tick = 0; tick < 3; tick++)
+        {
+            Assert.Equal(1, (await ObjectUsageChainTick.RunTickAsync(dataSource, 1, TimeSpan.FromMinutes(5), Recording, NullLogger.Instance, ct, state)).Steps);
+        }
+
+        Assert.Equal(new[] { "Alpha", "Beta", "Gamma" }, order.ToArray());
+    }
+
+    [Fact]
+    public async Task TwoTicksAtOnceOnOneStore_BuildEachPairOnce()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantServerAsync(connection, ServerOne, ["Alpha", "Beta", "Gamma"], 3, ct);
+
+        var calls = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        async Task<int> Slow(NpgsqlDataSource ds, int server, string database, int maxSteps, CancellationToken token)
+        {
+            calls.AddOrUpdate(database, 1, (_, n) => n + 1);
+            await Task.Delay(400, token);
+            return await ObjectUsageChainBuilder.BuildPairAsync(ds, server, database, maxSteps, token);
+        }
+
+        var first = ObjectUsageChainTick.RunTickAsync(dataSource, int.MaxValue, TimeSpan.FromMinutes(5), Slow, NullLogger.Instance, ct, new ObjectUsageChainTick.TickState());
+        await Task.Delay(150, ct);
+        var second = ObjectUsageChainTick.RunTickAsync(dataSource, int.MaxValue, TimeSpan.FromMinutes(5), Slow, NullLogger.Instance, ct, new ObjectUsageChainTick.TickState());
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Equal(new ObjectUsageChainTick.TickResult(3, 9, 0, false), results[0]);
+        Assert.Equal(new ObjectUsageChainTick.TickResult(0, 0, 0, false), results[1]);
+        Assert.Equal(new[] { 1, 1, 1 }, calls.OrderBy(c => c.Key, StringComparer.Ordinal).Select(c => c.Value).ToArray());
+
+        // The claim is released when the tick ends: the next tick takes it.
+        await PlantAsync(connection, ServerOne, "Beta", 4, ct);
+        Assert.Equal(1, (await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct)).Steps);
     }
 
     /// <summary>EXPLAIN (ANALYZE, BUFFERS) of one planner statement with its server id, on a store with sequential scans switched off so a missing index shows as an error text.</summary>
