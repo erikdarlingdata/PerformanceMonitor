@@ -90,6 +90,33 @@ public static class ObjectUsageChainBuilder
             collection_time
         """;
 
+    /// <summary>The pair's watermark and the oldest step version in its snapshots rows (null, null when it has none). $1 server_id, $2 database_name. Reads the primary key's range of one pair.</summary>
+    private const string LastSnapshotSql = """
+        SELECT
+            max(collection_time),
+            min(step_version)
+        FROM collect.object_usage_snapshots
+        WHERE server_id = $1
+        AND   database_name = $2
+        """;
+
+    /// <summary>One raw row after the watermark, if there is any. $1 server_id, $2 database_name, $3 the watermark.</summary>
+    private const string RawAfterProbeSql = """
+        SELECT
+            1
+        FROM collect.v_index_object_stats AS s
+        WHERE s.server_id = $1
+        AND   s.database_name = $2
+        AND   s.collection_time > $3
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// A test's count of the chain-row reads the builder made in its own async flow (a one-element array it sets before the call), so a test
+    /// can tell a call that stopped at the probe from one that read the chain. Null in production, which counts nothing.
+    /// </summary>
+    internal static readonly System.Threading.AsyncLocal<int[]?> ChainReadCount = new();
+
     private const string OpenRunsSql = """
         SELECT
             object_id,
@@ -178,6 +205,17 @@ public static class ObjectUsageChainBuilder
         }
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+
+        /* #9350: a pair that has raw rows after its watermark is the only pair with anything to fold, and the tick lists pairs whose raw rows may
+           have all been folded already (a database that stopped being collected on a server that did not). One probe of the watermark and
+           one LIMIT 1 over the raw rows answer that before the chain rows, the last snapshot's raw rows or the open runs are read. A pair
+           with no watermark is a backfill, and a pair built under an older version is rebuilt, so neither takes the probe. */
+        if (await ReadLastSnapshotAsync(connection, serverId, databaseName, cancellationToken) is { } built
+            && built.Version >= ObjectUsageChainVersion.Current
+            && !await HasRawAfterAsync(connection, serverId, databaseName, built.Time, cancellationToken))
+        {
+            return 0;
+        }
 
         var chain = await ReadChainRowsAsync(connection, serverId, databaseName, cancellationToken);
         var rebuild = chain.Rows.Count == 0 || chain.Versions.Any(v => v < ObjectUsageChainVersion.Current);
@@ -366,9 +404,35 @@ public static class ObjectUsageChainBuilder
         }
     }
 
+    private static async Task<(DateTime Time, short Version)?> ReadLastSnapshotAsync(
+        NpgsqlConnection connection, int serverId, string databaseName, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(LastSnapshotSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(Param(NpgsqlDbType.Integer, serverId));
+        command.Parameters.Add(Param(NpgsqlDbType.Text, databaseName));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return reader.IsDBNull(0) ? null : (reader.GetDateTime(0), reader.GetInt16(1));
+    }
+
+    private static async Task<bool> HasRawAfterAsync(
+        NpgsqlConnection connection, int serverId, string databaseName, DateTime watermark, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(RawAfterProbeSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(Param(NpgsqlDbType.Integer, serverId));
+        command.Parameters.Add(Param(NpgsqlDbType.Text, databaseName));
+        command.Parameters.Add(Param(NpgsqlDbType.Timestamp, watermark));
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
     private static async Task<(List<ChainRow> Rows, List<short> Versions)> ReadChainRowsAsync(
         NpgsqlConnection connection, int serverId, string databaseName, CancellationToken cancellationToken)
     {
+        if (ChainReadCount.Value is { } counter)
+        {
+            counter[0]++;
+        }
+
         var rows = new List<ChainRow>();
         var versions = new List<short>();
         await using var command = new NpgsqlCommand(ChainRowsSql, connection) { CommandTimeout = CommandTimeoutSeconds };
