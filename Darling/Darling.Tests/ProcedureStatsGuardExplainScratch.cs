@@ -69,6 +69,7 @@ FROM collect.procedure_stats GROUP BY 1, 2, 3", ct);
 
         try
         {
+            await TimescaleSupport.EnsureAggregateCompressionAsync(c, null, ct);
             var n = await TextAsync(c, "SELECT count(compress_chunk(ch, true)) FROM show_chunks('collect.procedure_stats_interval_hourly') AS ch", ct);
             report.AppendLine("compressed rollup chunks: " + n);
             await ExecAsync(c, $"ANALYZE {mat}", ct);
