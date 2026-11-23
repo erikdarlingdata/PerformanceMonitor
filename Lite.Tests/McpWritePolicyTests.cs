@@ -68,7 +68,7 @@ public sealed class McpWritePolicyTests
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
             .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct())
         {
             services.AddSingleton(serviceType, _ => null!);
@@ -126,7 +126,7 @@ public sealed class McpWritePolicyTests
 
     /// <summary>The host's own registration (<see cref="McpHostService.RegisterMcpServer"/>) and JSON guard behind a
     /// test web server: what a client reaches when it calls a tool on the real endpoint.</summary>
-    private static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null)
+    internal static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -140,7 +140,7 @@ public sealed class McpWritePolicyTests
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
             .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct())
         {
             builder.Services.AddSingleton(serviceType, _ => null!);
@@ -155,7 +155,7 @@ public sealed class McpWritePolicyTests
         return app.GetTestServer();
     }
 
-    private static async Task<string> PostAsync(TestServer server, string json)
+    internal static async Task<string> PostAsync(TestServer server, string json)
     {
         var ctx = await server.SendAsync(c =>
         {

@@ -2118,6 +2118,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
             /* #9388: call_tool, served on /lean only (ConfigureSessionOptions removes it elsewhere). */
             .WithGeminiCompatibleTools<DarlingMcpLeanTools>()
+            /* #9388: find_tools searches the tools this request serves (the per-request ToolCollection). Lite twin: McpToolSearchTools. */
+            .WithGeminiCompatibleTools<DarlingMcpToolSearchTools>()
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             .WithGeminiCompatibleTools<DarlingMcpFinOpsInventoryTools>()
             .WithGeminiCompatibleTools<DarlingMcpFinOpsRecommendationsTools>()

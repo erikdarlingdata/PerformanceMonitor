@@ -64,6 +64,7 @@ internal static class DarlingFrontDoorRouting
     {
         "get_tool_guide",
         "call_tool",
+        "find_tools",
         "analyze_plan_xml",
         "validate_custom_view",
         "validate_custom_alert_rule",

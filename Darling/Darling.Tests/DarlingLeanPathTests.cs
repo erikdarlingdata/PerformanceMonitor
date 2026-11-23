@@ -102,6 +102,21 @@ public sealed class DarlingLeanPathTests
     }
 
     [Fact]
+    public async Task LeanFindToolsNamesAToolLeanDoesNotList_AndCallToolRunsIt()
+    {
+        using var server = await StatementFilterCensus.BuildHostAsync();
+        Assert.DoesNotContain(UnlistedRead, await StatementFilterCensus.ListToolNamesAsync(server, "/lean"));
+
+        var found = await AnswerAsync(server, "/lean", "find_tools", new JsonObject { ["query"] = UnlistedRead, ["detail"] = "names" });
+        var ran = await AnswerAsync(server, "/lean", "call_tool", ViaCallTool(UnlistedRead, new JsonObject()));
+
+        Assert.False(found.IsError);
+        Assert.Contains(UnlistedRead, found.Text);
+        Assert.False(ran.IsError);
+        Assert.Equal(await AnswerAsync(server, "/", UnlistedRead, new JsonObject()), ran);
+    }
+
+    [Fact]
     public async Task AnUnknownArgumentThroughCallTool_GetsTheAnswerADirectCallGets()
     {
         using var server = await StatementFilterCensus.BuildHostAsync();

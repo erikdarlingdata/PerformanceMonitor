@@ -289,6 +289,8 @@ public static partial class DarlingWebEndpoints
         "get_tool_guide",
         /* #9388: call_tool runs another tool by name on /lean, so it reads nothing of its own and no page mirrors it. */
         "call_tool",
+        /* #9388: find_tools searches the served tool list; no page mirrors it. */
+        "find_tools",
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
         "get_investigation_evidence",
