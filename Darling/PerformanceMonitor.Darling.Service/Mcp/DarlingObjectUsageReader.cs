@@ -378,8 +378,7 @@ internal static class DarlingObjectUsageReader
 
     /// <summary>The raw rows of the snapshots the replay recomputes: <see cref="ObjectUsageWindowRead.Columns"/>, the list <see cref="ObjectUsageWindowRead.Sql"/> selects,
     /// so <see cref="ObjectUsageWindowRead.Map"/> reads them. $1 server_id, $2 database_name, $3 the collection times.</summary>
-    internal static readonly string BoundaryRowsSql = "SELECT
-" + ObjectUsageWindowRead.Columns + """
+    internal static readonly string BoundaryRowsSql = "SELECT " + ObjectUsageWindowRead.Columns + """
 
         FROM v_index_object_stats AS s
         WHERE s.server_id = $1
