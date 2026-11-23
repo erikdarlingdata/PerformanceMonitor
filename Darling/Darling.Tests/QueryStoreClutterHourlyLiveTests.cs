@@ -488,6 +488,25 @@ ON CONFLICT (server_id, day_utc) DO UPDATE SET built_at = EXCLUDED.built_at, clu
         }
 
         Assert.Equal(1L, await CountAsync(store, DayStamped, ct, ("server_id", A), ("day", rowDay)));
+
+        /* The boundary (#9383): an empty built day is unstamped when it ENDS at or before the oldest raw row, and keeps its stamp when raw's oldest
+           row falls inside it, since raw then holds part of that day. The oldest rows move to the midnight the day ends at, or six hours before it. */
+        var midnight = floor.Date;
+        var boundaryDay = midnight.AddDays(-1);
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, @"
+INSERT INTO collect.query_store_closed_day_built (server_id, day_utc, built_at, source_rows, clutter_built_at) VALUES (@server_id, @day, @at, 0, @at)
+ON CONFLICT (server_id, day_utc) DO UPDATE SET built_at = EXCLUDED.built_at, clutter_built_at = EXCLUDED.built_at, rebuild_needed = false", ct,
+            ("server_id", A), ("day", boundaryDay), ("at", TickNow));
+        const string MoveOldestRows = "UPDATE collect.query_store_stats SET collection_time = @to WHERE server_id = @server_id AND collection_time = @from";
+        var partlyHeldFloor = midnight.AddHours(-6);
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, MoveOldestRows, ct, ("server_id", A), ("from", floor), ("to", partlyHeldFloor));
+        await TickAsync(store, TickNow, ct);
+        Assert.Equal(1L, await CountAsync(store, DayStamped, ct, ("server_id", A), ("day", boundaryDay)));
+
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, MoveOldestRows, ct, ("server_id", A), ("from", partlyHeldFloor), ("to", midnight));
+        Assert.Equal(midnight, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(store.Connection, OldestRawRow, ct, ("server_id", A)));
+        await TickAsync(store, TickNow, ct);
+        Assert.Equal(0L, await CountAsync(store, DayStamped, ct, ("server_id", A), ("day", boundaryDay)));
     }
 
     [Fact]
@@ -518,6 +537,8 @@ ON CONFLICT (server_id, day_utc) DO UPDATE SET built_at = EXCLUDED.built_at, clu
             Assert.False(window.GetProperty("window_truncated").GetBoolean(), json);
             Assert.Equal(System.Text.Json.JsonValueKind.Null, window.GetProperty("truncation_note").ValueKind);
             Assert.True(window.GetProperty("effective_hours_back").GetDouble() >= 143.0, json);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, window.GetProperty("plan_churn_effective_hours_back").ValueKind);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, window.GetProperty("wait_effective_hours_back").ValueKind);
         }
 
         /* A wait row 2 hours back is the oldest wait_stats row: the wait arm holds 2 hours of the window and the note names it. */
@@ -530,8 +551,13 @@ VALUES (990382001, @at, @server_id, 'rollup-9111', 'QDS_ASYNC_QUEUE', 10, 100, 0
             var window = doc.RootElement.GetProperty("window");
             Assert.True(window.GetProperty("window_truncated").GetBoolean(), json);
             Assert.Equal(2.0, window.GetProperty("effective_hours_back").GetDouble());
+            Assert.Equal(2.0, window.GetProperty("wait_effective_hours_back").GetDouble());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, window.GetProperty("plan_churn_effective_hours_back").ValueKind);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, window.GetProperty("plan_churn_effective_start").ValueKind);
             var note = window.GetProperty("truncation_note").GetString()!;
             Assert.Contains("wait arm", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("wait_stats", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("query_store_stats", note, StringComparison.Ordinal);
         }
     }
 }
