@@ -771,7 +771,7 @@ public partial class ViewerServerTab : UserControl
             /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
             var failed = timer.FailedRead(ex);
             var surface = string.IsNullOrEmpty(timer.Surface) ? InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header) : timer.Surface;
-            StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: {surface}", failed?.Phase, failed?.Ms ?? timer.ElapsedMs, ex));
         }
         finally
         {

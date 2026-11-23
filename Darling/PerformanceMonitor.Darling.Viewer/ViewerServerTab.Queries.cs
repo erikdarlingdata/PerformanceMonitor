@@ -742,7 +742,7 @@ public partial class ViewerServerTab
         }
 
         var retried = false;
-        if (clock.ElapsedMilliseconds < 0)
+        if (!_refreshRequested)
         {
             retried = true;
             try
