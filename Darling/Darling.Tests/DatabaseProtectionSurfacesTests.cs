@@ -123,6 +123,18 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
     }
 
     [Fact]
+    public void AModelWithNoLogBackup_ReadsNotExpected_WithItsSentence_AndIsNotOverdue()
+    {
+        var read = Read(Fact("model", fullAgo: Day, checkDbAgo: Day, logState: "none_in_window"), Fact("Sales", fullAgo: Day, checkDbAgo: Day, logState: "none_in_window"));
+        var rows = ViewerDatabaseProtectionText.Rows(read);
+
+        var model = rows.Single(r => r.Database == "model");
+        Assert.Equal(("not expected", false, DatabaseProtectionBands.DetailSystemDatabase), (model.LogBackup, model.Overdue, model.LogBackupNote));
+        var sales = rows.Single(r => r.Database == "Sales");
+        Assert.Equal(("none in window - overdue", true, (string?)null), (sales.LogBackup, sales.Overdue, sales.LogBackupNote));
+    }
+
+    [Fact]
     public void NeverAndNoneInWindow_ReadTheirWord_AndOverdue()
     {
         var row = ViewerDatabaseProtectionText.Rows(Read(Fact("lost", checkDbState: "never", fullState: "none_in_window", logState: "none_in_window")))[0];

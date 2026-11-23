@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>One database of the Database Protection tab: the three facts as text, in the web page's words.</summary>
 public sealed record ViewerDatabaseProtectionRow(
     string Database, string State, string FullBackup, string LogBackup, string CheckDb, string Platform, string NotJudgedBecause, bool Overdue,
-    string CheckDbSource = "", string CheckDbOptions = "", string? CheckDbNote = null);
+    string CheckDbSource = "", string CheckDbOptions = "", string? CheckDbNote = null, string? LogBackupNote = null);
 
 /// <summary>
 /// The words of the Database Protection tab (#6873), as functions of <see cref="ViewerDatabaseProtectionRead"/>. They match the Health Checks
@@ -99,7 +99,8 @@ public static class ViewerDatabaseProtectionText
                 d.Band.AnyOverdue,
                 SourceLabel(d.Band.CheckDb),
                 d.Band.CheckDb.Options ?? "",
-                CheckDbNote(d.Fact, d.Band.CheckDb)))
+                CheckDbNote(d.Fact, d.Band.CheckDb),
+                d.Band.LogBackup.Detail))
             .ToList();
     }
 

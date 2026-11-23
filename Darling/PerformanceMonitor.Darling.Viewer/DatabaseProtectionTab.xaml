@@ -42,7 +42,14 @@
                     <DataGridTextColumn Header="Database" Binding="{Binding Database}" Width="200"/>
                     <DataGridTextColumn Header="State" Binding="{Binding State}" Width="90"/>
                     <DataGridTextColumn Header="Last full backup" Binding="{Binding FullBackup}" Width="190"/>
-                    <DataGridTextColumn Header="Last log backup" Binding="{Binding LogBackup}" Width="190"/>
+                    <!-- #9376: the tooltip is the band's sentence for a system database that expects no log backup. -->
+                    <DataGridTextColumn Header="Last log backup" Binding="{Binding LogBackup}" Width="190">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="ToolTip" Value="{Binding LogBackupNote}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
                     <!-- #8865: the tooltip is the band's sentence: a backfill still running, or a replica that is not readable. -->
                     <DataGridTextColumn Header="Last good CHECKDB" Binding="{Binding CheckDb}" Width="190">
                         <DataGridTextColumn.ElementStyle>
