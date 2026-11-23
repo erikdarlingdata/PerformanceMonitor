@@ -1184,6 +1184,49 @@ RETURNING state_key";
         }
     }
 
+    /// <summary>Loads the clamp entries a previous process stored for the server (#9359), once per server, before the cycle's
+    /// first clamp decision. A failed read returns no rows, which is the memory-only behaviour: one possible re-walk after a restart.</summary>
+    private async Task SeedQueryStoreClampReportsAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (_queryStoreClampReports.IsSeeded(serverId))
+        {
+            return;
+        }
+
+        _queryStoreClampReports.Seed(
+            serverId, await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken));
+    }
+
+    /// <summary>Keeps a database's stored clamp entry current (#9359): the upsert for a clamped landed cycle, the delete for the
+    /// first one that no longer clamps. Best-effort like <see cref="RecordQueryStoreBackfillHoleAsync"/>: a failed write costs one
+    /// possible re-walk after a restart, never wrong data.</summary>
+    private async Task PersistQueryStoreLandedAsync(int serverId, QueryStoreLandedChange? change, CancellationToken cancellationToken)
+    {
+        if (change is not { } landed)
+        {
+            return;
+        }
+
+        try
+        {
+            if (landed.Value is null)
+            {
+                await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, landed.Key, cancellationToken);
+            }
+            else
+            {
+                await SaveCollectorStateAsync(
+                    serverId, QueryStoreBackfillState.StateCollectorName,
+                    new Dictionary<string, string>(StringComparer.Ordinal) { [landed.Key] = landed.Value },
+                    cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Storing the query_store clamp entry {Key} failed; a restart may re-walk the database once", landed.Key);
+        }
+    }
+
     /// <summary>Records a clamp-opened Query Store hole for the backfill worker (#2058), under the
     /// WORKER's collector_state name — added to the database's pending holes and merged only with one it
     /// overlaps, so a repeat outage cannot overwrite an unserviced one and cannot send the dig back over

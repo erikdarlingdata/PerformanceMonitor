@@ -46,6 +46,8 @@ public static class QueryStorePerDatabaseState
     {
         (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.DoneKeyPrefix),
         (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
+        /* #9359: the last clamped read a database landed, so a restart does not forget it. */
+        (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.LandedKeyPrefix),
         /* #2312: the open-interval refresh stamp, per database like the pair above, under its own owner
            because a prefix pruned under the wrong collector name silently deletes nothing. */
         (QueryStoreOpenIntervalState.StateCollectorName, QueryStoreOpenIntervalState.WatermarkKeyPrefix),
