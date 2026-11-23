@@ -90,8 +90,7 @@ LIMIT 1";
     /// </summary>
     public static async Task<SkippedCycleSummary> GetSkippedCycleSummaryAsync(
         NpgsqlDataSource postgres, int serverId, DateTime? asOfUtc = null,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default,
-        DateTime? windowStartUtc = null)
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds, DateTime? windowStartUtc = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         var end = asOfUtc ?? DateTime.UtcNow;

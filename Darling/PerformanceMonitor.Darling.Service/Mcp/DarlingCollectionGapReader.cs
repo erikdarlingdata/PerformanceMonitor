@@ -39,7 +39,7 @@ internal static class DarlingCollectionGapReader
         CancellationToken cancellationToken)
     {
         var skipped = await SkippedCycleReader.GetSkippedCycleSummaryAsync(
-            postgres, serverId, windowEndUtc, McpCommandDeadlines.ReadSeconds, cancellationToken, windowStartUtc);
+            postgres, serverId, windowEndUtc, McpCommandDeadlines.ReadSeconds, windowStartUtc, cancellationToken);
 
         long failed = 0;
         DateTime? first = null;
