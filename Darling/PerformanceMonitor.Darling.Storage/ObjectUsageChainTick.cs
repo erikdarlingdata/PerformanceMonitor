@@ -408,6 +408,14 @@ public static class ObjectUsageChainTick
                         pairsBuilt++;
                         steps += built;
                     }
+
+                    /* The builder stops at the step cap it was given, so a pair that used the whole cap may have snapshots left, and no later
+                       pair in this tick is there to notice (the cap check above runs before a pair, not after the last). The server's
+                       backfill is then not finished: it stays pending, and a dead server (no raw row in the window) is listed by that. */
+                    if (steps >= maxSteps)
+                    {
+                        incomplete.Add(serverId);
+                    }
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
