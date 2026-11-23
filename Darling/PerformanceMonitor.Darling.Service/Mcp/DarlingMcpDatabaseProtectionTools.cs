@@ -112,7 +112,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
         "Per database, the last good CHECKDB, the last full backup and the last log backup, each with its age and a state word, and a server summary naming which databases are overdue on what. <<GUIDE>> " +
         "Thresholds: full backup 7 days, log backup 60 minutes, CHECKDB 14 days (shown in the answer). " +
         "Each fact's state: ok, overdue (older than the threshold), never (CHECKDB never passed) or none_in_window (no backup in the last 60 days), both of which count as overdue, " +
-        "new_database (created less than the threshold ago, so not late yet), not_expected (a SIMPLE-recovery database expects no log backup), " +
+        "new_database (created less than the threshold ago, so not late yet), not_expected (a SIMPLE-recovery database expects no log backup, and neither do master and model whatever their recovery model, with detail saying so), " +
         "platform_managed (Azure SQL Database and Managed Instance, all three facts) or native_only (Amazon RDS, the full and log backup facts only): the age shows and is never overdue, " +
         "unknown (SQL Server 2017 before CU9 cannot answer CHECKDB) or unavailable (the backup read was refused, for example no VIEW DATABASE PERFORMANCE STATE on Azure SQL Database, which VIEW DATABASE STATE grants): both pass through and are never overdue, " +
         "excluded (the database is offline, restoring or otherwise not online; excluded_reason says which; a secondary's full and log backup facts also read excluded, with detail secondary; when the error log was not read (refused, or an old capture) a secondary is still excluded whole, with excluded_reason secondary), " +
