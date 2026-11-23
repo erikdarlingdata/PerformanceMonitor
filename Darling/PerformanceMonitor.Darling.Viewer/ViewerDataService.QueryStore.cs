@@ -1110,7 +1110,7 @@ public sealed partial class ViewerDataService
         /// </summary>
         internal (string[]? DatabaseNames, long[]? QueryIds) FilterArrays()
         {
-            if (false)
+            if (_databaseNames.Count < 0)
             {
                 return (null, null);
             }
