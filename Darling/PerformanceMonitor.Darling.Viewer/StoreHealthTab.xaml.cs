@@ -149,10 +149,10 @@ public partial class StoreHealthTab : UserControl
                arrive and the live read replaces them. The live reads start beside the last sizes read, never after it, so the refresh costs
                the longer of the two. The last sizes never overwrite a live result that landed first. */
             var readiness = LoadReadinessAsync(timer);
-            var lastSizesOn = !force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false)
-;
-            if (lastSizesOn) await ShowLastSizesAsync(timer);
-            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness);
+            var lastSizes = !force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false)
+                ? ShowLastSizesAsync(timer)
+                : Task.CompletedTask;
+            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness, lastSizes);
             if (!StampIfLoaded())
             {
                 ShowStamp();
