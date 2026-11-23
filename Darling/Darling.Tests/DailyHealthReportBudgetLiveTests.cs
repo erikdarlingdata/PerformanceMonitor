@@ -34,7 +34,7 @@ public sealed class DailyHealthReportBudgetLiveTests
     private const int JobsPerServer = 14;
 
     [Fact]
-    public async Task BusyDay_StaysUnderTheBudget_AndDropsTheTailOfTheWorstFirstServers()
+    public async Task BusyDay_McpToolStaysUnderTheBudget_AndTheWebReadKeepsEveryServer()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -50,11 +50,14 @@ public sealed class DailyHealthReportBudgetLiveTests
         var bodySucceeded = false;
         try
         {
-            /* The period the default read resolves, so the seeded rows sit inside it. */
+            /* The period the default read resolves, so the seeded rows sit inside it. The day is read once here and passed to both reads
+               below, so a run that crosses a period boundary cannot send the tool to a period the rows are not in. */
             var config = await DarlingAlertReader.GetAlertConfigurationAsync(dataSource, ct);
             var sendAt = DailyHealthReportSettings.ResolveSendAt(config.Settings?.DailyReportSendAt);
             var zone = DailyHealthReportSettings.ResolveZone(config.Settings?.DailyReportTimeZone);
-            var periodEnd = DailyHealthReportPeriod.EndUtcFor(DailyHealthReportPeriod.LatestEndedDate(DateTime.UtcNow, sendAt, zone), sendAt, zone);
+            var day = DailyHealthReportPeriod.LatestEndedDate(DateTime.UtcNow, sendAt, zone);
+            var dayText = day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            var periodEnd = DailyHealthReportPeriod.EndUtcFor(day, sendAt, zone);
             var anchor = DarlingMcpTestData.Naive(periodEnd.AddHours(-3));
 
             for (var s = 0; s < ServerCount; s++)
@@ -85,7 +88,7 @@ FROM generate_series(0, {ServerCount - 1}) AS s, generate_series(1, 3) AS m, gen
             var data = await new DailyHealthReportBuilder(dataSource).BuildDataAsync(periodEnd, ct);
             var rendered = DailyHealthReportBuilder.Render(data);
 
-            var reply = await DarlingMcpDailyReportTools.GetDailyHealthReport(dataSource, null, ct);
+            var reply = await DarlingMcpDailyReportTools.GetDailyHealthReport(dataSource, dayText, ct);
 
             Assert.False(McpHelpers.IsErrorEnvelope(reply), reply);
             Assert.True(Encoding.UTF8.GetByteCount(reply) <= McpResponseBudget.DefaultBytes,
@@ -112,6 +115,18 @@ FROM generate_series(0, {ServerCount - 1}) AS s, generate_series(1, 3) AS m, gen
             Assert.Equal(total, summary.GetProperty("healthy_count").GetInt32() + summary.GetProperty("warning_count").GetInt32()
                 + summary.GetProperty("critical_count").GetInt32() + summary.GetProperty("offline_count").GetInt32());
             Assert.Equal(rendered.Text, root.GetProperty("text").GetString());
+
+            /* The web read of the same day passes no budget: every server, in the same order, and no budget keys saying it was cut. */
+            var webReply = await DarlingMcpDailyReportTools.GetDailyHealthReportWithin(dataSource, dayText, null, ct);
+            Assert.False(McpHelpers.IsErrorEnvelope(webReply), webReply);
+            Assert.True(Encoding.UTF8.GetByteCount(webReply) > McpResponseBudget.DefaultBytes, "the seeded day is bigger than the budget, or this test proves nothing");
+            using var webDoc = JsonDocument.Parse(webReply);
+            var webRoot = webDoc.RootElement;
+            var webServers = webRoot.GetProperty("servers").EnumerateArray().Select(e => e.GetProperty("server_id").GetInt32()).ToList();
+            Assert.Equal(data.Servers.Select(x => x.ServerId), webServers);
+            Assert.False(webRoot.TryGetProperty("budget_truncated", out _));
+            Assert.False(webRoot.TryGetProperty("budget_note", out _));
+            Assert.Equal(rendered.Text, webRoot.GetProperty("text").GetString());
 
             bodySucceeded = true;
         }
