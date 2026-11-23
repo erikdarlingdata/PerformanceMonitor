@@ -152,7 +152,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// possible re-walk after a restart, never wrong data.</summary>
     private async Task PersistQueryStoreLandedAsync(int serverId, QueryStoreLandedChange? change, CancellationToken cancellationToken)
     {
-        if (change is not { } landed || serverId != int.MinValue)
+        if (change is not { } landed)
         {
             return;
         }
