@@ -133,6 +133,12 @@ public sealed class QstopProbe
             if (Directory.Exists(vdir))
             {
                 File.WriteAllText(Path.Combine(vdir, "R0.sql"), RankSql(FindSource()));
+                File.WriteAllText(Path.Combine(vdir, "P1.sql"), "--PRAGMA SET preserve_insertion_order = false
+" + RankSql(FindSource()));
+                File.WriteAllText(Path.Combine(vdir, "P2.sql"), "--PRAGMA SET threads = 2
+" + RankSql(FindSource()));
+                File.WriteAllText(Path.Combine(vdir, "P3.sql"), "--PRAGMA SET preserve_insertion_order = false; SET threads = 2
+" + RankSql(FindSource()));
                 foreach (var f in Directory.GetFiles(vdir, "*.sql").OrderBy(x => x))
                 {
                     var sql = File.ReadAllText(f);
@@ -142,6 +148,7 @@ public sealed class QstopProbe
                     {
                         var sw = Stopwatch.StartNew();
                         using var c = await data.OpenConnectionAsync();
+                        if (sql.StartsWith("--PRAGMA ")) { await ExecAsync(c, sql.Substring(9, sql.IndexOf((char)10) - 9)); }
                         using var cmd = c.CreateCommand();
                         cmd.CommandText = sql;
                         cmd.Parameters.Add(new DuckDBParameter { Value = 1 });
@@ -153,8 +160,7 @@ public sealed class QstopProbe
                         vt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
                         if (i == 0) Line($"VARIANT {Path.GetFileName(f)} rows {rc} hash {h}");
                     }
-                    } catch (Exception ex) { Line($"VARIANT {Path.GetFileName(f)} FAILED {ex.Message.Replace("
-", " ")}"); continue; }
+                    } catch (Exception ex) { Line($"VARIANT {Path.GetFileName(f)} FAILED {ex.Message.Replace((char)10, (char)32)}"); continue; }
                     Line($"VARIANT {Path.GetFileName(f)}: {string.Join(" ", vt)}");
                 }
                 return;
