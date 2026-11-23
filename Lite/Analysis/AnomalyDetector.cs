@@ -109,6 +109,15 @@ public class AnomalyDetector
             metadata["baseline_distinct_days_is_proxy"] = 1;
     }
 
+    /// <summary>The archived tables the detectors' window statements read, each bounded below by the window start on
+    /// <c>collection_time</c> (#9195). The event tables (deadlocks, blocked process reports) and <c>server_properties</c> and
+    /// <c>index_object_stats</c> are not here: their reads are not bounded by the window start, or their views remove copies.</summary>
+    private static readonly string[] WindowReadTables =
+    [
+        "cpu_utilization_stats", "wait_stats", "dmv_blocking_snapshots", "file_io_stats", "perfmon_stats",
+        "session_stats", "collection_log", "query_stats", "memory_stats"
+    ];
+
     /// <summary>
     /// Detects anomalies by comparing the analysis window against time-bucketed baselines.
     /// Returns anomaly facts to be merged into the main fact list.
@@ -128,17 +137,26 @@ public class AnomalyDetector
         if (!await HasBaselineDataAsync(context.ServerId, context.TimeRangeEnd, context.CancellationToken))
             return anomalies;
 
+        /* #9195: every window read below starts at TimeRangeStart, and a v_ view is the hot table UNION ALL every archive
+           file, so each statement opened every file's footer even when the whole window sat in the hot table (a 4 h read
+           against a week of per-cycle files). A table whose archive holds nothing at or after the window start is read as
+           its hot table alone (#7256), judged once here for all the statements. The span is cached per archive view
+           generation, so only the first call after a start or an archive move reads the files. A table whose view removes
+           copies on a natural key, or whose archive may hold the window, keeps its view. */
+        var plan = await _duckDb.PlanArchiveReadAsync(context.CancellationToken,
+            [.. WindowReadTables.Select(t => new ArchiveWindow(t, "collection_time", context.TimeRangeStart))]);
+
         // Existing detection methods (upgraded to time-bucketed baselines)
-        await DetectCpuAnomalies(context, anomalies);
-        await DetectWaitAnomalies(context, anomalies);
-        await DetectBlockingAnomalies(context, anomalies);
-        await DetectIoAnomalies(context, anomalies);
+        await DetectCpuAnomalies(context, anomalies, plan);
+        await DetectWaitAnomalies(context, anomalies, plan);
+        await DetectBlockingAnomalies(context, anomalies, plan);
+        await DetectIoAnomalies(context, anomalies, plan);
 
         // New detection methods
-        await DetectBatchRequestAnomalies(context, anomalies);
-        await DetectSessionAnomalies(context, anomalies);
-        await DetectQueryDurationAnomalies(context, anomalies);
-        await DetectMemoryAnomalies(context, anomalies);
+        await DetectBatchRequestAnomalies(context, anomalies, plan);
+        await DetectSessionAnomalies(context, anomalies, plan);
+        await DetectQueryDurationAnomalies(context, anomalies, plan);
+        await DetectMemoryAnomalies(context, anomalies, plan);
         await DetectObjectStatsAnomalies(context, anomalies);
 
         return anomalies;
@@ -326,7 +344,7 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
     /// <summary>
     /// Detects CPU utilization anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectCpuAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectCpuAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -370,6 +388,7 @@ AND   collection_time >= $2 AND collection_time < $3
 GROUP BY local_hour
 ORDER BY local_hour";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -487,7 +506,7 @@ LIMIT 1";
     /// The young-baseline bar's peak: the same window and per-collection shape as the rate read, with the
     /// numerator leaving out <see cref="AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase"/>.
     /// </summary>
-    private static async Task<double> ReadYoungBaselineBarPeakAsync(DuckDBConnection connection, AnalysisContext context)
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan)
     {
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -506,6 +525,7 @@ WITH per_collection AS (
 )
 SELECT MAX(bar_ms_per_sec)
 FROM per_collection";
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -522,7 +542,7 @@ FROM per_collection";
     /// RESOURCE_SEMAPHORE while CX* dominate the summed baseline). Comparing all-types-vs-all-types on
     /// the honest per-second scale fixes units, aggregation, and the per-type cascade together.
     /// </summary>
-    private async Task DetectWaitAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectWaitAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -590,6 +610,7 @@ FROM collected
 LEFT JOIN per_collection USING (collection_time)
 GROUP BY local_hour
 ORDER BY local_hour";
+                rateCmd.CommandText = plan.Apply(rateCmd.CommandText);
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -727,7 +748,7 @@ ORDER BY local_hour";
                 var barPeak = peakRate;
                 if (await IsAzureSqlDatabaseAsync(connection, context))
                 {
-                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context, plan);
                     barExcludedApplied = true;
                 }
                 ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
@@ -779,6 +800,7 @@ AND   delta_wait_time_ms > 0
 GROUP BY rtrim(wait_type)
 ORDER BY total_ms DESC
 LIMIT 6";
+                contribCmd.CommandText = plan.Apply(contribCmd.CommandText);
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -812,7 +834,7 @@ LIMIT 6";
     /// Detects blocking/deadlock anomalies — event rates significantly above
     /// baseline for this time bucket. Uses ratio-based scoring.
     /// </summary>
-    private async Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -849,6 +871,7 @@ SELECT
 FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev) AS bpr_count) AS b")
                     .Replace("{SCOPE}", rowScope);
 
+                cmd.CommandText = plan.Apply(cmd.CommandText);
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -944,7 +967,7 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
     /// <summary>
     /// Detects I/O latency anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -1008,6 +1031,7 @@ LEFT JOIN active USING (collection_time)
 GROUP BY local_hour
 ORDER BY local_hour";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -1181,7 +1205,7 @@ ORDER BY local_hour";
     /// <summary>
     /// Detects batch requests/sec anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectBatchRequestAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectBatchRequestAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -1220,6 +1244,7 @@ AND   counter_name = 'Batch Requests/sec'
 GROUP BY local_hour
 ORDER BY local_hour";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -1313,7 +1338,7 @@ ORDER BY local_hour";
     /// <summary>
     /// Detects session/connection count anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectSessionAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectSessionAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -1370,6 +1395,7 @@ FROM instants
 GROUP BY local_hour
 ORDER BY local_hour";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -1464,7 +1490,7 @@ ORDER BY local_hour";
     /// Detects query duration aggregate anomalies using z-score against time-bucketed baseline.
     /// Measures total elapsed time across all queries per collection interval.
     /// </summary>
-    private async Task DetectQueryDurationAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectQueryDurationAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -1523,6 +1549,7 @@ FROM instants
 GROUP BY local_hour
 ORDER BY local_hour";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -1618,7 +1645,7 @@ ORDER BY local_hour";
     /// Dashboard and Darling collect memory metrics too; mirror any change across all three.
     /// Measures total_server_memory_mb / target_server_memory_mb as memory pressure %.
     /// </summary>
-    private async Task DetectMemoryAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectMemoryAnomalies(AnalysisContext context, List<Fact> anomalies, ArchiveReadPlan plan)
     {
         try
         {
@@ -1651,6 +1678,7 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 GROUP BY local_hour
 ORDER BY local_hour";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
