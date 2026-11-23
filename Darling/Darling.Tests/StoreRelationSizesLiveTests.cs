@@ -559,7 +559,7 @@ ANALYZE;";
     }
 
     [Fact]
-    public async Task TheViewersLastSizesRead_ReturnsTheTablesAndIndexesFromTheStoredPass_AndNullForAnEmptyTable()
+    public async Task TheViewersLastSizesRead_ReturnsTheTablesFromTheStoredPass_AndNullForAnEmptyTable()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
@@ -589,7 +589,6 @@ ANALYZE;";
             Assert.Equal(persisted.MeasuredAtUtc, last.MeasuredAtUtc);
             var table = Assert.Single(last.Tables.Rows, r => r.SchemaName == "zz9374" && r.TableName == "t1");
             Assert.True(table.HeapBytes > 0);
-            Assert.Contains(last.Indexes.Indexes, i => i.SchemaName == "zz9374" && i.TableName == "t1");
             bodySucceeded = true;
         }
         finally

@@ -26,13 +26,13 @@ public sealed record StoreIndexHealth(
     DateTime? ReadAtUtc = null);
 
 /// <summary>
-/// #9374: Store Health's first open from the store's last measured relation sizes: the tables rows, the index rows with their coverage, and when
-/// the sizes were measured. The tables read says the store answered it now (<c>ReadAtUtc</c> is the call's time): only the sizes are from
-/// <see cref="MeasuredAtUtc"/>. Rows of this read are never put in the held cache.
+/// #9374: Store Health's first open from the store's last measured relation sizes: the tables rows and when the sizes were measured. The
+/// tables read says the store answered it now (<c>ReadAtUtc</c> is the call's time): only the sizes are from <see cref="MeasuredAtUtc"/>.
+/// Rows of this read are never put in the held cache. There are no index rows: the live indexes read runs beside this read and costs about as
+/// much, so reading them here too would double the store's index work and show nothing sooner.
 /// </summary>
 public sealed record StoreLastSizesHealth(
     StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>> Tables,
-    StoreIndexHealth Indexes,
     DateTime MeasuredAtUtc);
 
 /// <summary>
@@ -95,7 +95,7 @@ public sealed partial class ViewerDataService
     /// <summary>#9374: whether the store's held reads already hold a tables read. The tab shows the last measured sizes only when they do not.</summary>
     public bool HoldsStoreTables => HeldStoreHealth().HoldsTables;
 
-    /// <summary>#9374: the tables and indexes rows from the store's last measured relation sizes, or null when there are none to show (a store
+    /// <summary>#9374: the tables rows from the store's last measured relation sizes, or null when there are none to show (a store
     /// behind the sizes table, an empty table, or a read of them that failed), so the caller reads live as it always did. A failure other than
     /// the caller's cancel is written to the Viewer log at Debug and answered with null, so a store or role that cannot read the sizes tables
     /// costs the tab nothing. The rows are not held: the held reads stay the live ones.</summary>
@@ -103,8 +103,7 @@ public sealed partial class ViewerDataService
         ReadLastSizesHealthAsync(_dataSource, StoreRelationSizesStore.ReadLastSizesAsync, DateTime.UtcNow, cancellationToken);
 
     /// <summary>The read behind <see cref="GetStoreLastSizesHealthAsync"/> over <paramref name="readLastSizes"/>, as of <paramref name="asOfUtc"/>.
-    /// The tables read and the indexes read (with the coverage read, as <see cref="ReadStoreIndexHealthAsync"/> adds it) both run from the one
-    /// pass and run together.</summary>
+    /// Only the tables read runs from the pass: the live indexes read runs beside this one, so the indexes are not read here.</summary>
     internal static async Task<StoreLastSizesHealth?> ReadLastSizesHealthAsync(
         NpgsqlDataSource store,
         Func<NpgsqlDataSource, CancellationToken, Task<MeasuredSizePass?>> readLastSizes,
@@ -119,25 +118,9 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
-            var tablesRead = DarlingStoreTableHealthReader.GetAsync(store, asOfUtc, measured.Pass, cancellationToken);
-            var indexesRead = DarlingStoreTableHealthReader.GetIndexesAsync(store, measured.Pass, cancellationToken);
-            await Task.WhenAll(tablesRead, indexesRead);
-            var tables = await tablesRead;
-            var indexes = await indexesRead;
-            var coverage = new List<DarlingStoreTableHealthReader.StoreIndexCoverageRow>();
-            string? leftOut = null;
-            try
-            {
-                coverage = await DarlingStoreTableHealthReader.GetIndexCoverageAsync(store, cancellationToken);
-            }
-            catch (StoreTableHealthTimeoutException ex)
-            {
-                leftOut = ex.Message;
-            }
-
+            var tables = await DarlingStoreTableHealthReader.GetAsync(store, asOfUtc, measured.Pass, cancellationToken);
             return new StoreLastSizesHealth(
                 new StoreHealthRead<IReadOnlyList<DarlingStoreTableHealthReader.StoreTableHealthRow>>(tables, asOfUtc),
-                new StoreIndexHealth(indexes, coverage, leftOut, asOfUtc),
                 measured.MeasuredAtUtc);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
