@@ -522,7 +522,7 @@ ORDER BY p.page_ord";
                newest: a backfilled slice stays in the hot table until the next archive pass) takes the view, as before. */
             var hotRelation = PerformanceMonitorLite.Database.LiteTextDimensions.HotSource("query_store_stats");
             var hotLatest = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateKeys, hotRelation, latestFloor);
-            var fromHot = hotLatest.Where(kv => kv.Value.CollectionTime > DateTime.MinValue).ToDictionary(kv => kv.Key, kv => kv.Value);
+            var fromHot = hotLatest.Where(kv => kv.Value.CollectionTime > newestArchived).ToDictionary(kv => kv.Key, kv => kv.Value);
             if (fromHot.Count > 0)
             {
                 foreach (var kv in fromHot) latestRows[kv.Key] = kv.Value;
