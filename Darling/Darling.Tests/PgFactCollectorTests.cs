@@ -123,7 +123,7 @@ public sealed class PgFactCollectorTests
         Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionDailySql, PgFactCollector.AllSql);
-        Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
+        Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotNotMonitorOnlySql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.CoverageSql, PgFactCollector.AllSql);
     }
 
@@ -338,7 +338,7 @@ public sealed class PgFactCollectorTests
     {
         /* The SPID-0 phantom-root filter and the pair cap are behavior, not style — see
            PgBlockingPairRowQuery (Lite's BlockingPairRowQuery carried verbatim). */
-        foreach (var sql in new[] { PgFactCollector.BlockingChainSql, PgBlockingPairRowQuery.DmvSnapshotSql })
+        foreach (var sql in new[] { PgFactCollector.BlockingChainSql, PgBlockingPairRowQuery.DmvSnapshotNotMonitorOnlySql })
         {
             Assert.Contains("blocking_spid IS NOT NULL", sql, StringComparison.Ordinal);
             Assert.Contains("blocking_spid <> 0", sql, StringComparison.Ordinal);

@@ -734,9 +734,11 @@ ORDER BY b.day_utc;";
 
     /// <summary>
     /// #9287: <see cref="ResolveServedDaysAsync"/> plus the reason no run was taken, so a slow read can say whether it read rollups. The
-    /// run is the same one, and the reason is <see cref="SourceReason.Served"/> when there is one.
+    /// run is the same one, and the reason is <see cref="SourceReason.Served"/> when there is one. #9363: <c>BuiltDays</c> is every day
+    /// the one statement returned (built, current, inside retention), so a built day outside the longest run can be told from one that is
+    /// not built, without another read.
     /// </summary>
-    public static Task<(ServedDays? Served, SourceReason Reason)> ResolveServedDaysWithReasonAsync(
+    public static Task<(ServedDays? Served, SourceReason Reason, IReadOnlyList<DateOnly> BuiltDays)> ResolveServedDaysWithReasonAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
         ResolveAsync(ServedDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken);
 
@@ -748,7 +750,7 @@ ORDER BY b.day_utc;";
         NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
         (await ResolveAsync(ServedClutterDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken)).Served;
 
-    private static async Task<(ServedDays? Served, SourceReason Reason)> ResolveAsync(
+    private static async Task<(ServedDays? Served, SourceReason Reason, IReadOnlyList<DateOnly> BuiltDays)> ResolveAsync(
         string servedSql, NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -762,7 +764,7 @@ ORDER BY b.day_utc;";
         var afterLast = DateOnly.FromDateTime(end);
         if (afterLast <= first)
         {
-            return (null, SourceReason.NoWholeDay);
+            return (null, SourceReason.NoWholeDay, Array.Empty<DateOnly>());
         }
 
         var days = new List<DateOnly>();
@@ -785,14 +787,14 @@ ORDER BY b.day_utc;";
         var run = LongestRun(days);
         if (run is not { } served)
         {
-            return (null, SourceReason.NoBuiltDays);
+            return (null, SourceReason.NoBuiltDays, days);
         }
 
         /* A server whose tick has not run lately is not known to be current: an older service marks nothing, so its late rows are not marked. */
         await using var stale = new NpgsqlCommand(StaleHeartbeatSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         stale.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         stale.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = HeartbeatFreshFor });
-        return (bool)(await stale.ExecuteScalarAsync(cancellationToken))! ? (null, SourceReason.HeartbeatStale) : (served, SourceReason.Served);
+        return (bool)(await stale.ExecuteScalarAsync(cancellationToken))! ? (null, SourceReason.HeartbeatStale, days) : (served, SourceReason.Served, days);
     }
 
     /// <summary>#9287: why a read took no day from the rollups, or <see cref="Served"/> when it took a run.</summary>
@@ -824,15 +826,59 @@ ORDER BY b.day_utc;";
         /// (the slicer read). <see cref="Describe"/> appends it, so a slow-load line shows which shape a cold read got.</summary>
         public string? Shape { get; init; }
 
-        /// <summary>The slow-load line's words, for example <c>3 days from rollups, 7 days from the interval table</c>, then the
-        /// <see cref="Shape"/> when there is one.</summary>
+        /// <summary>#9363: for each of <see cref="IntervalDays"/>, why the interval table served it, or null where the read could not say
+        /// (<see cref="DescribeSource(DateTime, DateTime, ServedDays?, SourceReason, bool)"/> was given no clock). Null as a whole lists the days bare.</summary>
+        public IReadOnlyList<(DateOnly Day, string? Label)>? IntervalNotes { get; init; }
+
+        /// <summary>The slow-load line's words, for example <c>3 days from rollups (2026-11-12 to 2026-11-14), 7 days from the interval table
+        /// (2026-11-11 partial first day, ...)</c>, then the <see cref="Shape"/> when there is one. #9363: the UTC days are named, and each
+        /// interval-table day carries the reason it was not served from a rollup.</summary>
         public string Describe()
         {
             static string Days(int n) => n == 1 ? "1 day" : $"{n} days";
+            var rollupList = RollupDays.Count == 0 ? string.Empty : $" ({FormatDays(RollupDays.Select(d => (d, (string?)null)))})";
+            var intervalList = IntervalDays.Count == 0
+                ? string.Empty
+                : $" ({FormatDays(IntervalNotes ?? IntervalDays.Select(d => (d, (string?)null)).ToList())})";
             var line = RollupDays.Count == 0
-                ? $"{Days(IntervalDays.Count)} from the interval table, no rollup days: {Why()}"
-                : $"{Days(RollupDays.Count)} from rollups{(EdgeDaysAsCollected ? EdgeDaysNote : string.Empty)}, {Days(IntervalDays.Count)} from the interval table";
+                ? $"{Days(IntervalDays.Count)} from the interval table{intervalList}, no rollup days: {Why()}"
+                : $"{Days(RollupDays.Count)} from rollups{rollupList}{(EdgeDaysAsCollected ? EdgeDaysNote : string.Empty)}, {Days(IntervalDays.Count)} from the interval table{intervalList}";
             return Shape is { Length: > 0 } shape ? $"{line}, {shape}" : line;
+        }
+
+        /// <summary>#9363: the days oldest first, a run of consecutive days with one label as <c>a to b label</c>, a single day as <c>a label</c>.</summary>
+        private static string FormatDays(IEnumerable<(DateOnly Day, string? Label)> days)
+        {
+            static string Date(DateOnly d) => d.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            var parts = new List<string>();
+            DateOnly? first = null, last = null;
+            string? label = null;
+            void Flush()
+            {
+                if (first is not { } f || last is not { } l)
+                {
+                    return;
+                }
+
+                var range = f == l ? Date(f) : $"{Date(f)} to {Date(l)}";
+                parts.Add(label is { Length: > 0 } ? $"{range} {label}" : range);
+            }
+
+            foreach (var (day, dayLabel) in days.OrderBy(d => d.Day))
+            {
+                if (last is { } previous && day == previous.AddDays(1) && dayLabel == label)
+                {
+                    last = day;
+                    continue;
+                }
+
+                Flush();
+                first = last = day;
+                label = dayLabel;
+            }
+
+            Flush();
+            return string.Join(", ", parts);
         }
 
         /// <summary>The grid banner's note, or null when nothing is worth saying: rollups served, or there was no whole day to take.</summary>
@@ -842,7 +888,7 @@ ORDER BY b.day_utc;";
             _ => null,
         };
 
-        private string Why() => Reason switch
+        internal string Why() => Reason switch
         {
             SourceReason.HeartbeatStale => "the server's heartbeat is older than 2 hours",
             SourceReason.NoBuiltDays => "its closed days are not built yet",
@@ -879,6 +925,20 @@ ORDER BY b.day_utc;";
     /// <paramref name="reason"/> when it took none. A window that ends exactly at midnight does not touch the day that starts there.
     /// </summary>
     public static ReadSource DescribeSource(DateTime readStart, DateTime end, ServedDays? served, SourceReason reason, bool edgeDaysAsCollected = false)
+        => DescribeSource(readStart, end, served, reason, edgeDaysAsCollected, null, null, null);
+
+    /// <summary>
+    /// #9363: <see cref="DescribeSource(DateTime, DateTime, ServedDays?, SourceReason, bool)"/> that also says, for each day the interval
+    /// table served, why no rollup did. <paramref name="nowUtc"/> and <paramref name="retentionDays"/> (the read's clock and the interval
+    /// table's retention, as <see cref="HoldsEdgeDays"/> takes them) tell a day that is not closed yet and a day the purge can already have
+    /// thinned (never built, <see cref="MayBeThinned"/>) from the rest. <paramref name="builtDays"/> is what the served-days statement already
+    /// returned, so a built day outside the longest run is told from a day with no usable rollup. Without a clock only the window's partial
+    /// first and last days are labelled. A day built after the read began cannot be told from one not built yet: the statement runs in the
+    /// read's snapshot, so both are the same absence.
+    /// </summary>
+    public static ReadSource DescribeSource(
+        DateTime readStart, DateTime end, ServedDays? served, SourceReason reason, bool edgeDaysAsCollected,
+        DateTime? nowUtc, int? retentionDays, IReadOnlyList<DateOnly>? builtDays)
     {
         var rollup = new List<DateOnly>();
         var interval = new List<DateOnly>();
@@ -894,7 +954,54 @@ ORDER BY b.day_utc;";
             (served is { } run && midnight >= run.Start && midnight < run.End ? rollup : interval).Add(day);
         }
 
-        return new ReadSource(rollup, interval, served is null && reason == SourceReason.Served ? SourceReason.NoBuiltDays : reason, edgeDaysAsCollected && served is not null);
+        var source = new ReadSource(rollup, interval, served is null && reason == SourceReason.Served ? SourceReason.NoBuiltDays : reason, edgeDaysAsCollected && served is not null);
+        var firstDay = DateOnly.FromDateTime(readStart);
+        var notes = new List<(DateOnly Day, string? Label)>(interval.Count);
+        foreach (var day in interval)
+        {
+            var midnight = day.ToDateTime(TimeOnly.MinValue);
+            string? label;
+            if (midnight < readStart || midnight.AddDays(1) > end)
+            {
+                label = day == firstDay ? "partial first day" : nowUtc is { } open && day >= DateOnly.FromDateTime(open) ? "open day" : "partial last day";
+            }
+            else if (nowUtc is not { } now)
+            {
+                label = null;
+            }
+            else if (midnight.AddDays(1) + CloseAfter > now)
+            {
+                label = "not closed yet";
+            }
+            else if (builtDays is not null && builtDays.Contains(day))
+            {
+                /* A built day keeps its rollup even at the retention edge (the builder skips only a thinned day that was never built), so
+                   a built day the read still took from the interval table is outside the longest run, whatever the time says. */
+                label = served is null ? "no rollups for this read" : "built but outside the longest run";
+            }
+            else if (retentionDays is { } retention && MayBeThinned(day, now, retention))
+            {
+                label = "never built at the retention edge";
+            }
+            else
+            {
+                label = served is null ? "no rollups for this read" : "no rollup for this day";
+            }
+
+            notes.Add((day, label));
+        }
+
+        return source with { IntervalNotes = notes };
+    }
+
+    /// <summary>#9363: <see cref="DescribeSource(DateTime, DateTime, ServedDays?, SourceReason, bool, DateTime?, int?, IReadOnlyList{DateOnly}?)"/>
+    /// on the clock and retention the served-day statement clipped to for <paramref name="connection"/> (the store's own, unless a test set them).</summary>
+    internal static ReadSource DescribeSourceFor(
+        NpgsqlConnection connection, DateTime readStart, DateTime end, ServedDays? served, SourceReason reason, IReadOnlyList<DateOnly>? builtDays)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        var (nowUtc, retentionDays) = ReadClockFor(connection);
+        return DescribeSource(readStart, end, served, reason, HoldsEdgeDays(connection, served), nowUtc ?? DateTime.UtcNow, retentionDays, builtDays);
     }
 
     /// <summary>

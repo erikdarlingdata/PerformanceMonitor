@@ -318,7 +318,7 @@ public sealed partial class PgFactCollector : IFactCollector
         WaitStatsSql,
         BlockingSql,
         BlockingChainSql,
-        PgBlockingPairRowQuery.DmvSnapshotSql,
+        PgBlockingPairRowQuery.DmvSnapshotNotMonitorOnlySql,
         DeadlocksSql,
         ServerConfigSql,
         MemoryStatsSql,

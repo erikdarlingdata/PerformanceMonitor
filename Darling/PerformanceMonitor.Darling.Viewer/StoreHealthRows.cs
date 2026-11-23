@@ -477,6 +477,23 @@ internal static class StoreHealthRows
         $"{CountText.Plural(indexes.Count, "store index", "store indexes")}. {Number(indexes.Count(r => r.LargerThanHeap))} larger than their table, "
         + $"{Number(indexes.Count(r => r.RarelyUsed))} rarely used, {Number(indexes.Count(r => !r.Valid))} invalid.";
 
+    /// <summary>#9364: what a tables or indexes read did, written after its time in the slow-load line: how many relations it sized, and
+    /// whether the store measured them for this call or the call took the measurement the Viewer already held, with that measurement's age.
+    /// A read stamped at or after <paramref name="startedUtc"/> (the moment the call began) was taken for it, a call that joined a read already
+    /// running included. An older stamp is a held measurement, and its age is counted to <paramref name="nowUtc"/>.</summary>
+    internal static string ReadNote(int relations, DateTime readAtUtc, DateTime startedUtc, DateTime nowUtc)
+    {
+        var sized = $"sized {CountText.Plural(relations, "relation")}";
+        if (readAtUtc >= startedUtc)
+        {
+            return sized + ", measured live";
+        }
+
+        var seconds = (long)Math.Max(0, (nowUtc - readAtUtc).TotalSeconds);
+        var age = seconds < 60 ? $"{seconds} s" : $"{seconds / 60} min {seconds % 60} s";
+        return $"{sized}, from the held measurement taken {age} ago";
+    }
+
     /// <summary>The measured result in plain words: the verdict, then the page counts, with the time the read took.</summary>
     internal static string MeasureText(string table, StoreTableMeasureResult result, TimeSpan elapsed)
     {
