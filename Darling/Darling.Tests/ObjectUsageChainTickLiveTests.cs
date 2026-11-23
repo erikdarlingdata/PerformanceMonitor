@@ -338,6 +338,72 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
     }
 
     [Fact]
+    public async Task ADeadServersBackfill_ThatABoundStopsAfterOneStep_IsListedOnTheNextTicks_AndFinishes()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        // The server is dead: all of its raw rows are older than the listing window, and it has no snapshots row until its first step.
+        await PlantServerAsync(connection, ServerTwo, ["Old"], 3, ct, OldDay);
+
+        var state = new ObjectUsageChainTick.TickState();
+        async Task<ObjectUsageChainTick.TickResult> OneStepAsync() =>
+            await ObjectUsageChainTick.RunTickAsync(dataSource, 1, TimeSpan.FromMinutes(5), ObjectUsageChainBuilder.BuildPairAsync, NullLogger.Instance, ct, state);
+
+        // The first tick folds one snapshot and the bound stops it. The server now has a snapshots row, so only its pending backfill lists it.
+        Assert.Equal(1, (await OneStepAsync()).Steps);
+        Assert.Equal(1L, await SnapshotsAsync(connection, ServerTwo, "Old", ct));
+        Assert.Equal(1, (await OneStepAsync()).Steps);
+        Assert.Equal(2L, await SnapshotsAsync(connection, ServerTwo, "Old", ct));
+        Assert.Equal(1, (await OneStepAsync()).Steps);
+        Assert.Equal(3L, await SnapshotsAsync(connection, ServerTwo, "Old", ct));
+
+        // The backfill is done: the server leaves the pending list and the next tick has nothing to build.
+        Assert.Equal(0, (await OneStepAsync()).Steps);
+        Assert.Empty(state.PendingBackfill);
+
+        // The stepwise build stores what one uncapped build of the same history stores.
+        await PlantServerAsync(connection, ServerOne, ["Old"], 3, ct, OldDay);
+        await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerOne, "Old", int.MaxValue, ct);
+        Assert.Equal(await FingerprintAsync(connection, ServerOne, "Old", ct), await FingerprintAsync(connection, ServerTwo, "Old", ct));
+    }
+
+    [Fact]
+    public async Task AServerWithNoRawIndexRows_IsNotListedForABackfill_AndAServerWithOldRowsIs()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        // Server two has old raw rows. Capped is registered and never collected, as a PostgreSQL target or a new server is.
+        await PlantServerAsync(connection, ServerTwo, ["Old"], 2, ct, OldDay);
+        await PlantServerAsync(connection, Capped, [], 0, ct);
+
+        var listed = new List<int>();
+        await using (var command = new NpgsqlCommand(ObjectUsageChainTick.UnbuiltServersSql, connection))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                listed.Add(reader.GetInt32(0));
+            }
+        }
+
+        Assert.Equal([ServerTwo], listed);
+
+        // The tick builds the dead server's history once and finds nothing to build for the other server, with no failure.
+        var tick = await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct);
+        Assert.Equal(new ObjectUsageChainTick.TickResult(1, 2, 0, false), tick);
+    }
+
+    [Fact]
     public async Task ABuiltLivePairWithNoNewRawRows_StopsAtTheProbeAndReadsNoChainRows()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);

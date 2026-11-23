@@ -306,6 +306,22 @@ public sealed class ObjectUsageWindowReplayTests
     }
 
     [Fact]
+    public void Assemble_WithAnIndexWhoseOnlyRunEndsBeforeARawRowInTheWindow_GivesUp()
+    {
+        var replay = Run(0, Fact(0), Fact(1, node: "B", start: Day(1).AddHours(-1)), Fact(2, comparedWith: 1));
+        /* The second index's run overlaps the window and ends before the boundary snapshot's raw row, so it does not cover that row. */
+        var runs = new[]
+        {
+            new ObjectUsageRun(100, 1, Day(0), null, "dbo", "Orders", false, false),
+            new ObjectUsageRun(100, 2, Day(0), Day(0).AddHours(1), "dbo", "Orders", false, false),
+        };
+        var raw = new[] { Raw(0, 100, 1), Raw(0, 100, 2), Raw(1, 100, 1), Raw(1, 100, 2) };
+
+        Assert.Null(replay.Assemble(Array.Empty<ObjectUsageDeltaTotals>(), runs, raw, out var reason));
+        Assert.Equal("a raw row names an index with no run", reason);
+    }
+
+    [Fact]
     public void Assemble_WithAnObjectThatHasNoRun_GivesUp()
     {
         var replay = Run(0, Fact(0), Fact(1, comparedWith: 0));

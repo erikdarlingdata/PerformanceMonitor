@@ -141,6 +141,33 @@ public sealed class ObjectUsageChainReaderLiveTests
     }
 
     [Fact]
+    public async Task AnIndexWhoseOnlyRunStartsAfterTheBaselineRow_TakesTheFullFold_AndTheAnswerIsTheFullFolds()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Node, ct);
+        await SeedRawAsync(connection, ct);
+        await SeedChainAsync(connection, ct);
+
+        Assert.NotNull((await DarlingObjectUsageReader.TryReadPersistedAsync(dataSource, ServerId, Db, T(0), ct)).Result);
+
+        /* Object 100's nonclustered index has a run that overlaps the window and starts after the baseline snapshot, whose raw row the
+           replay reads: the run overlaps the window and does not cover that row. */
+        await ExecAsync(connection, "UPDATE collect.object_usage_runs SET first_time = " + Literal(T(1)) + " WHERE object_id = 100 AND index_id = 2", ct);
+
+        var (persisted, reason) = await DarlingObjectUsageReader.TryReadPersistedAsync(dataSource, ServerId, Db, T(0), ct);
+        Assert.Null(persisted);
+        Assert.NotNull(reason);
+        AssertSame(
+            await DarlingObjectUsageReader.ReadTablesFullAsync(dataSource, ServerId, Db, T(0), ct),
+            await DarlingObjectUsageReader.ReadTablesAsync(dataSource, ServerId, Db, T(0), ct));
+    }
+
+    [Fact]
     public async Task AnUnreadableChainTable_TakesTheFullFoldWithAWarning_AndACancelledCallerStillThrows()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
