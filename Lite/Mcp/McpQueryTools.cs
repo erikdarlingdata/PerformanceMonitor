@@ -774,7 +774,9 @@ public sealed class McpQueryTools
             /* #6750: the store's data start, probed once. The window notice below reports it as effective_start, and the read divides
                each per-hour rate by the hours from it, so the two cannot disagree. */
             var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd);
-            var rows = await dataService.GetQueryStoreRegressionsAsync(
+            /* #9362: the read also answers the coverage facts the empty answer needs (for database_name when one is named), so an
+               empty answer makes no second pass over the archive for them. */
+            var (rows, readHasBaseline, readHasRecent) = await dataService.GetQueryStoreRegressionsWithCoverageAsync(
                 resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList(),
                 dataStartUtc: EffectiveWindowStart(floor, baselineStart));
 
@@ -792,7 +794,7 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of)), leftOut)!;
+                    await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of), readHasBaseline, readHasRecent), leftOut)!;
 
             var truncated = rows.Count > limit;
 
@@ -946,19 +948,24 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay) =>
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay, bool readHasBaseline, bool readHasRecent) =>
         /* #7167: the all-clear rungs below are true negatives only while the server is being collected. */
         await OfflineInsteadOfEmptyAsync(
             dataService, serverId, windowEnd,
-            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay), windowEnd.AddHours(-hours_back));
+            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay, readHasBaseline, readHasRecent), windowEnd.AddHours(-hours_back));
 
     private static async Task<string> EmptyRegressionRungsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
-        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay)
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay, bool readHasBaseline, bool readHasRecent)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
-           exist for this window", and a window it computed for itself would be a different one. */
-        var (hasBaseline, hasRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
+           exist for this window", and a window it computed for itself would be a different one.
+           #9362: with no database named, the read's own facts are the server-wide answer (the read folds them from the rows the
+           probe reads), so there is no probe. With one named they are that database's, and the server-wide question is still
+           asked once. */
+        var (hasBaseline, hasRecent) = databases is null
+            ? (readHasBaseline, readHasRecent)
+            : await dataService.GetQueryStoreRegressionCoverageAsync(serverId, hours_back, asOfUtc: windowEnd);
 
         if (!hasBaseline && !hasRecent)
         {
@@ -1013,8 +1020,7 @@ public sealed class McpQueryTools
            it the same. */
         if (databases is not null)
         {
-            var (filteredBaseline, filteredRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(
-                serverId, hours_back, asOfUtc: windowEnd, databaseNames: databases);
+            var (filteredBaseline, filteredRecent) = (readHasBaseline, readHasRecent);
 
             if (!filteredBaseline && !filteredRecent)
             {
