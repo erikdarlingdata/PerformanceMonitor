@@ -294,6 +294,7 @@ VALUES ($1,$2,$3,1,$4,$5,'dbo','T',false)",
         var (dataSource, connection, t) = await SeedAsync(scratch.ConnectionString, ct);
         await using var _ = dataSource;
         await using var __ = connection;
+        await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM collect.index_object_stats WHERE database_name = '{Dead}'");
         await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.index_object_stats");
         await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.object_usage_runs");
         await using var tx = await connection.BeginTransactionAsync(ct);
