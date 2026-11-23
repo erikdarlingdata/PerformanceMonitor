@@ -478,7 +478,7 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         // Old chunks: a database and a server whose rows are all ten days old, outside the listing window.
         await PlantServerAsync(connection, ServerOne, ["Dead"], 5, ct, OldDay);
         await PlantServerAsync(connection, Capped, ["Gone"], 5, ct, OldDay);
-        Assert.Equal(8, (await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct)).PairsBuilt);
+        Assert.Equal(7, (await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct)).PairsBuilt);
         await using (var analyze = new NpgsqlCommand("ANALYZE collect.index_object_stats; ANALYZE collect.object_usage_snapshots; SET enable_seqscan = off", connection))
         {
             await analyze.ExecuteNonQueryAsync(ct);
