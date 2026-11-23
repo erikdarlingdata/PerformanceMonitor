@@ -412,8 +412,7 @@ ANALYZE;";
 
     private static async Task WaitUntilAsync(Func<bool> condition, System.Threading.CancellationToken ct)
     {
-        var until = DateTime.UtcNow.AddSeconds(60);
-        while (!condition() && DateTime.UtcNow < until)
+        for (var waited = 0; waited < 1200 && !condition(); waited++)
         {
             await Task.Delay(50, ct);
         }
