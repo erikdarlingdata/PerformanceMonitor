@@ -86,7 +86,8 @@ public sealed class DarlingFrontDoorToolTests
         }
         var offered = DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(registeredCollection, Operator));
         Assert.True(served.Count > 100);
-        Assert.Equal(offered.OrderBy(n => n, StringComparer.Ordinal), served.Select(t => t.ProtocolTool.Name).OrderBy(n => n, StringComparer.Ordinal));
+        /* #9388: the census names what / serves, so it leaves out call_tool, which only /lean serves (the front door wraps it too). */
+        Assert.Equal(offered.OrderBy(n => n, StringComparer.Ordinal), served.Select(t => t.ProtocolTool.Name).Where(n => n != "call_tool").OrderBy(n => n, StringComparer.Ordinal));
         Assert.All(served, tool => Assert.IsType<DarlingFrontDoorTool>(tool));
 
         var byName = registered.ToDictionary(t => t.ProtocolTool.Name, StringComparer.Ordinal);
