@@ -28,5 +28,5 @@ public sealed class McpToolSearchTools
         [Description(McpToolSearchToolText.QueryParameter)] string query,
         [Description(McpToolSearchToolText.DetailParameter)] string detail = "summaries",
         [Description(McpToolSearchToolText.LimitParameter)] int? limit = null)
-        => McpToolSearch.Render(server.ServerOptions.ToolCollection, query, detail, limit);
+        => McpToolSearch.Render(Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetServices<McpServerTool>(server.Services!), query, detail, limit);
 }
