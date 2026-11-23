@@ -430,8 +430,9 @@ public sealed class DarlingManagedPostgresTests
            silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
            thirteen as of #3899 (v13 statement statistics); fourteen as of #3909 (v14 PostgreSQL 17
            maintenance_work_mem limit); fifteen as of #4246 (v15 WAL compression); sixteen as of #4246 (v16
-           checkpoint interval); seventeen as of v17 (log line prefix); eighteen as of v18 (auto_explain). */
-        Assert.Equal(18, markers.Length);
+           checkpoint interval); seventeen as of v17 (log line prefix); eighteen as of v18 (auto_explain); nineteen as of v19 (background
+           writer, #9400). */
+        Assert.Equal(19, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -2885,6 +2886,7 @@ public sealed class DarlingManagedPostgresTests
 
             pg.EnsureConfAppended(dataDirectory);
             var full = File.ReadAllText(confPath);
+            Assert.Contains(DarlingManagedPostgres.ConfMarkerV19, full, StringComparison.Ordinal);
             var withoutV19 = full.Replace(DarlingManagedPostgres.BuildBackgroundWriterConfAppend(), string.Empty, StringComparison.Ordinal);
             Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV19, withoutV19, StringComparison.Ordinal);
             Assert.Contains(DarlingManagedPostgres.ConfMarkerV18, withoutV19, StringComparison.Ordinal);
