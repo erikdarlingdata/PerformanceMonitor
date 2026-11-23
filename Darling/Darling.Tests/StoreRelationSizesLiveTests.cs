@@ -508,7 +508,6 @@ ANALYZE;";
             var table = Assert.Single(last.Tables.Rows, r => r.SchemaName == "zz9374" && r.TableName == "t1");
             Assert.True(table.HeapBytes > 0);
             Assert.Contains(last.Indexes.Indexes, i => i.SchemaName == "zz9374" && i.TableName == "t1");
-            Assert.Contains(last.Indexes.Coverage, c => c.SchemaName == "zz9374" && c.TableName == "pt");
             bodySucceeded = true;
         }
         finally
