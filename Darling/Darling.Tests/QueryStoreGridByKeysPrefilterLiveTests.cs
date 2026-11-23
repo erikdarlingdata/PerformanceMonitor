@@ -222,13 +222,28 @@ ANALYZE {Wide};", ct);
     }
 
     /// <summary>A store with the seed in the interval table, the closed-day run's days built into the daily table, and the split's index.</summary>
-    private static async Task<NpgsqlConnection> OpenSeededAsync(ScratchPostgres scratch, IEnumerable<Group> groups, CancellationToken ct)
+    private static async Task<NpgsqlConnection> OpenSeededAsync(ScratchPostgres scratch, IEnumerable<Group> groups, CancellationToken ct, bool filler = false)
     {
         var connection = await QueryStoreTopSplitLiveTests.OpenAsync(scratch, ct);
         await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
         Assert.True(await QueryStoreBackgroundIndexes.IsBuiltAsync(
             connection, null, QueryStoreBackgroundIndexes.WideNullStartFirstExec, 30, ct));
         await SeedAsync(connection, groups, ct);
+        if (filler)
+        {
+            /* 60,000 rows of 3,000 other groups over the seed's four days, so a scan of the arms has a choice to make and the daily table holds
+               the run's days. Their duration is far under every seeded group's. */
+            await ExecAsync(connection, $@"
+INSERT INTO {Wide}
+    (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+     last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
+SELECT s.t + interval '65 minutes', {ServerId}, 'fill' || (g % 7), 1000 + (g % 3000), 1000 + (g % 3000), 'Regular', s.t + interval '10 minutes',
+       s.t + interval '30 minutes', 'select 1', 1, 5, 100000 + g, s.t
+FROM generate_series(1, 60000) AS g
+CROSS JOIN LATERAL (SELECT timestamp '{Ts(D0.AddHours(7))}' + (g % 6000) * interval '1 minute' AS t) AS s;
+ANALYZE {Wide};", ct);
+        }
+
         for (var day = 1; day <= 3; day++)
         {
             Assert.True(await QueryStoreClosedDayRollup.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(D0.AddDays(day)), RunEnd.AddDays(3), ct) >= 0,
@@ -278,9 +293,11 @@ ANALYZE {Wide};", ct);
 
                     /* The page is the kept groups' rows and nothing else: one row per kept key, in each key's own database and query id. */
                     var page = bound.Select(line => JsonSerializer.Deserialize<JsonElement[]>(line)!)
-                        .Select(row => (Database: row[0].ValueKind == JsonValueKind.Null ? null : row[0].GetString(), QueryId: row[1].ValueKind == JsonValueKind.Null ? (long?)null : row[1].GetInt64()))
+                        .Select(row => (Database: row[0].ValueKind == JsonValueKind.Null ? "" : row[0].GetString()!, QueryId: row[1].GetInt64()))
                         .ToList();
-                    Assert.Equal(ids.OrderBy(i => i.Database).ThenBy(i => i.QueryId).ToList(), page.OrderBy(i => i.Database).ThenBy(i => i.QueryId).ToList());
+                    /* The grid row reads a NULL database name as "" and a NULL query id as 0. */
+                    var kept = ids.Select(i => (Database: i.Database ?? "", QueryId: i.QueryId ?? 0)).ToList();
+                    Assert.Equal(kept.OrderBy(i => i.Database).ThenBy(i => i.QueryId).ToList(), page.OrderBy(i => i.Database).ThenBy(i => i.QueryId).ToList());
 
                     var (databaseArray, queryIdArray) = keys.FilterArrays();
                     Assert.Equal(ids.Any(i => i.Database is null || i.QueryId is null), databaseArray is null);
@@ -363,8 +380,7 @@ ANALYZE {Wide};", ct);
 
         await SeedAsync(connection, AllGroups.Where(g => g.Database is null || g.QueryId is null), ct);
         var withNulls = await GridAsync();
-        Assert.Contains(withNulls, l => l.StartsWith("[null,5,", StringComparison.Ordinal));
-        Assert.Contains(withNulls, l => l.StartsWith("[\"qsA\",null,", StringComparison.Ordinal));
+        Assert.Equal(withoutNulls.Count + 2, withNulls.Count);
         Assert.Equal(await OracleAsync(), withNulls);
     }
 
@@ -425,7 +441,7 @@ ANALYZE {Wide};", ct);
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
-        await using var connection = await OpenSeededAsync(scratch, AllGroups, ct);
+        await using var connection = await OpenSeededAsync(scratch, AllGroups, ct, filler: true);
 
         foreach (var statements in AllStatements())
         {
@@ -459,14 +475,14 @@ ANALYZE {Wide};", ct);
                     var scans = new List<(string Table, string Conditions, string Index)>();
                     Collect(plan.RootElement[0].GetProperty("Plan"), scans);
 
-                    var intervalScans = scans.Where(s => s.Table == "query_store_interval_wide").ToList();
+                    var intervalScans = scans.Where(s => IsInterval(s.Table)).ToList();
                     Assert.True(intervalScans.Count > 0, $"{label}: no scan of the interval table in the plan");
                     if (statements.Rollup)
                     {
-                        Assert.Contains(scans, s => s.Table == "query_store_grid_daily");
+                        Assert.Contains(scans, s => IsDaily(s.Table));
                     }
 
-                    foreach (var scan in scans.Where(s => s.Table is "query_store_interval_wide" or "query_store_grid_daily"))
+                    foreach (var scan in scans.Where(s => IsInterval(s.Table) || IsDaily(s.Table)))
                     {
                         Assert.True(bindFilter == scan.Conditions.Contains("query_id = ANY", StringComparison.Ordinal),
                             $"{label}: a scan of {scan.Table} {(bindFilter ? "has no" : "has the")} query_id = ANY condition: {scan.Conditions}");
@@ -484,6 +500,11 @@ ANALYZE {Wide};", ct);
             }
         }
     }
+
+    /* A table the statement reads in two places is aliased query_store_interval_wide and query_store_interval_wide_1. */
+    private static bool IsInterval(string alias) => alias.StartsWith("query_store_interval_wide", StringComparison.Ordinal);
+
+    private static bool IsDaily(string alias) => alias.StartsWith("query_store_grid_daily", StringComparison.Ordinal);
 
     private static void IndexNames(JsonElement node, List<string> names)
     {
