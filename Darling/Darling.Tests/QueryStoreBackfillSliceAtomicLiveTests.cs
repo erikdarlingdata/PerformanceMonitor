@@ -30,7 +30,6 @@ public sealed class QueryStoreBackfillSliceAtomicLiveTests
 {
     private const int Server = -935901;
     private const string Database = "slice_db";
-    private static long s_id = 9359000;
 
     private static DateTime At(int day, int hour) => new(2026, 6, day, hour, 0, 0, DateTimeKind.Unspecified);
 
