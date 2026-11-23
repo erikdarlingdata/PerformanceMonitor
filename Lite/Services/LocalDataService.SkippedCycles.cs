@@ -186,7 +186,7 @@ WHERE server_id = $1
 AND   collection_time > $5
 AND   collection_time <= $6
 AND   (   (collector_name = $2 AND status = $3)
-       OR (collector_name = $4 AND status NOT IN ({HealthyStatusList})))";
+       OR (collector_name = $4 AND status <> 'SUCCESS'))";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = CollectionCycleSkip.CollectorName });
