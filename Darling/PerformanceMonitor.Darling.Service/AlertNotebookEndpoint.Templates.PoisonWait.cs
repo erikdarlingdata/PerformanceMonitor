@@ -85,10 +85,6 @@ internal static partial class AlertNotebookEndpoint
                 ["type"] = "markdown",
                 ["text"] = ThreadPoolStepText,
             });
-            cells.Add(AuthoredReadCell("get_health_parser_scheduler_issues", "Scheduler issues", serverName, asOf,
-                ("hours", "24")));
-            cells.Add(AuthoredReadCell("get_memory_pressure_events", "Memory pressure events", serverName, asOf,
-                ("hours", "24")));
         }
 
         if (string.Equals(waitType, ResourceSemaphoreWaitType, StringComparison.OrdinalIgnoreCase))

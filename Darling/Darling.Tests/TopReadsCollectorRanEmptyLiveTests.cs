@@ -186,10 +186,11 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
                   (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
                    query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
                    avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-                  VALUES ($2, $1, 'StackOverflow', 1, 1, 'Regular', $3, $2, 'h1', 10, 1000, 5, 5, 5, 5, 5, 'ph', 1, $3)",
-                ServerId, now.AddMinutes(-10), now.AddMinutes(-90));
+                  VALUES ($2, $1, 'StackOverflow', 1, 1, 'Regular', $4, $2, 'h1', 10, 1000, 5, 5, 5, 5, 5, 'ph', 1, $3)",
+                ServerId, now.AddMinutes(-10), now.AddMinutes(-90), now.AddDays(-5));
 
-            /* The same read the tool makes: the gate must plan the interval table for this window, or this test would pass on the raw tier. */
+            /* The same read the tool makes: the gate must plan the interval table for this window, or this test would pass on the raw tier. The
+               interval's first execution is days old (the table's own floor), so the gate's purge-edge clause lets the table through. */
             var reach = await DarlingDataReader.GetQueryStoreTopWithReachAsync(
                 postgres, ServerId, now.AddHours(-1), now, 2, DatabaseFilter.One("StackOverflow"), null, null, ct);
             Assert.NotNull(reach.Table);

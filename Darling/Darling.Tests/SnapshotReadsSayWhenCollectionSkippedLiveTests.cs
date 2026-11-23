@@ -147,7 +147,8 @@ VALUES ($1, $2, $3, $4, $5, $6, 10, 0, $7)",
         var name = NameFor(family, "offline");
         return RunAsync(name, DateTime.UtcNow.AddDays(-40), async (c, ds, serverId, now, ct) =>
         {
-            /* No successful run at all and registered long ago: offline. Skipped slots in the window do not change that answer. */
+            /* The newest successful run is twelve days old: offline. Skipped slots in the window do not change that answer. */
+            await LogAsync(c, serverId, name, CollectorOf(family), "SUCCESS", now.AddDays(-12), null, ct);
             await LogAsync(c, serverId, name, CollectionCycleRow.CollectorName, CollectionCycleRow.Status, now.AddMinutes(-30), 60, ct);
 
             var answer = JsonNode.Parse(await ReadAsync(family, ds, name))!;

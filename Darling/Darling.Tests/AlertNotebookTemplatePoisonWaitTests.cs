@@ -151,8 +151,7 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
         var note = Assert.Single(threadPool.OfType<JsonObject>(), c => (string?)c["type"] == "markdown");
         Assert.Equal(AlertNotebookEndpoint.ThreadPoolStepText, (string?)note["text"]);
         var reads = threadPool.OfType<JsonObject>().Where(c => (string?)c["type"] == "read").Select(c => (string)c["read"]!).ToArray();
-        Assert.Contains("get_memory_pressure_events", reads);
-        Assert.Contains("get_health_parser_scheduler_issues", reads);
+        /* The note points at wait stats deltas, which stay in the notebook as reads. */
         Assert.Contains("get_wait_stats", reads);
         Assert.DoesNotContain(other.OfType<JsonObject>(), c => (string?)c["type"] == "markdown");
 
@@ -184,7 +183,7 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
 
-        /* #9339: THREADPOOL carries its own step (a note and two reads), so the parity check uses a wait type with none. */
+        /* #9339: THREADPOOL carries its own step (a note), so the parity check uses a wait type with none. */
         var withRow = template.Invoke(
             "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null,
             RowWithWaitType("LCK_M_X"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
