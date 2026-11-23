@@ -17,8 +17,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// compressed on the same schedule and chunk interval as <c>index_object_stats</c>, and a plain table with the time-sliced DELETE otherwise.
 /// The retention pass purges them at the horizon it resolves for <c>index_object_stats</c> (<c>DarlingRetention.PurgeAsync</c>), so a per-collector
 /// retention override applies to all three at once and a derived row never outlives its raw rows. <see cref="RunsTable"/> is a plain table the same
-/// retention pass purges: a closed run one raw chunk interval after the raw horizon (<c>drop_chunks</c> keeps a raw chunk until all of it is past the
-/// horizon, and the full fold still reads those rows), and an open run of a pair that has no raw row left. The builder only writes runs.</para>
+/// retention pass purges: a closed run until it is older than both the raw horizon and the oldest raw chunk still stored (<c>drop_chunks</c> keeps a raw chunk until
+/// all of it is past the horizon, and the full fold still reads those rows), and an open run of a pair that has no raw row left. The builder only writes runs.</para>
 /// </summary>
 public static class ObjectUsageChain
 {

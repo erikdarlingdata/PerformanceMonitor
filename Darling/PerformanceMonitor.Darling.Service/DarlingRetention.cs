@@ -1803,7 +1803,7 @@ public static class DarlingRetention
     /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
     /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V299)
     /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass. The closed rows of
-    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than the horizon by one raw chunk interval) are deleted in the same call, and so are the
+    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than both the horizon and the oldest raw chunk still stored) are deleted in the same call, and so are the
     /// open runs of a pair with no raw row left; the open runs of a live pair never are.
     /// </summary>
     internal static async Task<(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesFailed)> PurgeObjectUsageChainAsync(
@@ -1851,10 +1851,15 @@ public static class DarlingRetention
         }
 
         /* The runs table is plain: a run is not a per-snapshot row, so it has no chunk to drop. A closed run (last_time set) goes once its last
-           snapshot is past the raw horizon by one raw chunk. The margin is load-bearing: drop_chunks keeps a raw chunk until ALL of its range is
-           past the horizon, so for up to one chunk interval after the horizon the full fold still reads raw rows, and a run purged at the
-           horizon itself would leave those rows with no run, an answer with no fallback. The statement is sliced on last_time. */
-        var runsCutoff = utcNow.AddDays(-retentionDays) - await ReadRawChunkIntervalAsync(postgres, timescaleAvailable, logger, cancellationToken);
+           snapshot is older than the horizon AND older than the oldest raw chunk still stored. The second bound is load-bearing: drop_chunks keeps
+           a raw chunk until ALL of its range is past the horizon, so a chunk that straddles the horizon keeps raw rows past it, and the full fold
+           still reads them. How far past depends on that chunk's own width, and a table narrowed from 24 h to 6 h keeps its older 24 h chunks, so
+           no single interval gives the bound. The oldest surviving range_start does, whatever the interval history and whether or not the raw drop
+           ran earlier in this pass: a closed run that ended before every surviving raw row covers none of them. A run purged earlier would leave
+           those rows with no run, an answer with no fallback. The statement is sliced on last_time. */
+        var horizon = utcNow.AddDays(-retentionDays);
+        var oldestRawChunkStart = await ReadOldestRawChunkStartAsync(postgres, timescaleAvailable, logger, cancellationToken);
+        var runsCutoff = oldestRawChunkStart is DateTime chunkStart ? (chunkStart < horizon ? chunkStart : horizon) : horizon - RunsFallbackMargin;
         var runsDeleted = await PurgeOneAsync(
             postgres, ObjectUsageChain.RunsTable, TimeSlicedDeleteSql(ObjectUsageChain.RunsTable, "last_time", "last_time IS NOT NULL"),
             runsCutoff, logger, cancellationToken, pacer: walPacer);
@@ -1926,41 +1931,40 @@ WHERE r.last_time IS NULL
 AND   r.server_id = d.server_id
 AND   r.database_name = d.database_name";
 
-    /// <summary>The raw chunk interval to assume when the table is not a hypertable or the read fails: TimescaleDB's default, the safe side (a run kept longer never gives a wrong answer).</summary>
-    internal static readonly TimeSpan DefaultRawChunkInterval = TimeSpan.FromDays(7);
+    /// <summary>How long past the raw horizon a closed run is kept when the oldest raw chunk cannot be read (no TimescaleDB, no hypertable, no chunk, or the read failed): TimescaleDB's default chunk width, the safe side (a run kept longer never gives a wrong answer).</summary>
+    internal static readonly TimeSpan RunsFallbackMargin = TimeSpan.FromDays(7);
 
     /// <summary>
-    /// The time chunk width of <c>collect.index_object_stats</c> (#9349), read from <c>timescaledb_information.dimensions</c>: how long past the raw
-    /// horizon a raw row can still be there, which is how much longer than the raw table the chain's closed runs must be kept.
-    /// <see cref="DefaultRawChunkInterval"/> where the store has no TimescaleDB, the table is no hypertable, the dimension is not time-typed, or the read fails.
+    /// The <c>range_start</c> of the oldest chunk <c>collect.index_object_stats</c> still has (#9349), as naive UTC, read from
+    /// <c>timescaledb_information.chunks</c>: no raw row is older than it. Null where the store has no TimescaleDB, the table is no hypertable or has no
+    /// chunk, or the read fails (warned); the caller then keeps closed runs <see cref="RunsFallbackMargin"/> past the raw horizon.
     /// </summary>
-    internal static async Task<TimeSpan> ReadRawChunkIntervalAsync(
+    internal static async Task<DateTime?> ReadOldestRawChunkStartAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken)
     {
         if (!timescaleAvailable)
         {
-            return DefaultRawChunkInterval;
+            return null;
         }
 
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC every stored timestamp follows. */
             using var command = new NpgsqlCommand(@"
 SELECT
-    extract(epoch FROM d.time_interval)::bigint
-FROM timescaledb_information.dimensions AS d
-WHERE d.hypertable_schema = 'collect'
-AND   d.hypertable_name = $1
-AND   d.dimension_type = 'Time'", connection) { CommandTimeout = DeleteTimeoutSeconds };
+    min(c.range_start) AT TIME ZONE 'UTC'
+FROM timescaledb_information.chunks AS c
+WHERE c.hypertable_schema = 'collect'
+AND   c.hypertable_name = $1", connection) { CommandTimeout = DeleteTimeoutSeconds };
             command.Parameters.AddWithValue(ObjectUsageChain.SourceCollector);
-            var answer = await command.ExecuteScalarAsync(cancellationToken);
-            return answer is long seconds && seconds > 0 ? TimeSpan.FromSeconds(seconds) : DefaultRawChunkInterval;
+            return await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning(ex, "Retention purge could not read the chunk interval of {Table}; its object usage runs are kept {Days} days past the raw horizon instead.",
-                ObjectUsageChain.SourceCollector, DefaultRawChunkInterval.TotalDays);
-            return DefaultRawChunkInterval;
+            logger?.LogWarning(ex, "Retention purge could not read the oldest chunk of {Table}; its object usage runs are kept {Days} days past the raw horizon instead.",
+                ObjectUsageChain.SourceCollector, RunsFallbackMargin.TotalDays);
+            return null;
         }
     }
 
