@@ -1025,15 +1025,19 @@ public sealed class PayloadDimensionTests
         var root = FindRepoRoot();
         Assert.True(root is not null, RepoRootNotFound);
 
+        /* The pin reads the partial that holds the batch write (WriteBatchAsync), not the whole runner.
+           Other partials hold other transactions, so joining them would make the counts below cover code
+           this pin does not guard. */
         var path = Path.Combine(
-            root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
-        Assert.True(File.Exists(path), $"Expected the collector runner at '{path}'.");
+            root!, "Darling", "PerformanceMonitor.Darling.Service",
+            "DarlingCollectorRunner.StoreWriteAndWatermarks.cs");
+        Assert.True(File.Exists(path), $"Expected the batch-write partial at '{path}'.");
 
-        var source = RepoFile.ReadRepoFile(path);
+        var source = File.ReadAllText(path);
 
-        /* Exactly one of each, so comparing positions is unambiguous. If a second COPY or a second commit
-           ever appears in this file, this pin must be rescoped to the method body rather than quietly
-           comparing the wrong pair. */
+        /* Exactly one of each within the batch-write partial, so comparing positions is unambiguous. If a
+           second COPY or a second commit ever appears in this partial, this pin must be rescoped to the
+           method body rather than quietly comparing the wrong pair. */
         foreach (var call in new[]
         {
             "importer.CompleteAsync(",
