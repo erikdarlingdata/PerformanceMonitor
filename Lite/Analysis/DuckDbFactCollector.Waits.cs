@@ -262,7 +262,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
 WITH " + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.DuckDb, "waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, blocking_status
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev") + @",
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + "{SCOPE}") + @" AS ev") + @",
 reports AS (
     SELECT
         wait_time_ms,
@@ -435,6 +435,10 @@ WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
             await connection.OpenAsync(context.CancellationToken);
 
             using var command = connection.CreateCommand();
+            /* #9346: on an Azure SQL Database master target, pairs of databases monitored as their own targets are skipped, so one chain
+               does not page from both targets. Both reads cut them inside the query, before their 5,000-row cap, like the monitor-only
+               pairs. A pair with no database stays. */
+            var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } scopedList ? scopedList : null;
             // SpidFilter keeps this in lockstep with the drill-down + viewer fetch on the apex
             // (Lite maps a missing blocker to spid 0 — see BlockingPairRowQuery).
             command.CommandText = $@"
@@ -445,13 +449,14 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter + " " + BlockingPairRowQuery.NotMonitorOnlyPairFilter + SeparatelyMonitoredScope.BprFilter(separate, 4))} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
             command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            SeparatelyMonitoredScope.AddParameters(command, separate);
 
             var rows = new List<BlockingPairRow>();
             using (var reader = await command.ExecuteReaderAsync(context.CancellationToken))
@@ -460,17 +465,13 @@ LIMIT 5000";
                     rows.Add(BlockingPairRowQuery.Read(reader));
             }
 
-            // Always-on DMV blocking snapshot fallback (works when the blocked-process-report XE is empty,
-            // e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
+            /* Always-on DMV blocking snapshot fallback (works when the blocked-process-report XE is empty,
+               e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
+               #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out.
+               Both reads cut it inside the query, before their 5,000-row cap, so newer monitor-only rows cannot push real pairs out. */
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                context.CancellationToken, plan: plan);
-
-            /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
-               skipped, so one chain does not page from both targets. A pair with no database stays. */
-            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
-                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
-                    && scopeList.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
+                context.CancellationToken, plan: plan, excludeMonitorOnlyPairs: true, separateDatabases: separate);
 
             if (rows.Count == 0) return;
 
