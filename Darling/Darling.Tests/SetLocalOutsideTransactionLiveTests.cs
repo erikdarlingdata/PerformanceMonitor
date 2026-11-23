@@ -73,10 +73,11 @@ public sealed class SetLocalOutsideTransactionLiveTests
         }
     }
 
-    /// <summary>The helper the setup runs the index blocks through puts the block's own lock timeout in force for the statements after it, and the
-    /// setting ends with the helper's transaction instead of staying on the session.</summary>
+    /// <summary>Every index block that opens with <c>SET LOCAL lock_timeout</c> runs through the helper the setup uses without the warning, and the
+    /// block's own lock timeout is in force for the statements after it and gone after the commit. As the first statement of a plain command each of
+    /// these blocks raises the warning.</summary>
     [Fact]
-    public async Task ExecuteInTransaction_PutsTheBlocksLockTimeoutInForceForTheStatementsAfterIt_AndNotAfterTheCommit()
+    public async Task ExecuteInTransaction_RunsEveryLockTimeoutIndexBlockWithoutTheWarning_AndTheTimeoutEndsWithTheTransaction()
     {
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -86,17 +87,32 @@ public sealed class SetLocalOutsideTransactionLiveTests
         var bodySucceeded = false;
         try
         {
+            var notices = new List<string>();
+            connection.Notice += (_, e) => notices.Add(e.Notice.MessageText);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
 
             var expected = (PgMigrations.MigrationCommandTimeoutSeconds - 20) + "s";
-            var probe = "\nDO $$ BEGIN IF current_setting('lock_timeout') <> '" + expected + "' THEN "
+            var probe = "
+DO $$ BEGIN IF current_setting('lock_timeout') <> '" + expected + "' THEN "
                 + "RAISE EXCEPTION 'lock_timeout is %, expected " + expected + "', current_setting('lock_timeout'); END IF; END $$;";
-            await TimescaleSupport.ExecuteInTransactionAsync(
-                connection, TimescaleSupport.CreateQueryStoreCorrectedHourlyHashCoveringIndexSql + probe, ct);
+            var blocks = new[]
+            {
+                TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql,
+                TimescaleSupport.CreateQueryStoreCorrectedHourlyServerCoveringIndexSql,
+                TimescaleSupport.CreateQueryStoreCorrectedHourlyHashCoveringIndexSql,
+                TimescaleSupport.CreateQueryStoreCorrectedDailyHashCoveringIndexSql,
+                TimescaleSupport.CreateQueryStatsHourlyHashCoveringIndexesSql,
+            };
+            foreach (var block in blocks)
+            {
+                await TimescaleSupport.ExecuteInTransactionAsync(connection, block + probe, ct);
+                await using var read = new NpgsqlCommand("SELECT current_setting('lock_timeout')", connection);
+                Assert.Equal("0", (string)(await read.ExecuteScalarAsync(ct))!);
+            }
 
-            await using var read = new NpgsqlCommand("SELECT current_setting('lock_timeout')", connection);
-            Assert.Equal("0", (string)(await read.ExecuteScalarAsync(ct))!);
+            var warned = notices.Where(n => n.Contains(SetLocalWarning, StringComparison.Ordinal)).ToList();
+            Assert.True(warned.Count == 0, string.Join(" | ", warned));
             bodySucceeded = true;
         }
         finally
