@@ -228,29 +228,29 @@ function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null, gate
   function onDrill(next) {
     drill = next && Array.isArray(next.keys) && next.keys.length ? next : null;
     hold();
-    run();
+    run(true);
   }
   function onZoomChange(next) {
     zoom = next && next.startIso && next.endIso ? next : null;
     hold();
-    run();
+    run(true);
   }
-  function run() {
+  function run(sendAgain = false) {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
     const done = firstRun ? onSettled : null;
     firstRun = false;
-    return renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot, onRetry: retry }).finally(() => {
+    return renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot, onRetry: retry, sendAgain: sendAgain === true }).finally(() => {
       if (done) done();
     });
   }
   /* #7257: the Retry button on a failed read runs this panel again through the page's gate, like its first load. */
   function retry() {
     if (!gate) {
-      run();
+      run(true);
       return;
     }
     mount(body, waitingStrip());
-    gate(run, true);
+    gate(() => run(true), true);
   }
   if (gate) gate(run);
   else run();
@@ -288,19 +288,25 @@ export function composedNoticeText(data) {
 /** Run a composed panel and fill `body` with the chart (or the empty/error state). Used by the card + the live
  *  preview. `opts` (design D5/D6): {drill, onDrill} drive the transient drill-down chip + mark clicks. */
 export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
+  /* #9357: a cell the store stopped at its statement timeout is not sent again by the page's own refresh. The key is the run
+     the cell would send, so a different window, server, variable, drill or zoom is a different cell and always runs. A click
+     (opts.sendAgain: the Retry button, a drill or zoom change) and a manual or non-poll render (forgetStoppedCells) run it. */
+  const stoppedKey = JSON.stringify(buildRunBody(panelSpec, scope, opts.zoom));
+  const stopped = opts.sendAgain ? null : stoppedCells.get(stoppedKey);
+  if (stopped) {
+    mountComposedError(body, stopped, opts);
+    return;
+  }
   mount(body, loadingStrip());
   /* #7257: a read the service refuses busy (429) is sent once more after its Retry-After, as the by-tag page does (#6800). */
   const res = await retryOnceWhenBusy(() => runCompose(panelSpec, scope, opts.zoom), (seconds) => mount(body, busyRetryStrip(seconds)));
   if (res.kind === "error") {
-    /* Keep the drill AND zoom chips (with their clears) above a failed run so the viewer can always pop
-       back — a historical zoom can legitimately land on a window this store can't serve. */
-    const nodes = [errorStrip(res.message || "Could not run this panel.")];
-    if (opts.onRetry) nodes.push(retryButton(opts.onRetry));
-    if (opts.zoom && opts.onZoomChange) nodes.unshift(zoomChip(opts.zoom, opts.onZoomChange));
-    if (opts.drill && opts.onDrill) nodes.unshift(drillChip(opts.drill, opts.onDrill));
-    mount(body, nodes);
+    if (res.reason === STATEMENT_TIMEOUT_REASON) stoppedCells.set(stoppedKey, res);
+    else stoppedCells.delete(stoppedKey);
+    mountComposedError(body, res, opts);
     return;
   }
+  stoppedCells.delete(stoppedKey);
   const data = res.data || {};
   /* Resolve annotation display names off the catalog (data-driven, not hardcoded) only when there are markers to
      draw; getCatalog is a cached promise, so this is effectively free after the first page load. */
@@ -331,6 +337,27 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }
+}
+
+/** The failed-run draw: the message, the Retry button, and the drill and zoom chips above them. */
+function mountComposedError(body, res, opts) {
+  /* Keep the drill AND zoom chips (with their clears) above a failed run so the viewer can always pop
+     back — a historical zoom can legitimately land on a window this store can't serve. */
+  const nodes = [errorStrip(res.message || "Could not run this panel.")];
+  if (opts.onRetry) nodes.push(retryButton(opts.onRetry));
+  if (opts.zoom && opts.onZoomChange) nodes.unshift(zoomChip(opts.zoom, opts.onZoomChange));
+  if (opts.drill && opts.onDrill) nodes.unshift(drillChip(opts.drill, opts.onDrill));
+  mount(body, nodes);
+}
+
+/** #9357: the answers of cells the store stopped at its statement timeout, by the run each would send. The service marks that
+ *  answer with `reason: "statement_timeout"` beside its unchanged 400 text. */
+const STATEMENT_TIMEOUT_REASON = "statement_timeout";
+const stoppedCells = new Map();
+
+/** Drops every held statement-timeout answer, so each cell runs again. The page calls it for a render the viewer asked for. */
+export function forgetStoppedCells() {
+  stoppedCells.clear();
 }
 
 /** POST the composed panel to /api/compose/run with the view scope; returns the apiSendRead result ({sql, rows} on data). */

@@ -637,7 +637,7 @@ public static partial class DarlingWebEndpoints
             if (sqlState == QueryStoreComposeStamp.StatementTimeoutSqlState)
             {
                 return JsonNodeResult(
-                    new JsonObject { ["error"] = ComposeStatementTimeoutSentence(body), ["detail"] = outcome.Error },
+                    new JsonObject { ["error"] = ComposeStatementTimeoutSentence(body), ["detail"] = outcome.Error, ["reason"] = ComposeStatementTimeoutReason },
                     StatusCodes.Status400BadRequest);
             }
         }
@@ -646,6 +646,10 @@ public static partial class DarlingWebEndpoints
             ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs, requestAborted)
             : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
     }
+
+    /// <summary>#9357: the <c>reason</c> a composed cell's 400 carries when the store stopped it at its statement timeout. The page keys
+    /// on it, not on the sentence, to leave that cell alone on its own refresh until the viewer asks again.</summary>
+    internal const string ComposeStatementTimeoutReason = "statement_timeout";
 
     /// <summary>#8323: the plain sentence a composed cell answers when the store stopped it at its statement timeout: what
     /// the cell was reading (<paramref name="body"/>'s <c>windowStart</c>/<c>windowEnd</c>, else its <c>hours</c>, else the
