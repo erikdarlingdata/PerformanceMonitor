@@ -40,6 +40,44 @@ public sealed class QueryStoreWideReadGuardRawRouteTests
         Assert.Equal(ComposeLimits.MaxRawProcedureStatsRows, QueryStoreWideReadGuard.RawLimitFor("procedure_stats"));
     }
 
+    private static ComposeFilter FilterOn(string source, string dimension, ComposeFilterOp op, params string[] values) =>
+        new(new ComposeDimension(source, dimension, dimension, false), op, new ComposeFilterValue(values, null));
+
+    /// <summary>The refusal for an estimate of <paramref name="rows"/> over a day, judged as the panel runner does: by the collector and the
+    /// statement's own filters.</summary>
+    private static string? RefuseFiltered(long rows, string collector, params ComposeFilter[] filters) =>
+        QueryStoreWideReadGuard.RawRefusal(
+            new QueryStoreWideReadGuard.RawEstimate(rows, rows, 43), collector, Start, Start.AddDays(1),
+            QueryStoreWideReadGuard.RawLimitFor(collector, filters));
+
+    /// <summary>#9357: the estimate counts the whole collector and cannot see filters, so an estimate between the two limits refuses an
+    /// unfiltered raw procedure_stats statement and runs one carrying an eq filter (one value, or a list: the in form). A filter that
+    /// does not narrow by equality (neq, like, a range) does not count, and query_stats keeps one limit with or without a filter.</summary>
+    [Fact]
+    public void AnEqFilter_KeepsTheOldLimit_ForProcedureStatsOnly()
+    {
+        const long between = 25_000_000;
+        Assert.True(between > ComposeLimits.MaxRawProcedureStatsRows && between <= ComposeLimits.MaxRawFilteredProcedureStatsRows);
+        Assert.Equal(40_000_000, ComposeLimits.MaxRawFilteredProcedureStatsRows);
+
+        Assert.NotNull(RefuseFiltered(between, "procedure_stats"));
+        Assert.Null(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Eq, "usp_one")));
+        Assert.Null(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "database_name", ComposeFilterOp.Eq, "db_a", "db_b")));
+        Assert.Null(RefuseFiltered(between, "procedure_stats",
+            FilterOn("procedure_stats", "object_name", ComposeFilterOp.Neq, "usp_one"), FilterOn("procedure_stats", "database_name", ComposeFilterOp.Eq, "db_a")));
+
+        Assert.NotNull(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Neq, "usp_one")));
+        Assert.NotNull(RefuseFiltered(between, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Like, "usp%")));
+
+        /* A filtered statement still refuses past the old limit. */
+        Assert.NotNull(RefuseFiltered(ComposeLimits.MaxRawFilteredProcedureStatsRows + 1, "procedure_stats", FilterOn("procedure_stats", "object_name", ComposeFilterOp.Eq, "usp_one")));
+
+        Assert.NotNull(RefuseFiltered(between, "query_stats"));
+        Assert.NotNull(RefuseFiltered(between, "query_stats", FilterOn("query_stats", "query_hash", ComposeFilterOp.Eq, "0x01")));
+        Assert.Null(RefuseFiltered(ComposeLimits.MaxRawQueryStatsRows, "query_stats", FilterOn("query_stats", "query_hash", ComposeFilterOp.Eq, "0x01")));
+        Assert.Equal(ComposeLimits.MaxRawQueryStatsRows, QueryStoreWideReadGuard.RawLimitFor("query_stats", new[] { FilterOn("query_stats", "query_hash", ComposeFilterOp.Eq, "0x01") }));
+    }
+
     [Theory]
     [InlineData("query_stats")]
     [InlineData("procedure_stats")]

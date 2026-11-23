@@ -584,7 +584,7 @@ internal static class ComposePanelRunner
            route, so a panel the hourly-raw-edges route or a rollup serves is never counted. A panel whose hourly-edges guard did not pass
            holds the snapshot's connection, and the estimate reads there under a savepoint. Fails open, like the Query Store guard above. */
         if (QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
-            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken) is { } rawTooBig)
+            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, plan!.Filters) is { } rawTooBig)
         {
             return ComposeRunOutcome.BadRequest(rawTooBig);
         }
