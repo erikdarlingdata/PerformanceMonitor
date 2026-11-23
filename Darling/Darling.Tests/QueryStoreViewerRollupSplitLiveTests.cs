@@ -180,6 +180,7 @@ ANALYZE {Wide};", ct);
             AddShared(byKeys, end, databases);
             keys.AddParameters(byKeys);
             AddRun(byKeys);
+            keys.AddFilterParameters(byKeys);
             return (keyLines, await ReadAllAsync(byKeys, ct));
         }
         finally

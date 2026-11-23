@@ -212,6 +212,37 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// #9373: where the by-keys statements' prefilter goes. Every interval-table arm and the <c>query_store_grid_daily</c> arm of a table or
+    /// rollup prefix carries this token after its database list ($5). <see cref="WithByKeysFilter"/> fills it for a by-keys statement and
+    /// <see cref="WithoutByKeysFilter"/> empties it for the keys statements and the one-statement read, so one prefix serves all of them.
+    /// </summary>
+    private const string ByKeysSlot = "/*BYKEYS*/";
+
+    /// <summary>
+    /// #9373: the by-keys statements' arms bounded to the kept keys' database names and query ids, as the NULL-able arrays
+    /// <paramref name="databaseParameter"/> and <paramref name="queryIdParameter"/> (<see cref="TableReadKeys.AddFilterParameters"/>). Both are
+    /// superset filters on columns of the dedupe: these prefixes read rows with a literal <c>rn</c> of 1 and no window, so a row is kept or
+    /// dropped on its own columns. Every row <see cref="KeyMatch"/> and the two <c>EXISTS</c> branches above can match has its database name
+    /// among the kept keys' and its query id among theirs, so the rows kept, their <c>rn</c> and the page do not change. A kept key with a NULL
+    /// database name or query id cannot match a plain equality, so the caller binds both arrays NULL for it, the filter is true, and the
+    /// arms read as they did before (the second <c>EXISTS</c> branch finds those keys).
+    /// </summary>
+    private static string WithByKeysFilter(string prefix, int databaseParameter, int queryIdParameter) =>
+        prefix.Replace(ByKeysSlot,
+            $"AND   (${databaseParameter}::text[] IS NULL OR database_name = ANY(${databaseParameter}))
+"
+            + $"            AND   (${queryIdParameter}::bigint[] IS NULL OR query_id = ANY(${queryIdParameter}))", StringComparison.Ordinal);
+
+    /// <summary>#9373: <paramref name="prefix"/> with <see cref="ByKeysSlot"/> left empty, for the statements that rank (the keys statements) and the one-statement read.</summary>
+    private static string WithoutByKeysFilter(string prefix) => prefix.Replace(ByKeysSlot, "", StringComparison.Ordinal);
+
+    /// <summary>The first free parameter of a table by-keys statement after its keys ($1 to $5, $6 to $11).</summary>
+    private const int TableByKeysFilterParameter = 12;
+
+    /// <summary>The first free parameter of a rollup by-keys statement: after its keys and the built run's two midnights ($12, $13).</summary>
+    private const int RollupByKeysFilterParameter = 14;
+
+    /// <summary>
     /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
     /// interval, every outcome — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written
     /// (<see cref="QueryStoreIntervalWide.UpsertSql"/> keeps only the running maximum under
@@ -256,6 +287,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
         ),
 
         """;
@@ -263,8 +295,9 @@ public sealed partial class ViewerDataService
     /// <summary>The select list both arms of <see cref="QueryStoreTopTableSplitPrefix"/> project: every column, and the literal <c>rn</c> of <see cref="QueryStoreTopTablePrefix"/>.</summary>
     private const string QueryStoreTopTableSplitSelect = "*, 1 AS rn";
 
-    /// <summary>The predicate both arms repeat: the database list ($5). The grid has no execution outcome filter.</summary>
-    private const string QueryStoreTopTableSplitTrailing = "            AND   ($5::text[] IS NULL OR database_name = ANY($5))";
+    /// <summary>The predicates both arms repeat: the database list ($5) and the by-keys slot (<see cref="ByKeysSlot"/>). The grid has no execution outcome filter.</summary>
+    private const string QueryStoreTopTableSplitTrailing = "            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            " + ByKeysSlot;
 
     /// <summary>
     /// <see cref="QueryStoreTopTablePrefix"/> with the window as two arms (#9283), for a store whose
@@ -644,7 +677,7 @@ public sealed partial class ViewerDataService
     /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
     /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
     /// </summary>
-    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopTableRankedHead + "\n" + QueryStoreTopTail;
+    public static readonly string QueryStoreTopTableSql = WithoutByKeysFilter(QueryStoreTopTablePrefix) + QueryStoreTopTableRankedHead + "\n" + QueryStoreTopTail;
 
     /// <summary>
     /// #8549: the first statement of the grid's table read: the kept keys, one row per key, ranked and limited exactly as the one-statement
@@ -659,7 +692,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public static readonly string QueryStoreTopTableSplitKeysSql = TableKeysSql(QueryStoreTopTableSplitPrefix);
 
-    private static string TableKeysSql(string prefix) => prefix + QueryStoreTopTableKeysCte + "\n"
+    private static string TableKeysSql(string prefix) => WithoutByKeysFilter(prefix) + QueryStoreTopTableKeysCte + "\n"
         + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys\n"
         + "ORDER BY rank_cost DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
 
@@ -670,7 +703,8 @@ public sealed partial class ViewerDataService
     /// identity index with a 1 to 3 row estimate per leaf (about 3,500 to 4,000 rows actual): on a field store 61,611 reads, 18.2 s. The
     /// caller runs this statement with index scans off, so each leaf is a Bitmap Heap Scan over the db_query_first_exec index per key.
     /// $1 server_id, $2 the read start, $3 window end, $4 top, $5 database filter, $6 to $11 the keys' six columns as parallel arrays
-    /// (database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role).
+    /// (database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role), $12 the kept keys' distinct database names and $13 their
+    /// distinct query ids (#9373, <see cref="WithByKeysFilter"/>), each NULL when a kept key has a NULL in either of the two columns.
     /// </summary>
     public static readonly string QueryStoreTopTableByKeysSql = TableByKeysSql(QueryStoreTopTablePrefix);
 
@@ -680,7 +714,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public static readonly string QueryStoreTopTableSplitByKeysSql = TableByKeysSql(QueryStoreTopTableSplitPrefix);
 
-    private static string TableByKeysSql(string prefix) => prefix
+    private static string TableByKeysSql(string prefix) => WithByKeysFilter(prefix, TableByKeysFilterParameter, TableByKeysFilterParameter + 1)
         + "keys AS (\n"
         + "    SELECT *\n"
         + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
@@ -713,6 +747,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= {{runStart}}::timestamp + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
             UNION ALL
             SELECT
                 {{QueryStoreClosedDayRollup.GridKeyColumns}},
@@ -725,6 +760,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= {{runEnd}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
             UNION ALL
             SELECT
                 {{QueryStoreClosedDayRollup.GridKeyColumns}},
@@ -735,6 +771,7 @@ public sealed partial class ViewerDataService
             AND   day_utc >= CAST({{runStart}}::timestamp AS date)
             AND   day_utc < CAST({{runEnd}}::timestamp AS date)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
         ),
 
         """;
@@ -750,15 +787,15 @@ public sealed partial class ViewerDataService
     /// #9111: <see cref="QueryStoreTopTableKeysSql"/> over <see cref="QueryStoreTopRollupPrefix"/>. $1 to $6 as that statement's, $7 the
     /// first midnight of the built run, $8 the midnight after its last day.
     /// </summary>
-    public static readonly string QueryStoreTopRollupKeysSql = QueryStoreTopRollupPrefix("$7", "$8") + OverRollupParts(QueryStoreTopTableKeysCte) + "\n"
+    public static readonly string QueryStoreTopRollupKeysSql = WithoutByKeysFilter(QueryStoreTopRollupPrefix("$7", "$8")) + OverRollupParts(QueryStoreTopTableKeysCte) + "\n"
         + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys\n"
         + "ORDER BY rank_cost DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
 
     /// <summary>
     /// #9111: <see cref="QueryStoreTopTableByKeysSql"/> over <see cref="QueryStoreTopRollupPrefix"/>. $1 to $11 as that statement's, $12 the
-    /// first midnight of the built run, $13 the midnight after its last day.
+    /// first midnight of the built run, $13 the midnight after its last day, $14 and $15 the kept keys' distinct database names and query ids (#9373).
     /// </summary>
-    public static readonly string QueryStoreTopRollupByKeysSql = QueryStoreTopRollupPrefix("$12", "$13")
+    public static readonly string QueryStoreTopRollupByKeysSql = WithByKeysFilter(QueryStoreTopRollupPrefix("$12", "$13"), RollupByKeysFilterParameter, RollupByKeysFilterParameter + 1)
         + "keys AS (\n"
         + "    SELECT *\n"
         + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
@@ -798,6 +835,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.IntervalStartSlackSql}}
             AND   first_execution_time <= {{runStart}}::timestamp + {{startUpperSlackSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
             UNION ALL
             SELECT
                 {{QueryStoreClosedDayRollup.GridKeyColumns}},
@@ -811,6 +849,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= {{runStart}}::timestamp + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
             UNION ALL
             SELECT
                 {{QueryStoreClosedDayRollup.GridKeyColumns}},
@@ -824,6 +863,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= {{runEnd}}::timestamp - {{QueryStoreIntervalWide.IntervalStartSlackSql}}
             AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{startUpperSlackSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
             UNION ALL
             SELECT
                 {{QueryStoreClosedDayRollup.GridKeyColumns}},
@@ -837,6 +877,7 @@ public sealed partial class ViewerDataService
             AND   first_execution_time >= {{runEnd}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
             UNION ALL
             SELECT
                 {{QueryStoreClosedDayRollup.GridKeyColumns}},
@@ -847,6 +888,7 @@ public sealed partial class ViewerDataService
             AND   day_utc >= CAST({{runStart}}::timestamp AS date)
             AND   day_utc < CAST({{runEnd}}::timestamp AS date)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            {{ByKeysSlot}}
         ),
 
         """;
@@ -854,13 +896,13 @@ public sealed partial class ViewerDataService
     /// <summary>#9287: <see cref="QueryStoreTopRollupKeysSql"/> over <see cref="QueryStoreTopRollupSplitPrefix"/>; same parameters, rows and order.
     /// <paramref name="startUpperSlackSql"/> is the upper slack of the arms with an interval start.</summary>
     internal static string QueryStoreTopRollupSplitKeysSqlFor(string startUpperSlackSql) =>
-        QueryStoreTopRollupSplitPrefix("$7", "$8", startUpperSlackSql) + OverRollupParts(QueryStoreTopTableKeysCte) + "\n"
+        WithoutByKeysFilter(QueryStoreTopRollupSplitPrefix("$7", "$8", startUpperSlackSql)) + OverRollupParts(QueryStoreTopTableKeysCte) + "\n"
         + "SELECT database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role FROM keys\n"
         + "ORDER BY rank_cost DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
 
     /// <summary>#9287: <see cref="QueryStoreTopRollupByKeysSql"/> over <see cref="QueryStoreTopRollupSplitPrefix"/>; same parameters, rows and order.</summary>
     internal static string QueryStoreTopRollupSplitByKeysSqlFor(string startUpperSlackSql) =>
-        QueryStoreTopRollupSplitPrefix("$12", "$13", startUpperSlackSql)
+        WithByKeysFilter(QueryStoreTopRollupSplitPrefix("$12", "$13", startUpperSlackSql), RollupByKeysFilterParameter, RollupByKeysFilterParameter + 1)
         + "keys AS (\n"
         + "    SELECT *\n"
         + "    FROM unnest($6::text[], $7::bigint[], $8::bigint[], $9::text[], $10::text[], $11::text[])\n"
@@ -1064,6 +1106,39 @@ public sealed partial class ViewerDataService
             return first;
         }
 
+        /// <summary>
+        /// #9373: the kept keys' distinct database names and distinct query ids, the arrays of <see cref="WithByKeysFilter"/>, or NULL for both
+        /// when any kept key has a NULL database name or a NULL query id (a plain equality cannot match it, and the filter would drop its rows).
+        /// </summary>
+        internal (string[]? DatabaseNames, long[]? QueryIds) FilterArrays()
+        {
+            if (_databaseNames.Any(name => name is null) || _queryIds.Any(id => id is null))
+            {
+                return (null, null);
+            }
+
+            return (_databaseNames.Select(name => name!).Distinct().ToArray(), _queryIds.Select(id => id!.Value).Distinct().ToArray());
+        }
+
+        /// <summary>
+        /// #9373: adds the two filter parameters of a by-keys statement, which follow $11 for the table statements and the built run's two
+        /// midnights for the rollup ones (<see cref="TableByKeysFilterParameter"/>, <see cref="RollupByKeysFilterParameter"/>). Call it last.
+        /// </summary>
+        internal void AddFilterParameters(Npgsql.NpgsqlCommand command)
+        {
+            var (databaseNames, queryIds) = FilterArrays();
+            command.Parameters.Add(new Npgsql.NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                Value = databaseNames is null ? DBNull.Value : databaseNames,
+            });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint,
+                Value = queryIds is null ? DBNull.Value : queryIds,
+            });
+        }
+
         /// <summary>Adds $6 to $11 of <see cref="QueryStoreTopTableByKeysSql"/>.</summary>
         internal void AddParameters(Npgsql.NpgsqlCommand command)
         {
@@ -1249,6 +1324,9 @@ public sealed partial class ViewerDataService
                 {
                     AddServedDaysParameters(command, run);
                 }
+
+                /* #9373: after the served run's two parameters, where a rollup statement's filter parameters start. */
+                fetched.AddFilterParameters(command);
 
                 await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                 (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
