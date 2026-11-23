@@ -443,7 +443,6 @@ ANALYZE {Wide};", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenSeededAsync(scratch, AllGroups, ct, filler: true);
 
-        var diag = new List<string>();
         foreach (var statements in AllStatements())
         {
             var (keys, ids) = await ReadKeysAsync(connection, statements, null, null, 3, ct);
@@ -486,12 +485,7 @@ ANALYZE {Wide};", ct);
                     foreach (var scan in scans.Where(s => IsInterval(s.Table) || IsDaily(s.Table)))
                     {
                         Assert.True(bindFilter == scan.Conditions.Contains("query_id = ANY", StringComparison.Ordinal),
-                            $"{label}: a scan of {scan.Table} {(bindFilter ? "has no" : "has the")} query_id = ANY condition: {scan.Conditions}");
-                    }
-
-                    if (Environment.GetEnvironmentVariable("DARLING_9373_PLAN_DIAG") == "1" && bindFilter)
-                    {
-                        diag.Add("Total: P " + label.Replace("arrays bound", "b") + "> " + string.Join(" ", scans.Where(s => IsInterval(s.Table) || IsDaily(s.Table)).Select(s => s.Table.Replace("query_store_interval_wide", "i").Replace("query_store_grid_daily", "d") + ":" + s.Index.Replace("query_store_interval_wide", "W").Replace("query_store_grid_daily", "D"))));
+                            $"{label}: a scan of {scan.Table} {(bindFilter ? "has no" : "has the")} query_id = ANY condition: {scan.Conditions} (index {scan.Index})");
                     }
                 }
                 finally
@@ -499,11 +493,6 @@ ANALYZE {Wide};", ct);
                     await ExecAsync(connection, "RESET enable_indexscan", ct);
                 }
             }
-        }
-
-        if (diag.Count > 0)
-        {
-            Assert.Fail(string.Join(" ;;; ", diag));
         }
     }
 
