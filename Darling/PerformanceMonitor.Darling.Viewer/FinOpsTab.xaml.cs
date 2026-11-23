@@ -325,7 +325,8 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+            var failed = timer.FailedRead(ex);
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: FinOps", failed?.Phase, failed?.Ms ?? timer.ElapsedMs, ex));
         }
         finally
         {

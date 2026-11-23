@@ -41,6 +41,8 @@ public sealed class ViewerLoadTimer
        task's state to tell that read from one still running. */
     private readonly Dictionary<int, (string Phase, long StartedMs, Task Task)> _inFlight = new();
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _cancelled = new();
+    /* #9365: every read handed to Track, kept for the load's life, so a failed load can name the read whose task carries the exception. */
+    private readonly List<(string Phase, long StartedMs, Task Task)> _tracked = new();
     private readonly Dictionary<string, string> _phaseNotes = new();
     private int _nextReadId;
     private bool _superseded;
@@ -100,6 +102,25 @@ public sealed class ViewerLoadTimer
         }
     }
 
+    /// <summary>#9365: the tracked read whose task failed with <paramref name="failure"/>, and the milliseconds from its start to now (the caller
+    /// reports at once, so that is the read's own time). Null when no tracked read carries that exception, for a failure the loader raised
+    /// itself or wrapped.</summary>
+    internal (string Phase, long Ms)? FailedRead(Exception failure)
+    {
+        lock (_gate)
+        {
+            foreach (var (phase, startedMs, task) in _tracked)
+            {
+                if (task.IsFaulted && task.Exception!.InnerExceptions.Contains(failure))
+                {
+                    return (phase, Math.Max(0, ElapsedMs - startedMs));
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>#8549: the load was stopped by a newer one (a tab that cancels its superseded load calls this from its cancel path). A read
     /// still in flight, or cancelled by that newer load, then reads "stopped by a newer pick" in the slow-load line. Without this call a read
     /// still out when the load finishes stays off the line, as before.</summary>
@@ -118,6 +139,7 @@ public sealed class ViewerLoadTimer
         {
             var id = ++_nextReadId;
             _inFlight[id] = (phase, started, task);
+            _tracked.Add((phase, started, task));
             return (id, started);
         }
     }

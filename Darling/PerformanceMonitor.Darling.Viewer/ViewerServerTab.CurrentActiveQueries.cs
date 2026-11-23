@@ -60,9 +60,10 @@ public partial class ViewerServerTab
 
         RefreshCurrentActiveQueriesButton.IsEnabled = false;
         CurrentActiveQueriesStatus.Text = "Fetching what is running on the server right now...";
+        var timer = new ViewerLoadTimer();
         try
         {
-            var result = await _dataService.RequestActiveQueriesLiveAsync(_server.ServerId);
+            var result = await Timed(timer, "live active queries read", _dataService.RequestActiveQueriesLiveAsync(_server.ServerId));
             switch (result.Status)
             {
                 case ActiveQueriesLiveStatus.Fetched:
@@ -95,8 +96,10 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            CurrentActiveQueriesStatus.Text = $"Failed to fetch live active queries: {ex.Message}";
-            StatusChanged?.Invoke($"live active queries failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            var text = ViewerRefreshFailure.Report($"{_server.DisplayName}: Current Active Queries", timer, ex);
+            CurrentActiveQueriesStatus.Text = text;
+            StatusChanged?.Invoke(text);
         }
         finally
         {

@@ -49,9 +49,10 @@ public partial class DatabaseProtectionTab : UserControl
         }
 
         var gen = _loads.Claim(nameof(RefreshAsync));
+        var timer = new ViewerLoadTimer();
         try
         {
-            var servers = await _dataService.GetPickerServersAsync();
+            var servers = await ViewerServerTab.Timed(timer, "server list read", _dataService.GetPickerServersAsync());
             if (_loads.Superseded(nameof(RefreshAsync), gen)) return;
 
             var pickedId = (ServerComboBox.SelectedItem as DarlingServer)?.ServerId;
@@ -72,7 +73,8 @@ public partial class DatabaseProtectionTab : UserControl
         {
             if (_loads.Superseded(nameof(RefreshAsync), gen)) return;
 
-            StatusChanged?.Invoke($"failed to load the server list for database protection: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Database Protection", timer, ex));
         }
     }
 
@@ -85,9 +87,10 @@ public partial class DatabaseProtectionTab : UserControl
         }
 
         var gen = _loads.Claim(nameof(LoadAsync));
+        var timer = new ViewerLoadTimer();
         try
         {
-            var read = await _dataService.ReadDatabaseProtectionAsync(server, DateTime.UtcNow);
+            var read = await ViewerServerTab.Timed(timer, "database protection read", _dataService.ReadDatabaseProtectionAsync(server, DateTime.UtcNow));
             if (_loads.Superseded(nameof(LoadAsync), gen)) return;
 
             Show(read);
@@ -98,7 +101,8 @@ public partial class DatabaseProtectionTab : UserControl
         {
             if (_loads.Superseded(nameof(LoadAsync), gen)) return;
 
-            StatusChanged?.Invoke($"failed to load database protection for {server.DisplayName}: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Database Protection", timer, ex));
         }
     }
 
