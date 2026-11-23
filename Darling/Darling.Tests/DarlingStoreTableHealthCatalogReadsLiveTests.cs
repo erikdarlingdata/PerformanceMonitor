@@ -225,13 +225,9 @@ CREATE TABLE zz9224.big (id integer PRIMARY KEY, body text);
 INSERT INTO zz9224.big SELECT g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 400) AS i) FROM generate_series(1, 200) AS g;
 CREATE INDEX big_body_len ON zz9224.big (length(body));
 DELETE FROM zz9224.big WHERE id % 2 = 0;
-VACUUM zz9224.big;
 CREATE UNLOGGED TABLE zz9224.ul (id integer PRIMARY KEY, v text);
 CREATE INDEX ul_v ON zz9224.ul (v);
-INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;
-VACUUM zz9224.ul;
-VACUUM zz9224.ht;
-ANALYZE;";
+INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;";
 
     private static async Task<long> ListedRelationsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
@@ -292,6 +288,11 @@ ANALYZE;";
         await connection.OpenAsync(ct);
         await ExecAsync(connection, SeedSql, ct);
         await ExecAsync(connection, ForksSeedSql, ct);
+        foreach (var vacuum in new[] { "VACUUM zz9224.big", "VACUUM zz9224.ul", "VACUUM zz9224.ht", "ANALYZE" })
+        {
+            await ExecAsync(connection, vacuum, ct);
+        }
+
         await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
