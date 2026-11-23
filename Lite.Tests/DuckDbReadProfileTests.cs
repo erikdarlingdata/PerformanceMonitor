@@ -308,6 +308,21 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {q
     }
 
     [Fact]
+    public async Task ZZProbe()
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        var log = new System.Text.StringBuilder();
+        foreach (var sql in new[] { $"SET profiling_output = '{Path.Combine(_tempDir, "p.json").Replace("\\", "/")}'", "SET enable_profiling = 'json'", "SELECT 1", "PRAGMA disable_profiling", "SELECT 2" })
+        {
+            try { using var c = connection.CreateCommand(); c.CommandText = sql; using var r = c.ExecuteReader(); log.AppendLine("ok: " + sql); }
+            catch (Exception ex) { log.AppendLine("ERR: " + sql + " => " + ex.Message.Replace("\n", " ")); }
+        }
+        log.AppendLine("files: " + string.Join(",", Directory.GetFiles(_tempDir).Select(Path.GetFileName)));
+        throw new Exception("PROBE " + log.ToString().Replace("\r", "").Replace("\n", " | "));
+    }
+
+    [Fact]
     public async Task AFolderThatCannotBeWritten_StillLetsTheReadReturnItsResult()
     {
         SeedQueryStore();
