@@ -104,7 +104,8 @@ internal sealed class ObjectUsageNodeStep
 {
     internal ObjectUsageNodeStep(
         DateTime time, string? server, DateTime? start, string nodeKey, bool isBaseline, bool nodeKnown, ObjectUsageNodeState node,
-        string? previousServer, DateTime? previousTime, ObjectUsageResetReasons reasons, ObjectUsageNodeDecision decision, DateTime? keptStart)
+        string? previousServer, DateTime? previousTime, DateTime? comparedWith, ObjectUsageResetReasons reasons, ObjectUsageNodeDecision decision,
+        DateTime? keptStart)
     {
         Time = time;
         Server = server;
@@ -115,6 +116,7 @@ internal sealed class ObjectUsageNodeStep
         Node = node;
         PreviousServer = previousServer;
         PreviousTime = previousTime;
+        ComparedWith = comparedWith;
         Reasons = reasons;
         Decision = decision;
         KeptStart = keptStart;
@@ -138,11 +140,11 @@ internal sealed class ObjectUsageNodeStep
     /// <summary>The node had a state already: it answered an earlier snapshot of this fold.</summary>
     public bool NodeKnown { get; }
 
-    /// <summary>The node's state before the step. A fresh empty one when <see cref="NodeKnown"/> is false.</summary>
+    /// <summary>The node's live state, a fresh empty one when <see cref="NodeKnown"/> is false. Its <c>Counters</c> are the compared rows until <see cref="ObjectUsageNodeTracker.Commit"/> replaces them.</summary>
     public ObjectUsageNodeState Node { get; }
 
-    /// <summary>The snapshot the node's counters are compared against: the node state's last snapshot. Null when the node is new.</summary>
-    public DateTime? ComparedWith => NodeKnown ? Node.LastSnapshot : null;
+    /// <summary>The snapshot the node's counters are compared against: the node state's last snapshot. Null when the node is new. Fixed when the step is resolved: <see cref="ObjectUsageNodeTracker.Commit"/> moves the live node state on.</summary>
+    public DateTime? ComparedWith { get; }
 
     /// <summary>The answering instance's name for the snapshot before this one, when known (carried through unnamed snapshots).</summary>
     public string? PreviousServer { get; }
@@ -226,7 +228,8 @@ internal sealed class ObjectUsageNodeTracker
             : start ?? node.Start;
 
         return new ObjectUsageNodeStep(
-            time, server, start, nodeKey, isBaseline, nodeKnown, node, _previousServer, PreviousTime, reasons, decision, keptStart);
+            time, server, start, nodeKey, isBaseline, nodeKnown, node, _previousServer, PreviousTime, nodeKnown ? node.LastSnapshot : null, reasons, decision,
+            keptStart);
     }
 
     /// <summary>Moves the tracker past the snapshot. <paramref name="counters"/> is the snapshot's deduped counters, which become the node's
@@ -395,7 +398,7 @@ internal static class ObjectUsageCounterStep
             /* A clear on an instance already being measured wiped whatever it held since that instance's last snapshot. An instance
                seen for the first time lost nothing: its counters are counted whole, or its stamps still stand (a baseline). */
             var cleared = (reasons & ~(ObjectUsageResetReasons.NodeChanged | ObjectUsageResetReasons.NodeBaseline)) != ObjectUsageResetReasons.None;
-            blindFrom = cleared ? node.Node.LastSnapshot : null;
+            blindFrom = cleared ? node.ComparedWith : null;
         }
 
         var indexes = new List<ObjectUsageIndexStep>(current.Count);
