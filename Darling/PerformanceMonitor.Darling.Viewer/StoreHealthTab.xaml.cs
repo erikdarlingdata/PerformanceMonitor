@@ -64,12 +64,11 @@ public partial class StoreHealthTab : UserControl
     private DateTime? _tablesReadAtUtc;
     private DateTime? _indexesReadAtUtc;
 
-    /// <summary>#9374: when the store measured the sizes of the rows on screen, while a section still shows the store's last measured sizes
-    /// (the first open's rows, before a live read replaced them). Each flag clears when that section's live read lands. A failed live read
-    /// leaves the flag and the rows, so the strip keeps saying where the sizes are from.</summary>
+    /// <summary>#9374: when the store measured the sizes of the rows on screen, while the tables still show the store's last measured sizes
+    /// (the first open's rows, before the live read replaced them). The flag clears when the live tables read lands. A failed live read
+    /// leaves the flag and the rows, so the strip keeps saying where the sizes are from. The indexes have no such rows: only the live read fills them.</summary>
     private DateTime? _lastSizesAtUtc;
     private bool _tablesFromLastSizes;
-    private bool _indexesFromLastSizes;
 
     /// <summary>How long after a successful refresh another one that nothing forced is skipped (#8819). The tables read takes seconds on a
     /// large store, and a trigger queued behind a running load starts the moment it ends. The Refresh button is never skipped.</summary>
@@ -146,14 +145,13 @@ public partial class StoreHealthTab : UserControl
         try
         {
             ShowRefreshing();
-            /* #9374: the first open, with nothing on screen and no read held, shows the store's last measured sizes at once and the live read
-               below replaces them. The maintenance check does not wait for the sizes. */
+            /* #9374: the first open, with nothing on screen and no read held, shows the store's last measured tables sizes the moment they
+               arrive and the live read replaces them. The live reads start beside the last sizes read, never after it, so the refresh costs
+               the longer of the two. The last sizes never overwrite a live result that landed first. */
             var readiness = LoadReadinessAsync(timer);
-            if (!force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false))
-            {
-                await ShowLastSizesAsync(timer);
-            }
-
+            var lastSizesOn = !force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false)
+;
+            if (lastSizesOn) await ShowLastSizesAsync(timer);
             await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness);
             if (!StampIfLoaded())
             {
@@ -191,37 +189,40 @@ public partial class StoreHealthTab : UserControl
         LastRefreshedIndicator.Text = OnLastSizes() ? LastSizesText() + " The live read failed."
             : _lastStamp is null ? "" : "Last refreshed " + _lastStamp + CatalogsReadText();
 
-    /// <summary>#9374: whether a section still shows the store's last measured sizes.</summary>
-    private bool OnLastSizes() => _lastSizesAtUtc is not null && (_tablesFromLastSizes || _indexesFromLastSizes);
+    /// <summary>#9374: whether the tables still show the store's last measured sizes.</summary>
+    private bool OnLastSizes() => _lastSizesAtUtc is not null && _tablesFromLastSizes;
 
     /// <summary>#9374: what the strip says while the rows on screen are the store's last measured sizes, with when they were measured.</summary>
     private string LastSizesText() =>
         "Sizes are from the store's last measurement, taken " + ViewerTimeHelper.RefreshedStamp(_lastSizesAtUtc!.Value, ViewerTimeHelper.CurrentDisplayMode) + ".";
 
-    /// <summary>#9374: reads the store's last measured sizes and puts their rows on screen, with the strip saying so. Returns false, and
-    /// leaves the screen alone, when the store has none to give (the live read then runs as it always did).</summary>
-    private async Task<bool> ShowLastSizesAsync(ViewerLoadTimer timer)
+    /// <summary>#9374: reads the store's last measured sizes and puts the tables rows on screen, with the strip saying so, unless the live
+    /// tables read has already landed (its rows are never overwritten). Leaves the screen alone when the store has no sizes to give (the live
+    /// read then runs as it always did). The caller starts the live reads before awaiting this one.</summary>
+    private async Task ShowLastSizesAsync(ViewerLoadTimer timer)
     {
         var read = LastSizesRead?.Invoke() ?? _dataService?.GetStoreLastSizesHealthAsync();
         if (read is null)
         {
-            return false;
+            return;
         }
 
         var last = await ViewerServerTab.Timed(timer, "store last sizes read", read);
         if (last is null)
         {
-            return false;
+            return;
+        }
+
+        timer.NotePhase("store last sizes read", StoreHealthRows.LastSizesNote(last.Tables.Rows.Count, last.MeasuredAtUtc, DateTime.UtcNow));
+        if (_tablesLoaded)
+        {
+            return;
         }
 
         ShowTables(last.Tables.Rows);
-        ShowIndexes(last.Indexes);
         _lastSizesAtUtc = last.MeasuredAtUtc;
         _tablesFromLastSizes = true;
-        _indexesFromLastSizes = true;
-        timer.NotePhase("store last sizes read", StoreHealthRows.LastSizesNote(last.Tables.Rows.Count, last.MeasuredAtUtc, DateTime.UtcNow));
         ShowRefreshing();
-        return true;
     }
 
     /// <summary>What follows the stamp: when the store answered the tables and indexes on screen, the older of the two. The rows are held
@@ -402,7 +403,6 @@ public partial class StoreHealthTab : UserControl
 
             ShowIndexes(read);
             _indexesReadAtUtc = read.ReadAtUtc;
-            _indexesFromLastSizes = false;
             _indexesLoaded = true;
         }
         catch (Exception ex)
@@ -413,17 +413,14 @@ public partial class StoreHealthTab : UserControl
             _indexesReadAtUtc = null;
             /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
             var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
-            if (!_indexesFromLastSizes)
-            {
-                IndexesDataGrid.ItemsSource = null;
-                CoverageDataGrid.ItemsSource = null;
-                CoverageDataGrid.Visibility = Visibility.Collapsed;
-                IndexHeaderText.Text = "The store indexes failed to load.";
-                IndexesMessage.Text = text;
-                IndexesMessage.Visibility = Visibility.Visible;
-                CoverageMessage.Text = "Partition index coverage failed to load.";
-                CoverageMessage.Visibility = Visibility.Visible;
-            }
+            IndexesDataGrid.ItemsSource = null;
+            CoverageDataGrid.ItemsSource = null;
+            CoverageDataGrid.Visibility = Visibility.Collapsed;
+            IndexHeaderText.Text = "The store indexes failed to load.";
+            IndexesMessage.Text = text;
+            IndexesMessage.Visibility = Visibility.Visible;
+            CoverageMessage.Text = "Partition index coverage failed to load.";
+            CoverageMessage.Visibility = Visibility.Visible;
 
             StatusChanged?.Invoke(text);
         }

@@ -522,11 +522,10 @@ public sealed class ViewerStoreHealthRefreshTests
 
     private static string MeasuredStamp() => ViewerTimeHelper.RefreshedStamp(SizesMeasured, ViewerTimeHelper.CurrentDisplayMode);
 
-    /// <summary>The store's last measured sizes as the data service answers them: two tables (the live read answers one) and one index.</summary>
+    /// <summary>The store's last measured sizes as the data service answers them: two tables (the live read answers one). There are no index rows.</summary>
     private static StoreLastSizesHealth LastSizes(ScriptedReads reads) =>
         new(
             new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>([TableRow("store_things"), TableRow("old_things")], reads.ReadAt),
-            new StoreIndexHealth([IndexRow("ix_last")], [], ReadAtUtc: reads.ReadAt),
             SizesMeasured);
 
     private static async Task UntilAsync(Func<bool> condition)
@@ -553,7 +552,7 @@ public sealed class ViewerStoreHealthRefreshTests
 
             /* The live read is held at its gate: what is on screen is the store's last measurement, and the strip says so. */
             Assert.Equal(1, lastCalls);
-            Assert.Single(tab.IndexesDataGrid.Items);
+            Assert.Empty(tab.IndexesDataGrid.Items);
             Assert.Equal(
                 "Sizes are from the store's last measurement, taken " + MeasuredStamp() + ". A live read is running…",
                 tab.LastRefreshedIndicator.Text);
@@ -573,6 +572,81 @@ public sealed class ViewerStoreHealthRefreshTests
             var after = Assert.IsType<StoreTableRow>(tab.TablesDataGrid.SelectedItem);
             Assert.Equal(before.Table, after.Table);
             Assert.NotSame(before, after);
+        });
+    }
+
+    /// <summary>#9374: the live reads start beside the last sizes read, so the first open costs the longer of the two and not their sum.</summary>
+    [Fact]
+    public void TheFirstOpen_StartsTheLiveReads_BeforeTheLastSizesReadFinishes()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var lastRelease = new TaskCompletionSource<StoreLastSizesHealth?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var lastCalls = 0;
+            tab.LastSizesRead = () => { lastCalls++; return lastRelease.Task; };
+            reads.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var refresh = tab.RefreshAsync();
+
+            /* The last sizes read is still running, and the live tables, indexes and maintenance reads are already under way. */
+            await UntilAsync(() => reads.Tables == 1 && reads.Indexes == 1 && reads.Readiness == 1);
+            Assert.Equal(1, lastCalls);
+            Assert.False(refresh.IsCompleted);
+
+            lastRelease.SetResult(LastSizes(reads));
+            await UntilAsync(() => tab.TablesDataGrid.Items.Count == 2);
+            reads.Gate.SetResult();
+            await refresh;
+
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.Equal((1, 1), (reads.Tables, reads.Indexes));
+        });
+    }
+
+    /// <summary>#9374: whichever read finishes first, a live result is never written over by the last sizes.</summary>
+    [Fact]
+    public void ALiveResultThatLandsBeforeTheLastSizes_IsNeverOverwrittenByThem()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            var lastRelease = new TaskCompletionSource<StoreLastSizesHealth?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            tab.LastSizesRead = () => lastRelease.Task;
+
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => tab.TablesDataGrid.Items.Count == 1 && tab.IndexesDataGrid.Items.Count == 1);
+
+            lastRelease.SetResult(LastSizes(reads));
+            await refresh;
+
+            Assert.Single(tab.TablesDataGrid.Items);
+            Assert.Equal("store_things", ((StoreTableRow)tab.TablesDataGrid.Items[0]).Table.Split('.')[^1]);
+            Assert.Equal("ix_things", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("last measurement", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#9374: the first open reads the indexes once, and the tables rows from the last sizes show while the indexes read is still running.</summary>
+    [Fact]
+    public void TheFirstOpen_ReadsTheIndexesOnce_AndShowsTheLastSizesTablesWithoutWaitingForThem()
+    {
+        RunTab(async (tab, reads) =>
+        {
+            tab.LastSizesRead = () => Task.FromResult<StoreLastSizesHealth?>(LastSizes(reads));
+            reads.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => tab.TablesDataGrid.Items.Count == 2);
+
+            /* The live indexes read is held: the tables show their last sizes, and the indexes grid waits for the one read of them. */
+            Assert.Equal(1, reads.Indexes);
+            Assert.Empty(tab.IndexesDataGrid.Items);
+
+            reads.Gate.SetResult();
+            await refresh;
+
+            Assert.Equal(1, reads.Indexes);
+            Assert.Equal("ix_things", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
         });
     }
 
