@@ -295,6 +295,10 @@ VALUES ($1,$2,$3,1,$4,$5,'dbo','T',false)",
         await using var _ = dataSource;
         await using var __ = connection;
         await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM collect.index_object_stats WHERE database_name = '{Dead}'");
+        await DarlingMcpTestData.ExecAsync(connection, ct, $@"INSERT INTO collect.index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_type_desc, user_seeks, user_scans, user_lookups, user_updates, last_user_seek, is_indexed_view, answering_server_name, is_memory_optimized)
+SELECT 90000000 + g, '{t.Newer2:yyyy-MM-dd}'::timestamp + (g % 40) * interval '1 hour', {ServerId}, 'x', '2026-01-01', 'bulk' || (g % 8), 7, 'dbo', g % 5000, 'T', 1, 'CLUSTERED', g, 0, 0, 0, NULL, false, 'x', false FROM generate_series(1, 400000) AS g");
+        await DarlingMcpTestData.ExecAsync(connection, ct, $@"INSERT INTO collect.object_usage_runs (server_id, database_name, object_id, index_id, first_time, last_time, schema_name, object_name, is_indexed_view)
+SELECT {ServerId}, 'bulk' || (g % 8), g, 1, '{t.Floor.AddDays(-3):yyyy-MM-dd}'::timestamp, NULL, 'dbo', 'T', false FROM generate_series(1, 20000) AS g");
         await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.index_object_stats");
         await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.object_usage_runs");
         await using var tx = await connection.BeginTransactionAsync(ct);
