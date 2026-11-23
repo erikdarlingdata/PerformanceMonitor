@@ -158,6 +158,50 @@ public static class ComposeCompiler
     private const char RankBaseAlias = 'b';
 
     /// <summary>
+    /// The hourly-raw-edges FROM item (#4605): the successor rollup for the whole-hour middle <c>[edgeStart, edgeEnd)</c> and raw for the
+    /// edges outside it, one SELECT list for every arm. The window, scope, filters and module join stay outside, on the caller's alias.
+    ///
+    /// <para><c>query_stats</c> has a third arm: the raw restart rows (<c>sample_interval_seconds = 0</c>) the rollup excludes, so a group
+    /// or bucket holding only restart rows stays in the result with a NULL value, as the raw read gives it.</para>
+    ///
+    /// <para><c>procedure_stats</c> has no restart arm (#9357). The route accepts only a Cumulative delta measure
+    /// (<see cref="ComposeSourceRouter"/>'s IsHourlyEdgesMeasure) under SUM, MAX or MIN (HourlyRawEdgesCandidate's aggregate check), and
+    /// every one of them compiles with <c>FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0)</c> (MeasuredDeltaFilter, because
+    /// procedure_stats is in CollectorDeltaCalculator.DeltaFamilyCollectors). A restart row therefore never adds a value to an
+    /// aggregate. It can only add a group or a bucket whose value is NULL, and the arm-less read leaves that group or bucket out. The arm
+    /// was measured to dominate the cold read of this source: its restart rows sit on scattered heap pages, one random read each, so
+    /// dropping it is the point of the route here. A line panel drops NULL points before it draws (charts.js), so a missing bucket and a NULL
+    /// bucket draw the same line.</para>
+    /// </summary>
+    internal static string HourlyRawEdgesRelation(
+        string sourceTable, string successorRelation, ComposeAggregate aggregate,
+        string startParam, string endParam, string edgeStartParam, string edgeEndParam)
+    {
+        var groups = ComposeHybridColumns.GroupColumns[sourceTable];
+        var mid = ComposeRoute.HybridMidAlias;
+        var suffix = aggregate switch
+        {
+            ComposeAggregate.Max => "max",
+            ComposeAggregate.Min => "min",
+            _ => "sum",
+        };
+        var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
+            + $", {mid}.bucket AS collection_time, "
+            + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}_{suffix} AS {kv.Key}"))
+            + ", 1 AS sample_interval_seconds";
+        var rawCols = string.Join(", ", groups) + ", collection_time, "
+            + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
+        var restartArm = ComposeHybridColumns.ReadsRestartRows(sourceTable)
+            ? $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {edgeStartParam} AND collection_time < {edgeEndParam} AND sample_interval_seconds = 0 "
+            : "";
+        return $"(SELECT {midCols} FROM {PgSchemaGenerator.CollectSchema}.{successorRelation} AS {mid} WHERE {mid}.bucket >= {edgeStartParam} AND {mid}.bucket < {edgeEndParam} "
+            + restartArm
+            + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+            + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {edgeStartParam} OR collection_time >= {edgeEndParam}))";
+    }
+
+    /// <summary>
     /// The relation the panel aggregates: the routed CAGG, or the raw source table — except
     /// <c>query_store_stats</c> on the RAW route, which is wrapped in a per-interval dedup first (#1841).
     ///
@@ -231,28 +275,7 @@ public static class ComposeCompiler
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
-            /* Three arms with one SELECT list: the rollup for the whole-hour middle, the raw restart rows the rollup
-               excludes (literal `sample_interval_seconds = 0`, so the planner can use the partial index), and raw for the
-               edges outside the middle. The window, scope, filters and module join stay outside, on the caller's alias. */
-            var groups = ComposeHybridColumns.GroupColumns[sourceTable];
-            var mid = ComposeRoute.HybridMidAlias;
-            var suffix = aggregate switch
-            {
-                ComposeAggregate.Max => "max",
-                ComposeAggregate.Min => "min",
-                _ => "sum",
-            };
-            var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
-                + $", {mid}.bucket AS collection_time, "
-                + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}_{suffix} AS {kv.Key}"))
-                + ", 1 AS sample_interval_seconds";
-            var rawCols = string.Join(", ", groups) + ", collection_time, "
-                + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
-            return $"(SELECT {midCols} FROM {PgSchemaGenerator.CollectSchema}.{route.CaggRelation} AS {mid} WHERE {mid}.bucket >= {edgeStartParam} AND {mid}.bucket < {edgeEndParam} "
-                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
-                + $"WHERE collection_time >= {edgeStartParam} AND collection_time < {edgeEndParam} AND sample_interval_seconds = 0 "
-                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
-                + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {edgeStartParam} OR collection_time >= {edgeEndParam}))";
+            return HourlyRawEdgesRelation(sourceTable, route.CaggRelation!, aggregate, startParam, endParam, edgeStartParam!, edgeEndParam!);
         }
 
         if (route.IsCagg)

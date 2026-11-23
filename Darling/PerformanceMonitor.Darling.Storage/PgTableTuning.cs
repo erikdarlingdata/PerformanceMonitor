@@ -808,7 +808,7 @@ public static class PgTableTuning
              indexes lead on observed_bytes and on expired_at, so a deleted row leaves half-empty pages in the middle of the
              index that VACUUM never merges (#8570). Fillfactor 80 lets an update that leaves those columns alone stay on its
              page (HOT), and 0.02 + 1000 starts cleanup after about 2% of the rows are dead instead of 20%.
-           - query_stats_hour_ledger: UPDATE-heavy. Every collection adds its count to the current hour's row, so one row is
+           - query_stats_hour_ledger and procedure_stats_hour_ledger (#9357): UPDATE-heavy. Every collection adds its count to the current hour's row, so one row is
              updated about once a minute per server for an hour. n is not indexed, so those updates can be HOT with room on
              the page. The table grows with servers x 24 x the rollup's retention days, so at the stock 0.2 the dead rows of
              a large fleet wait a long time for a vacuum; 0.02 + 1000 keeps that trigger near a few minutes of updates.
@@ -832,6 +832,7 @@ public static class PgTableTuning
            stamp stays heap-only where the page has room, and its rows are deleted with their text row. */
         "ALTER TABLE collect.oversized_plan_backlog SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.query_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        "ALTER TABLE collect.procedure_stats_hour_ledger SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.collector_state SET (fillfactor = 80)",
         "ALTER TABLE collect.query_text_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.pg_statement_text SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",

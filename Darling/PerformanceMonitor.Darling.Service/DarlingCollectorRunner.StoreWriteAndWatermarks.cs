@@ -628,6 +628,15 @@ public sealed partial class DarlingCollectorRunner
            at procedure_stats that is not the catalog's ProcedureStatsCollector (an import or backfill) writes its totals too. */
         var totalsBatch = string.Equals(definition.TargetTable, ProcedureStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
 
+        /* #9357: a procedure_stats batch also adds its non-restart row count to the procedure hour ledger (V300), tallied and written exactly
+           as the query_stats ledger above is: the writer's tally of the value sent into sample_interval_seconds, one upsert on the COPY's own
+           transaction. Chosen by the table this COPY writes, so an import or backfill aimed at procedure_stats is counted too, or fails loudly. */
+        var procedureLedgerBatch = totalsBatch; /* the same table test, so the transaction the totals already open is the ledger's too */
+        if (procedureLedgerBatch)
+        {
+            writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
+        }
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -756,6 +765,11 @@ public sealed partial class DarlingCollectorRunner
                         QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
                     }
 
+                    if (procedureLedgerBatch)
+                    {
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
+                    }
+
                     await importer.CompleteAsync(cancellationToken);
                 }
             }
@@ -844,6 +858,16 @@ public sealed partial class DarlingCollectorRunner
                 if (ledgerBatch)
                 {
                     await QueryStatsHourLedgerWriter.AddBatchAsync(
+                        pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
+                        writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                /* #9357: the procedure_stats batch's count joins its own hourly ledger on THIS transaction, with the query_stats ledger's contract:
+                   after the COPY, before the commit, no savepoint and no catch, so a fault rolls the batch back and a rolled-back COPY leaves no
+                   ledger change. A count of 0 writes nothing. */
+                if (procedureLedgerBatch)
+                {
+                    await QueryStatsHourLedgerWriter.AddProcedureStatsBatchAsync(
                         pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
                         writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
                 }

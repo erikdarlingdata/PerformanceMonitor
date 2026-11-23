@@ -2200,6 +2200,8 @@ async function classifyResponse(resp) {
     /* #8323: an answer that put a plain sentence in front of the engine's own text (a composed cell the store stopped at its
        statement timeout) carries that text as `detail`; the panel shows it behind "More detail". */
     if (body && typeof body.detail === "string" && body.detail) result.detail = body.detail;
+    /* #9357: the service's own name for why a composed cell was refused (`statement_timeout`), so the page does not match its sentence. */
+    if (body && typeof body.reason === "string" && body.reason) result.reason = body.reason;
     return result;
   }
 

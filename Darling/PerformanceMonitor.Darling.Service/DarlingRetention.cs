@@ -1433,6 +1433,24 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.procedure_stats_hour_ledger (#9357, V300): the same ledger for procedure_stats, pruned the same way and at the same
+               horizon (the procedure hourly rollup keeps TimescaleSupport.HourlyRetentionSpan too), single-shot and failure-isolated. */
+            var procedureHourLedgerDeleted = await PurgeOneAsync(
+                postgres, ProcedureStatsHourLedger.LedgerTable,
+                ProcedureStatsHourLedger.PruneSql,
+                utcNow - TimescaleSupport.HourlyRetentionSpan, logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (procedureHourLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += procedureHourLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_store_watermarks (#5684, V178): the per-batch watermark side table of the Query Store per-database
                watermark read. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
                A FIXED two days (QueryStoreWatermarks.RetentionDays), NOT Query Store's retention: the read never looks back more than
@@ -1801,7 +1819,7 @@ public static class DarlingRetention
     /// <summary>
     /// Purges <c>collect.object_usage_snapshots</c> and <c>collect.object_usage_deltas</c> at <see cref="ObjectUsageChainRetentionDays"/> (#9349):
     /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
-    /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V299)
+    /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V300)
     /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass. The closed rows of
     /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than both the horizon and the oldest raw chunk still stored) are deleted in the same call, and so are the
     /// open runs of a pair with no raw row left; the open runs of a live pair never are.
