@@ -35,12 +35,12 @@ public sealed class ProcedureStatsHourLedgerTests
     {
         string Swap(string text) => text.Replace("query_stats", "procedure_stats", StringComparison.Ordinal);
 
-        Assert.Equal(Swap(QueryStatsHourLedger.CreateSql), ProcedureStatsHourLedger.CreateSql);
-        Assert.Equal(Swap(QueryStatsHourLedger.UpsertSql), ProcedureStatsHourLedger.UpsertSql);
-        Assert.Equal(Swap(QueryStatsHourLedger.PruneSql), ProcedureStatsHourLedger.PruneSql);
-        Assert.Equal(Swap(QueryStatsHourLedger.RecountSql), ProcedureStatsHourLedger.RecountSql);
-        Assert.Equal(Swap(QueryStatsHourLedger.LedgerTable), ProcedureStatsHourLedger.LedgerTable);
-        Assert.Equal(Swap(QueryStatsHourLedger.StateTable), ProcedureStatsHourLedger.StateTable);
+        Assert.Equal(ProcedureStatsHourLedger.CreateSql, Swap(QueryStatsHourLedger.CreateSql));
+        Assert.Equal(ProcedureStatsHourLedger.UpsertSql, Swap(QueryStatsHourLedger.UpsertSql));
+        Assert.Equal(ProcedureStatsHourLedger.PruneSql, Swap(QueryStatsHourLedger.PruneSql));
+        Assert.Equal(ProcedureStatsHourLedger.RecountSql, Swap(QueryStatsHourLedger.RecountSql));
+        Assert.Equal(ProcedureStatsHourLedger.LedgerTable, Swap(QueryStatsHourLedger.LedgerTable));
+        Assert.Equal(ProcedureStatsHourLedger.StateTable, Swap(QueryStatsHourLedger.StateTable));
     }
 
     [Fact]
