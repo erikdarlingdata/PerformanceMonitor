@@ -365,6 +365,45 @@ VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'S
         Assert.Equal(0, left.ClutterDaysFolded);
     }
 
+    /// <summary>
+    /// #9384: a tick whose hourly step failed folds no clutter day, and the next tick that the hourly step survives folds it. The hourly step also
+    /// removes the empty hour stamps that raw never held, so a fold after a failed step could stamp a day made of stamps the step had left. The
+    /// day's stamp is removed first, with all 24 hours built and unmarked, so only a fold stamps it. The hourly step is made to fail by a trigger
+    /// on its prune, which the fold never deletes from.
+    /// </summary>
+    [Fact]
+    public async Task ATickWhoseHourlyStepFailed_FoldsNoClutterDay_AndTheNextTickFoldsIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        var dayArgs = new (string Name, object Value)[] { ("server_id", A), ("day", day) };
+        const string FoldStamps = "SELECT count(*) FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day";
+
+        await TickAsync(store, FoldNow, ct);
+        Assert.Equal(1L, await CountAsync(store, FoldStamps, ct, dayArgs));
+        Assert.Equal(24L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND hour_utc >= @day::timestamp AND hour_utc < @day::timestamp + interval '1 day' AND NOT rebuild_needed", ct, dayArgs));
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+
+        await ExecuteAsync(store, @"
+CREATE FUNCTION collect.fail_hourly_prune() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the hourly prune is made to fail'; END $$;
+CREATE TRIGGER fail_hourly_prune BEFORE DELETE ON collect.query_store_clutter_plan_hourly FOR EACH STATEMENT EXECUTE FUNCTION collect.fail_hourly_prune();", ct);
+        var failed = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(0, failed.ClutterDaysFolded);
+        Assert.Equal(0L, await CountAsync(store, FoldStamps, ct, dayArgs));
+
+        await ExecuteAsync(store, "DROP TRIGGER fail_hourly_prune ON collect.query_store_clutter_plan_hourly; DROP FUNCTION collect.fail_hourly_prune();", ct);
+        var next = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(1, next.ClutterDaysFolded);
+        Assert.Equal(1L, await CountAsync(store, FoldStamps, ct, dayArgs));
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+    }
+
     private static async Task ExecuteAsync(QueryStoreClosedDayRollupLiveTests.Store store, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, store.Connection);

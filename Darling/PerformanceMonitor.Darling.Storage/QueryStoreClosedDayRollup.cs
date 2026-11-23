@@ -1462,23 +1462,30 @@ WHERE b.server_id = f.server_id
         QueryStoreClutterDayFold.TickResult folded = default;
         if (rawRetentionDays is { } rawDays)
         {
+            var hoursRan = false;
             try
             {
                 hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken);
+                hoursRan = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogWarning(ex, "Query Store hourly clutter rollups could not run; the next tick retries: {Message}", ex.Message);
             }
 
-            /* #9384: then the clutter days the hours now complete, so a day closes soon after midnight and not at the grid's close. Its own catch too. */
-            try
+            /* #9384: then the clutter days the hours now complete, so a day closes soon after midnight and not at the grid's close. Its own catch too.
+               It runs only after the hourly step ran: that step also removes the empty hour stamps that raw never held (#9383), and a day folded
+               from stamps it has not yet removed would be stamped as folded and served as empty clutter. */
+            if (hoursRan)
             {
-                folded = await QueryStoreClutterDayFold.RunAsync(connection, nowUtc, retentionDays, logger, elapsed, cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogWarning(ex, "Query Store clutter days from hours could not run; the next tick retries: {Message}", ex.Message);
+                try
+                {
+                    folded = await QueryStoreClutterDayFold.RunAsync(connection, nowUtc, retentionDays, logger, elapsed, cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Query Store clutter days from hours could not run; the next tick retries: {Message}", ex.Message);
+                }
             }
         }
 
