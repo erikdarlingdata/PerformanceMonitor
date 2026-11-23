@@ -130,7 +130,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
         var body = drill.Value;
 
         Assert.Equal(1, Matches(body,
-            @"var dataStartTask = _dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc\);\s*var dataReadTask = _dataService\.GetLatestQuerySnapshotsAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc,"));
+            @"var dataStartTask = _dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc\);\s*var dataReadTask = (?:Timed\(timer,\s*""[^""]+"",\s*)?_dataService\.GetLatestQuerySnapshotsAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc,"));
         /* #5034: the read is awaited beside its probe, so a probe that fails after the read threw is watched. The rows come from the same read. */
         Assert.Equal(1, Matches(body,
             @"await AwaitReadWatchingProbeAsync\(dataReadTask,\s*dataStartTask,\s*""Active Queries""\);\s*var \(totalCount, snapshots\) = dataReadTask\.Result;"));

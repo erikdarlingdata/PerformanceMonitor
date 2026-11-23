@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -211,6 +212,79 @@ public sealed class ViewerRefreshFailureTests : IDisposable
         var line = Assert.Single(TaggedLines(tag));
         Assert.Contains("Queries", line, StringComparison.Ordinal);
         Assert.Contains(" ms", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>#9365: a fleet tab's failed reads name what did not load in the tab's own message and in the status bar, never the driver's text,
+    /// and each failed read writes exactly one warning line that names the tab and that read.</summary>
+    [Fact]
+    public void AFleetTabsFailedReads_ShowPlainWords_AndEachWritesOneWarnLineNamingTheTabAndTheRead()
+    {
+        var tag = "fleet-" + Guid.NewGuid().ToString("N");
+        var statuses = new List<string>();
+        var tablesMessage = "";
+        var indexesMessage = "";
+        RunThemed(async () =>
+        {
+            ViewerLogger.Initialize(_logDir);
+            var tab = new StoreHealthTab();
+            tab.StatusChanged += statuses.Add;
+            tab.TablesRead = async _ => { await Task.Yield(); throw new IOException(RawDriverText + " tables " + tag); };
+            tab.IndexesRead = async _ => { await Task.Yield(); throw new IOException(RawDriverText + " indexes " + tag); };
+            tab.ReadinessRead = async () => { await Task.Yield(); throw new IOException(RawDriverText + " readiness " + tag); };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.RefreshAsync(force: true);
+                tablesMessage = tab.TablesMessage.Text;
+                indexesMessage = tab.IndexesMessage.Text;
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(3, statuses.Count);
+        Assert.Contains("The store tables did not load.", statuses);
+        Assert.Contains("The store indexes did not load.", statuses);
+        Assert.Contains("The store maintenance check did not load.", statuses);
+        Assert.Equal("The store tables did not load.", tablesMessage);
+        Assert.Equal("The store indexes did not load.", indexesMessage);
+        Assert.All(statuses, s => Assert.DoesNotContain(RawDriverText, s, StringComparison.Ordinal));
+
+        var lines = TaggedLines(tag);
+        Assert.Equal(3, lines.Count);
+        Assert.Single(lines, l => l.Contains("[Store Health]", StringComparison.Ordinal) && l.Contains("store tables read", StringComparison.Ordinal) && l.Contains(" tables " + tag, StringComparison.Ordinal));
+        Assert.Single(lines, l => l.Contains("[Store Health]", StringComparison.Ordinal) && l.Contains("store indexes read", StringComparison.Ordinal) && l.Contains(" indexes " + tag, StringComparison.Ordinal));
+        Assert.Single(lines, l => l.Contains("[Store Health]", StringComparison.Ordinal) && l.Contains("store maintenance check", StringComparison.Ordinal) && l.Contains(" readiness " + tag, StringComparison.Ordinal));
+    }
+
+    /// <summary>#9365: a slicer drag whose grid read throws leaves plain words in the status bar and writes exactly one warning line that names the
+    /// tab, the sub-tab and the read, where it used to put the driver's own text in the status bar and write nothing to the log.</summary>
+    [Fact]
+    public void ASlicerDrag_WhoseGridReadFails_ShowsPlainWords_AndWritesOneWarnLineNamingTheTabAndTheRead()
+    {
+        var tag = "drag-" + Guid.NewGuid().ToString("N");
+        var statuses = new List<string>();
+        RunThemed(async () =>
+        {
+            ViewerLogger.Initialize(_logDir);
+            var tab = NewTab(25, tag, statuses);
+            var start = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+            typeof(ViewerServerTab).GetMethod("OnBlockingSlicerChanged", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(tab, new object?[] { null, new SlicerRangeEventArgs(start, start.AddHours(1)) });
+            for (var waited = 0; statuses.Count == 0 && waited < 600; waited++)
+            {
+                await Task.Delay(50);
+            }
+        });
+
+        var status = Assert.Single(statuses);
+        Assert.Equal("The grid did not load.", status);
+        var line = Assert.Single(TaggedLines(tag));
+        Assert.Contains("Blocking > Blocked Process Reports", line, StringComparison.Ordinal);
+        Assert.Contains("grid read", line, StringComparison.Ordinal);
     }
 
     /// <summary>The warning lines the Refresh source wrote for a tab whose display name carries <paramref name="tag"/>.</summary>
