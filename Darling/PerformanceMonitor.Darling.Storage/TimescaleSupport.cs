@@ -7474,8 +7474,10 @@ WITH NO DATA";
                 {
                     /* #9343: these blocks open with SET LOCAL lock_timeout (shared with V246, V284, V291 and V292, which run them
                        inside their own migration transaction). On this plain connection that statement is outside any transaction,
-                       PostgreSQL ignores it with a warning, and the index build then waits on the refresh's lock with no timeout.
-                       The transaction gives it the scope the blocks were written for. */
+                       PostgreSQL warns "SET LOCAL can only be used in transaction blocks" for it: a fresh-store setup on PostgreSQL 17.12 raised it
+                       three times, once per block. Measured on 17.12 and 18.7: the lock timeout still held for the later statements of the SAME command,
+                       so a build did give up at the set value, but the setting is gone for the next command. The transaction gives the blocks the scope
+                       they were written for and ends the warning. */
                     await ExecuteInTransactionAsync(connection, keptIndexesSql, cancellationToken);
                 }
 
@@ -14919,8 +14921,9 @@ END $$;";
 
     /// <summary>
     /// #9343: runs <paramref name="sql"/> in one transaction of its own on <paramref name="connection"/>, so a leading
-    /// <c>SET LOCAL lock_timeout</c> applies to the statements after it and ends with the commit. A <c>SET LOCAL</c> sent on a plain connection runs
-    /// in its own implicit transaction: PostgreSQL warns "can only be used in transaction blocks" and the setting is gone before the next statement.
+    /// <c>SET LOCAL lock_timeout</c> applies to the statements after it and ends with the commit. A <c>SET LOCAL</c> sent on a plain connection is outside
+    /// any transaction block: PostgreSQL warns "can only be used in transaction blocks" (measured on 17.12 and 18.7), the setting reaches the rest of that one
+    /// command and is gone for the next command.
     /// The connection must not already be inside a transaction. Not for <c>CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)</c>, which
     /// cannot run in one.
     /// </summary>

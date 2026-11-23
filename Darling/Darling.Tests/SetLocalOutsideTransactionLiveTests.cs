@@ -19,9 +19,10 @@ namespace Darling.Tests;
 
 /* #1776 own-store: this class mints its own scratch databases through ScratchPostgres and never touches another test's rows. */
 /// <summary>
-/// #9343: the Query Store rollup index blocks open with <c>SET LOCAL lock_timeout</c>. Sent on a plain connection that statement runs in its own
-/// implicit transaction, PostgreSQL raises "SET LOCAL can only be used in transaction blocks", and the index build after it waits with no timeout.
-/// The fresh-store continuous aggregate setup and every convergence pass after it ran them that way.
+/// #9343: the Query Store rollup index blocks open with <c>SET LOCAL lock_timeout</c>. Sent on a plain connection that statement is outside any
+/// transaction block and PostgreSQL raises "SET LOCAL can only be used in transaction blocks". The fresh-store continuous aggregate setup and every
+/// convergence pass after it ran them that way. On the PostgreSQL 17 the compose file and the Helm chart ship, the fresh-store test below fails on the
+/// plain command with three warnings.
 /// </summary>
 public sealed class SetLocalOutsideTransactionLiveTests
 {
