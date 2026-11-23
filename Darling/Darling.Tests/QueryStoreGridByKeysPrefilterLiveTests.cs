@@ -443,6 +443,7 @@ ANALYZE {Wide};", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenSeededAsync(scratch, AllGroups, ct, filler: true);
 
+        var diag = new List<string>();
         foreach (var statements in AllStatements())
         {
             var (keys, ids) = await ReadKeysAsync(connection, statements, null, null, 3, ct);
@@ -490,7 +491,7 @@ ANALYZE {Wide};", ct);
 
                     if (Environment.GetEnvironmentVariable("DARLING_9373_PLAN_DIAG") == "1" && bindFilter)
                     {
-                        Assert.Fail("Total: PLAN " + label + " => " + string.Join(" ;; ", scans.Select(s => s.Table + " using " + s.Index)));
+                        diag.Add("Total: PLAN " + label + " => " + string.Join(" ;; ", scans.Where(s => IsInterval(s.Table) || IsDaily(s.Table)).Select(s => s.Table + " using " + s.Index)));
                     }
                 }
                 finally
@@ -498,6 +499,11 @@ ANALYZE {Wide};", ct);
                     await ExecAsync(connection, "RESET enable_indexscan", ct);
                 }
             }
+        }
+
+        if (diag.Count > 0)
+        {
+            Assert.Fail(string.Join(" ;;; ", diag));
         }
     }
 
