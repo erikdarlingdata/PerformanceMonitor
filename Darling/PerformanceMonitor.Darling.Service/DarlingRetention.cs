@@ -1389,7 +1389,7 @@ public static class DarlingRetention
             }
 
             /* #8784 follow-up: the dependency lists of databases the server no longer has. The loop above keeps each database's newest
-               list however old (DeleteSqlFor's ObjectDependenciesReplacedPredicate), so this is the only way a dropped database's list
+               list however old (DeleteSqlFor's ObjectDependenciesSliceDeleteSql), so this is the only way a dropped database's list
                goes. One statement; the horizon is the collector's own retention. */
             var droppedDatabaseDependenciesDeleted = await PurgeOneAsync(
                 postgres, ObjectDependenciesTable, DroppedDatabaseDependenciesDeleteSql,
@@ -1800,8 +1800,7 @@ public static class DarlingRetention
         => schema switch
         {
             AttentionCollector => ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
-            ObjectDependenciesCollector => TimeSlicedDeleteSql(
-                schema.TargetTable, schema.PrefixTimeColumnName, ObjectDependenciesReplacedPredicate),
+            ObjectDependenciesCollector => ObjectDependenciesSliceDeleteSql,
             _ => TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
         };
 
@@ -1809,88 +1808,158 @@ public static class DarlingRetention
     internal const string ObjectDependenciesTable = "collect.object_dependencies";
 
     /// <summary>
-    /// #8784 follow-up: which expired dependency rows the time-sliced purge may delete. Every read takes only a database's NEWEST capture,
-    /// and a view a database's list names counts as used, so a list must not age out while it is still the newest one: a database whose
-    /// capture fails for a few days (a lost grant, a collector failing there) would otherwise take its references with it, and another
-    /// database's view that only it named would read "Not used in window". So an expired row goes only once a newer capture of the same
-    /// (server, database) exists, which <c>idx_object_dependencies_database</c> answers with one seek. A dropped database's list goes
-    /// through <see cref="DroppedDatabaseDependenciesDeleteSql"/>. A removed server's last lists stay, one capture per database: no read
-    /// looks at them, and the same server added again (the same server_id) finds them until its first capture replaces them. Applied to the DELETE and to
-    /// both <c>min()</c> subqueries of <see cref="TimeSlicedDeleteSql"/>, so a kept row never anchors an empty slice; the unqualified
-    /// <c>object_dependencies</c> there is the nearest scope's table, the DELETE target or the subquery's own.
+    /// #8784 follow-up: the time-sliced purge of the dependency lists. Every read takes only a database's NEWEST capture, and a view a
+    /// database's list names counts as used, so a list must not age out while it is still the newest one: a database whose capture fails
+    /// for a few days (a lost grant, a collector failing there) would otherwise take its references with it, and another database's view
+    /// that only it named would read "Not used in window". So an expired row goes only while a newer capture of the same (server, database)
+    /// exists. A dropped database's list goes through <see cref="DroppedDatabaseDependenciesDeleteSql"/>. A removed server's last lists
+    /// stay, one capture per database: no read looks at them, and the same server added again (the same server_id) finds them until its
+    /// first capture replaces them.
+    /// <para>Each (server_id, database_name) pair is listed with a skip scan over <c>idx_object_dependencies_database</c>, and its newest
+    /// capture is one backward seek on the same index. The first shape wrote this as <c>EXISTS (newer capture)</c> inside
+    /// <see cref="TimeSlicedDeleteSql"/>. The planner turned that into a hash semi join on (server_id, database_name) with the time test as
+    /// a join filter, so every row the EXISTS rejected walked its whole hash bucket, and a kept list of R rows cost about R squared checks
+    /// (a 150,000-row list ran past 180 s, and a list can reach 200,000 rows, <c>MaxRowsPerDatabase</c>). Here the newest time is found once
+    /// per pair.</para>
+    /// <para>The slice is the shape <see cref="TimeSlicedDeleteSql"/> writes: the oldest expired day that has a row to delete, one
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> wide, per execution. <c>slice_start</c> is taken over the deletable rows only, so a
+    /// kept row never anchors an empty slice. When none is left it is NULL, every comparison is unknown, nothing is deleted, and the drain
+    /// loop stops as it does for every other table. <c>$1</c> is the cutoff.</para>
     /// </summary>
-    internal const string ObjectDependenciesReplacedPredicate =
-        "EXISTS (SELECT 1 FROM collect.object_dependencies AS n WHERE n.server_id = object_dependencies.server_id"
-        + " AND n.database_name = object_dependencies.database_name AND n.collection_time > object_dependencies.collection_time)";
-
-    /// <summary>
-    /// #8784 follow-up: the dependency rows of a database the server no longer has. A kept newest list (<see cref="ObjectDependenciesReplacedPredicate"/>)
-    /// of a dropped database would keep its references alive for good, so it goes once both hold: it is past the retention cutoff ($1),
-    /// and the server's newest <c>collect.database_states</c> capture (an unfiltered <c>sys.databases</c> read, every minute by default)
-    /// is newer than the list and does not name the database. The cutoff keeps a database that is briefly gone (detached and attached
-    /// again, renamed and renamed back) until its next capture replaces the list. A server with no <c>database_states</c> rows (that
-    /// collector off, or Azure SQL Database, where it does not run) keeps its lists: that errs toward "used". The servers are listed by a
-    /// skip scan over <c>idx_object_dependencies_time</c>, and each one's newest state capture is one seek on <c>idx_database_states_time</c>.
-    /// </summary>
-    internal const string DroppedDatabaseDependenciesDeleteSql = @"
+    internal static readonly string ObjectDependenciesSliceDeleteSql = @"
 WITH RECURSIVE
-    servers AS
+    pairs AS
 (
     (
-        SELECT
-            d.server_id
-        FROM collect.object_dependencies AS d
-        ORDER BY
-            d.server_id
+        SELECT o.server_id, o.database_name
+        FROM collect.object_dependencies AS o
+        WHERE o.database_name IS NOT NULL
+        ORDER BY o.server_id, o.database_name
         LIMIT 1
     )
     UNION ALL
-    SELECT
-        (
-            SELECT
-                d.server_id
-            FROM collect.object_dependencies AS d
-            WHERE d.server_id > servers.server_id
-            ORDER BY
-                d.server_id
-            LIMIT 1
-        )
-    FROM servers
-    WHERE servers.server_id IS NOT NULL
-),
-    newest AS
-(
-    SELECT
-        servers.server_id,
-        s.collection_time
-    FROM servers
+    SELECT nx.server_id, nx.database_name
+    FROM pairs AS p
     CROSS JOIN LATERAL
     (
-        SELECT
-            st.collection_time
-        FROM collect.database_states AS st
-        WHERE st.server_id = servers.server_id
-        ORDER BY
-            st.collection_time DESC
+        SELECT o.server_id, o.database_name
+        FROM collect.object_dependencies AS o
+        WHERE (o.server_id, o.database_name) > (p.server_id, p.database_name)
+        ORDER BY o.server_id, o.database_name
         LIMIT 1
-    ) AS s
-    WHERE servers.server_id IS NOT NULL
+    ) AS nx
+),
+    newest AS MATERIALIZED
+(
+    SELECT
+        p.server_id,
+        p.database_name,
+        (
+            SELECT max(o.collection_time)
+            FROM collect.object_dependencies AS o
+            WHERE o.server_id = p.server_id
+            AND   o.database_name = p.database_name
+        ) AS newest_time
+    FROM pairs AS p
+),
+    slice AS MATERIALIZED
+(
+    SELECT min(d.collection_time) AS slice_start
+    FROM collect.object_dependencies AS d
+    JOIN newest AS n ON n.server_id = d.server_id AND n.database_name = d.database_name
+    WHERE d.collection_time < $1
+    AND   d.collection_time < n.newest_time
 )
 DELETE FROM collect.object_dependencies AS d
-USING newest AS n
-WHERE d.server_id = n.server_id
+USING newest AS n, slice AS s
+WHERE n.server_id = d.server_id
+AND   n.database_name = d.database_name
 AND   d.collection_time < $1
-AND   d.collection_time < n.collection_time
-AND   d.database_name IS NOT NULL
-AND   NOT EXISTS
-      (
-          SELECT
-              1
-          FROM collect.database_states AS st
-          WHERE st.server_id = n.server_id
-          AND   st.collection_time = n.collection_time
-          AND   st.database_name = d.database_name
-      )";
+AND   d.collection_time < n.newest_time
+AND   d.collection_time >= s.slice_start
+AND   d.collection_time < s.slice_start + INTERVAL '" + TimescaleSupport.ChunkIntervalDays + @" days'";
+
+    /// <summary>
+    /// #8784 follow-up: the dependency rows of a database the server no longer has. A kept newest list (<see cref="ObjectDependenciesSliceDeleteSql"/>)
+    /// of a dropped database would keep its references alive for good, so it goes once both hold: it is past the retention cutoff ($1),
+    /// and the server's newest <c>collect.database_states</c> capture (an unfiltered <c>sys.databases</c> read, every minute by default)
+    /// is newer than the list and does not name the database. The cutoff keeps a database that is briefly gone (detached and attached
+    /// again, renamed and renamed back) until its next capture replaces the list.
+    /// <para>Each server's newest <c>database_states</c> capture is found with one backward seek on the (server_id, collection_time) index.
+    /// Its names are read once, behind the MATERIALIZED and <c>OFFSET 0</c> fence. The keep or drop decision is made per (server_id,
+    /// database_name) pair, never per row, and only the dropped pairs' rows are deleted, by a range on
+    /// <c>idx_object_dependencies_database</c>. The first shape tested NOT EXISTS against <c>database_states</c> for every expired row,
+    /// which the planner made a hash anti join over every <c>database_states</c> row (millions on a large store, decompressed and spilled
+    /// to disk on TimescaleDB).</para>
+    /// <para>The <c>u</c> EXISTS keeps every list on a server whose newest capture names no user database (<c>database_id</c> above 4).
+    /// That is what a login that lost VIEW ANY DATABASE sees: <c>sys.databases</c> then shows only master, tempdb and the databases the
+    /// login owns, and without the check every list on that server would drop once it passed the cutoff, the lost-grant case this purge
+    /// exists to survive. A server with no <c>database_states</c> rows (that collector off, or Azure SQL Database, where it does not run)
+    /// has no <c>newest</c> row, so it keeps its lists too: that errs toward "used".</para>
+    /// </summary>
+    internal const string DroppedDatabaseDependenciesDeleteSql = @"
+WITH RECURSIVE
+    pairs AS
+(
+    (
+        SELECT o.server_id, o.database_name
+        FROM collect.object_dependencies AS o
+        WHERE o.database_name IS NOT NULL
+        ORDER BY o.server_id, o.database_name
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT nx.server_id, nx.database_name
+    FROM pairs AS p
+    CROSS JOIN LATERAL
+    (
+        SELECT o.server_id, o.database_name
+        FROM collect.object_dependencies AS o
+        WHERE (o.server_id, o.database_name) > (p.server_id, p.database_name)
+        ORDER BY o.server_id, o.database_name
+        LIMIT 1
+    ) AS nx
+),
+    newest AS MATERIALIZED
+(
+    SELECT sv.server_id, s.collection_time
+    FROM (SELECT DISTINCT p.server_id FROM pairs AS p) AS sv
+    CROSS JOIN LATERAL
+    (
+        SELECT st.collection_time
+        FROM collect.database_states AS st
+        WHERE st.server_id = sv.server_id
+        ORDER BY st.collection_time DESC
+        LIMIT 1
+    ) AS s
+),
+    named AS MATERIALIZED
+(
+    SELECT n.server_id, st.database_name, st.database_id
+    FROM newest AS n
+    CROSS JOIN LATERAL
+    (
+        SELECT st.database_name, st.database_id
+        FROM collect.database_states AS st
+        WHERE st.server_id = n.server_id
+        AND   st.collection_time = n.collection_time
+        OFFSET 0
+    ) AS st
+),
+    gone AS MATERIALIZED
+(
+    SELECT p.server_id, p.database_name, n.collection_time AS state_time
+    FROM pairs AS p
+    JOIN newest AS n ON n.server_id = p.server_id
+    WHERE EXISTS (SELECT 1 FROM named AS u WHERE u.server_id = n.server_id AND u.database_id > 4)
+    AND   NOT EXISTS (SELECT 1 FROM named AS m WHERE m.server_id = p.server_id AND m.database_name = p.database_name)
+)
+DELETE FROM collect.object_dependencies AS d
+USING gone AS g
+WHERE d.server_id = g.server_id
+AND   d.database_name = g.database_name
+AND   d.collection_time < $1
+AND   d.collection_time < g.state_time";
 
     /// <summary>
     /// #8719: <see cref="TimeSlicedDeleteSql"/> for a plain table whose only index is <c>(server_id, {col})</c> and whose

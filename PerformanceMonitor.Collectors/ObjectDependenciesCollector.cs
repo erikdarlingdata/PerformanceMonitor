@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Collectors;
 /// so the same filter and walk carry use of the synonym on to its target, in this database or (by three-part name) another.</para>
 ///
 /// <para><b>Load.</b> One catalog read per database per day, bounded by <see cref="MaxRowsPerDatabase"/>. A plain table on every store
-/// (<see cref="StaysPlainTable"/>), kept 30 days: only the newest capture is read.</para>
+/// (<see cref="StaysPlainTable"/>), kept 3 days (the schedule's retention): only the newest capture is read, and the purge keeps a database's newest list however old.</para>
 /// </summary>
 public sealed class ObjectDependenciesCollector : CollectorDefinitionBase<ObjectDependenciesCollector.Row>
 {
