@@ -117,8 +117,8 @@ public sealed class ViewerQueryStoreRollupSourceTests
     private static string? LabelOf(QueryStoreClosedDayRollup.ReadSource source, int day) =>
         source.IntervalNotes!.Single(n => n.Day == D(day)).Label;
 
-    /* #9363: the shape the field showed. Retention is 10 days, the window starts at the retention edge, and five closed days are built. The
-       oldest whole day can be thinned by the purge so it is never built, and the two newest whole days are not closed yet. */
+    /* #9363: a read with a closed day outside the built run. Retention is 10 days, the window starts at the retention edge, and five closed days are built.
+       The oldest whole day was never built and the purge may have thinned it, day 21 is closed with no rollup, and day 22 is not closed yet. */
     [Fact]
     public void WholeDaysReadFromTheIntervalTable_EachNameWhy()
     {

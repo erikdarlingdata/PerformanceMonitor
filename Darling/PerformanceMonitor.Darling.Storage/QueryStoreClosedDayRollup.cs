@@ -973,17 +973,19 @@ ORDER BY b.day_utc;";
             {
                 label = "not closed yet";
             }
+            else if (builtDays is not null && builtDays.Contains(day))
+            {
+                /* A built day keeps its rollup even at the retention edge (the builder skips only a thinned day that was never built), so
+                   a built day the read still took from the interval table is outside the longest run, whatever the time says. */
+                label = served is null ? "no rollups for this read" : "built but outside the longest run";
+            }
             else if (retentionDays is { } retention && MayBeThinned(day, now, retention))
             {
                 label = "never built at the retention edge";
             }
-            else if (served is null)
-            {
-                label = "no rollups for this read";
-            }
             else
             {
-                label = builtDays is not null && builtDays.Contains(day) ? "built but outside the longest run" : "no rollup for this day";
+                label = served is null ? "no rollups for this read" : "no rollup for this day";
             }
 
             notes.Add((day, label));
