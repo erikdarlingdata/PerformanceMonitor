@@ -195,7 +195,7 @@ public static class ObjectUsageChainBuilder
 
         if (rebuild)
         {
-            await ExecuteAsync(connection, null, DeletePairSql, cancellationToken, serverId, databaseName);
+            await ExecuteAsync(connection, null, DeletePairSql, [serverId, databaseName], cancellationToken);
         }
         else
         {
@@ -217,7 +217,7 @@ public static class ObjectUsageChainBuilder
         var limit = rawBatchRows;
         while (steps < maxSteps)
         {
-            var batch = await ReadRawAsync(connection, RawAfterSql, cancellationToken, serverId, databaseName, from, limit);
+            var batch = await ReadRawAsync(connection, RawAfterSql, serverId, databaseName, [from, limit], cancellationToken);
             if (batch.Count == 0)
             {
                 break;
@@ -305,10 +305,13 @@ public static class ObjectUsageChainBuilder
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await ExecuteAsync(
-            connection, transaction, InsertSnapshotSql, cancellationToken,
-            serverId, databaseName, Naive(time), (short)ObjectUsageChainVersion.Current, (object?)node.Server ?? DBNull.Value,
-            Db(node.Start), node.NodeKey, Db(node.ComparedWith), Db(node.KeptStart), (int)step.Reasons, (short)step.Counted,
-            step.IndexResets, Db(step.BlindFrom), Naive(DateTime.UtcNow));
+            connection, transaction, InsertSnapshotSql,
+            [
+                serverId, databaseName, Naive(time), (short)ObjectUsageChainVersion.Current, (object?)node.Server ?? DBNull.Value,
+                Db(node.Start), node.NodeKey, Db(node.ComparedWith), Db(node.KeptStart), (int)step.Reasons, (short)step.Counted,
+                step.IndexResets, Db(step.BlindFrom), Naive(DateTime.UtcNow),
+            ],
+            cancellationToken);
 
         if (deltas.Count > 0)
         {
@@ -411,7 +414,7 @@ public static class ObjectUsageChainBuilder
         }
 
         var times = last.Values.Select(r => Naive(r.Time)).Distinct().ToArray();
-        var raw = await ReadRawAsync(connection, RawAtSql, cancellationToken, serverId, databaseName, times);
+        var raw = await ReadRawAsync(connection, RawAtSql, serverId, databaseName, [times], cancellationToken);
         var byTime = raw.GroupBy(r => r.CollectionTime).ToDictionary(g => g.Key, g => ObjectUsageCounterStep.Dedupe(g.ToList()));
 
         var nodes = last.Select(kv => (
@@ -423,7 +426,7 @@ public static class ObjectUsageChainBuilder
     }
 
     private static async Task<List<ObjectUsageSample>> ReadRawAsync(
-        NpgsqlConnection connection, string sql, CancellationToken cancellationToken, int serverId, string databaseName, params object[] args)
+        NpgsqlConnection connection, string sql, int serverId, string databaseName, object[] args, CancellationToken cancellationToken)
     {
         var rows = new List<ObjectUsageSample>();
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = CommandTimeoutSeconds };
@@ -450,7 +453,7 @@ public static class ObjectUsageChainBuilder
     }
 
     private static async Task ExecuteAsync(
-        NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, CancellationToken cancellationToken, params object[] args)
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, object[] args, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
         foreach (var arg in args)
