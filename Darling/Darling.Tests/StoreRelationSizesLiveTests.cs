@@ -104,6 +104,52 @@ ANALYZE;";
         return versions;
     }
 
+    /// <summary>The relations both size passes on <paramref name="source"/> have stat'ed so far.</summary>
+    private static long RelationsSizedOn(NpgsqlDataSource source) => MainRelationsSizedOn(source) + ExtraRelationsSizedOn(source);
+
+    [Fact]
+    public async Task AFailedExtrasPass_RecordsNoCombinedPass_AndWritesNothing_UntilTheExtrasFinish()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(store, SeedSql, ct);
+            var rig = new Rig();
+
+            // The main pass finishes (the indexes read) and the extras pass fails (the tables read): half a pass is not recorded or written.
+            FailExtrasPassesOn(store, new InvalidOperationException("injected extras failure"));
+            Assert.NotEmpty(await rig.Cache.GetIndexesAsync(store, cancellationToken: ct));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Cache.GetTablesAsync(store, fresh: true, cancellationToken: ct));
+            await rig.Cache.WhenIdleAsync();
+            Assert.True(MainRelationsSizedOn(store) > 0);
+            Assert.Null(LastSizePassOn(store));
+            Assert.Equal(0, rig.WriteCount);
+            Assert.Null(await StoreRelationSizesStore.ReadLastSizesAsync(store, ct));
+
+            // The extras then finish for the same relation list: the combined pass is recorded and written once.
+            FailExtrasPassesOn(store, null);
+            await rig.Cache.GetTablesAsync(store, fresh: true, cancellationToken: ct);
+            await rig.Cache.WhenIdleAsync();
+            var recorded = LastSizePassOn(store);
+            Assert.NotNull(recorded);
+            Assert.True(recorded.Pass.Oids.Length >= 60, $"pass sized {recorded.Pass.Oids.Length}");
+            Assert.Equal(1, rig.WriteCount);
+            Assert.NotNull(await StoreRelationSizesStore.ReadLastSizesAsync(store, ct));
+            Assert.Empty(rig.Reported);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
     private static MeasuredSizePass With(MeasuredSizePass source, Func<long, bool> keep, Func<long, long> mainBytes, DateTime at)
     {
         var p = source.Pass;

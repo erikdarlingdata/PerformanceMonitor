@@ -938,6 +938,14 @@ public sealed partial class DarlingCollectorRunner
                         ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
                 }
 
+                /* #9359: the caller's own writes (the Query Store backfill's state for this slice) join THIS transaction, so the rows and
+                   the state commit together or not at all. No savepoint and no catch, deliberately: a fault throws out of the batch, the
+                   transaction rolls back with the COPY in it, and the next pass walks the slice from a clean store. */
+                if (context.StoreTransactionWrite is { } transactionWrite)
+                {
+                    await transactionWrite(pgConnection, transaction, cancellationToken);
+                }
+
                 commitSent = true;
                 await transaction.CommitAsync(cancellationToken);
             }

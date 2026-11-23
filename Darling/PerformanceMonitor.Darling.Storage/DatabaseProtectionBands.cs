@@ -73,7 +73,7 @@ public sealed record DatabaseProtectionOverdue(string Kind, string Database, str
 /// <summary>
 /// #6873: the pure banding over one capture's stored facts. No I/O, so the MCP tool and the Viewer call it with the same facts and say the
 /// same words. Order of the rules, first match wins: a database that is not online is excluded and judged on nothing (a secondary whose own error log was not read is too; #8865 a secondary whose log was read keeps only its two backup facts excluded and its CHECKDB is judged);
-/// a SIMPLE-recovery log reads <c>not_expected</c>; the collector's <c>unknown</c> and <c>unavailable</c> pass through as their own words;
+/// a SIMPLE-recovery log reads <c>not_expected</c>, and so does a late or missing log backup of master or model (#9376); the collector's <c>unknown</c> and <c>unavailable</c> pass through as their own words;
 /// a platform-managed target shows the age under the platform's word and is never overdue, and a native-only target does the same for its two backup facts while its CHECKDB is judged as on SQL Server (#6902); a CHECKDB or backup that never
 /// happened is overdue unless the database is newer than the threshold (<c>new_database</c>); a recorded time is overdue when its age at
 /// the capture is above the threshold. #8865: CHECKDB comes from the replica's own error log when it was read (an AG database on the log only, <c>pending</c> while the
@@ -144,7 +144,27 @@ public static class DatabaseProtectionBands
                 ? BandCheckDb(fact, capturedAt, thresholds.CheckDb)
                 : Band(fact, fact.CheckDbState, fact.LastGoodCheckDbTime, thresholds.CheckDb, capturedAt, isCheckDb: true),
             Band(fact, fact.FullBackupState, fact.LastFullBackupTime, thresholds.FullBackup, capturedAt, isCheckDb: false),
-            Band(fact, fact.LogBackupState, fact.LastLogBackupTime, thresholds.LogBackup, capturedAt, isCheckDb: false));
+            BandLog(fact, capturedAt, thresholds.LogBackup));
+    }
+
+    /// <summary>#9376: the sentence a system database's log fact gets when it is not judged, said by every surface.</summary>
+    public const string DetailSystemDatabase = "system database: log backups are not needed";
+
+    /// <summary>#9376: <c>master</c> cannot take a log backup (SQL Server allows only full backups of it) and nothing writes to <c>model</c>, which is only the
+    /// template for new databases. Their names cannot be changed and sys.databases always spells them in lowercase, so the match is exact: on a case-sensitive server a user database named
+    /// <c>Model</c> or <c>MASTER</c> is still judged. msdb and every other user database are judged.</summary>
+    internal static bool IsLogBackupExempt(string? databaseName) =>
+        string.Equals(databaseName, "master", StringComparison.Ordinal)
+        || string.Equals(databaseName, "model", StringComparison.Ordinal);
+
+    /// <summary>The log fact: banded as any backup, except that a late or missing log backup of <c>master</c> or <c>model</c> reads <c>not_expected</c> with a
+    /// detail, whatever the recovery model (#9376). The full backup and CHECKDB of both are judged as before.</summary>
+    private static DatabaseProtectionFactBand BandLog(DatabaseProtectionFact fact, DateTime capturedAt, TimeSpan threshold)
+    {
+        var band = Band(fact, fact.LogBackupState, fact.LastLogBackupTime, threshold, capturedAt, isCheckDb: false);
+        return band.Overdue && IsLogBackupExempt(fact.DatabaseName)
+            ? new(NotExpected, false, band.Age, threshold, Detail: DetailSystemDatabase)
+            : band;
     }
 
     /// <summary>#8865 rules 1 and 2: the error log is the CHECKDB source only on a platform that is not managed and when the read finished

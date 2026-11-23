@@ -195,6 +195,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         _readAdmission = readAdmission;
         _logger = logger;
         PgKnownPatternStore.UseSharedLogger(logger);
+        DarlingObjectUsageReader.UseSharedLogger(logger);
         _state = state;
         _registryState = registryState;
         _baselineCache = baselineCache ?? new BaselineCache();

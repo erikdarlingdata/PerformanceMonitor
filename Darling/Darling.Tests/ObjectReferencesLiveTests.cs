@@ -55,11 +55,13 @@ public sealed class ObjectReferencesLiveTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasObjectReferences", parameters[^2].Name);
+        Assert.Equal("hasObjectReferences", parameters[^4].Name);
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
         all[^1] = false;
         all[^2] = false;
+        all[^3] = false;
+        all[^4] = false;
         Assert.Equal(rung.Version - 1, (int)method.Invoke(null, all)!);
     }
 

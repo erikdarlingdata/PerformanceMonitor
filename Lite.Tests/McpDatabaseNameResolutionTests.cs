@@ -41,6 +41,11 @@ public sealed class McpDatabaseNameResolutionTests : IClassFixture<SharedDuckDbF
     private const string Unlisted = "DbnUnlistedSrv";
     private const string Twin = "DbnTwinSrv";
 
+    /// <summary>The lookup deadline these hosts run with (#9375). The DuckDB lock is one lock for the whole test process, and other
+    /// classes hold it exclusively for seconds, so under the host's own 3 s a lookup queued behind such a hold expired and the call ran
+    /// as given, which is how the two-case-twins refusal was once missed in CI. Thirty seconds waits out the holds the suite makes (WriteLockBudgetTests sums them against the host budget).</summary>
+    private static readonly TimeSpan LookupDeadline = TimeSpan.FromSeconds(30);
+
     /// <summary>The Lite tools that take a <c>database_name</c> and no <c>server_name</c>: <c>find_database</c> searches every
     /// server and already ignores case, and the two query-tag writes compare object names ignoring case.</summary>
     private static readonly string[] NotResolved = { "assign_query_tag", "find_database", "unassign_query_tag" };
@@ -183,7 +188,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
             {
                 builder.Services.AddSingleton(_service);
                 builder.Services.AddSingleton(_serverManager);
-                builder.WithRequestFilters(McpHostService.AddCallToolFilters);
+                builder.WithRequestFilters(filters => McpHostService.AddCallToolFiltersWithLookupDeadline(filters, LookupDeadline));
             });
         return _host;
     }
@@ -324,6 +329,43 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
     }
 
     [Fact]
+    public async Task ACallWhoseLookupWaitsBehindAWriterPastTheHostsOwnDeadline_IsStillRefused()
+    {
+        var host = await StartLongQueryHostAsync();
+
+        /* A writer holds the process-wide lock for longer than the host's own 3 s, as another class's archive or checkpoint can
+           (#9375). The lookup queues behind it, and with the deadline these hosts run with it waits the hold out. */
+        using var acquired = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var writer = Task.Factory.StartNew(() =>
+        {
+            /* A bounded acquisition, so WriteLockBudgetTests does not score this file's seed ages (hours) as a hold. The hold is the
+               3.5 s the test waits, ended by the finally below. */
+            using var held = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(30));
+            acquired.Set();
+            release.Wait();
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        Assert.True(acquired.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+
+        Task<(JsonElement Json, bool IsError)> call;
+        try
+        {
+            call = Task.Run(() => LongQueriesAsync(host, Listed, "reports"), TestContext.Current.CancellationToken);
+            await Task.Delay(McpDatabaseNameFilter.LookupDeadline + TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            /* Released on every path: a held lock would stall every other test in the process. */
+            release.Set();
+            await writer;
+        }
+
+        var (refused, isError) = await call;
+        Assert.True(isError);
+        Assert.Contains("'REPORTS', 'Reports'", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TwoStoredNamesThatDifferOnlyByCase_AreRefusedWithBothListed_AndEachStillReadsWhenSpelledExactly()
     {
         var host = await StartLongQueryHostAsync();
@@ -438,7 +480,7 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
             {
                 builder.Services.AddSingleton(_service);
                 builder.Services.AddSingleton(_serverManager);
-                builder.WithRequestFilters(McpHostService.AddCallToolFilters);
+                builder.WithRequestFilters(filters => McpHostService.AddCallToolFiltersWithLookupDeadline(filters, LookupDeadline));
                 builder.WithRequestFilters(filters => filters.AddCallToolFilter(recorder));
             });
 

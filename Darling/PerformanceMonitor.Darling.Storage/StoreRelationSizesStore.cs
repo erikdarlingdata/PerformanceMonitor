@@ -28,7 +28,7 @@ public readonly record struct StoreRelationSizesWrite(int Deleted, int Upserted)
 /// once instead of waiting for a size pass of its own. On a store with thousands of chunks the size pass is most of the first open's wait, and
 /// relation sizes change slowly.
 ///
-/// <para><b>Shape (V299).</b> <c>collect.store_relation_sizes_latest</c> holds one row per relation: <c>rel_oid</c> (the key), the relation's schema and
+/// <para><b>Shape (V301).</b> <c>collect.store_relation_sizes_latest</c> holds one row per relation: <c>rel_oid</c> (the key), the relation's schema and
 /// name beside it, the oid of the heap an index hangs under (0 for a heap), the main-fork bytes, the other forks' bytes (indexes only) and the TOAST
 /// total (heaps only). Those are the columns of <see cref="RelationSizePass"/>, which both presized reads are fed from, so a read fed the stored rows
 /// runs the same statement a live pass would feed. <c>collect.store_relation_sizes_measured</c> holds one row: when the pass finished.</para>
@@ -46,10 +46,10 @@ public readonly record struct StoreRelationSizesWrite(int Deleted, int Upserted)
 public static class StoreRelationSizesStore
 {
     /// <summary>The store schema version that adds the two tables.</summary>
-    public const int Version = 299;
+    public const int Version = 301;
 
     /// <summary>
-    /// The rung (V299): two empty plain tables, no data moves. The latest table is <c>fillfactor = 80</c> so the size columns, which no index
+    /// The rung (V301): two empty plain tables, no data moves. The latest table is <c>fillfactor = 80</c> so the size columns, which no index
     /// covers, update in place (a HOT update) on the free space each page keeps, and a pass that changes a few dozen rows does not grow the
     /// primary key's index. An older build never reads them.
     /// </summary>
@@ -162,7 +162,7 @@ FROM collect.store_relation_sizes_latest AS l";
     /// The stored sizes and when they were measured, in the shape both presized reads take
     /// (<see cref="DarlingStoreTableHealthReader.GetAsync(NpgsqlDataSource, DateTime, RelationSizePass, CancellationToken)"/> and
     /// <see cref="DarlingStoreTableHealthReader.GetIndexesAsync(NpgsqlDataSource, RelationSizePass, CancellationToken)"/>), or null for a store
-    /// behind V299 (no table) or one nothing has written to yet, so the caller reads live as it does today. The stamp and the rows are read in one
+    /// behind V301 (no table) or one nothing has written to yet, so the caller reads live as it does today. The stamp and the rows are read in one
     /// snapshot, so a write between the two reads cannot pair an old time with new rows.
     /// </summary>
     public static Task<MeasuredSizePass?> ReadLastSizesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>

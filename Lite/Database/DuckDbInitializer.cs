@@ -1261,9 +1261,15 @@ public partial class DuckDbInitializer : IDisposable
     ///   with every 8192-row group of every file. Once it is over the trim cycle's 64 MB target, the trim's
     ///   `SET memory_limit` fails with "could not free up enough memory" and the trim stops working. The file
     ///   count is the real cost of a bind, and compaction (this issue) is what keeps that count down.
+    /// - prefetch_all_parquet_files=true (#9362): DuckDB's default reads a local Parquet file one column chunk at a time. With the
+    ///   archive's 2,048-row row groups (#5381, kept) a wide scan of many files becomes tens of thousands of small serial reads, and
+    ///   that is where the 168 hour Query Store regressions and top queries reads spent nearly all their time. With the setting on,
+    ///   each column chunk the scan needs is fetched whole. Only this main connection takes it: the archive service and compaction
+    ///   open their own in-memory connections, and the memory limit still bounds what a read may hold (the #5381 memory tests run
+    ///   through this connection string).
     /// </summary>
     public string ConnectionString =>
-        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB";
+        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB;prefetch_all_parquet_files=true";
 
     /// <summary>
     /// The main connection's resting <c>memory_limit</c> (#5381, owner ruling 2026-10-06). It was 1 GB, which

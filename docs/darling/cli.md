@@ -53,6 +53,7 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | `--remove-alert-source` | Drops an alert source's login and its queued alerts. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
 | `--list-alert-sources` | Lists the alert sources. It never prints a password. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
 | `--export-investigations` | Writes the investigation cases that have feedback, one JSON object per line. | no | either (1) | `0`, `1`, `2`, `130` | [Export the judged cases](agents-and-alert-sources.md#export-the-judged-cases-to-test-your-own-agent-6236) |
+| `--object-usage-compare` | Reads one database's object usage two ways, from the stored chain and from every snapshot, and says whether the answers match. It changes nothing. | no | either (1) | `0`, `1`, `2`, `3`, `4` | [`--object-usage-compare`](#--object-usage-compare) |
 | `--backfill-rollups` | Builds the retention rollups over existing history. | no | either (1) | `0`, `1` | [Retention hold runbook](../retention-hold-runbook.md) |
 | `--collapse-legacy-slices` | Repairs Query Store rows collected before the split-slice fix, then rebuilds the rollups they fed. | no | either (1) | `0`, `1` | [Retention hold runbook](../retention-hold-runbook.md) |
 | `--recompress-plan-dim` | Converts old plan text rows to gzip in batches, then compacts the table. | no | either (1) | `0`, `1` | [Retention hold runbook](../retention-hold-runbook.md) |
@@ -92,6 +93,8 @@ These verbs also use `1` for a few cases of their own:
 - An output file that cannot be written, or that exists when `--force` was not given. This is `--export-investigations`. When it cannot read the store, it exits `2`.
 
 `--export-investigations` also exits `130` when it is cancelled. It writes no file in that case.
+
+`--object-usage-compare` uses `0`, `1` and `2` as the collector verbs do, and adds `3` (the two answers differ) and `4` (the chain cannot answer the window). See [`--object-usage-compare`](#--object-usage-compare).
 
 `--check-settings` uses four numbers:
 
@@ -197,6 +200,16 @@ Server, host, database, login and domain names and IP addresses are replaced wit
 When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`. The `store_unreachable` section holds no sentence, only an error class and a fixed reason code. For a managed store the bundle reads the store's own `postmaster.pid` when the first connect is refused: a store listening on another port than `postgres.port` is used there (a warning says so; the service reads the port only at start-up), and a store still starting is waited for (about 20 seconds). If it still cannot connect, the reason is `store_not_running` (no live store on the data directory, so start the service and read its log), `store_starting`, or `data_directory_missing` (the bundle is reading a `darling.json` whose data directory is not the service's: pass `--config` with the install folder's file); a bare `connect_failed` means the store is listening on the configured port and still refused.
 
 Exit codes: see [Exit codes](#exit-codes). If the service log is not where the verb looks, the `service_log` section says so. Pass `--log-dir`.
+
+### `--object-usage-compare`
+
+```
+PerformanceMonitor.Darling.Service.exe --object-usage-compare <server> <database> [days] [--config <path>]
+```
+
+The `get_object_usage` tool reads a chain that the service builds each hour. This verb checks that the chain gives the same answer as reading every snapshot. It reads the window both ways for one database, then prints `identical` with the time each read took, or each difference. `days` is how far back the window reaches. It is 90 if you leave it out. The verb only reads: it never builds the chain and never writes to the store, so a login that can read the store is enough.
+
+The exit codes are the usual `0`, `1` and `2`, and two more. `3` means the two answers differ. `4` means the chain cannot answer that window yet, so there is nothing to compare. The tool reads every snapshot for such a window.
 
 ### `--grant-script`
 
