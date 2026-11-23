@@ -1803,7 +1803,8 @@ public static class DarlingRetention
     /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
     /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V299)
     /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass. The closed rows of
-    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than the horizon) are deleted in the same call; open runs never are.
+    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than the horizon by one raw chunk interval) are deleted in the same call, and so are the
+    /// open runs of a pair with no raw row left; the open runs of a live pair never are.
     /// </summary>
     internal static async Task<(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesFailed)> PurgeObjectUsageChainAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, Func<string, int>? retentionDaysFor, DateTime utcNow, ILogger? logger,
@@ -1849,12 +1850,14 @@ public static class DarlingRetention
             }
         }
 
-        /* The runs table is plain: a run is not a per-snapshot row, so it has no chunk to drop. A closed run (last_time set) whose last
-           snapshot is past the horizon goes, because no window the chain can answer reaches back to it. A run still open (last_time NULL)
-           means the index is present through the pair's newest snapshot and is never purged. The statement is sliced on last_time. */
+        /* The runs table is plain: a run is not a per-snapshot row, so it has no chunk to drop. A closed run (last_time set) goes once its last
+           snapshot is past the raw horizon by one raw chunk. The margin is load-bearing: drop_chunks keeps a raw chunk until ALL of its range is
+           past the horizon, so for up to one chunk interval after the horizon the full fold still reads raw rows, and a run purged at the
+           horizon itself would leave those rows with no run, an answer with no fallback. The statement is sliced on last_time. */
+        var runsCutoff = utcNow.AddDays(-retentionDays) - await ReadRawChunkIntervalAsync(postgres, timescaleAvailable, logger, cancellationToken);
         var runsDeleted = await PurgeOneAsync(
             postgres, ObjectUsageChain.RunsTable, TimeSlicedDeleteSql(ObjectUsageChain.RunsTable, "last_time", "last_time IS NOT NULL"),
-            utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+            runsCutoff, logger, cancellationToken, pacer: walPacer);
         if (runsDeleted is null)
         {
             tablesFailed++;
@@ -1865,7 +1868,96 @@ public static class DarlingRetention
             rowsDeleted += runsDeleted.Value;
         }
 
+        /* A run still open (last_time NULL) means the index is present through the pair's newest snapshot, so it stays while the pair has
+           raw rows. A pair collected no longer has none left once its raw chunks are dropped, and nothing closes its runs: they go here. */
+        var deadPairRunsDeleted = await PurgeOneAsync(
+            postgres, ObjectUsageChain.RunsTable, OpenRunsOfDeadPairsDeleteSql,
+            utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+        if (deadPairRunsDeleted is null)
+        {
+            tablesFailed++;
+        }
+        else
+        {
+            rowsDeleted += deadPairRunsDeleted.Value;
+        }
+
         return (tablesPurged, rowsDeleted, chunksDropped, tablesFailed);
+    }
+
+    /// <summary>
+    /// The open runs (<c>last_time</c> NULL) of every (server, database) pair that has no <c>index_object_stats</c> row left (#9349). <c>$1</c> is the
+    /// raw horizon: a run first seen after it belongs to a pair whose raw rows the horizon cannot have dropped, so it is never looked at. Each pair is
+    /// probed once, on the prefix of <c>idx_index_object_stats_object</c> (<c>server_id, database_name</c>): a live pair stops at its first row and a
+    /// dead pair has no row to find, so the probe costs one index descent per pair and not one per run.
+    /// </summary>
+    internal const string OpenRunsOfDeadPairsDeleteSql = @"
+WITH open_pairs AS
+(
+    SELECT DISTINCT
+        r.server_id,
+        r.database_name
+    FROM collect.object_usage_runs AS r
+    WHERE r.last_time IS NULL
+    AND   r.first_time < $1
+),
+dead_pairs AS
+(
+    SELECT
+        p.server_id,
+        p.database_name
+    FROM open_pairs AS p
+    WHERE NOT EXISTS
+    (
+        SELECT
+            1
+        FROM collect.index_object_stats AS s
+        WHERE s.server_id = p.server_id
+        AND   s.database_name = p.database_name
+    )
+)
+DELETE FROM collect.object_usage_runs AS r
+USING dead_pairs AS d
+WHERE r.last_time IS NULL
+AND   r.server_id = d.server_id
+AND   r.database_name = d.database_name";
+
+    /// <summary>The raw chunk interval to assume when the table is not a hypertable or the read fails: TimescaleDB's default, the safe side (a run kept longer never gives a wrong answer).</summary>
+    internal static readonly TimeSpan DefaultRawChunkInterval = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// The time chunk width of <c>collect.index_object_stats</c> (#9349), read from <c>timescaledb_information.dimensions</c>: how long past the raw
+    /// horizon a raw row can still be there, which is how much longer than the raw table the chain's closed runs must be kept.
+    /// <see cref="DefaultRawChunkInterval"/> where the store has no TimescaleDB, the table is no hypertable, the dimension is not time-typed, or the read fails.
+    /// </summary>
+    internal static async Task<TimeSpan> ReadRawChunkIntervalAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (!timescaleAvailable)
+        {
+            return DefaultRawChunkInterval;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(@"
+SELECT
+    extract(epoch FROM d.time_interval)::bigint
+FROM timescaledb_information.dimensions AS d
+WHERE d.hypertable_schema = 'collect'
+AND   d.hypertable_name = $1
+AND   d.dimension_type = 'Time'", connection) { CommandTimeout = DeleteTimeoutSeconds };
+            command.Parameters.AddWithValue(ObjectUsageChain.SourceCollector);
+            var answer = await command.ExecuteScalarAsync(cancellationToken);
+            return answer is long seconds && seconds > 0 ? TimeSpan.FromSeconds(seconds) : DefaultRawChunkInterval;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Retention purge could not read the chunk interval of {Table}; its object usage runs are kept {Days} days past the raw horizon instead.",
+                ObjectUsageChain.SourceCollector, DefaultRawChunkInterval.TotalDays);
+            return DefaultRawChunkInterval;
+        }
     }
 
     /// <summary>

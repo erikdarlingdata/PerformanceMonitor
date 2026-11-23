@@ -32,6 +32,16 @@ namespace PerformanceMonitor.Darling.Storage;
 /// of each node's last snapshot, and the call goes on with the raw snapshots after the watermark. A backfill and a build one snapshot per call
 /// store the same rows, apart from <c>built_at</c>.</para>
 ///
+/// <para><b>Two runs of one server's <c>index_object_stats</c> never overlap on one host, so the raw snapshots of a pair arrive in
+/// <c>collection_time</c> order and a snapshot once there is complete.</b> The daily run holds the per-(server, collector) <c>DetachedCollectorGate</c> slot,
+/// and the at-connect run and <c>snapshot_now</c> take that same slot before they run (<c>DarlingWorker.TryTakeInlineDailySlot</c>, called from
+/// <c>RunOnLoadAsync</c> and from the snapshot path), so an inline run never starts beside a scheduled one. A run with a non-daily schedule override runs
+/// under the per-server <c>CollectionGate</c>, which <c>snapshot_now</c> also takes. A snapshot's <c>collection_time</c> comes from
+/// <c>CollectionTimeClock.NextStrictlyAfter</c> per (server, collector), so no two snapshots of one server share a time and a later run never lands before
+/// an earlier one. The builder therefore never scans for a snapshot that is missing from the middle of what it has built, and a call that finds
+/// the watermark behind the newest snapshot just goes on from it. The invariant is per host: a second host writing the same store is not covered by
+/// it.</para>
+///
 /// <para><b>Raw rows are read in batches</b> of whole snapshots, so a pair with years of rows is never held in memory or in one long read.</para>
 /// </summary>
 public static class ObjectUsageChainBuilder
