@@ -71,25 +71,27 @@ public partial class ViewerServerTab
 
     private async void DailyCalendar_MonthChanged(object? sender, PerformanceCalendarMonthEventArgs e)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await LoadCalendarMonthAsync(e.Month);
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"Daily Summary load failed: {ex.Message}");
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Daily Summary", null, clock.ElapsedMilliseconds, ex));
         }
     }
 
     private async void DailySummaryRefresh_Click(object sender, RoutedEventArgs e)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await LoadCalendarMonthAsync(DailyCalendar.DisplayMonth);
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"Daily Summary refresh failed: {ex.Message}");
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Daily Summary", null, clock.ElapsedMilliseconds, ex));
         }
     }
 

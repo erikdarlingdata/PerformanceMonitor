@@ -49,7 +49,8 @@ public sealed class ViewerFleetTabStatusLinesTests
         yield return new object[] { "StoreHealthTabItem", "StoreHealthContent", "failed to " };
         yield return new object[] { "IdentityCapacityTabItem", "IdentityCapacityContent", "failed to load the server list for identity capacity: " };
         yield return new object[] { "AvailabilityGroupsTabItem", "AvailabilityGroupsContent", "Availability Groups failed to load: " };
-        yield return new object[] { "FinOpsTab", "FinOpsContent", "refresh failed: " };
+        /* #9365: FinOps names what did not load in plain words, so its line is found by that phrase rather than a prefix. */
+        yield return new object[] { "FinOpsTab", "FinOpsContent", " did not load" };
     }
 
     [Theory]
@@ -80,7 +81,7 @@ public sealed class ViewerFleetTabStatusLinesTests
                 await (Task)typeof(MainWindow).GetMethod("RefreshVisibleAsync", Instance)!.Invoke(w, null)!;
                 ClippedTextProbe.Settle(host);
 
-                if (!status.Text.StartsWith(failurePrefix, StringComparison.Ordinal))
+                if (!(failurePrefix.StartsWith(' ') ? status.Text.Contains(failurePrefix, StringComparison.Ordinal) : status.Text.StartsWith(failurePrefix, StringComparison.Ordinal)))
                 {
                     findings.Add($"with {tabName} on screen after its read failed the status bar reads \"{status.Text}\", not \"{failurePrefix}…\"");
                 }

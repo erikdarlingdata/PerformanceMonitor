@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
@@ -244,7 +245,8 @@ public partial class ViewerServerTab
                tier disclosure are independent facts, so both may show at once (a window aged past raw AND
                routed to hourly). */
             UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
-            await LoadQueryStatsSlicerAsync(startUtc, endUtc, slicerTask);
+            await LoadQueryStatsSlicerAsync(startUtc, endUtc, slicerTask,
+                () => Timed(timer, "slicer read (retry)", _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter)));
         }
         catch
         {
@@ -311,7 +313,8 @@ public partial class ViewerServerTab
                banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await UpdateProcStatsLeftOutBannerAsync(read, startUtc, endUtc);
-            await LoadProcStatsSlicerAsync(startUtc, endUtc, slicerTask);
+            await LoadProcStatsSlicerAsync(startUtc, endUtc, slicerTask,
+                () => Timed(timer, "slicer read (retry)", _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter)));
         }
         catch
         {
@@ -716,9 +719,57 @@ public partial class ViewerServerTab
 
     // ── Slicers (Lite's ServerTab.Slicers.cs; the slicer sends UTC bounds, the viewer reads take naive UTC) ──
 
-    private async Task LoadQueryStatsSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read)
+    /// <summary>
+    /// #9365: awaits a tab's chart (slicer) read, which started beside the grid's. The grid is already bound when this runs, so a failure of
+    /// the chart alone must not fail the refresh: it is tried once more inside the same refresh (never when the refresh was cancelled by a
+    /// sub-tab pick, or a newer refresh is already queued, which reads again anyway), and a second failure writes ONE warning line naming
+    /// the tab and the read, leaves the plain-words text for the status line and answers null so the caller draws an empty chart.
+    /// A cancelled load rethrows, as before.
+    /// </summary>
+    /// <param name="read">The read the loader started beside the grid's.</param>
+    /// <param name="again">Starts the same read once more.</param>
+    internal async Task<List<TimeSliceBucket>?> ReadSlicerWithOneRetryAsync(string surface, Task<List<TimeSliceBucket>> read, Func<Task<List<TimeSliceBucket>>> again)
     {
-        var data = await read;
+        var clock = Stopwatch.StartNew();
+        Exception failure;
+        try
+        {
+            return await read;
+        }
+        catch (Exception first) when (!ViewerReadScope.Current.IsCancellationRequested)
+        {
+            failure = first;
+        }
+
+        var retried = false;
+        if (!_refreshRequested)
+        {
+            retried = true;
+            try
+            {
+                return await again();
+            }
+            catch (Exception second) when (!ViewerReadScope.Current.IsCancellationRequested)
+            {
+                failure = second;
+            }
+        }
+
+        _partialFailureText = ViewerRefreshFailure.Report($"{_server.DisplayName}: {surface}", "slicer read", clock.ElapsedMilliseconds, failure, ViewerRefreshFailure.GridIsCurrent, retried);
+        return null;
+    }
+
+    private async Task LoadQueryStatsSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read, Func<Task<List<TimeSliceBucket>>> again)
+    {
+        var data = await ReadSlicerWithOneRetryAsync("Queries > Top Queries by Duration", read, again);
+        if (data is null)
+        {
+            _queryStatsSlicerData = new List<TimeSliceBucket>();
+            QueryStatsSlicer.ShowEmpty("The time-range chart did not load.");
+            UpdateQueryStatsEmptyMessage();
+            return;
+        }
+
         _queryStatsSlicerData = data;
         _queryStatsSlicerMetric = "TotalCpu";
         if (data.Count == 0)
@@ -749,9 +800,16 @@ public partial class ViewerServerTab
         }
     }
 
-    private async Task LoadProcStatsSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read)
+    private async Task LoadProcStatsSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read, Func<Task<List<TimeSliceBucket>>> again)
     {
-        var data = await read;
+        var data = await ReadSlicerWithOneRetryAsync("Queries > Top Procedures by Duration", read, again);
+        if (data is null)
+        {
+            _procStatsSlicerData = new List<TimeSliceBucket>();
+            ProcStatsSlicer.ShowEmpty("The time-range chart did not load.");
+            return;
+        }
+
         _procStatsSlicerData = data;
         _procStatsSlicerMetric = "TotalCpu";
         if (data.Count == 0)
