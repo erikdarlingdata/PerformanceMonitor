@@ -55,9 +55,10 @@ public partial class AgentChangesTab : UserControl
     {
         if (_dataService is null)
             return;
+        var timer = new ViewerLoadTimer();
         try
         {
-            var read = await _dataService.ReadAgentChangesAsync();
+            var read = await ViewerServerTab.Timed(timer, "agent changes read", _dataService.ReadAgentChangesAsync());
             _enabled = read.Enabled;
             ChangesGrid.ItemsSource = read.Changes.Select(c => new AgentChangeViewRow(c)).ToList();
             RefusalsGrid.ItemsSource = AgentRefusalViewRow.From(read.Refusals);
@@ -65,7 +66,8 @@ public partial class AgentChangesTab : UserControl
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Status?.Invoke("Could not read agent changes: " + ex.Message);
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            Status?.Invoke(ViewerRefreshFailure.Report("Agent Changes", timer, ex));
         }
 
         await LoadProposalsAsync();
@@ -76,9 +78,10 @@ public partial class AgentChangesTab : UserControl
     {
         if (_dataService is null || _readOnly)
             return;
+        var timer = new ViewerLoadTimer();
         try
         {
-            var rows = await _dataService.ReadProposalsAsync(_login);
+            var rows = await ViewerServerTab.Timed(timer, "proposals read", _dataService.ReadProposalsAsync(_login));
             if (rows is null)
                 Status?.Invoke("The service has not listed the proposals yet. Reload the tab to read them again.");
             else
@@ -86,7 +89,8 @@ public partial class AgentChangesTab : UserControl
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Status?.Invoke("Could not read the proposals: " + ex.Message);
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            Status?.Invoke(ViewerRefreshFailure.Report("Agent Changes", timer, ex));
         }
     }
 

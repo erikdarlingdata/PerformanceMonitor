@@ -1343,12 +1343,13 @@ public partial class MainWindow : Window
         /* The tab whose load this is, read once: the reader may have moved to another tab by the time the load finishes or fails, and
            its stamp or its failure belongs to this one. */
         var selected = MainTabs.SelectedItem as TabItem;
+        var loadClock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             switch (selected)
             {
                 case TabItem { Content: ViewerServerTab serverTab }:
-                    /* The tab writes its own line, "<display name>: refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
+                    /* The tab writes its own line, "<display name>: refreshed …" or its plain "did not load" line, through the writer wired in OpenServerTab. */
                     await serverTab.RefreshActiveInnerTabAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
@@ -1414,7 +1415,8 @@ public partial class MainWindow : Window
         {
             /* #8133: a failed fleet read must not leave the Overview saying it is loading. */
             OverviewLoadingText.Visibility = Visibility.Collapsed;
-            SetTabStatus(selected, $"refresh failed: {ex.Message}");
+            /* #9365: one warning line naming the tab, and plain words in the status bar in place of the driver's text. */
+            SetTabStatus(selected, ViewerRefreshFailure.Report(selected?.Header?.ToString() ?? "tab", null, loadClock.ElapsedMilliseconds, ex));
         }
     }
 

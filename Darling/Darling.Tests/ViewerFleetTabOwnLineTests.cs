@@ -82,7 +82,7 @@ public sealed class ViewerFleetTabOwnLineTests
                 var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 void OnFailure(string line)
                 {
-                    if (line.StartsWith("failed to load the fleet sweep watch items", StringComparison.Ordinal))
+                    if (line.StartsWith("The watch items did not load.", StringComparison.Ordinal))
                     {
                         failed.TrySetResult();
                     }

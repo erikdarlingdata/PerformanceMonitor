@@ -216,8 +216,8 @@ public sealed class ViewerQueryTabLoadTests
         Assert.Contains("await RefreshProcStatsComparisonAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
         Assert.Contains("await RefreshQueryStoreComparisonAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
 
-        /* The paths that start outside a load pass no timer: the day-summary drill and the three slicer drags. */
-        Assert.Contains("await LoadTopQueriesAsync(startUtc, endUtc);", Source("ViewerServerTab.DailySummary.cs"), StringComparison.Ordinal);
+        /* The paths that start outside a load never use a load's clock: the day-summary drill hands its loader a clock of its own, and the three slicer drags pass no timer to the comparison. */
+        Assert.Contains("await LoadTopQueriesAsync(startUtc, endUtc, timer);", Source("ViewerServerTab.DailySummary.cs"), StringComparison.Ordinal);
         Assert.Contains("await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);", queries, StringComparison.Ordinal);
         Assert.Contains("await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);", queries, StringComparison.Ordinal);
         Assert.Contains("await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);", queries, StringComparison.Ordinal);
