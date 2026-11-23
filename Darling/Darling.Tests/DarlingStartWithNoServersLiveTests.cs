@@ -350,9 +350,7 @@ public sealed class DarlingStartWithNoServersLiveTests
             Assert.True(ReferenceEquals(finished, task), "the loop did not finish within 60 seconds of the stop");
             await task;
 
-            var afterStop = logger.Entries.Skip(loggedBeforeStop)
-                .Where(e => e.Level >= LogLevel.Warning && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal))
-                .ToList();
+            var afterStop = Faults(logger.Entries.Skip(loggedBeforeStop)).ToList();
             Assert.True(
                 afterStop.Count == 0,
                 "nothing at Warning or above may be logged after the stop: " + string.Join(" || ", afterStop.Select(e => e.Level + " " + e.Message)));
@@ -375,10 +373,45 @@ public sealed class DarlingStartWithNoServersLiveTests
     }
 
     /* A store the test borrows can carry settings of its own that the service rightly warns about (pg_stat_statements.track_utility on
-       a plain cluster). Those say nothing about the server list, so they are the one kind left out. */
-    private static IEnumerable<(LogLevel Level, string Message)> Faults(RecordingLogger logger) =>
-        logger.Entries.Where(e => e.Level >= LogLevel.Warning
-            && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal));
+       a plain cluster), and states of its own that depend on the time of day. Those say nothing about the server list, so they are the
+       two kinds left out, each by its fixed prefix.
+       The second is the TimescaleDB compression clearance warning ("TimescaleDB: compression of <table> last ran ..."). The test's
+       store is a clone of a template whose compression job came due while the template sat idle, so the clone's scheduler runs that
+       job the moment it starts, on whatever minute of the hour that is. At a minute an hourly refresh also starts on (the clearance
+       there is zero) the service reports the run as it reports any run on that minute: a warning about the store's schedule, which
+       the server list does not touch. */
+    private static IEnumerable<(LogLevel Level, string Message)> Faults(IEnumerable<(LogLevel Level, string Message)> entries) =>
+        entries.Where(e => e.Level >= LogLevel.Warning
+            && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal)
+            && !e.Message.StartsWith("TimescaleDB: compression of ", StringComparison.Ordinal));
+
+    private static IEnumerable<(LogLevel Level, string Message)> Faults(RecordingLogger logger) => Faults(logger.Entries);
+
+    /// <summary>
+    /// The compression clearance warning at a minute an hourly refresh also starts on is the one a clone's first scheduler run can
+    /// log, and it must not count as a fault of starting with no servers. Runs the product's own report on a reading of that run
+    /// at that minute (no store and no clock needed: the minute is in the reading), so it fails at every minute, not only at the
+    /// ones CI happens to land on.
+    /// </summary>
+    [Fact]
+    public void ACompressionRunOnARefreshMinute_IsNotAFaultOfStartingWithNoServers()
+    {
+        var refreshMinute = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HourlyRefreshPhaseOrder[0]);
+        Assert.Equal(0, TimescaleSupport.CompressionMinuteClearanceSeconds(refreshMinute));
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out _));
+
+        var started = new DateTime(2026, 11, 8, 4, refreshMinute, 0, DateTimeKind.Utc);
+        var reading = new CompressionActivity(
+            TimescaleSupport.CollectionLogTable, "Scheduled", started, TimeSpan.Zero, 0L);
+        var logger = new RecordingLogger();
+
+        TimescaleSupport.LogCompressionActivity([reading], started.AddMinutes(1), logger);
+
+        Assert.Contains(
+            logger.Entries, e => e.Level == LogLevel.Warning
+                && e.Message.StartsWith("TimescaleDB: compression of ", StringComparison.Ordinal));
+        Assert.Empty(Faults(logger));
+    }
 
     internal sealed class RecordingLogger : ILogger<DarlingWorker>
     {
