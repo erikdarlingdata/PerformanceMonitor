@@ -488,12 +488,6 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne);
         var watermarks = await PlanOfAsync(connection, ObjectUsageChainTick.WatermarksSql, ct, ServerOne);
 
-        var dump = Environment.GetEnvironmentVariable("TICK_PLAN_DUMP");
-        if (!string.IsNullOrEmpty(dump))
-        {
-            System.IO.File.WriteAllText(dump, "SERVERS" + Environment.NewLine + servers + Environment.NewLine + "DATABASES" + Environment.NewLine + databases);
-        }
-
         Assert.DoesNotContain("Dead", string.Join(",", await ListDatabasesAsync(connection, ct)), StringComparison.Ordinal);
         Assert.DoesNotContain("Seq Scan", servers, StringComparison.Ordinal);
         Assert.Contains("Index Only Scan using idx_index_object_stats_server_time", servers, StringComparison.Ordinal);
