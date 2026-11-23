@@ -61,7 +61,7 @@ internal static class DuckDbReadProfile
         public void Dispose() => s_testScope.Value = outer;
     }
 
-    private static bool IsOn => false;
+    private static bool IsOn => s_testScope.Value is { } scope ? scope.On : Enabled;
 
     private static int s_warned;
     private static int s_shapeLogged;
@@ -202,7 +202,6 @@ internal static class DuckDbReadProfile
         /// <summary>Profiling off on the connection, the file named on the current trail, and the read's older files pruned.</summary>
         internal void End()
         {
-            TryDisable(_connection);
             DuckDbProfileTrail.Add(Path.GetFileName(_path));
             try
             {
