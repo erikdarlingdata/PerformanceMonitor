@@ -86,10 +86,20 @@ internal static class McpArgumentTypeRows
 
     /// <summary>One row per (type, value): the CLR type, the JSON value as sent, whether the binder cannot read it, and
     /// the phrases the refusal must say, separated by '|' (empty for a value the binder reads).</summary>
-    public static TheoryData<string, string, bool, string> All()
+    public static TheoryData<string, string, bool, string> All(IEnumerable<Type> toolTypes)
     {
+        /* A row goes to a host only when a tool of that host declares its type (the probe tool counts, since it stands in for
+           a type no shipped tool declares). Both SKUs compile this table, and Darling's call_tool takes a JsonElement?
+           that Lite has no tool for (#9388). This reads the tool methods themselves, with no host, so a row is dropped only
+           when no method of that host's tool types has a parameter of its type. */
+        var declared = toolTypes
+            .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .SelectMany(method => method.GetParameters().Select(parameter => parameter.ParameterType))
+            .ToHashSet();
+
         var data = new TheoryData<string, string, bool, string>();
-        foreach (var row in Table())
+        foreach (var row in Table().Where(row => declared.Contains(s_types[row.Type])))
         {
             data.Add(row.Type, row.Raw, row.Refused, row.Says);
         }
