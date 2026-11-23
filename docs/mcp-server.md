@@ -136,7 +136,7 @@ Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for exampl
 
 Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only URL, `http://localhost:5151/`. Use the same entry with that URL and a `lite-token` input. Paste the token from Lite's Settings, Access, **Copy Token**.
 
-Lite does not need `/core`. Its code defines 115 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 101 by default, well under 128. Even all 115 are under the cap. The cap still counts every other MCP server in the same chat.
+Lite does not need `/core`. Its code defines 116 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 102 by default, well under 128. Even all 116 are under the cap. The cap still counts every other MCP server in the same chat.
 
 These steps were checked with VS Code and Copilot Free against a Darling service, where the server loaded its 75 `/core` tools and answered `list_servers`. Lite was not checked in Copilot, and the Lite steps follow the same entry with Lite's URL.
 

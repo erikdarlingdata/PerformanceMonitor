@@ -106,7 +106,7 @@ public sealed class McpUnknownArgumentGuardTests
     /// <remarks>#3898: the shared <see cref="McpServedSchema"/> predicate, which also keeps nullable value types
     /// and arrays (get_tool_guide's <c>string[]</c>) model-facing; the old inline one called both services and
     /// dropped them from the schemas this census checks.</remarks>
-    internal static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
+    internal static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer);
 
     private static CallToolRequestParams Call(string toolName, Dictionary<string, JsonElement> arguments) =>
         new() { Name = toolName, Arguments = arguments };
