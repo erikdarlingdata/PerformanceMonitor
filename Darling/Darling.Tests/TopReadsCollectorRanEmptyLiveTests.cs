@@ -189,6 +189,11 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
                   VALUES ($2, $1, 'StackOverflow', 1, 1, 'Regular', $3, $2, 'h1', 10, 1000, 5, 5, 5, 5, 5, 'ph', 1, $3)",
                 ServerId, now.AddMinutes(-10), now.AddMinutes(-90));
 
+            /* The same read the tool makes: the gate must plan the interval table for this window, or this test would pass on the raw tier. */
+            var reach = await DarlingDataReader.GetQueryStoreTopWithReachAsync(
+                postgres, ServerId, now.AddHours(-1), now, 2, DatabaseFilter.One("StackOverflow"), null, null, ct);
+            Assert.NotNull(reach.Table);
+
             var answer = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, database_name: "StackOverflow", as_of: now.ToString("o"))).RootElement;
 
             Assert.Equal("empty", answer.GetProperty("status").GetString());
