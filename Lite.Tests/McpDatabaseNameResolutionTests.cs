@@ -339,7 +339,9 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
         using var release = new ManualResetEventSlim();
         var writer = Task.Factory.StartNew(() =>
         {
-            using var held = _duckDb.AcquireWriteLock();
+            /* A bounded acquisition, so WriteLockBudgetTests does not score this file's seed ages (hours) as a hold. The hold is the
+               3.5 s the test waits, ended by the finally below. */
+            using var held = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(30));
             acquired.Set();
             release.Wait();
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
