@@ -104,12 +104,39 @@ public sealed class DarlingMcpQueryStoreClutterTools
     internal const string ClerkNoteDroppedOut =
         "The clerk appeared earlier in the window and has since dropped out of the collector's top 25; latest_memory_mb is its last observed footprint, not its current one.";
 
+    /// <summary>
+    /// #9382: the window note, naming each arm that holds less than the window and how far back that arm reaches. A null start means that arm
+    /// covers the whole window. The wording is shared by the web Queries tab, which renders the note it is sent.
+    /// </summary>
+    private static string WindowTruncationNote(DateTime? planChurnStart, DateTime? waitStart, DateTime requestedStart, DateTime now)
+    {
+        static string Hours(DateTime start, DateTime now) =>
+            Math.Round((now - start).TotalHours, 1).ToString("0.#", CultureInfo.InvariantCulture);
+
+        var parts = new List<string>();
+        if (planChurnStart is { } churn)
+        {
+            parts.Add($"the plan-churn arm (clutter rollups plus raw query_store_stats) holds {Hours(churn, now)} hours of the window");
+        }
+
+        if (waitStart is { } wait)
+        {
+            parts.Add($"the wait arm (wait_stats) holds {Hours(wait, now)} hours of the window");
+        }
+
+        return "The window reaches further back than this server's stored data for " + string.Join(" and ", parts)
+            + ", not the " + Hours(requestedStart, now) + " asked for; effective_hours_back is the shorter of the arms that were cut."
+            + (planChurnStart is null ? " The plan-churn arm covers the whole window." : "")
+            + (waitStart is null ? " The wait arm covers the whole window." : "")
+            + " The read-cost and config arms read tables with longer retention and cover the whole window.";
+    }
+
     [McpServerTool(Name = "get_query_store_clutter"), Description(
         "The Query Store CLUTTER view for one server, composed from already-collected rows: no new query runs. Clutter (read_cost/plan_churn/config) is per DATABASE; qs_overhead (waits/memory clerk) is per SERVER, never attributed to a database. No rows answers unavailable, never a clean bill. Verdict Unknown means unmeasured, never quietly Healthy. REPLICAS: excluded, verdict Unknown, never a defect. query_capture_mode null means never asked, never NONE. window_truncated is a retention floor, not a page cut: no limit fixes it. fleet_median is null unless include_fleet_median=true. <<GUIDE>> The Query Store CLUTTER view for one server, composed from rows already collected: no new query runs against the monitored server. Clutter is per DATABASE and overhead is per SERVER, and the payload keeps the two apart. Each database row carries three decomposed arms with raw numbers, never a bare composite. (a) read_cost, from the query_store collector's fan-out rollup on collection_log: runs_observed (fan-out runs on the server in the window), runs_slowest (runs on which THIS database was the slowest item) and runs_slowest_pct, slowest_item_ms_p50/p95 when it was, run_duration_ms_p50 for scale, slowest_share_pct (median of slowest_item_ms / duration_ms over those runs, the slowest item's share of the whole pass, get_collection_health's verdict figure), and dominance_ratio (this database's median slowest cost over the pooled median of every OTHER database's slowest cost on the same server, null when no other database was ever slowest). dominance_ratio is NOT get_collection_health's dominance (slowest x items / run): it names a different quantity. The store keeps only the slowest item of each run, so this arm ranks databases by how often and by how much they were the slowest, not by a per-database series. (b) plan_churn, from raw query_store_stats: distinct_queries, distinct_plans (plan_id, the identity MAX_PLANS_PER_QUERY caps and the plan map keys on), plans_per_query_p95 and _max, new_plans_per_day (plans first seen after the database's first collection in the window, per day of the span its collections cover; a plan idle before the window and run again inside it counts as new, the store keeps no first-seen stamp), never_seen_twice_fraction (plans seen under exactly one collection over all plans observed; null under two collections) and collections_observed. (c) config, the newest query_store_health capture per database INSIDE the window, with its own captured_at: actual_state, desired_state, readonly_reason (decoded), storage used vs cap and pct_of_cap, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, and query_capture_mode (the DMV's query_capture_mode_desc spelling verbatim: ALL / AUTO / CUSTOM / NONE) with capture_mode_known beside it, null means the newest capture predates the column, which is NEVER ASKED and never NONE. The mode is the one option on that row that names a plan-churn factory, so the churn recommendations name it: ALL beside high churn is the 'switch to AUTO' case, AUTO beside it points at the workload. Per database, verdict is the band canon (Healthy / Warning / Critical / Unknown) with verdict_reasons naming the arm and bar that raised it; the bars are published under thresholds so you can disagree with them on the evidence, and Unknown means unmeasured, never quietly Healthy. recommendations is prose per reason and next_tools names the reads that carry the detail. Rows are ordered worst-first (band, then the read-cost share, then plans per query) and cut at limit, observed off a fetch one past it: truncated is the page cut, databases_returned the page, database_count the whole. READ-ONLY: verdict_reasons qs_read_only (Critical) means readonly_reason carries a capacity bit (65536, 131072, 262144 or 524288), the store filled up and stopped, and a capacity bit decides when a state bit is set too. qs_read_only_state means Query Store is READ_ONLY with no capacity bit and no operator choice: either the database itself is in a state Query Store cannot record in (readonly_reason 1 read-only, 2 single-user, 4 emergency), or readonly_reason is 0 with desired_state READ_WRITE, or it holds only bits this build does not recognise, where the cause is not recorded and get_query_store_health and the error log are the next read. qs_read_only_operator means readonly_reason 0 with desired_state READ_ONLY, an operator's own OPERATION_MODE. Both are reasons with no band and are not clutter; the row stays Unknown unless another arm grades it, and recommendations name the decoded reason. REPLICAS: a database whose readonly_reason carries bit 8 (the engine's readable-secondary flag) reads excluded: true, excluded_reason: qs_read_only_replica, verdict Unknown, Query Store on a readable secondary is READ_ONLY by design, its clutter and configuration are its primary's, and it is never a defect here. qs_overhead is the ONE per-server block: wait_stats lists every non-sleep QDS_* wait type in the window with wait_ms_total, waiting_tasks_total and wait_ms_per_hour (rated milliseconds over the measured seconds they accrued over, never over a cadence; null when no interval was knowable), and excluded_wait_types NAMES the four QDS_* sleep waits IgnoredWaitDefaults drops at collection (QDS_ASYNC_QUEUE, QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP, QDS_PERSIST_TASK_MAIN_LOOP_SLEEP, QDS_SHUTDOWN_QUEUE) so the proxy is not mistaken for the whole; memory_clerk is MEMORYCLERK_QUERYDISKSTORE latest and window max, with clerk_in_latest_capture saying whether it is in the collector's current top 25 (its absence is a rank, not a zero); the block ends with the window's baseline discontinuities, the same markers the trend tools publish. The window block carries the requested start and end beside the raw tier's reach. fleet_median is opt-in (include_fleet_median): discrete medians of slowest_share_pct and plans_per_query_p95 over every database on every enabled SQL Server target that is not a replica, and of the QDS wait rate over those servers, each with the population it was drawn from, off by default because it walks two raw hypertables fleet-wide over the window. include_fleet_median's own original wording, unabbreviated: If true, also compute fleet_median: the discrete median of each headline arm over every enabled SQL Server target that is not a replica, so a per-server figure has a reference. Default false: it walks query_store_stats and wait_stats fleet-wide over the window, which on a large store is the read deadline's whole budget. The plan-churn and wait arms read the raw tier only, which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreClutter(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24, maximum 168; the plan-churn and wait arms read the raw tier, which a store with the rollups armed drops at 4 days: window_truncated says when the window reached past it.")] int hours_back = 24,
+        [Description("Hours of history. Default 24, maximum 168; the plan-churn arm reads whole days and hours from the clutter rollups and raw rows at the edges, and the wait arm reads wait_stats: window_truncated says when either holds less than the window.")] int hours_back = 24,
         [Description("Maximum database rows to return, worst first. Default 50. truncated is true when the server had more Query-Store-bearing databases than this; database_count is the whole.")] int limit = DefaultLimit,
         [Description("If true, also computes fleet_median: the discrete median of each headline arm over every enabled non-replica SQL Server target. Default false; see the reading guide for the read-cost detail.")] bool include_fleet_median = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
@@ -206,17 +233,25 @@ public sealed class DarlingMcpQueryStoreClutterTools
                             "unavailable",
                             $"No Query Store rows, no query_store fan-out run and no query_store_health capture for this server in the {hours_back}-hour window. "
                             + "The query_store collector runs every 5 minutes and query_store_health hourly on SQL Server 2016+; a server with none of the three either predates Query Store, has it OFF everywhere, or has not completed a cycle yet. "
-                            + "The plan-churn arm reads the raw tier, which a store with the rollups armed drops at 4 days: try a shorter window before concluding nothing ran.", databaseFilter.Describe(), noRows.AsHints());
+                            + "The plan-churn arm reads the clutter rollups and raw rows, and the raw rows a store with the rollups armed drops at 4 days: try a shorter window before concluding nothing ran.", databaseFilter.Describe(), noRows.AsHints());
                 return McpHelpers.WithDatabasesLeftOut(await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, emptyAnswer, noRows, cancellationToken, requestedStart), leftOut)!;
             }
 
-            /* #2364 / #3653 item 17: what the raw tier actually held, beside what was asked for. The
-               plan-churn arm is raw-only (the rollups carry no plan_id), so its floor is the window's. */
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-            /* The floor can sit before the requested start when the rows reach back past the window; the shared
-               helper never reports a served start earlier than the one asked for. */
-            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
-            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            /* #2364 / #3653 item 17, #9382: how far back each arm that can be cut actually reached, beside what was asked for. The
+               plan-churn arm reads whole days and hours from the clutter rollups and raw rows at the edges (#9148, #9173), so its coverage
+               starts where its route's rollups do, or at raw's oldest row: GetPlanChurnCoverageStartAsync. The wait arm reads wait_stats
+               and has its own floor. The read-cost and config arms read tables with longer retention. */
+            var planChurnStart = await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(postgres, serverIds, requestedStart, now, cancellationToken);
+            var waitFloor = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.WaitStats, resolved.ServerId, requestedStart, now, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            /* A start before the requested one means the arm covers the window whole; the shared helper never reports a served start earlier
+               than the one asked for. */
+            var planChurnTruncated = RawWindowFloor.IsTruncated(planChurnStart, requestedStart);
+            var waitTruncated = RawWindowFloor.IsTruncated(waitFloor, requestedStart);
+            var windowTruncated = planChurnTruncated || waitTruncated;
+            var effectiveStart = RawWindowFloor.EffectiveStart(
+                planChurnTruncated && waitTruncated ? (planChurnStart > waitFloor ? planChurnStart : waitFloor) : planChurnTruncated ? planChurnStart : waitTruncated ? waitFloor : null,
+                requestedStart);
+            var truncationNote = windowTruncated ? WindowTruncationNote(planChurnTruncated ? planChurnStart : null, waitTruncated ? waitFloor : null, requestedStart, now) : null;
 
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
 
@@ -355,9 +390,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                     effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                     effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                     window_truncated = windowTruncated,
-                    truncation_note = windowTruncated
-                        ? "The window reaches further back than this server's raw query_store_stats retains, so the plan-churn arm (and the wait arm, which reads the same raw tier) covers effective_hours_back, not hours_back. The read-cost and config arms read tables with longer retention and cover the whole window."
-                        : null,
+                    truncation_note = truncationNote,
                 },
                 server_is_replica = serverIsReplica,
                 server_note = serverIsReplica

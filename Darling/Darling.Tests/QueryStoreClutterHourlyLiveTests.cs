@@ -488,4 +488,49 @@ ON CONFLICT (server_id, day_utc) DO UPDATE SET built_at = EXCLUDED.built_at, clu
 
         Assert.Equal(1L, await CountAsync(store, DayStamped, ct, ("server_id", A), ("day", rowDay)));
     }
+
+    [Fact]
+    public async Task TheClutterWindowBlock_ReportsPlanChurnCoverageFromTheRollups_NotFromRawAlone_AndNamesTheWaitArmWhenItIsTheOneCut()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await QueryStoreClutterRollupLiveTests.SeedServerAsync(store, A, E.AddDays(-10), 10, 48, 12, true, ct);
+        await TickAsync(store, TickNow, ct);
+
+        /* Raw keeps four days and the rollups keep the older ones: the purge drops the raw rows, and the built days and hours stay served. */
+        var rawFloor = E.AddDays(-4);
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection,
+            "DELETE FROM collect.query_store_stats WHERE server_id = @server_id AND collection_time < @floor", ct, ("server_id", A), ("floor", rawFloor));
+
+        /* A 144-hour window that starts half an hour before a midnight: the rollup days start at that midnight, so every arm reaches the window start. */
+        var now = E.AddMinutes(-30);
+        var asOf = DateTime.SpecifyKind(now, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var fleet = new[] { A };
+        Assert.True(await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(store.Postgres, fleet, now.AddHours(-144), now, ct) is { } coverage && coverage < rawFloor,
+            "plan churn coverage does not start before raw's oldest row, so the rollups are not read");
+
+        var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(store.Postgres, "rollup-9111", hours_back: 144, as_of: asOf);
+        using (var doc = System.Text.Json.JsonDocument.Parse(json))
+        {
+            var window = doc.RootElement.GetProperty("window");
+            Assert.False(window.GetProperty("window_truncated").GetBoolean(), json);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, window.GetProperty("truncation_note").ValueKind);
+            Assert.True(window.GetProperty("effective_hours_back").GetDouble() >= 143.0, json);
+        }
+
+        /* A wait row 2 hours back is the oldest wait_stats row: the wait arm holds 2 hours of the window and the note names it. */
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(store.Connection, @"
+INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+VALUES (990382001, @at, @server_id, 'rollup-9111', 'QDS_ASYNC_QUEUE', 10, 100, 0, 1, 1, 0, 60)", ct, ("at", now.AddHours(-2)), ("server_id", A));
+        json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(store.Postgres, "rollup-9111", hours_back: 144, as_of: asOf);
+        using (var doc = System.Text.Json.JsonDocument.Parse(json))
+        {
+            var window = doc.RootElement.GetProperty("window");
+            Assert.True(window.GetProperty("window_truncated").GetBoolean(), json);
+            Assert.Equal(2.0, window.GetProperty("effective_hours_back").GetDouble());
+            var note = window.GetProperty("truncation_note").GetString()!;
+            Assert.Contains("wait arm", note, StringComparison.Ordinal);
+        }
+    }
 }
