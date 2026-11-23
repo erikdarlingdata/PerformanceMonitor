@@ -155,11 +155,17 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         {
             await using var postgres = NpgsqlDataSource.Create(connection.ConnectionString);
 
-            var all = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(postgres, ServerId, day, day.AddDays(1), 7, ct);
+            var all = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(postgres, ServerId, day, day.AddDays(1), 8, ct);
             Assert.Equal(8, all.Rows.Count);
             Assert.Equal(5, all.TotalEvents);
             Assert.Equal(5, all.ShownEvents);
             Assert.False(all.Truncated);
+
+            /* Seven rows: the one cut is the second node's record of an event whose first record is still shown, so no event is left out. */
+            var sevenRows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(postgres, ServerId, day, day.AddDays(1), 7, ct);
+            Assert.Equal(7, sevenRows.Rows.Count);
+            Assert.Equal(5, sevenRows.ShownEvents);
+            Assert.False(sevenRows.Truncated);
 
             /* Four rows: the newest are the STEADY pair (one event) and the 1 ms pair (one event), so two events shown of five. */
             var cut = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(postgres, ServerId, day, day.AddDays(1), 4, ct);
