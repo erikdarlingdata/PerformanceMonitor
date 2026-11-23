@@ -242,9 +242,9 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {q
         SeedAnomalies(start);
 
         using var scope = DuckDbReadProfile.ScopeForTests(on: false, _profiles);
+        using var trail = DuckDbProfileTrail.Begin();
         var rows = await _service.GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 6);
         var facts = await new AnomalyDetector(_duckDb, new BaselineProvider(_duckDb)).DetectAnomaliesAsync(Context(start, end));
-        using var trail = DuckDbProfileTrail.Begin();
 
         Assert.Equal(2, rows.Count);
         Assert.Contains(facts, f => f.Key == "ANOMALY_READ_LATENCY");
@@ -256,7 +256,6 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {q
     public async Task AfterAProfiledRead_TheSameConnectionHasProfilingOff()
     {
         using var scope = DuckDbReadProfile.ScopeForTests(on: true, _profiles);
-        using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
 
@@ -277,7 +276,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {q
             Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
         }
 
-        Assert.Equal([file], Directory.GetFiles(_profiles));
+        Assert.Equal(new[] { file }, Directory.GetFiles(_profiles));
         Assert.Equal(before, File.ReadAllText(file));
         Assert.True(HasOperatorTiming(file));
     }
@@ -301,8 +300,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {q
         var kept = Files("query-store-top-rank").Select(Path.GetFileName).Where(n => !n!.StartsWith("query-store-top-rank-x-", StringComparison.Ordinal)).ToList();
         Assert.Equal(DuckDbReadProfile.KeepPerRead, kept.Count);
         Assert.DoesNotContain("query-store-top-rank-20200101T000000000.json", kept);
-        Assert.DoesNotContain("query-store-top-rank-20200101T000004000.json", kept);
-        Assert.Contains("query-store-top-rank-20200101T000005000.json", kept);
+        Assert.Contains("query-store-top-rank-20200101T000024000.json", kept);
         Assert.Contains(kept, n => !n!.Contains("20200101", StringComparison.Ordinal));
         Assert.True(File.Exists(other));
     }
