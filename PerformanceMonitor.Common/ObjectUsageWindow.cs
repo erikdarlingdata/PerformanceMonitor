@@ -188,17 +188,13 @@ public sealed record ObjectUsageWindowResult(
 public sealed class ObjectUsageWindow
 {
     private readonly List<ObjectUsageSample> _snapshot = new();
-    private readonly Dictionary<string, NodeState> _nodes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ObjectUsageStepper _stepper = new();
     private readonly Dictionary<int, ObjectState> _objects = new();
     private readonly List<ObjectUsageReset> _resets = new();
     private readonly List<string> _servers = new();
 
     private DateTime? _snapshotTime;
-    private DateTime? _previousTime;
-    private string? _previousServer;
-    private string? _previousNodeKey;
     private int _indexResets;
-    private DateTime? _coveredFrom;
     private TimeSpan? _largestGap;
     private int _snapshotCount;
     private bool _completed;
@@ -248,7 +244,7 @@ public sealed class ObjectUsageWindow
             .ToList();
 
         return new ObjectUsageWindowResult(
-            _coveredFrom, _previousTime, _snapshotCount, _largestGap, _resets.ToList(), _servers.ToList(), objects, _indexResets,
+            _stepper.Nodes.CoveredFrom, _stepper.Nodes.PreviousTime, _snapshotCount, _largestGap, _resets.ToList(), _servers.ToList(), objects, _indexResets,
             TimeSpan.FromTicks(_resets.Sum(r => r.BlindTime.Ticks)));
     }
 
@@ -259,114 +255,20 @@ public sealed class ObjectUsageWindow
             return;
         }
 
-        /* One value per index: two rows for the same index in one snapshot (a retried database inside one run) keep the larger of each field,
-           which is the later reading of a counter that only grows between clears. */
-        var current = new Dictionary<(int ObjectId, int IndexId), Counters>();
-        DateTime? start = null;
-        string? server = null;
-        foreach (var row in _snapshot)
+        /* The per-snapshot rules (node, restart, evidence, whole or difference) live in ObjectUsageStepper (#9349), shared with Darling's chain
+           builder and window replay. This fold only adds up what each step says. */
+        var step = _stepper.Step(time, _snapshot);
+        var node = step.Node;
+
+        if (!node.IsBaseline)
         {
-            start ??= row.SqlServerStartTime;
-            server ??= string.IsNullOrWhiteSpace(row.AnsweringServerName) ? null : row.AnsweringServerName;
-            var counters = Counters.From(row);
-            var key = (row.ObjectId, row.IndexId);
-            current[key] = current.TryGetValue(key, out var seen) ? Counters.Max(seen, counters) : counters;
-        }
-
-        /* The instance this snapshot is compared against is the one that answered it. An unnamed snapshot is taken to be the instance before
-           it, and the first name to follow unnamed snapshots takes their state over: a store upgraded to collect the name is one instance
-           going on, not a new one appearing. */
-        var nodeKey = server ?? _previousNodeKey ?? "";
-        if (server is not null && _previousNodeKey is { Length: 0 } && !_nodes.ContainsKey(server) && _nodes.Remove("", out var unnamed))
-        {
-            _nodes[server] = unnamed;
-        }
-
-        var isBaseline = _previousTime is null;
-        var nodeKnown = _nodes.TryGetValue(nodeKey, out var node);
-        node ??= new NodeState();
-
-        /* How this snapshot's counters are counted: nothing (a baseline), every index whole (a database reset), or each index's difference
-           with the indexes in countWhole whole. */
-        var reasons = ObjectUsageResetReasons.None;
-        var countNothing = isBaseline;
-        var countAllWhole = false;
-        HashSet<(int ObjectId, int IndexId)>? countWhole = null;
-
-        if (!isBaseline)
-        {
-            if (!nodeKnown)
+            _indexResets += step.IndexResets;
+            if (step.Reasons != ObjectUsageResetReasons.None)
             {
-                reasons |= ObjectUsageResetReasons.NodeChanged;
-                if (start is { } nodeStart && _coveredFrom is { } from && nodeStart < from - StartClockMargin)
-                {
-                    reasons |= ObjectUsageResetReasons.NodeBaseline;
-                    countNothing = true;
-                }
-                else
-                {
-                    countAllWhole = true;
-                }
-            }
-            else if (start is { } s && node.Start is { } ps && (s - ps).Duration() > StartTimeTolerance)
-            {
-                reasons |= ObjectUsageResetReasons.Restart;
-                countAllWhole = true;
-            }
-            else
-            {
-                var evidence = ObjectUsageResetReasons.None;
-                var active = 0;
-                foreach (var (key, now) in current)
-                {
-                    if (!node.Counters.TryGetValue(key, out var before) || !before.HasUse)
-                    {
-                        continue;
-                    }
-
-                    active++;
-                    var own = ObjectUsageResetReasons.None;
-                    if (now.Seeks < before.Seeks || now.Scans < before.Scans || now.Lookups < before.Lookups || now.Updates < before.Updates)
-                    {
-                        own |= ObjectUsageResetReasons.CounterDecreased;
-                    }
-
-                    if (Cleared(before.LastSeek, now.LastSeek) || Cleared(before.LastScan, now.LastScan)
-                        || Cleared(before.LastLookup, now.LastLookup) || Cleared(before.LastUpdate, now.LastUpdate))
-                    {
-                        own |= ObjectUsageResetReasons.LastAccessCleared;
-                    }
-
-                    if (own != ObjectUsageResetReasons.None)
-                    {
-                        evidence |= own;
-                        (countWhole ??= new()).Add(key);
-                    }
-                }
-
-                if (countWhole is not null)
-                {
-                    if (countWhole.Count * 2 >= active)
-                    {
-                        reasons |= evidence;
-                        countAllWhole = true;
-                    }
-                    else
-                    {
-                        _indexResets += countWhole.Count;
-                    }
-                }
+                _resets.Add(new ObjectUsageReset(time, step.Reasons, node.PreviousServer, node.Server, step.BlindFrom));
             }
 
-            if (reasons != ObjectUsageResetReasons.None)
-            {
-                /* A clear on an instance already being measured wiped whatever it held since that instance's last snapshot. An instance
-                   seen for the first time lost nothing: its counters are counted whole, or its stamps still stand (a baseline). */
-                var cleared = (reasons & ~(ObjectUsageResetReasons.NodeChanged | ObjectUsageResetReasons.NodeBaseline)) != ObjectUsageResetReasons.None;
-                _resets.Add(new ObjectUsageReset(time, reasons, _previousServer, server, cleared ? node.LastSnapshot : null));
-            }
-
-            var gap = time - _previousTime!.Value;
+            var gap = time - node.PreviousTime!.Value;
             if (_largestGap is not { } largest || gap > largest)
             {
                 _largestGap = gap;
@@ -391,49 +293,24 @@ public sealed class ObjectUsageWindow
             state.LastWrite = Newest(state.LastWrite, row.LastUserUpdate);
         }
 
-        if (!countNothing)
+        foreach (var index in step.Indexes)
         {
-            foreach (var (key, now) in current)
+            var state = _objects[index.ObjectId];
+            state.Reads += index.Reads;
+            if (index.IndexId <= 1)
             {
-                var seenBefore = node.Counters.TryGetValue(key, out var before);
-                var whole = countAllWhole || !seenBefore || countWhole?.Contains(key) == true;
-                var reads = whole
-                    ? now.Seeks + now.Scans + now.Lookups
-                    : Delta(now.Seeks, before.Seeks) + Delta(now.Scans, before.Scans) + Delta(now.Lookups, before.Lookups);
-                var updates = whole ? now.Updates : Delta(now.Updates, before.Updates);
-
-                var state = _objects[key.ObjectId];
-                state.Reads += reads;
-                if (key.IndexId <= 1)
-                {
-                    state.Writes += updates;
-                }
+                state.Writes += index.Updates;
             }
         }
 
-        if (server is not null && !_servers.Contains(server, StringComparer.OrdinalIgnoreCase))
+        if (node.Server is { } server && !_servers.Contains(server, StringComparer.OrdinalIgnoreCase))
         {
             _servers.Add(server);
         }
 
-        node.Counters = current;
-        node.LastSnapshot = time;
-
-        /* A start time inside the tolerance is the same start: the first value read is kept, so a slow drift cannot add up to a restart. */
-        node.Start = start is { } read && node.Start is { } kept && (read - kept).Duration() <= StartTimeTolerance ? kept : start ?? node.Start;
-        _nodes[nodeKey] = node;
-
-        _coveredFrom ??= time;
-        _previousTime = time;
-        _previousServer = server ?? _previousServer;
-        _previousNodeKey = nodeKey;
         _snapshotCount++;
         _snapshot.Clear();
     }
-
-    /// <summary>How far before the baseline an instance's start time has to be before its counters are taken to predate the window. The start
-    /// time is the server's local clock and the collection time is UTC, so the two can differ by a time zone offset.</summary>
-    private static readonly TimeSpan StartClockMargin = TimeSpan.FromDays(1);
 
     /// <summary>How far an instance's <c>sqlserver_start_time</c> may move between two snapshots and still be the same start. The value is
     /// computed by the server, and a reading that differs by a fraction of a second would otherwise count every index whole again and make a
@@ -441,38 +318,9 @@ public sealed class ObjectUsageWindow
     /// did not is still caught by the counters going down.</summary>
     public static readonly TimeSpan StartTimeTolerance = TimeSpan.FromMinutes(1);
 
-    private static bool Cleared(DateTime? before, DateTime? now) => before is not null && now is null;
-
-    private static long Delta(long now, long before) => now > before ? now - before : 0;
-
     /// <summary>The later of two stamps, a null being no stamp.</summary>
     internal static DateTime? Newest(DateTime? a, DateTime? b) =>
         a is null ? b : b is null ? a : (a.Value >= b.Value ? a : b);
-
-    private readonly record struct Counters(
-        long Seeks, long Scans, long Lookups, long Updates, DateTime? LastSeek, DateTime? LastScan, DateTime? LastLookup, DateTime? LastUpdate)
-    {
-        /// <summary>Any counter above zero or any stamp set: an index a clear of the DMV would show on.</summary>
-        public bool HasUse =>
-            Seeks > 0 || Scans > 0 || Lookups > 0 || Updates > 0
-            || LastSeek is not null || LastScan is not null || LastLookup is not null || LastUpdate is not null;
-
-        public static Counters From(ObjectUsageSample row) =>
-            new(Math.Max(0, row.UserSeeks), Math.Max(0, row.UserScans), Math.Max(0, row.UserLookups), Math.Max(0, row.UserUpdates),
-                row.LastUserSeek, row.LastUserScan, row.LastUserLookup, row.LastUserUpdate);
-
-        public static Counters Max(Counters a, Counters b) =>
-            new(Math.Max(a.Seeks, b.Seeks), Math.Max(a.Scans, b.Scans), Math.Max(a.Lookups, b.Lookups), Math.Max(a.Updates, b.Updates),
-                Newest(a.LastSeek, b.LastSeek), Newest(a.LastScan, b.LastScan), Newest(a.LastLookup, b.LastLookup), Newest(a.LastUpdate, b.LastUpdate));
-    }
-
-    /// <summary>One answering instance's last snapshot: what the next snapshot it answers is compared with.</summary>
-    private sealed class NodeState
-    {
-        public DateTime? Start { get; set; }
-        public DateTime? LastSnapshot { get; set; }
-        public Dictionary<(int ObjectId, int IndexId), Counters> Counters { get; set; } = new();
-    }
 
     private sealed class ObjectState(int objectId, DateTime firstSnapshot)
     {
