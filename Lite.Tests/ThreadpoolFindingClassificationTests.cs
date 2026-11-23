@@ -79,9 +79,10 @@ public class ThreadpoolFindingClassificationTests
     public void NotableBlocking_WithoutParallelism_IsBlockingDriven()
     {
         var blocking = BlockingEvents();
+        var key = RootKeyOf(Threadpool(), blocking);
 
-        /* The fixture is only a test of the rule if this blocking fact clears the root bar. */
+        /* Scored by RootKeyOf: the fixture is only a test of the rule if this blocking fact clears the root bar. */
         Assert.True(FactScorer.ClearsRootBar(blocking));
-        Assert.Equal("THREADPOOL_BLOCKING", RootKeyOf(Threadpool(), blocking));
+        Assert.Equal("THREADPOOL_BLOCKING", key);
     }
 }
