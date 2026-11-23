@@ -130,11 +130,13 @@ public sealed class TimescaleAggregateCompressionTests
                 StringComparer.Ordinal);
 
             Assert.Equal(
-                hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan
+                view == TimescaleSupport.QueryStatsIntervalHourlyView ? TimescaleSupport.DailyAggregateCompressAfterSpan   // #8570: the daily's re-read source stays uncompressed as long as the daily's window
+                    : hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan
                     : TimescaleSupport.DailyRefreshStartSpanFor(view) + TimescaleSupport.AggregateCompressMarginSpan,   // #6070: a daily-parented daily's window is a bucket wider
                 TimescaleSupport.AggregateCompressAfterSpanFor(view));
             Assert.Equal(
-                hourly ? TimescaleSupport.HourlyAggregateCompressAfter
+                view == TimescaleSupport.QueryStatsIntervalHourlyView ? TimescaleSupport.DailyAggregateCompressAfter
+                    : hourly ? TimescaleSupport.HourlyAggregateCompressAfter
                     : TimescaleSupport.WholeDaysInterval(TimescaleSupport.DailyRefreshStartSpanFor(view) + TimescaleSupport.AggregateCompressMarginSpan),
                 TimescaleSupport.AggregateCompressAfterFor(view));
         }
@@ -325,7 +327,7 @@ public sealed class TimescaleAggregateCompressionTests
             var sql = TimescaleSupport.AddAggregateCompressionPolicySql(view, night);
 
             Assert.StartsWith($"SELECT add_compression_policy('collect.{view}', ", sql, StringComparison.Ordinal);
-            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "6 days" : "5 days")}'", sql, StringComparison.Ordinal);
+            Assert.Contains($"compress_after => INTERVAL '{(hourly && view != TimescaleSupport.QueryStatsIntervalHourlyView ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "6 days" : "5 days")}'", sql, StringComparison.Ordinal);
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
             Assert.Contains(
@@ -460,6 +462,27 @@ public sealed class TimescaleAggregateCompressionTests
             new[] { State(hourly) }, new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>());
         Assert.Empty(none);
         Assert.Equal(new[] { hourly }, allUnread);
+    }
+
+    /// <summary>
+    /// #8570: query_stats_interval_hourly is an hourly target held to the daily compression window, so its staging backlog is the
+    /// daily eligible count. The hourly count would include chunks its policy does not compress yet.
+    /// </summary>
+    [Fact]
+    public void ApplyAggregateCompressionSizes_QueryStatsIntervalHourly_TakesTheDailyCount()
+    {
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
+        var state = new TimescaleSupport.AggregateCompressionState(view, CompressionEnabled: true, JobId: null, CompressAfterSeconds: null,
+            ScheduleIntervalSeconds: null, FixedSchedule: false, PhaseHour: null, PhaseMinute: null, MaterializationBytes: 0, EligibleChunksNow: 0);
+        var rows = new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>(StringComparer.Ordinal)
+        {
+            [view] = (1000, 7, 3),
+        };
+
+        var (sized, unread) = TimescaleSupport.ApplyAggregateCompressionSizes(new[] { state }, rows);
+
+        Assert.Empty(unread);
+        Assert.Equal((1000L, 3L), (sized.Single().MaterializationBytes, sized.Single().EligibleChunksNow));
     }
 
     /// <summary>
@@ -883,6 +906,100 @@ public sealed class TimescaleAggregateCompressionTests
                 await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
                     (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #8570: the fleet summary's plan-cache mid route reads the daily's whole re-read window out of
+    /// <c>query_stats_interval_hourly</c>, so that one hourly keeps its recent days uncompressed for as long as
+    /// the daily tier does. A store whose policy is still on the hourly tier's old 2 days is moved onto the
+    /// daily window by the startup ensure, and no other aggregate's policy changes. Live, because the policy is
+    /// a real job row.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_QueryStatsIntervalHourly_OldTwoDayPolicy_MovesOntoTheDailyWindow_OthersUnchanged_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live aggregate-compression window test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureAggregateCompressionAsync(connection, null, ct);
+
+            var view = TimescaleSupport.QueryStatsIntervalHourlyView;
+
+            /* The store an earlier build left: this one hourly on the hourly tier's 2 days. */
+            using (var drift = new NpgsqlCommand($@"
+    SELECT alter_job(
+        j.job_id,
+        config => jsonb_set(j.config, '{{compress_after}}', to_jsonb('{TimescaleSupport.HourlyAggregateCompressAfter}'::text)))
+    FROM timescaledb_information.jobs AS j
+    WHERE j.proc_name LIKE '%compression%' AND j.hypertable_schema = 'collect' AND j.hypertable_name = '{view}'", connection))
+            {
+                Assert.NotNull(await drift.ExecuteScalarAsync(ct));
+            }
+
+            var before = await ReadCompressAfterSecondsAsync(connection, ct);
+            Assert.Equal((long)TimescaleSupport.HourlyAggregateCompressAfterSpan.TotalSeconds, before[view]);
+
+            var convergeLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureAggregateCompressionAsync(connection, convergeLog, ct);
+            Assert.Contains("1 converged", convergeLog.Joined, StringComparison.Ordinal);
+
+            var after = await ReadCompressAfterSecondsAsync(connection, ct);
+            Assert.Equal((long)TimescaleSupport.DailyAggregateCompressAfterSpan.TotalSeconds, after[view]);
+            foreach (var (otherView, seconds) in before.Where(kv => kv.Key != view))
+            {
+                Assert.Equal(seconds, after[otherView]);
+            }
+
+            /* The query store twin keeps the hourly tier's window. */
+            Assert.Equal(
+                (long)TimescaleSupport.HourlyAggregateCompressAfterSpan.TotalSeconds,
+                after[TimescaleSupport.QueryStoreStatsCorrectedHourlyView]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
+        }
+    }
+
+    /// <summary>Every aggregate compression job's <c>compress_after</c> in seconds, keyed by view name.</summary>
+    private static async Task<Dictionary<string, long>> ReadCompressAfterSecondsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        var result = new Dictionary<string, long>(StringComparer.Ordinal);
+        using var read = new NpgsqlCommand(@"
+    SELECT j.hypertable_name, EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint
+    FROM timescaledb_information.jobs AS j
+    WHERE j.proc_name LIKE '%compression%' AND j.hypertable_schema = 'collect'", connection);
+        using var reader = await read.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (TimescaleSupport.IsAggregateCompressionTarget(reader.GetString(0)))
+            {
+                result[reader.GetString(0)] = reader.GetInt64(1);
+            }
+        }
+
+        return result;
     }
 
     /// <summary>Every <c>collect</c> aggregate's materialization chunk interval in seconds, read from

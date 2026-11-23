@@ -2491,6 +2491,26 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     WHERE step_id = 0 AND run_status = 1;";
 
     /// <summary>
+    /// V302 (#8570): <c>idx_job_history_job_failed</c> on <c>collect.job_history (server_id, run_datetime DESC, instance_id DESC)</c>,
+    /// <c>WHERE step_id = 0 AND run_status = 0</c>, the failed-outcome twin of V220's success index. The Daily Health Report's failed-jobs
+    /// read joins every server to its last 48 hours of <c>job_history</c> and keeps only the step 0 failures. Without this index each
+    /// server's <c>run_datetime</c> range comes from <c>idx_job_history_server_run</c> and the filter drops nearly every row it fetched
+    /// from the heap, thousands of rows per server on an uncompressed chunk. Failures are rare, so the partial index is small and has no
+    /// INCLUDE columns. It leads with <c>server_id</c> and then <c>run_datetime DESC, instance_id DESC</c>, the order the read keeps its newest
+    /// failure in. A compressed chunk keeps no rows in this index, as V220 measured for its twin, so the read takes those chunks through
+    /// the compressed batches as it did before. Plain <c>CREATE INDEX IF NOT EXISTS</c>, V220's shape: <c>MigrateAsync</c> runs the rung
+    /// in one transaction, where <c>timescaledb.transaction_per_chunk</c> cannot run. The build holds a SHARE lock on the uncompressed
+    /// chunks, which blocks the collector's inserts for the build's length, so the lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V220's. Additive: an older build never reads it, and no GRANT is needed
+    /// for an index.
+    /// </summary>
+    private static readonly string V302Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+CREATE INDEX IF NOT EXISTS idx_job_history_job_failed
+    ON collect.job_history (server_id, run_datetime DESC, instance_id DESC)
+    WHERE step_id = 0 AND run_status = 0;";
+
+    /// <summary>
     /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
     /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
     /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
@@ -4012,6 +4032,9 @@ END $$;";
            time they were measured (collect.store_relation_sizes_measured), so the Viewer's first open shows the last sizes at once. Two plain tables
            created empty: no data moves, and the service fills them from a size pass. An older build ignores them. */
         new Migration(StoreRelationSizesStore.Version, "store-relation-sizes-latest", StoreRelationSizesStore.CreateSql),
+        /* V302 (#8570): the partial index of failed Agent job outcomes on collect.job_history, for the Daily Health Report's failed-jobs read. An older build
+           never reads it. */
+        new Migration(302, "job-history-failed-index", V302Sql),
     };
 
     /// <summary>

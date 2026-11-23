@@ -975,6 +975,9 @@ DROP TABLE IF EXISTS collect.procedure_stats_hour_ledger;"),
         // creates them empty. Safe on a store that never had them.
         new(301, "hasStoreRelationSizes", @"DROP TABLE IF EXISTS collect.store_relation_sizes_latest;
 DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
+        // V302 (#8570): the partial index of failed Agent job outcomes on collect.job_history. It is the probe's newest sentinel. The rewind drops it, so a re-run of V302
+        // creates it again. Safe on a store that never had it.
+        new(302, "hasJobHistoryFailedIndex", @"DROP INDEX IF EXISTS collect.idx_job_history_job_failed;"),
     ];
 
     /// <summary>
