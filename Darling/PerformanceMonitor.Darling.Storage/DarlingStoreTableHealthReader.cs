@@ -1642,15 +1642,15 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         {
             while (_free > 0)
             {
-                if (_main.Count > 0)
-                {
-                    _free--;
-                    _main.Dequeue().SetResult();
-                }
-                else if (_extras.Count > 0 && _mainCallers == 0)
+                if (_extras.Count > 0)
                 {
                     _free--;
                     _extras.Dequeue().SetResult();
+                }
+                else if (_main.Count > 0)
+                {
+                    _free--;
+                    _main.Dequeue().SetResult();
                 }
                 else
                 {
