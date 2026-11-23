@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading.Tasks;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Helpers;
 using Xunit;
 
@@ -44,7 +46,7 @@ public sealed class TabFirstLoadTests
 
         Assert.Equal(7, result);
         var line = Assert.Single(lines);
-        Assert.Equal("First load of Queries > Performance Trends: 1234 ms", line);
+        Assert.Equal("First load of Queries > Performance Trends: 1234 ms (before read 0 ms, read 1234 ms, read lock wait 0 ms over 0 connections, draw 0 ms)", line);
     }
 
     [Fact]
@@ -65,7 +67,7 @@ public sealed class TabFirstLoadTests
         await log.RunAsync("tab 2/1", "Active Queries", () => { clock.Advance(20); return Task.FromResult(0); });
 
         Assert.Equal(2, lines.Count);
-        Assert.Equal("First load of Active Queries: 20 ms", lines[1]);
+        Assert.StartsWith("First load of Active Queries: 20 ms (", lines[1]);
     }
 
     [Fact]
@@ -79,7 +81,7 @@ public sealed class TabFirstLoadTests
         Assert.Empty(lines);
 
         await log.RunAsync("tab 4", "CPU", () => { clock.Advance(9); return Task.FromResult(0); }, abandoned: () => false);
-        Assert.Equal("First load of CPU: 9 ms", Assert.Single(lines));
+        Assert.StartsWith("First load of CPU: 9 ms (", Assert.Single(lines));
     }
 
     [Fact]
@@ -144,6 +146,115 @@ public sealed class TabFirstLoadTests
         markers.SetResult("m");
         await draw.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         Assert.Equal(["3/m"], drawn);
+    }
+
+    private static long LockTicks(int ms) => Stopwatch.Frequency * ms / 1000;
+
+    /// <summary>#9366: the total is the pick to the first drawn row, split into queued, before read, read and draw.</summary>
+    [Fact]
+    public async Task TheLine_TimesFromThePick_ToTheFirstDrawnRow_AndSplitsTheTimeBetween()
+    {
+        var lines = new List<string>();
+        var clock = new HandClock();
+        var log = new TabFirstLoad(lines.Add, clock, () => { clock.Advance(50); return Task.CompletedTask; });
+
+        log.Pick("tab 2/4");
+        clock.Advance(300);                         // queued behind another pass
+        var passStarted = log.Timestamp();
+        clock.Advance(200);                         // engine edition, data start, collector runs
+
+        await log.RunAsync("tab 2/4", "Queries > Query Store by Duration", () =>
+        {
+            clock.Advance(1000);                    // the read
+            ReadLockWaitTally.Current!.RecordAcquire(LockTicks(150));
+            ReadLockWaitTally.Current!.RecordAcquire(LockTicks(250));
+            TabFirstLoad.RowsHanded();              // the rows go to the grid, the render pass takes 50 ms
+            clock.Advance(700);                     // the comparison and banner reads that follow are not the first row
+            return Task.FromResult(0);
+        }, passStartedAt: passStarted);
+
+        Assert.Equal(
+            "First load of Queries > Query Store by Duration: 1550 ms (queued 300 ms, before read 200 ms, read 1000 ms, read lock wait 400 ms over 2 connections, draw 50 ms)",
+            Assert.Single(lines));
+    }
+
+    [Fact]
+    public async Task ALoadThatNeverHandsItsRows_EndsItsReadAtTheEndOfTheLoad()
+    {
+        var lines = new List<string>();
+        var clock = new HandClock();
+        var log = new TabFirstLoad(lines.Add, clock, () => { clock.Advance(20); return Task.CompletedTask; });
+
+        log.Pick("tab 4");
+        clock.Advance(10);
+        var passStarted = log.Timestamp();
+
+        await log.RunAsync("tab 4", "CPU", () => { clock.Advance(500); return Task.FromResult(0); }, passStartedAt: passStarted);
+
+        Assert.Equal("First load of CPU: 530 ms (queued 10 ms, before read 0 ms, read 500 ms, read lock wait 0 ms over 0 connections, draw 20 ms)", Assert.Single(lines));
+    }
+
+    [Fact]
+    public async Task ANewerPickOfTheSameTab_ReplacesTheStamp_SoTheNewerPickIsTheOneMeasured()
+    {
+        var lines = new List<string>();
+        var clock = new HandClock();
+        var log = new TabFirstLoad(lines.Add, clock);
+
+        log.Pick("tab 2/4");
+        clock.Advance(5000);
+        log.Pick("tab 2/4");
+        clock.Advance(100);
+
+        await log.RunAsync("tab 2/4", "Query Store", () => { clock.Advance(10); return Task.FromResult(0); }, passStartedAt: log.Timestamp());
+
+        Assert.StartsWith("First load of Query Store: 110 ms (queued 100 ms,", Assert.Single(lines));
+    }
+
+    [Fact]
+    public async Task ASupersededPick_WritesNoLine_AndTheNewPicksLoadIsMeasuredFromItsOwnStamp()
+    {
+        var lines = new List<string>();
+        var clock = new HandClock();
+        var log = new TabFirstLoad(lines.Add, clock);
+
+        log.Pick("tab 2/4");
+        clock.Advance(100);
+        var abandonedStart = log.Timestamp();
+        log.Pick("tab 2/5");                        // the user moved on before the first load finished
+        clock.Advance(40);
+        await log.RunAsync("tab 2/4", "Query Store", () => { clock.Advance(900); return Task.FromResult(0); }, abandoned: () => true, passStartedAt: abandonedStart);
+        Assert.Empty(lines);
+
+        var secondStart = log.Timestamp();
+        clock.Advance(15);
+        await log.RunAsync("tab 2/5", "Plan Corrections", () => { clock.Advance(60); return Task.FromResult(0); }, passStartedAt: secondStart);
+
+        Assert.Equal("First load of Plan Corrections: 1015 ms (queued 940 ms, before read 15 ms, read 60 ms, read lock wait 0 ms over 0 connections, draw 0 ms)", Assert.Single(lines));
+    }
+
+    [Fact]
+    public async Task APickAfterTheFirstLoad_IsIgnored_AndTheLaterLoadWritesNothing()
+    {
+        var lines = new List<string>();
+        var clock = new HandClock();
+        var log = new TabFirstLoad(lines.Add, clock);
+
+        await log.RunAsync("tab 4", "CPU", () => Task.FromResult(0));
+        log.Pick("tab 4");
+        clock.Advance(5000);
+        await log.RunAsync("tab 4", "CPU", () => Task.FromResult(0));
+
+        Assert.Single(lines);
+    }
+
+    [Fact]
+    public async Task ARowsHandedCall_OutsideAFirstLoad_DoesNothing()
+    {
+        var log = new TabFirstLoad(_ => { }, new HandClock());
+        await log.RunAsync("tab 4", "CPU", () => Task.FromResult(0));
+
+        TabFirstLoad.RowsHanded();
     }
 
     private static async Task Eventually(Func<bool> condition)
