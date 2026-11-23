@@ -88,6 +88,10 @@ FROM unnest($1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[], $5::bigint[]
         AS s(rel_oid, parent_oid, main_bytes, other_forks_bytes, toast_bytes)
 JOIN pg_catalog.pg_class AS c ON c.oid = s.rel_oid::oid
 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN collect.store_relation_sizes_latest AS o ON o.rel_oid = s.rel_oid
+WHERE o.rel_oid IS NULL
+   OR (o.schema_name, o.rel_name, o.parent_oid, o.main_bytes, o.other_forks_bytes, o.toast_bytes)
+      IS DISTINCT FROM (n.nspname, c.relname, s.parent_oid, s.main_bytes, s.other_forks_bytes, s.toast_bytes)
 ON CONFLICT (rel_oid) DO UPDATE
 SET schema_name = EXCLUDED.schema_name,
     rel_name = EXCLUDED.rel_name,
@@ -112,7 +116,7 @@ FROM collect.store_relation_sizes_latest AS l";
 
     /// <summary>
     /// Replaces the stored sizes with <paramref name="measured"/> in one transaction (see the class remarks): relations not in the pass are
-    /// deleted, changed ones are updated, unchanged ones are not touched, and the measured time is set. Returns how many relation rows the write
+    /// deleted, changed ones are updated, unchanged ones are left out of the upsert's SELECT, so they are neither locked nor rewritten (#9374; a DO UPDATE ... WHERE alone still locks every conflicting row), and the measured time is set. Returns how many relation rows the write
     /// deleted and how many it inserted or updated, so a caller can log what moved.
     /// </summary>
     public static async Task<StoreRelationSizesWrite> WriteAsync(

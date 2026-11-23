@@ -335,6 +335,42 @@ ANALYZE;";
     }
 
     [Fact]
+    public async Task ASecondWriteOfTheSameSizes_LocksNoRow_AndLeavesTheRowsAsTheFirstWriteLeftThem()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(store, SeedSql, ct);
+            var rig = new Rig();
+            await rig.Cache.GetTablesAsync(store, cancellationToken: ct);
+            await rig.Cache.WhenIdleAsync();
+            var first = LastSizePassOn(store)!;
+            var versionsBefore = await RowVersionsAsync(store, ct);
+            Assert.True(versionsBefore.Count >= 60);
+
+            // The same sizes again, an hour later (#9374): PostgreSQL stamps xmax on every row a DO UPDATE reaches, even when its WHERE is false.
+            var write = await StoreRelationSizesStore.WriteAsync(store, With(first, _ => true, _ => 0, first.MeasuredAtUtc.AddHours(1)), ct);
+
+            Assert.Equal(0, write.Upserted);
+            Assert.Equal(0, await ScalarAsync(store, "SELECT count(*) FROM collect.store_relation_sizes_latest WHERE xmax::text::bigint <> 0", ct));
+            Assert.Equal(versionsBefore, await RowVersionsAsync(store, ct));
+            var persisted = (await StoreRelationSizesStore.ReadLastSizesAsync(store, ct))!;
+            Assert.Equal(Rows(first.Pass), Rows(persisted.Pass));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task ASecondWrite_WhereOneRelationChanged_UpdatesExactlyOneRow_AndRestampsTheTime()
     {
         var baseCs = BaseConnectionString;
