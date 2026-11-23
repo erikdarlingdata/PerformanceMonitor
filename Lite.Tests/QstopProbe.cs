@@ -132,6 +132,7 @@ public sealed class QstopProbe
             var vdir = Path.Combine(dir, "variants");
             if (Directory.Exists(vdir))
             {
+                File.WriteAllText(Path.Combine(vdir, "R0.sql"), RankSql(FindSource()));
                 foreach (var f in Directory.GetFiles(vdir, "*.sql").OrderBy(x => x))
                 {
                     var sql = File.ReadAllText(f);
@@ -147,9 +148,9 @@ public sealed class QstopProbe
                         cmd.Parameters.Add(new DuckDBParameter { Value = now });
                         var h = 17L; rc = 0;
                         using var r = await cmd.ExecuteReaderAsync();
-                        while (await r.ReadAsync()) { rc++; for (var k = 0; k < r.FieldCount; k++) h = h * 31 + (r.IsDBNull(k) ? 7 : r.GetValue(k).ToString()!.GetHashCode()); }
+                        while (await r.ReadAsync()) { rc++; for (var k = 0; k < r.FieldCount; k++) h = h * 31 + (r.IsDBNull(k) ? 7 : StableHash(r.GetValue(k).ToString()!)); }
                         vt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
-                        if (i == 0) Line($"VARIANT {Path.GetFileName(f)} rows {rc}");
+                        if (i == 0) Line($"VARIANT {Path.GetFileName(f)} rows {rc} hash {h}");
                     }
                     Line($"VARIANT {Path.GetFileName(f)}: {string.Join(" ", vt)}");
                 }
@@ -170,6 +171,8 @@ public sealed class QstopProbe
             File.WriteAllText(outPath, _out.ToString());
         }
     }
+
+    private static long StableHash(string t) { long h = 7; foreach (var ch in t) h = h * 131 + ch; return h; }
 
     private static string FindSource()
     {
