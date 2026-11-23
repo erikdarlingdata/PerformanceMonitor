@@ -741,8 +741,8 @@ SELECT
     /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
     /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false) =>
-        (await ReadRecentBlockedProcessReportsAsync(serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc, limit, xmlOnly, windowOnCollectionTime)).Rows;
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false, bool excludeMonitorOnlyPairs = false) =>
+        (await ReadRecentBlockedProcessReportsAsync(serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc, limit, xmlOnly, windowOnCollectionTime, excludeMonitorOnlyPairs)).Rows;
 
     /// <summary>The Blocked Process Reports grid's row cap: the default <c>limit</c> of
     /// <see cref="GetRecentBlockedProcessReportsAsync"/> and <see cref="ReadRecentBlockedProcessReportsAsync"/>, and the
@@ -761,7 +761,7 @@ SELECT
     /// before the merge (<see cref="FilledPageStart"/>) and <see cref="BlockedProcessReportsRead.CappedSourceStartUtc"/> names
     /// the oldest event time of the read that filled its page (the later one when both did).
     /// </summary>
-    public async Task<BlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
+    public async Task<BlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false, bool excludeMonitorOnlyPairs = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -774,13 +774,17 @@ SELECT
 AND   blocked_process_report_xml IS NOT NULL
 AND   blocked_process_report_xml <> ''"
             : string.Empty;
+        /* #9340: the alert read leaves out a pair whose two sessions are both the monitor's own (see the predicate); the grids keep them. */
+        var pairClause = excludeMonitorOnlyPairs
+            ? " AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate
+            : string.Empty;
 
         /* The XE arm windows on event_time; the DMV arm stays on collection_time because
            dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync),
            and only that collection_time window needs the look-back collectedFrom adds. */
         var xeRows = windowOnCollectionTime
-            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + dbClause, collectedFrom: "$2")
-            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3" + xmlClause + dbClause);
+            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + pairClause + dbClause, collectedFrom: "$2")
+            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3" + xmlClause + pairClause + dbClause);
 
         command.CommandText = @"
 SELECT
@@ -892,7 +896,7 @@ LIMIT $4";
         // Skipped under xmlOnly: a DMV snapshot never carries a report, so it has nothing to add to that page.
         DateTime? dmvFilledPageStart = null;
         if (!xmlOnly)
-            dmvFilledPageStart = await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
+            dmvFilledPageStart = await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit, excludeMonitorOnlyPairs);
 
         return new BlockedProcessReportsRead(items, LaterOf(xeFilledPageStart, dmvFilledPageStart));
     }
@@ -933,7 +937,7 @@ LIMIT $4";
     /// <paramref name="items"/> — see <see cref="GetRecentBlockedProcessReportsAsync"/> for why.
     /// </summary>
     private static async Task<DateTime?> AppendDmvBlockedProcessGridRowsAsync(
-        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap)
+        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap, bool excludeMonitorOnlyPairs = false)
     {
         var dmvItems = new List<BlockedProcessReportRow>();
         /* The DMV read's own cap: the grid's cap plus the XE rows in hand. */
@@ -952,7 +956,7 @@ SELECT
     blocking_login_name, blocking_host_name, blocking_client_app,
     blocking_login_time, blocking_last_request_end_time, blocking_open_transaction_count, blocking_tran_log_bytes_used
 FROM v_dmv_blocking_snapshots
-WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3" + dbClause + @"
+WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3" + (excludeMonitorOnlyPairs ? " AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate : string.Empty) + dbClause + @"
 ORDER BY event_time DESC
 LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

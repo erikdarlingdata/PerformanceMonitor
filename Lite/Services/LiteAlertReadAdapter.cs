@@ -65,7 +65,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         var serverId = ParseServerKey(serverKey);
         /* On collection_time, unlike the grids: the alert read is a delivery cursor ("rows collected since the
            last sweep"), so a report collected late still alerts once it lands. */
-        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
+        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true, excludeMonitorOnlyPairs: true), cancellationToken);
         return new List<BlockedProcessAlertRow>(rows);
     }
 
