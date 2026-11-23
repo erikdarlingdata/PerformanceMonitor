@@ -671,7 +671,7 @@ public sealed partial class DarlingCollectorRunner
                transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
                its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
                upsert can never be left without the transaction its atomicity with the COPY depends on. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch || watermarkBatch || context.StoreTransactionWrite is not null
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch || watermarkBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
