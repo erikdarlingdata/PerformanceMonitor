@@ -1423,6 +1423,24 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.procedure_stats_hour_ledger (#9357, V299): the same ledger for procedure_stats, pruned the same way and at the same
+               horizon (the procedure hourly rollup keeps TimescaleSupport.HourlyRetentionSpan too), single-shot and failure-isolated. */
+            var procedureHourLedgerDeleted = await PurgeOneAsync(
+                postgres, ProcedureStatsHourLedger.LedgerTable,
+                ProcedureStatsHourLedger.PruneSql,
+                utcNow - TimescaleSupport.HourlyRetentionSpan, logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (procedureHourLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += procedureHourLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_store_watermarks (#5684, V178): the per-batch watermark side table of the Query Store per-database
                watermark read. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
                A FIXED two days (QueryStoreWatermarks.RetentionDays), NOT Query Store's retention: the read never looks back more than

@@ -794,6 +794,19 @@ public sealed class DarlingRetentionTests
                 await insert.ExecuteNonQueryAsync(ct);
             }
 
+            /* #9357: the procedure_stats hour ledger is pruned at the same horizon, with the same three ages. */
+            foreach (var ageDays in new[] { 100.0, 80.0, 1.0 / 24 })
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO collect.procedure_stats_hour_ledger (server_id, server_name, bucket, n)"
+                    + " VALUES ($1, $2, date_trunc('hour', $3::timestamp), $4)", connection);
+                insert.Parameters.AddWithValue(TestServerId);
+                insert.Parameters.AddWithValue("retention-e2e");
+                insert.Parameters.AddWithValue(utcNow.AddDays(-ageDays));
+                insert.Parameters.AddWithValue(9L);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
             /* At least our three expired rows go (40-day wait_stats, 70-day collection_log, 100-day
                config_alert_log); a shared dev store may shed more. The extension-free DELETE path on purpose
                (timescaleAvailable: false) — it must keep working even on a store whose tables ARE hypertables,
@@ -898,6 +911,28 @@ public sealed class DarlingRetentionTests
                 Assert.True(survivors[1].Bucket > utcNow.AddDays(-1),
                     $"the newer surviving ledger bucket should be the last-hour one, got {survivors[1].Bucket:O}; {purgeLog.Joined}");
                 Assert.All(survivors, s => Assert.Equal(7L, s.N));
+            }
+
+            /* #9357: the procedure_stats ledger's survivors are the same two buckets, for the same reason. */
+            using (var read = new NpgsqlCommand(
+                "SELECT bucket, n FROM collect.procedure_stats_hour_ledger WHERE server_id = $1 ORDER BY bucket", connection))
+            {
+                read.Parameters.AddWithValue(TestServerId);
+                using var reader = await read.ExecuteReaderAsync(ct);
+
+                var survivors = new List<(DateTime Bucket, long N)>();
+                while (await reader.ReadAsync(ct))
+                {
+                    survivors.Add((reader.GetDateTime(0), reader.GetInt64(1)));
+                }
+
+                Assert.True(survivors.Count == 2,
+                    $"expected the 80-day and the last-hour procedure ledger bucket to survive, got {survivors.Count} bucket(s); {purgeLog.Joined}");
+                Assert.True(survivors[0].Bucket < utcNow.AddDays(-79) && survivors[0].Bucket > utcNow.AddDays(-81),
+                    $"the older surviving procedure ledger bucket should be the 80-day one, got {survivors[0].Bucket:O}; {purgeLog.Joined}");
+                Assert.True(survivors[1].Bucket > utcNow.AddDays(-1),
+                    $"the newer surviving procedure ledger bucket should be the last-hour one, got {survivors[1].Bucket:O}; {purgeLog.Joined}");
+                Assert.All(survivors, s => Assert.Equal(9L, s.N));
             }
 
             /* The purge writes ONE auditable run-record under the fleet sentinel server_id — SUCCESS here
@@ -1069,6 +1104,7 @@ WHERE hypertable_name = 'wait_stats'
             $"DELETE FROM config.config_command WHERE target_server_id = {TestServerId}; " +
             $"DELETE FROM collect.plan_force_actions WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collect.query_stats_hour_ledger WHERE server_id = {TestServerId}; " +
+            $"DELETE FROM collect.procedure_stats_hour_ledger WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {DarlingObservability.FleetServerId} AND collector_name = 'data_retention';",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);

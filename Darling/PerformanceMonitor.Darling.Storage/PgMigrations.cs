@@ -656,6 +656,16 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
     /// <summary>
+    /// V299 (#9357): <c>collect.procedure_stats_hour_ledger</c> and its one-row state table, V164's ledger for
+    /// <c>collect.procedure_stats</c>. The hourly-plus-raw-edges read of a procedure cell compares this ledger with
+    /// <c>collect.procedure_stats_interval_hourly</c> instead of counting raw. The text and the counted population are on
+    /// <see cref="ProcedureStatsHourLedger"/>, which the rung embeds. Both tables are empty when created, and the rung inserts only
+    /// the state row (<c>counted_since</c>, the next whole hour), so an existing store takes the route only once the ledger covers the
+    /// window. No GRANT and no provisioning change, as for V164. The number may move: another open change also claims V299.
+    /// </summary>
+    private const string V299Sql = ProcedureStatsHourLedger.CreateSql;
+
+    /// <summary>
     /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
     /// one <c>current</c> row at most), <c>config.password_key_service</c> (what each service host holds and its state),
     /// <c>config.legacy_secret_pin</c> and the one-row <c>config.legacy_secret_pin_marker</c>, seeded <c>pending</c>. The
@@ -3979,6 +3989,9 @@ END $$;";
            refresh no longer rewrites a text or plan row. Per dimension: the table, the insert trigger, the backfill, the two constraints and the
            index, then the drop of the dimension's own last_seen index. */
         new Migration(298, "payload-dimension-seen", V298Sql),
+        /* V299 (#9357): the procedure_stats hour ledger and its state row, V164's pair for the procedure rollup's count guard. An older build
+           ignores both tables. */
+        new Migration(299, "procedure-stats-hour-ledger", V299Sql),
     };
 
     /// <summary>

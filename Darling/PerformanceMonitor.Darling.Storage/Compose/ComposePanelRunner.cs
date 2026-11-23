@@ -1252,14 +1252,15 @@ internal static class ComposePanelRunner
     }
 
     /// <summary>
-    /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> on the run's snapshot connection and returns the verdict
+    /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> (or, for a procedure_stats cell, <see cref="IntervalRollupCountGuard.ProcedureStatsSql"/>, #9357:
+    /// the guard for the candidate's source, over that source's ledger and rollup) on the run's snapshot connection and returns the verdict
     /// the compiler needs to take the hourly-plus-raw-edges route, or null. The guard runs under its own 15 s
     /// <c>statement_timeout</c>, which is put back to the compose deadline before the panel statement. Only a count of 0 is a
     /// pass; any other count, a ledger that does not cover the window (<see cref="IntervalRollupCountGuard.UncoveredResult"/>, noted as
     /// <see cref="ReadFallback.LedgerUncovered"/> with no log line), any fault and any timeout return null, and the panel reads raw.
     /// A store before V164 has no ledger table, and it is found by its schema version, not by the guard's fault: right after the
     /// savepoint, and before the guard's statement timeout and SQL, the run reads the version (<see cref="QueryStoreWideSchemaVersionSql"/>,
-    /// the Query Store route's own probe). Below <see cref="QueryStatsHourLedger.RungVersion"/> the guard never runs; the read is
+    /// the Query Store route's own probe). Below the source's ledger rung (<see cref="IntervalRollupCountGuard.RungVersionFor"/>, V164 for query_stats and V299 for procedure_stats) the guard never runs; the read is
     /// noted <see cref="ReadFallback.GateFailed"/> with no log line, for a state the store's migration ends. An undefined table on a
     /// store at the rung is a real fault and takes the normal path below: one Warning. The guard's <c>$3</c> is bound
     /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict
@@ -1288,7 +1289,7 @@ internal static class ComposePanelRunner
                 schemaVersion = Convert.ToInt32(await probe.ExecuteScalarAsync(cancellationToken));
             }
 
-            if (schemaVersion < QueryStatsHourLedger.RungVersion)
+            if (schemaVersion < IntervalRollupCountGuard.RungVersionFor(candidate.SourceTable))
             {
                 ComposeReadNotes.Note(ReadFallback.GateFailed);
                 return null;
@@ -1299,7 +1300,7 @@ internal static class ComposePanelRunner
             long mismatches;
             /* Bound to a local so the construction reads `new NpgsqlCommand(<identifier>, connection)`, the shape McpReadCommandTimeoutTests'
                store-receiver census recognises; a method call as the first argument is an unclassifiable receiver there (#5525). */
-            var guardSql = IntervalRollupCountGuard.SqlFor(unregisteredServers is { Count: > 0 });
+            var guardSql = IntervalRollupCountGuard.SqlFor(candidate.SourceTable, unregisteredServers is { Count: > 0 });
             await using (var guard = new NpgsqlCommand(guardSql, connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
             {
                 guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified) });
