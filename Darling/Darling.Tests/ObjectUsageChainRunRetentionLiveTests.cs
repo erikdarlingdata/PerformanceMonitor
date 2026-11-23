@@ -82,11 +82,7 @@ public sealed class ObjectUsageChainRunRetentionLiveTests
         async Task Plant(string database, DateTime at, int objectId)
         {
             step++;
-            await DarlingMcpTestData.ExecAsync(connection, ct,
-                @"INSERT INTO collect.index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_type_desc, user_seeks, user_scans, user_lookups, user_updates, last_user_seek, is_indexed_view, answering_server_name, is_memory_optimized)
-VALUES ($1,$2,$3,$4,$5,$6,7,'dbo',$7,$8,1,'CLUSTERED',$9,0,0,0,$10,false,$4,false)",
-                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, Node, DarlingMcpTestData.Naive(Started), database, objectId, "T" + objectId,
-                (long)(10 * step), DarlingMcpTestData.Naive(at.AddMinutes(-5)));
+            await PlantAsync(connection, database, at, objectId, 10 * step, ct);
         }
 
         foreach (var obj in new[] { 100, 200, 300 })
@@ -114,6 +110,16 @@ VALUES ($1,$2,$3,$4,$5,$6,7,'dbo',$7,$8,1,'CLUSTERED',$9,0,0,0,$10,false,$4,fals
         await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerId, Live, int.MaxValue, ct);
         await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerId, Dead, int.MaxValue, ct);
         return (dataSource, connection, t);
+    }
+
+    /// <summary>One <c>index_object_stats</c> row for <see cref="Node"/>: the index (object, 1) of <paramref name="database"/> at <paramref name="at"/>, with a counter that grows with <paramref name="seeks"/>.</summary>
+    private static async Task PlantAsync(NpgsqlConnection connection, string database, DateTime at, int objectId, long seeks, CancellationToken ct)
+    {
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collect.index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_type_desc, user_seeks, user_scans, user_lookups, user_updates, last_user_seek, is_indexed_view, answering_server_name, is_memory_optimized)
+VALUES ($1,$2,$3,$4,$5,$6,7,'dbo',$7,$8,1,'CLUSTERED',$9,0,0,0,$10,false,$4,false)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, Node, DarlingMcpTestData.Naive(Started), database, objectId, "T" + objectId,
+            seeks, DarlingMcpTestData.Naive(at.AddMinutes(-5)));
     }
 
     private static async Task<List<string>> RunsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -209,7 +215,7 @@ AND   NOT EXISTS
     }
 
     [Fact]
-    public async Task AClosedRunPastTheHorizonAndAChunkGoes_AnOpenRunOfALivePairStays_AnOpenRunOfAPairWithNoRawRowsGoes()
+    public async Task AClosedRunOlderThanEveryRawRowGoes_AnOpenRunOfALivePairStays_AnOpenRunOfAPairWithNoRawRowsGoes()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
         var ct = TestContext.Current.CancellationToken;
@@ -229,7 +235,7 @@ AND   NOT EXISTS
 
             await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: true, NullLogger.Instance, ct, Horizon);
 
-            /* C closed in the old chunk, more than a chunk past the horizon: gone. B closed in the straddling chunk, which is inside the margin: kept. */
+            /* C closed in the old chunk, which the raw drop took: older than every surviving raw row, gone. B closed in the straddling chunk, which is still stored: kept. */
             Assert.Equal([$"{Live}/100/open", $"{Live}/200/closed", $"{Live}/400/open"], await RunsAsync(connection, ct));
 
             bodySucceeded = true;
@@ -240,7 +246,104 @@ AND   NOT EXISTS
         }
     }
 
-    /// <summary>On a store with no TimescaleDB the chunk width is unknown, so the margin is the default of seven days, on the safe side.</summary>
+    /// <summary>
+    /// A table narrowed from 24 h to 6 h chunks keeps its older 24 h chunks. The oldest surviving chunk is one of those and straddles the horizon by
+    /// more than 6 h, so the raw rows it keeps run past the horizon by more than the current interval. Every one of them still has its run.
+    /// The clock is fixed so the straddle does not depend on the hour the test runs.
+    /// </summary>
+    [Fact]
+    public async Task AfterTheChunkIntervalIsNarrowed_AnOlderWideChunkThatStraddlesTheHorizonStillKeepsTheRunOfEveryRow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB must be available for this test");
+
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Node, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT _timescaledb_functions.stop_background_workers()");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            Assert.True(await TimescaleSupport.EnsureObjectUsageHypertablesAsync(connection, NullLogger.Instance, ct));
+            await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT set_chunk_time_interval('collect.index_object_stats', INTERVAL '24 hours')");
+
+            /* A fixed clock: the horizon is day 11 at 10:00, so the 24 h chunk of day 11 (00:00 to 24:00) holds it and runs 14 h past it. */
+            var day0 = DateTime.UtcNow.Date.AddDays(-60);
+            var now = day0.AddDays(HorizonDays + 11).AddHours(10);
+            var horizon = now.AddDays(-HorizonDays);
+            var old = day0.AddHours(1);
+            var straddleBefore = day0.AddDays(11).AddHours(2);
+            var straddleAfter = day0.AddDays(11).AddHours(20);
+            Assert.True(straddleBefore < horizon && horizon.AddHours(6) < straddleAfter);
+
+            await PlantAsync(connection, Live, old, 100, 10, ct);
+            await PlantAsync(connection, Live, old, 200, 20, ct);
+            await PlantAsync(connection, Live, old, 300, 30, ct);
+            await PlantAsync(connection, Live, straddleBefore, 100, 40, ct);
+            await PlantAsync(connection, Live, straddleBefore, 200, 50, ct);
+            await PlantAsync(connection, Live, straddleAfter, 100, 60, ct);
+
+            /* The reconciler's narrowing: only chunks created from here on are 6 h wide. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT set_chunk_time_interval('collect.index_object_stats', INTERVAL '6 hours')");
+            var newer1 = day0.AddDays(13).AddHours(1);
+            var newer2 = day0.AddDays(13).AddHours(8);
+            foreach (var at in new[] { newer1, newer2 })
+            {
+                await PlantAsync(connection, Live, at, 100, 70, ct);
+                await PlantAsync(connection, Live, at, 400, 80, ct);
+            }
+
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerId, Live, int.MaxValue, ct);
+            Assert.Equal(
+                [$"{Live}/100/open", $"{Live}/200/closed", $"{Live}/300/closed", $"{Live}/400/open"],
+                await RunsAsync(connection, ct));
+
+            /* The raw drop at the fixed horizon: the 24 h chunk of day 0 goes, the 24 h chunk of day 11 stays. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"SELECT drop_chunks('collect.index_object_stats', older_than => '{horizon:yyyy-MM-dd HH:mm:ss}'::timestamp)");
+            Assert.Equal(0L, await CountAsync(connection, $"SELECT count(*) FROM collect.index_object_stats WHERE server_id = {ServerId} AND collection_time < '{day0.AddDays(11):yyyy-MM-dd}'::timestamp", ct));
+            Assert.Equal(3L, await CountAsync(connection, $"SELECT count(*) FROM collect.index_object_stats WHERE server_id = {ServerId} AND collection_time < '{day0.AddDays(12):yyyy-MM-dd}'::timestamp", ct));
+
+            await DarlingRetention.PurgeObjectUsageChainAsync(dataSource, timescaleAvailable: true, Horizon, now, NullLogger.Instance, ct);
+
+            /* B closed at straddleBefore: older than the horizon by less than the 6 h width the table has now, but its 24 h chunk is still stored. C is older than every surviving raw row. */
+            Assert.Equal([$"{Live}/100/open", $"{Live}/200/closed", $"{Live}/400/open"], await RunsAsync(connection, ct));
+
+            Assert.Equal(0L, await CountAsync(connection, $@"
+SELECT count(*)
+FROM collect.index_object_stats AS s
+WHERE s.server_id = {ServerId}
+AND   NOT EXISTS
+(
+    SELECT 1
+    FROM collect.object_usage_runs AS r
+    WHERE r.server_id = s.server_id
+    AND   r.database_name = s.database_name
+    AND   r.object_id = s.object_id
+    AND   r.index_id = s.index_id
+    AND   r.first_time <= s.collection_time
+    AND   (r.last_time IS NULL OR r.last_time >= s.collection_time)
+)", ct));
+
+            foreach (var windowStart in new[] { straddleBefore, straddleAfter, newer1 })
+            {
+                AssertSame(
+                    await DarlingObjectUsageReader.ReadTablesFullAsync(dataSource, ServerId, Live, windowStart, ct),
+                    await DarlingObjectUsageReader.ReadTablesAsync(dataSource, ServerId, Live, windowStart, ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>On a store with no TimescaleDB there is no chunk to read, so the margin is the fallback of seven days, on the safe side.</summary>
     [Fact]
     public async Task WithNoHypertable_AClosedRunIsKeptSevenDaysPastTheHorizon()
     {
@@ -271,7 +374,7 @@ VALUES ($1,$2,$3,1,$4,$5,'dbo','T',false)",
             }
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            Assert.Equal(TimeSpan.FromDays(7), await DarlingRetention.ReadRawChunkIntervalAsync(postgres, timescaleAvailable: false, NullLogger.Instance, ct));
+            Assert.Null(await DarlingRetention.ReadOldestRawChunkStartAsync(postgres, timescaleAvailable: false, NullLogger.Instance, ct));
             await DarlingRetention.PurgeObjectUsageChainAsync(postgres, timescaleAvailable: false, Horizon, now, NullLogger.Instance, ct);
 
             /* 1 and 2 are past the horizon by less than seven days and stay, 3 is past it by more and goes, 4 is inside the horizon. */
