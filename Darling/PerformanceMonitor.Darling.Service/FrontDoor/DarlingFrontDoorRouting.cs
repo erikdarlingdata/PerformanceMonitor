@@ -32,6 +32,10 @@ internal enum FrontDoorToolClass
 
     /// <summary>Every other tool: asked of every store, the answers kept apart.</summary>
     FanOut,
+
+    /// <summary>The front door answers it itself and never forwards it (#9388): it is about the front door's own served tool set, which
+    /// no store knows.</summary>
+    Local,
 }
 
 /// <summary>
@@ -68,6 +72,16 @@ internal static class DarlingFrontDoorRouting
         "validate_custom_alert_rule",
         "describe_custom_view_catalog",
         "list_custom_alert_templates",
+    };
+
+    /// <summary>The tools the front door answers itself and never wraps or forwards (#9388). <c>find_tools</c> searches the tools THIS
+    /// request is served here (what the caller's token can call on the front door, with <c>store</c> in each schema), where a store would
+    /// search its own set under the front door's peer token. <c>call_tool</c> is rewritten to the inner tool before dispatch, so its own
+    /// method never runs, and its <c>store</c> goes inside <c>arguments</c>.</summary>
+    internal static readonly IReadOnlySet<string> LocalTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "find_tools",
+        "call_tool",
     };
 
     /// <summary>The arguments whose value is a row id inside one store. An id from one store means nothing in another, so a call that
@@ -129,12 +143,13 @@ internal static class DarlingFrontDoorRouting
     /// in the write policy's sets, which the existing census already holds every tool to), and the census test fails it at build time.</summary>
     internal static FrontDoorToolClass ClassOf(string tool) =>
         IsStoreRequired(tool) ? FrontDoorToolClass.StoreRequired
+        : LocalTools.Contains(tool) ? FrontDoorToolClass.Local
         : AnyOneStoreTools.Contains(tool) ? FrontDoorToolClass.AnyOneStore
         : FrontDoorToolClass.FanOut;
 
     /// <summary>The classes <paramref name="tool"/> is listed in, for the census: one name in two lists is a defect.</summary>
     internal static int ClassesListedIn(string tool) =>
-        (IsStoreRequired(tool) ? 1 : 0) + (AnyOneStoreTools.Contains(tool) ? 1 : 0) + (FanOutTools.Contains(tool) ? 1 : 0);
+        (IsStoreRequired(tool) ? 1 : 0) + (AnyOneStoreTools.Contains(tool) ? 1 : 0) + (LocalTools.Contains(tool) ? 1 : 0) + (FanOutTools.Contains(tool) ? 1 : 0);
 
     /// <summary>True when the call carries a store-local id with a value.</summary>
     internal static bool CarriesStoreLocalId(IDictionary<string, JsonElement>? arguments)

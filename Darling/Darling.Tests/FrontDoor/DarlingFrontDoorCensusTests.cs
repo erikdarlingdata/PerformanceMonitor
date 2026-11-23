@@ -43,7 +43,7 @@ public sealed class DarlingFrontDoorCensusTests
 
         Assert.True(
             unclassified.Count == 0,
-            "These tools take no server_name and are in no front door class. Put each in DarlingFrontDoorRouting's FanOutTools, AnyOneStoreTools or "
+            "These tools take no server_name and are in no front door class. Put each in DarlingFrontDoorRouting's FanOutTools, AnyOneStoreTools, LocalTools or "
             + $"ExtraStoreRequiredTools (a write belongs in the write policy's sets): {string.Join(", ", unclassified)}");
         Assert.True(inTwoClasses.Count == 0, $"These tools are in more than one front door class: {string.Join(", ", inTwoClasses)}");
     }
@@ -56,6 +56,7 @@ public sealed class DarlingFrontDoorCensusTests
 
         var missing = DarlingFrontDoorRouting.FanOutTools
             .Concat(DarlingFrontDoorRouting.AnyOneStoreTools)
+            .Concat(DarlingFrontDoorRouting.LocalTools)
             .Concat(DarlingFrontDoorRouting.ExtraStoreRequiredTools)
             .Where(name => !registered.Contains(name))
             .OrderBy(n => n, StringComparer.Ordinal)

@@ -392,8 +392,12 @@ internal static class DarlingMcpWritePolicy
         if (tools is null)
             return names;
 
+        /* #9388: call_tool is served on /lean only, so the census of what / serves does not count it. */
         foreach (var tool in tools)
-            names.Add(tool.ProtocolTool.Name);
+        {
+            if (!string.Equals(tool.ProtocolTool.Name, DarlingLeanToolProfile.CallToolName, StringComparison.Ordinal))
+                names.Add(tool.ProtocolTool.Name);
+        }
 
         return names;
     }

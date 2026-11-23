@@ -171,6 +171,6 @@ public sealed class HostHeaderGuardTests
         Assert.True(
             stateless > transport && configure > stateless,
             "options.Stateless = true must be set in the same WithHttpTransport block as ConfigureSessionOptions");
-        Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core is mapped");
+        Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core and /lean are mapped");
     }
 }

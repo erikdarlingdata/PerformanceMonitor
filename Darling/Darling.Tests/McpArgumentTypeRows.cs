@@ -81,14 +81,25 @@ internal static class McpArgumentTypeRows
         ["double"] = typeof(double),
         ["double?"] = typeof(double?),
         ["string[]"] = typeof(string[]),
+        ["JsonElement?"] = typeof(JsonElement?),
     };
 
     /// <summary>One row per (type, value): the CLR type, the JSON value as sent, whether the binder cannot read it, and
     /// the phrases the refusal must say, separated by '|' (empty for a value the binder reads).</summary>
-    public static TheoryData<string, string, bool, string> All()
+    public static TheoryData<string, string, bool, string> All(IEnumerable<Type> toolTypes)
     {
+        /* A row goes to a host only when a tool of that host declares its type (the probe tool counts, since it stands in for
+           a type no shipped tool declares). Both SKUs compile this table, and Darling's call_tool takes a JsonElement?
+           that Lite has no tool for (#9388). This reads the tool methods themselves, with no host, so a row is dropped only
+           when no method of that host's tool types has a parameter of its type. */
+        var declared = toolTypes
+            .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .SelectMany(method => method.GetParameters().Select(parameter => parameter.ParameterType))
+            .ToHashSet();
+
         var data = new TheoryData<string, string, bool, string>();
-        foreach (var row in Table())
+        foreach (var row in Table().Where(row => declared.Contains(s_types[row.Type])))
         {
             data.Add(row.Type, row.Raw, row.Refused, row.Says);
         }
@@ -314,6 +325,16 @@ internal static class McpArgumentTypeRows
         rows.Add("string[]", "[\"a\",5]", true, "list|text");
         rows.Add("string[]", "\"a\"", true, "list|text");
 
+        /* A raw JSON value (call_tool's arguments, #9388). The binder reads any JSON value into a JsonElement, so no row is
+           one the binder cannot read, and the guard leaves every one alone. Refusing a string or a number is not the guard's
+           work: CallToolFilter does it on the lean path (DarlingLeanPathTests), and this host does not install that filter, so
+           here every row reaches call_tool's own body, which answers that it did not reach the tool. */
+        rows.Add("JsonElement?", "{}", false, "");
+        rows.Add("JsonElement?", "{\"hours_back\":1}", false, "");
+        rows.Add("JsonElement?", "null", false, "");
+        rows.Add("JsonElement?", "\"x\"", false, "");
+        rows.Add("JsonElement?", "5", false, "");
+
         return rows;
     }
 
@@ -325,8 +346,8 @@ internal static class McpArgumentTypeRows
         McpInProcessHost guarded, McpInProcessHost unguarded, IReadOnlyCollection<Type> toolTypes,
         string typeKey, string raw, bool refused, string says, CancellationToken cancellationToken)
     {
-        var (tool, parameter) = Resolve(guarded, toolTypes, s_types[typeKey]);
-        var arguments = new Dictionary<string, object?> { [parameter] = JsonDocument.Parse(raw).RootElement.Clone() };
+        var (tool, parameter, others) = Resolve(guarded, toolTypes, s_types[typeKey]);
+        var arguments = new Dictionary<string, object?>(others) { [parameter] = JsonDocument.Parse(raw).RootElement.Clone() };
         var label = $"{tool}.{parameter} ({typeKey}) <- {raw}";
 
         /* Half one: the binder on its own. The row says what it does; this is what pins that. */
@@ -375,36 +396,50 @@ internal static class McpArgumentTypeRows
     /// passed over. What keeps any tool body from reaching a real store is the test host's stand-in services, not the
     /// name check: Darling's data source points at a closed port, and Lite's services are uninitialized instances with
     /// every field null.</summary>
-    private static (string Tool, string Parameter) Resolve(McpInProcessHost host, IEnumerable<Type> toolTypes, Type clr)
+    private static (string Tool, string Parameter, Dictionary<string, object?> Others) Resolve(
+        McpInProcessHost host, IEnumerable<Type> toolTypes, Type clr)
     {
         var served = host.RegisteredTools.ToDictionary(tool => tool.ProtocolTool.Name, StringComparer.Ordinal);
 
-        foreach (var toolType in toolTypes)
+        /* The first pass wants a tool that needs no other argument. Only when no tool is that simple does the second pass take
+           one whose other required arguments are all text (call_tool's name, #9388), and sends "x" for each. So a row never
+           lands on a tool that a simpler one could have stood in for. */
+        foreach (var allowTextArguments in new[] { false, true })
         {
-            foreach (var method in toolType
-                         .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
-                         .OrderBy(method => method.Name, StringComparer.Ordinal))
+            foreach (var toolType in toolTypes)
             {
-                if (method.GetCustomAttribute<McpServerToolAttribute>() is not { } attribute
-                    || !served.TryGetValue(attribute.Name ?? method.Name, out var tool)
-                    || ChangesData(tool.ProtocolTool.Name))
+                foreach (var method in toolType
+                             .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                             .OrderBy(method => method.Name, StringComparer.Ordinal))
                 {
-                    continue;
-                }
-
-                var schema = tool.ProtocolTool.InputSchema;
-                var advertised = schema.TryGetProperty("properties", out var properties)
-                    ? properties.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal)
-                    : new HashSet<string>(StringComparer.Ordinal);
-                var required = schema.TryGetProperty("required", out var requiredNames)
-                    ? requiredNames.EnumerateArray().Select(name => name.GetString()!).ToHashSet(StringComparer.Ordinal)
-                    : new HashSet<string>(StringComparer.Ordinal);
-
-                foreach (var parameter in method.GetParameters().Where(p => p.ParameterType == clr && advertised.Contains(p.Name!)))
-                {
-                    if (required.All(name => name == parameter.Name))
+                    if (method.GetCustomAttribute<McpServerToolAttribute>() is not { } attribute
+                        || !served.TryGetValue(attribute.Name ?? method.Name, out var tool)
+                        || ChangesData(tool.ProtocolTool.Name))
                     {
-                        return (tool.ProtocolTool.Name, parameter.Name!);
+                        continue;
+                    }
+
+                    var schema = tool.ProtocolTool.InputSchema;
+                    var advertised = schema.TryGetProperty("properties", out var properties)
+                        ? properties.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal)
+                        : new HashSet<string>(StringComparer.Ordinal);
+                    var required = schema.TryGetProperty("required", out var requiredNames)
+                        ? requiredNames.EnumerateArray().Select(name => name.GetString()!).ToHashSet(StringComparer.Ordinal)
+                        : new HashSet<string>(StringComparer.Ordinal);
+
+                    foreach (var parameter in method.GetParameters().Where(p => p.ParameterType == clr && advertised.Contains(p.Name!)))
+                    {
+                        var others = required.Where(name => name != parameter.Name).ToList();
+                        if (others.Count == 0)
+                        {
+                            return (tool.ProtocolTool.Name, parameter.Name!, new Dictionary<string, object?>());
+                        }
+
+                        if (allowTextArguments
+                            && others.All(name => method.GetParameters().Any(p => p.Name == name && p.ParameterType == typeof(string))))
+                        {
+                            return (tool.ProtocolTool.Name, parameter.Name!, others.ToDictionary(name => name, _ => (object?)"x"));
+                        }
                     }
                 }
             }

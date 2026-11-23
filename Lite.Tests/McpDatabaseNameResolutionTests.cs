@@ -470,7 +470,7 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
 
         _host = await McpInProcessHost.StartAsync(
             global::Lite.Tests.McpWholeNumberArgumentTests.LiteToolTypes(),
-            type => global::Lite.Tests.McpServedSchema.IsServiceParameter(type) && type != typeof(McpToolGuideCatalog),
+            type => global::Lite.Tests.McpServedSchema.IsServiceParameter(type) && type != typeof(McpToolGuideCatalog) && type != typeof(ModelContextProtocol.Server.McpServer),
             type => type == typeof(IInvestigationRequestStore)
                 ? NotificationRoutesMcpTests.RouteUseStore.Create(new Dictionary<int, (int LastHour, int LastDay)>())
                 : null,

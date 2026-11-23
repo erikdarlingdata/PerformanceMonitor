@@ -282,7 +282,8 @@ public sealed class DarlingMcpWritePolicyTests
     [Fact]
     public void Instructions_ToolCounts_MatchTheRegisteredTools_UnderEachSwitchState()
     {
-        var all = ServedTools();
+        /* #9388: call_tool is served on /lean only, so the census of the full path leaves it out. */
+        var all = PerformanceMonitor.Darling.Service.Mcp.DarlingLeanToolProfile.WithoutCallTool(ServedTools());
         var total = all.Count;
         var defaultCount = DarlingMcpWritePolicy.FilterToolCollection(all, DarlingMcpWritePolicy.Effective.Off).Count;
         var writesCount = DarlingMcpWritePolicy.FilterToolCollection(all, new DarlingMcpWritePolicy.Effective(true, false)).Count;

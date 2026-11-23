@@ -53,7 +53,7 @@ public class McpAlwaysLoadedToolsTests
             .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
-            .Where(t => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog))
+            .Where(t => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct();
 
         foreach (var serviceType in serviceParamTypes)
