@@ -534,6 +534,7 @@ public partial class RemoteCollectorService
         {
             await duckConnection.OpenAsync(cancellationToken);
             written = WriteBatch(duckConnection, definition, rows, serverId, context.ServerName, ceilingUtc, context);
+            written -= RemoveStoredBackfillCopies(duckConnection, serverId, databaseName, ceilingUtc);
         }
 
         /* #6254: backfill rows feed the ship guard, so a later look-back read that meets the same key with the same or an
@@ -577,6 +578,48 @@ public partial class RemoteCollectorService
             server.DisplayName, databaseName, written,
             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
             boundary ?? floorUtc, isHole ? "hole" : "tail", ceilingUtc);
+    }
+
+    /// <summary>
+    /// Removes the rows a backfill slice just wrote that the store already held (#9352). A catch-up clamp opens a hole that
+    /// REPLACES the database's one saved hole, so the dig restarts at the clamp point and walks ranges an earlier pass filled
+    /// and ranges the live collector already stored. Two passes whose chunks line up write the same rows under the same stamp
+    /// (exact copies), and passes that do not line up write the same rows under another stamp. Both inflate any total over raw
+    /// rows, and the read side's dedup only hides them.
+    ///
+    /// <para>A row of the slice (stamped <paramref name="stamp"/>) goes when a row with a LOWER <c>collection_id</c> is equal to it
+    /// in the dedup key and every measurement, <c>collection_time</c> aside: the copy that was stored first stays. Only rows equal
+    /// in the measurements are removed, so a row whose interval has since gained executions is kept as the newer state.
+    /// Returns the rows removed. This is the guard at the write. The cause (the hole replacement and the clamp that opens it
+    /// on a quiet database) is separate.</para>
+    /// </summary>
+    internal static int RemoveStoredBackfillCopies(
+        DuckDB.NET.Data.DuckDBConnection connection, int serverId, string databaseName, DateTime stamp)
+    {
+        var columns = new List<string>();
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT column_name FROM information_schema.columns WHERE table_schema = 'main' AND table_name = 'query_store_stats' ORDER BY ordinal_position";
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                columns.Add(reader.GetString(0));
+            }
+        }
+
+        var key = QueryStoreSliceRepairService.KeyColumnsFor(columns);
+        var same = QueryStoreSliceRepairService.DistinctSliceColumns(columns, key)
+            .Where(c => !string.Equals(c, "collection_time", StringComparison.OrdinalIgnoreCase))
+            .Select(c => $"o.{c} IS NOT DISTINCT FROM t.{c}");
+
+        using var delete = connection.CreateCommand();
+        delete.CommandText =
+            "DELETE FROM query_store_stats AS t WHERE t.server_id = $1 AND t.database_name = $2 AND t.collection_time = $3 " +
+            $"AND EXISTS (SELECT 1 FROM query_store_stats AS o WHERE o.collection_id < t.collection_id AND {string.Join(" AND ", same)})";
+        delete.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+        delete.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+        delete.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = stamp });
+        return delete.ExecuteNonQuery();
     }
 
     /// <summary>Binds a CollectorQuery's parameters onto a SqlCommand — Lite's slice commands share
