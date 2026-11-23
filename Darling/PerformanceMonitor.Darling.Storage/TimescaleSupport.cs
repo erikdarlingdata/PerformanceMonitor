@@ -14926,7 +14926,6 @@ END $$;";
     /// </summary>
     internal static async Task ExecuteInTransactionAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
     {
-        NpgsqlTransaction? transaction = null;
         using (var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds })
         {
             await command.ExecuteNonQueryAsync(cancellationToken);
