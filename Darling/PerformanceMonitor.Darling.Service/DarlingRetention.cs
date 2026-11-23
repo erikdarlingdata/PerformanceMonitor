@@ -1889,7 +1889,8 @@ public static class DarlingRetention
     /// The open runs (<c>last_time</c> NULL) of every (server, database) pair that has no <c>index_object_stats</c> row left (#9349). <c>$1</c> is the
     /// raw horizon: a run first seen after it belongs to a pair whose raw rows the horizon cannot have dropped, so it is never looked at. Each pair is
     /// probed once, on the prefix of <c>idx_index_object_stats_object</c> (<c>server_id, database_name</c>): a live pair stops at its first row and a
-    /// dead pair has no row to find, so the probe costs one index descent per pair and not one per run.
+    /// dead pair has no row to find, so the probe costs one index descent per pair and not one per run. The probe is a <c>LATERAL</c> with <c>LIMIT 1</c> on purpose:
+    /// written as <c>NOT EXISTS</c> the planner chose a hash anti join that read every raw row of the table.
     /// </summary>
     internal const string OpenRunsOfDeadPairsDeleteSql = @"
 WITH open_pairs AS
@@ -1907,14 +1908,17 @@ dead_pairs AS
         p.server_id,
         p.database_name
     FROM open_pairs AS p
-    WHERE NOT EXISTS
+    LEFT JOIN LATERAL
     (
         SELECT
-            1
+            1 AS present
         FROM collect.index_object_stats AS s
         WHERE s.server_id = p.server_id
         AND   s.database_name = p.database_name
-    )
+        LIMIT 1
+    ) AS probe
+      ON true
+    WHERE probe.present IS NULL
 )
 DELETE FROM collect.object_usage_runs AS r
 USING dead_pairs AS d
