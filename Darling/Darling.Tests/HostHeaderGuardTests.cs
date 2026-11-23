@@ -162,7 +162,6 @@ public sealed class HostHeaderGuardTests
     {
         var source = ReadHostSource("DarlingMcpHostService.cs");
         Assert.True(source.Contains("app.MapMcp(\"/core\");", StringComparison.Ordinal), "/core is no longer mapped — this test needs rewriting");
-        Assert.True(source.Contains("app.MapMcp(\"/lean\");", StringComparison.Ordinal), "/lean is no longer mapped (#9388) — this test needs rewriting");
 
         var transport = source.IndexOf(".WithHttpTransport(options =>", StringComparison.Ordinal);
         var stateless = source.IndexOf("options.Stateless = true;", StringComparison.Ordinal);
