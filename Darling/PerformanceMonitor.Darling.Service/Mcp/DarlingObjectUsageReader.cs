@@ -8,9 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -289,8 +293,276 @@ internal static class DarlingObjectUsageReader
         AND   databases.database_name <> $2
         """;
 
-    /// <summary>Reads the window and runs it through <see cref="ObjectUsageWindow"/>.</summary>
+    /// <summary>
+    /// The window's baseline and the newest raw snapshot of one database. The baseline is the snapshot <see cref="ObjectUsageWindowRead.Sql"/>
+    /// starts from: its baseline CTE verbatim, else the first snapshot at or after the start. $1 server_id, $2 database_name, $3 the window start.
+    /// </summary>
+    internal static readonly string BoundsSql = $"""
+        WITH baseline AS
+        (
+            SELECT max(b.collection_time) AS collection_time
+            FROM v_index_object_stats AS b
+            WHERE b.server_id = $1
+            AND   b.database_name = $2
+            AND   b.collection_time <= $3
+            AND   b.collection_time > $3 - interval '{ObjectUsageWindowRead.BaselineReachDays} days'
+        )
+        SELECT
+            (
+                SELECT min(s.collection_time)
+                FROM v_index_object_stats AS s
+                WHERE s.server_id = $1
+                AND   s.database_name = $2
+                AND   s.collection_time >= COALESCE((SELECT collection_time FROM baseline), $3)
+            ),
+            (
+                SELECT max(n.collection_time)
+                FROM v_index_object_stats AS n
+                WHERE n.server_id = $1
+                AND   n.database_name = $2
+            )
+        """;
+
+    /// <summary>The chain's per-snapshot facts of one database from the baseline to the newest snapshot, oldest first.
+    /// $1 server_id, $2 database_name, $3 the baseline, $4 the newest snapshot.</summary>
+    internal const string FactsSql = """
+        SELECT
+            f.collection_time,
+            f.step_version,
+            f.answering_server_name,
+            f.sqlserver_start_time,
+            f.compared_with,
+            f.reasons,
+            f.index_resets,
+            f.blind_from
+        FROM collect.object_usage_snapshots AS f
+        WHERE f.server_id = $1
+        AND   f.database_name = $2
+        AND   f.collection_time >= $3
+        AND   f.collection_time <= $4
+        ORDER BY
+            f.collection_time
+        """;
+
+    /// <summary>The stored deltas of the window summed per object, the baseline and the boundary steps left out. $1 server_id,
+    /// $2 database_name, $3 the baseline, $4 the newest snapshot, $5 the boundary steps' times.</summary>
+    internal const string DeltasSql = """
+        SELECT
+            d.object_id,
+            sum(d.reads)::bigint                                               AS reads,
+            COALESCE(sum(d.updates) FILTER (WHERE d.index_id <= 1), 0)::bigint AS writes,
+            max(d.last_read)                                                   AS last_read,
+            max(d.last_update)                                                 AS last_write
+        FROM collect.object_usage_deltas AS d
+        WHERE d.server_id = $1
+        AND   d.database_name = $2
+        AND   d.collection_time > $3
+        AND   d.collection_time <= $4
+        AND   d.collection_time <> ALL ($5)
+        GROUP BY
+            d.object_id
+        """;
+
+    /// <summary>The runs of one database that overlap the window. $1 server_id, $2 database_name, $3 the baseline, $4 the newest snapshot.</summary>
+    internal const string RunsSql = """
+        SELECT
+            r.object_id,
+            r.index_id,
+            r.first_time,
+            r.last_time,
+            r.schema_name,
+            r.object_name,
+            r.is_indexed_view,
+            r.is_memory_optimized
+        FROM collect.object_usage_runs AS r
+        WHERE r.server_id = $1
+        AND   r.database_name = $2
+        AND   r.first_time <= $4
+        AND   (r.last_time IS NULL OR r.last_time >= $3)
+        ORDER BY
+            r.first_time,
+            r.index_id
+        """;
+
+    /// <summary>The raw rows of the snapshots the replay recomputes: the same 17 columns in the same order as <see cref="ObjectUsageWindowRead.Sql"/>,
+    /// so <see cref="ObjectUsageWindowRead.Map"/> reads them. $1 server_id, $2 database_name, $3 the collection times.</summary>
+    internal const string BoundaryRowsSql = """
+        SELECT
+            s.collection_time,
+            s.sqlserver_start_time,
+            s.answering_server_name,
+            s.object_id,
+            s.index_id,
+            s.schema_name,
+            s.table_name,
+            COALESCE(s.is_indexed_view, false),
+            COALESCE(s.user_seeks, 0),
+            COALESCE(s.user_scans, 0),
+            COALESCE(s.user_lookups, 0),
+            COALESCE(s.user_updates, 0),
+            s.last_user_seek,
+            s.last_user_scan,
+            s.last_user_lookup,
+            s.last_user_update,
+            s.is_memory_optimized
+        FROM v_index_object_stats AS s
+        WHERE s.server_id = $1
+        AND   s.database_name = $2
+        AND   s.collection_time = ANY ($3)
+        """;
+
+    private static ILogger? _sharedLogger;
+
+    /// <summary>Gives the reader the host's logger, for the line it writes when it takes the full fold.</summary>
+    internal static void UseSharedLogger(ILogger logger) => Interlocked.CompareExchange(ref _sharedLogger, logger, null);
+
+    /// <summary>
+    /// Reads the window (#9349). The persisted path replays the window over the chain's per-snapshot facts and sums the stored deltas, and the
+    /// answer is record-equal to the full fold's. Whenever it cannot prove that, it takes the full fold (<see cref="ReadTablesFullAsync"/>) and
+    /// logs the reason at Debug level.
+    /// </summary>
     public static async Task<ObjectUsageWindowResult> ReadTablesAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken,
+        ILogger? logger = null)
+    {
+        var (result, reason) = await TryReadPersistedAsync(postgres, serverId, databaseName, windowStartUtc, cancellationToken);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        (logger ?? _sharedLogger)?.LogDebug("get_object_usage reads every snapshot of the window: {Reason}", reason);
+        return await ReadTablesFullAsync(postgres, serverId, databaseName, windowStartUtc, cancellationToken);
+    }
+
+    /// <summary>The persisted path. Null with the reason when the window cannot be answered from the chain.</summary>
+    internal static async Task<(ObjectUsageWindowResult? Result, string? Reason)> TryReadPersistedAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken)
+    {
+        DateTime? baseline = null;
+        DateTime? newest = null;
+        await using (var command = postgres.CreateCommand(BoundsSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddText(command, databaseName);
+            DarlingMcpReadParameters.AddTimestamp(command, windowStartUtc);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                baseline = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                newest = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+            }
+        }
+
+        if (baseline is not { } from || newest is not { } to)
+        {
+            return (null, "the window holds no snapshot");
+        }
+
+        var facts = new List<ObjectUsageSnapshotFact>();
+        await using (var command = postgres.CreateCommand(FactsSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddText(command, databaseName);
+            DarlingMcpReadParameters.AddTimestamp(command, from);
+            DarlingMcpReadParameters.AddTimestamp(command, to);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                facts.Add(new ObjectUsageSnapshotFact(
+                    reader.GetDateTime(0),
+                    Convert.ToInt16(reader.GetValue(1), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                    reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                    (ObjectUsageResetReasons)Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture),
+                    Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(7) ? null : reader.GetDateTime(7)));
+            }
+        }
+
+        var replay = ObjectUsageWindowReplay.Run(facts, from, to, ObjectUsageChainVersion.Current);
+        if (replay.FallbackReason is not null)
+        {
+            return (null, replay.FallbackReason);
+        }
+
+        var boundaryTimes = replay.Boundaries.Select(b => b.Time).ToArray();
+        var deltas = new List<ObjectUsageDeltaTotals>();
+        await using (var command = postgres.CreateCommand(DeltasSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddText(command, databaseName);
+            DarlingMcpReadParameters.AddTimestamp(command, from);
+            DarlingMcpReadParameters.AddTimestamp(command, to);
+            AddTimestampArray(command, boundaryTimes);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                deltas.Add(new ObjectUsageDeltaTotals(
+                    Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.GetInt64(1),
+                    reader.GetInt64(2),
+                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                    reader.IsDBNull(4) ? null : reader.GetDateTime(4)));
+            }
+        }
+
+        var runs = new List<ObjectUsageRun>();
+        await using (var command = postgres.CreateCommand(RunsSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddText(command, databaseName);
+            DarlingMcpReadParameters.AddTimestamp(command, from);
+            DarlingMcpReadParameters.AddTimestamp(command, to);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                runs.Add(new ObjectUsageRun(
+                    Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+                    reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                    reader.IsDBNull(4) ? "" : reader.GetString(4),
+                    reader.IsDBNull(5) ? "" : reader.GetString(5),
+                    reader.GetBoolean(6),
+                    reader.IsDBNull(7) ? null : reader.GetBoolean(7)));
+            }
+        }
+
+        var raw = new List<ObjectUsageSample>();
+        await using (var command = postgres.CreateCommand(BoundaryRowsSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddText(command, databaseName);
+            AddTimestampArray(command, replay.RawTimes.ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                raw.Add(ObjectUsageWindowRead.Map(reader));
+            }
+        }
+
+        var result = replay.Assemble(deltas, runs, raw, out var reason);
+        return (result, reason);
+    }
+
+    /// <summary>Binds a naive-UTC <c>timestamp[]</c>.</summary>
+    private static void AddTimestampArray(NpgsqlCommand command, DateTime[] values) =>
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+            Value = values.Select(v => DateTime.SpecifyKind(v, DateTimeKind.Unspecified)).ToArray(),
+        });
+
+    /// <summary>The full fold: every index row of every snapshot in the window through <see cref="ObjectUsageWindow"/>. Lite's read, and the
+    /// persisted path's fallback.</summary>
+    internal static async Task<ObjectUsageWindowResult> ReadTablesFullAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken)
     {
         var window = new ObjectUsageWindow();
