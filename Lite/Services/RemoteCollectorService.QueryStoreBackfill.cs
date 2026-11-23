@@ -1162,7 +1162,14 @@ RETURNING state_key";
     {
         var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
         var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-        var remaining = QueryStoreBackfillState.RemoveDugRange(existing.TryGetValue(key, out var encoded) ? encoded : null, dugFromUtc, dugToUtc, floorUtc);
+        if (!existing.TryGetValue(key, out var encoded))
+        {
+            /* A state read that fails returns no rows, and the slice's own hole key was there when the scan found it. Writing
+               nothing leaves the hole as it was, where deleting it would lose the backfill opportunity. */
+            return;
+        }
+
+        var remaining = QueryStoreBackfillState.RemoveDugRange(encoded, dugFromUtc, dugToUtc, floorUtc);
         if (remaining is null)
         {
             await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, key, cancellationToken);
