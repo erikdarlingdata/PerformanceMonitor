@@ -85,7 +85,7 @@ public class ArchivableTableBareReadSweepTests
            HasPriorCollectorSuccessAsync counts the live log first and v_collection_log when that is 0. */
         /* #9352: the other two are the copy guard that runs right after a backfill slice writes. It deletes from the hot table the slice
            just wrote to and compares each row with an earlier hot row of the same key and measurements. Rows already archived are not
-           compared, since the slice is stamped with a hot-store write time and the read-side dedup covers an archived twin. */
+           compared: the guard only cleans what the slice just wrote, and the read-side dedup covers an archived twin. */
         [("RemoteCollectorService.QueryStoreBackfill.cs", "query_store_stats")] = 3,
         [("RemoteCollectorService.QueryStoreBackfill.cs", "database_states")] = 3,
         [("RemoteCollectorService.cs", "collection_log")] = 1,
