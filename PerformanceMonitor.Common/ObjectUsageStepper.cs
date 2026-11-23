@@ -252,6 +252,25 @@ internal sealed class ObjectUsageNodeTracker
         _previousNodeKey = step.NodeKey;
     }
 
+    /// <summary>Puts a tracker back where a fold left it, for the chain builder's next call: a fresh tracker is made to look as if every snapshot
+    /// up to <paramref name="previousTime"/> had been committed. Each node is its last snapshot, its kept start and the deduped counters of that
+    /// snapshot. The caller passes only the nodes the fold would still hold (an unnamed node is gone once a name has taken it over).</summary>
+    public void Restore(
+        IEnumerable<(string NodeKey, DateTime LastSnapshot, DateTime? KeptStart, Dictionary<(int ObjectId, int IndexId), ObjectUsageCounters> Counters)> nodes,
+        string? previousNodeKey, string? previousServer, DateTime coveredFrom, DateTime previousTime)
+    {
+        _nodes.Clear();
+        foreach (var (key, last, kept, counters) in nodes)
+        {
+            _nodes[key] = new ObjectUsageNodeState { Start = kept, LastSnapshot = last, Counters = counters };
+        }
+
+        _previousNodeKey = previousNodeKey;
+        _previousServer = previousServer;
+        CoveredFrom = coveredFrom;
+        PreviousTime = previousTime;
+    }
+
     /// <summary>How far before the baseline an instance's start time has to be before its counters are taken to predate the window. The start
     /// time is the server's local clock and the collection time is UTC, so the two can differ by a time zone offset.</summary>
     private static readonly TimeSpan StartClockMargin = TimeSpan.FromDays(1);
