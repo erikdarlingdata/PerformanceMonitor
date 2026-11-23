@@ -448,6 +448,20 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         return string.Join("\n", lines);
     }
 
+    private static async Task<List<string>> ListDatabasesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var names = new List<string>();
+        await using var command = new NpgsqlCommand(ObjectUsageChainTick.DatabasesSql, connection);
+        command.Parameters.AddWithValue(ServerOne);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            names.Add(reader.GetString(0));
+        }
+
+        return names;
+    }
+
     [Fact]
     public async Task ThePlannerStatements_ReadIndexEntriesAndNeverScanTheTable()
     {
@@ -460,7 +474,11 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
 
         await PlantServerAsync(connection, ServerOne, ["Alpha", "Beta", "Gamma"], 5, ct);
         await PlantServerAsync(connection, ServerTwo, ["Alpha", "Delta"], 5, ct);
-        Assert.Equal(5, (await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct)).PairsBuilt);
+
+        // Old chunks: a database and a server whose rows are all ten days old, outside the listing window.
+        await PlantServerAsync(connection, ServerOne, ["Dead"], 5, ct, OldDay);
+        await PlantServerAsync(connection, Capped, ["Gone"], 5, ct, OldDay);
+        Assert.Equal(8, (await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct)).PairsBuilt);
         await using (var analyze = new NpgsqlCommand("ANALYZE collect.index_object_stats; ANALYZE collect.object_usage_snapshots; SET enable_seqscan = off", connection))
         {
             await analyze.ExecuteNonQueryAsync(ct);
@@ -470,6 +488,18 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne);
         var watermarks = await PlanOfAsync(connection, ObjectUsageChainTick.WatermarksSql, ct, ServerOne);
 
+        var dump = Environment.GetEnvironmentVariable("TICK_PLAN_DUMP");
+        if (!string.IsNullOrEmpty(dump))
+        {
+            System.IO.File.WriteAllText(dump, "SERVERS
+" + servers + "
+
+DATABASES
+" + databases + "
+");
+        }
+
+        Assert.DoesNotContain("Dead", string.Join(",", await ListDatabasesAsync(connection, ct)), StringComparison.Ordinal);
         Assert.DoesNotContain("Seq Scan", servers, StringComparison.Ordinal);
         Assert.Contains("Index Only Scan using idx_index_object_stats_server_time", servers, StringComparison.Ordinal);
         Assert.DoesNotContain("Seq Scan", databases, StringComparison.Ordinal);
