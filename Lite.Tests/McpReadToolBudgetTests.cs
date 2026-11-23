@@ -400,6 +400,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         name.StartsWith("analyze_", StringComparison.Ordinal) ||
         name.StartsWith("compare_", StringComparison.Ordinal) ||
         name == "audit_config" ||
+        /* #9388: find_tools reads the request's own served tool list through its McpServer, which a reflective call cannot give it. Its worst
+           case, full at its cap over the real registered tools, is measured in the McpToolSearch tests instead. */
+        name == "find_tools" ||
         WriteToolRoster.Contains(name);
 
     internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>

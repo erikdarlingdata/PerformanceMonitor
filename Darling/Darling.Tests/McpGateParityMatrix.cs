@@ -97,7 +97,7 @@ internal static class McpGateParityMatrix
     internal static readonly string[] SharedReads =
     {
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan", "analyze_server",
-        "audit_config", "compare_analysis", "find_database", "get_active_queries", "get_alert_history", "get_alert_settings",
+        "audit_config", "compare_analysis", "find_database", "find_tools", "get_active_queries", "get_alert_history", "get_alert_settings",
         "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend",
         "get_client_timeouts", "get_collection_health", "get_collection_log", "get_cpu_by_database", "get_cpu_scheduler_pressure",
         "get_cpu_utilization", "get_current_waits_trend", "get_daily_summary", "get_daily_summary_range", "get_database_config",

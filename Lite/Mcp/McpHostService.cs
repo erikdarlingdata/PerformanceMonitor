@@ -343,6 +343,8 @@ public sealed class McpHostService : BackgroundService
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Darling twin:
                DarlingMcpToolGuideTools. */
             .WithGeminiCompatibleTools<McpToolGuideTools>()
+            /* #9388: find_tools searches the tools this request serves (the served ToolCollection). Darling twin: DarlingMcpToolSearchTools. */
+            .WithGeminiCompatibleTools<McpToolSearchTools>()
             /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
                every tool with no per-tool change. A call carrying an argument no tool parameter
                declares is refused before dispatch — the refusal names the key and lists what the

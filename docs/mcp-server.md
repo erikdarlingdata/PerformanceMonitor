@@ -126,6 +126,12 @@ The `http://localhost:5152/core` URL serves a subset of 75 tools. They are the d
 
 Tools from every other MCP server enabled in the same chat count toward the 128 as well. A chat that also uses other servers has less room. Turn tools off in the picker if you reach the cap.
 
+##### The /lean URL
+
+Many clients load every listed tool into the model's context before the first question. The `http://localhost:5152/lean` URL lists six tools: the four entry tools that `/core` starts from, `find_tools` and `call_tool`. Use `find_tools` to find the tool a question needs. Use `call_tool` with that tool's name and arguments to run it.
+
+`call_tool` runs read tools only. It runs the tool as a direct call would, with the same argument checks, output filters and timing records. A tool that writes is refused with a pointer to `/`. `/lean` serves the same tools as `/` for the same token, so a tool that `/lean` does not list can still be called by name. Only `call_tool` is new, and it is served on `/lean` alone.
+
 ##### A reader token for Copilot
 
 A named token with the `reader` role fits Copilot well. A `reader` token sees the reads and nothing else: no write tool, no server admin tool and no investigation tool.
@@ -136,7 +142,7 @@ Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for exampl
 
 Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only URL, `http://localhost:5151/`. Use the same entry with that URL and a `lite-token` input. Paste the token from Lite's Settings, Access, **Copy Token**.
 
-Lite does not need `/core`. Its code defines 115 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 101 by default, well under 128. Even all 115 are under the cap. The cap still counts every other MCP server in the same chat.
+Lite does not need `/core`. Its code defines 116 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 102 by default, well under 128. Even all 116 are under the cap. The cap still counts every other MCP server in the same chat.
 
 These steps were checked with VS Code and Copilot Free against a Darling service, where the server loaded its 75 `/core` tools and answered `list_servers`. Lite was not checked in Copilot, and the Lite steps follow the same entry with Lite's URL.
 
@@ -216,6 +222,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Discovery | `list_servers`, `find_database` |
 | Query text search (Darling) | `find_queries_by_text` (finds the statements whose text holds a piece of text, such as a table name. Name a server and it searches Query Store text and the plan-cache text of the raw tier. Each source has its own horizon and its own 4 second budget. The Query Store text is read through its opt-in trigram index (`queryStoreTextTrigramIndexEnabled`, or `update_service_flags` `query_store_text_trigram_index_enabled`, which wins and needs no restart) when that index is ready, which makes a rare pattern fast. The plan-cache text of that server is read through the plan-cache text index (`queryTextTrigramIndexEnabled`) when that index is ready: the matching texts are found first and the server's samples read by them (`sample_read` is `probe`), and a pattern more than 1,000 texts contain, or a text match that takes more than a second, tests each text instead (`sample_read` is `plain`). Leave the server out to search the plan-cache text of every server, which is served only when the opt-in trigram index (`queryTextTrigramIndexEnabled`, or `update_service_flags` `query_text_trigram_index_enabled`, which wins and needs no restart) is ready. The matching texts' digests are then bound to the sample read (`sample_read` is `probe`, `matched_texts` says how many), which the sample index the same option builds on `query_stats` serves on uncompressed chunks; a pattern more than 1,000 statements contain joins the whole raw window instead (`sample_read` is `join`) and can reach the 4 second budget and report `stopped`. Each source reports `ok`, `empty`, `stopped`, or `not_searched` (Query Store text, in the all-servers scope). A statement the sensitive-statement filter withholds is listed with the withheld marker in place of its text. It is refused when `mcp.dataDetail` hides statement text) |
 | Tool guides | `get_tool_guide` (the long-form reading guide of a tool whose description ends "Reading guide: get_tool_guide.", and cross-tool topics; both editions) |
+| Tool search | `find_tools` (searches the tools the connection can call; both editions) |
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Store health (Lite) | `get_store_health` (Lite's own store, not a monitored server: data against the reset point (`hot_store_reset_mb`, 512 MB by default), file size against twice that, archive files, the history of archives, resets and cleanups, and rows per table) |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) and, with writes on, `create_known_pattern`, `update_known_pattern`, `delete_known_pattern` |
@@ -262,6 +269,12 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Mute rule purge (Darling) | `purge_expired_mute_rules` deletes every expired mute rule (the Viewer's Purge Expired) and returns each rule it deleted |
 | Custom alert rules (Darling) | `create_custom_alert_rule` and `update_custom_alert_rule` take no server argument. A rule applies to every monitored server unless its definition carries a `scope`: `{"scope":{"mode":"servers","servers":["<server name>"]}}` limits it to the named servers, and `{"scope":{"mode":"tag","tagId":<fleet tag id>}}` to the servers assigned that fleet tag (#6455) |
 | Alert tuning (Darling) | `backtest_custom_alert_rule` (where a rule fired over stored history), `set_alert_threshold_override`, `dismiss_alert_history` and `restore_alert_history`, and route tools such as `create_notification_route`, `update_notification_route`, `set_notification_route_fallback`, `update_notification_channels` (the default SMTP, Teams, Slack, generic webhook and PagerDuty channels the Viewer sets in Settings > Notifications; secrets are sealed and never shown), and the webhook signing key tools `generate_webhook_signing_key` and `remove_webhook_signing_key` |
+
+#### Finding a tool with find_tools
+
+Many clients load every tool definition before the first question. `find_tools` lets the model ask for the few tools a question needs. Pass words in `query`. A tool matches when any word is in its name or its description, and a tool with more of the words in its name comes first. `detail` is `names`, `summaries` (the default) or `full`, which adds the input schema and hints. `limit` is at most 50 results, or 10 at `full`. A larger value, or one below 1, is refused.
+
+The search covers only tools that this connection can call. A tool that a token's settings, a write switch or the `/core` path leave out is never named. `find_tools` reads no collected data and no monitored server. Lite and Darling have the same tool.
 
 Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](../Darling/README.md).)
 

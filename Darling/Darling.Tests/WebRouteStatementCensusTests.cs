@@ -102,6 +102,7 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/server-tags/{id:int}/servers\""] = "server tags",
         ["MapMcp()"] = "the MCP transport: every tool result passes the MCP output filter (pinned by the MCP filter tests)",
         ["MapMcp(\"/core\")"] = "the MCP transport, core profile: every tool result passes the MCP output filter",
+        ["MapMcp(\"/lean\")"] = "the MCP transport, lean profile: every tool result, including one run through call_tool, passes the MCP output filter",
     };
 
     /// <summary>

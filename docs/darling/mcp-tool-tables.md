@@ -182,12 +182,13 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `test_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map` (tag scope) |
 | `test_query_tag_rule` | `collect.query_tag_sightings`<br>`config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_assignments`<br>`collect.servers` |
 
-## Tools about Darling itself (40)
+## Tools about Darling itself (41)
 
 | Tool | Store objects |
 |---|---|
 | `analyze_plan_xml` | None. It analyses the plan XML that you pass in. |
 | `describe_custom_view_catalog` | None. The catalog is built into the service. |
+| `find_tools` | None. It searches the tools the connection can call. |
 | `get_agent_changes` | `config.investigation_journal`<br>`config.config_alert_log`<br>`config.investigation_requests`<br>`config.investigation_evidence`<br>`config.config_service`<br>`collect.servers` |
 | `get_alert_settings` | `config.config_alert_settings`<br>`config.config_notification`<br>`config.config_threshold_overrides` |
 | `get_change_watches` | `config.change_watches`<br>`config.change_watch_changes` |
