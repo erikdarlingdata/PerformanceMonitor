@@ -491,7 +491,7 @@ ANALYZE {Wide};", ct);
 
                     if (Environment.GetEnvironmentVariable("DARLING_9373_PLAN_DIAG") == "1" && bindFilter)
                     {
-                        diag.Add("Total: PLAN " + label + " => " + string.Join(" ;; ", scans.Where(s => IsInterval(s.Table) || IsDaily(s.Table)).Select(s => s.Table + " using " + s.Index)));
+                        diag.Add("Total: P " + label.Replace("arrays bound", "b") + "> " + string.Join(" ", scans.Where(s => IsInterval(s.Table) || IsDaily(s.Table)).Select(s => s.Table.Replace("query_store_interval_wide", "i").Replace("query_store_grid_daily", "d") + ":" + s.Index.Replace("query_store_interval_wide", "W").Replace("query_store_grid_daily", "D"))));
                     }
                 }
                 finally
