@@ -61,7 +61,7 @@ internal static class DuckDbReadProfile
         public void Dispose() => s_testScope.Value = outer;
     }
 
-    private static bool IsOn => s_testScope.Value is { } scope ? scope.On : Enabled;
+    private static bool IsOn => false;
 
     private static int s_warned;
     private static int s_shapeLogged;
