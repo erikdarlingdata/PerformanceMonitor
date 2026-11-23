@@ -32,7 +32,6 @@ public sealed class AnomalyDetectorReadTimingProbe : IDisposable
         foreach (var p in ps) cmd.Parameters.Add(new DuckDBParameter { Value = p });
         var sw = Stopwatch.StartNew();
         cmd.ExecuteNonQuery();
-        _lines.Add($"seed {sw.ElapsedMilliseconds} ms: {sql.Trim().Split('\n')[0]}");
     }
 
     private long Next() { var b = _base; _base += 100_000_000; return b; }
