@@ -543,6 +543,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "table from the transition table, which is the function text and not a statement the rung runs. The backfill reads the "
             + "dimension's main heap only, never its TOAST. It runs under V298CommandTimeoutSeconds (1,800 s, equal to V281's), because it is silent and reads about 18 GB of main heap on "
             + "the largest store, so the lock-wait budget is unchanged. The rung's own timing is measured separately and is not part of this declaration."),
+        new(
+            302,
+            SetsTheFloor: false,
+            "#8570: CREATE INDEX over the populated collect.job_history hypertable (created V1/V24), a partial index on the failed job outcomes "
+            + "(step_id = 0 AND run_status = 0). V220's case on the same table, the failed-outcome twin of its success index: a compressed "
+            + "chunk's index is an empty shell, only the uncompressed newest chunks hold rows, and failure rows are rare, so the partial predicate "
+            + "keeps a small share of those. The build takes seconds on a large store, nowhere near a MigrationCommandTimeoutSeconds window, so "
+            + "this rung does not move the multiple"),
     ];
 
     /// <summary>
