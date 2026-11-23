@@ -292,6 +292,7 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         await PlantServerAsync(connection, ServerOne, ["Alpha", "Beta", "Gamma"], 5, ct);
         await PlantServerAsync(connection, ServerTwo, ["Alpha", "Delta"], 5, ct);
