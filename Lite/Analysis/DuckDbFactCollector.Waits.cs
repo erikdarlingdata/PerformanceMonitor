@@ -262,7 +262,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
 WITH " + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.DuckDb, "waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, blocking_status
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev") + @",
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + "{SCOPE}") + @" AS ev") + @",
 reports AS (
     SELECT
         wait_time_ms,
@@ -465,6 +465,9 @@ LIMIT 5000";
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken, plan: plan);
+
+            /* #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out. */
+            rows.RemoveAll(r => PerformanceMonitor.Common.MonitorApplicationNames.IsMonitorOnlyBlockingPair(r.BlockedClientApp, r.BlockingClientApp));
 
             /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
                skipped, so one chain does not page from both targets. A pair with no database stays. */

@@ -281,7 +281,8 @@ WITH " + BlockingWaits.WaitsCteSql(
     FROM blocked_process_reports
     WHERE server_id = $1
     AND   event_time >= $2
-    AND   event_time <= $3" + extraWhere) + @",
+    AND   event_time <= $3
+    AND   " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate + extraWhere) + @",
 reports AS (
     SELECT
         wait_time_ms,
@@ -773,6 +774,9 @@ LIMIT 5000";
                 },
                 rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
+
+            /* #9340: a pair whose two sessions are both the monitor's own is no blocking evidence, as the BLOCKING_EVENTS read leaves it out. */
+            rows.RemoveAll(r => PerformanceMonitor.Common.MonitorApplicationNames.IsMonitorOnlyBlockingPair(r.BlockedClientApp, r.BlockingClientApp));
 
             /* A master target leaves out the pairs of databases monitored as their own targets (the same
                rule the BLOCKING_EVENTS fact applies), so one chain does not page from both targets. */
