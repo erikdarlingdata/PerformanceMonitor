@@ -37,6 +37,36 @@ public sealed class QueryStoreClampReports
             && seen.Raw == raw
             && floor <= seen.ReadThrough;
 
+    /// <summary>
+    /// Where a clamp hole for this raw watermark should start (#9352). A landed cycle read everything up to its
+    /// collection time, so a later clamp that is a new gap (an outage that outlasted the catch-up window) leaves
+    /// only the span from that time to the new floor unread. Opening the hole at the raw watermark instead made
+    /// it overlap the hole an earlier clamp recorded, and merging the two sent the dig back over a range it had
+    /// filled and a range the live read held. Any other raw value, database or server gets the raw watermark.
+    /// </summary>
+    public DateTime HoleFloor(int serverId, string database, DateTime raw)
+        => _landed.TryGetValue((serverId, database), out var seen) && seen.Raw == raw && seen.ReadThrough > raw
+            ? seen.ReadThrough
+            : raw;
+
+    /// <summary>
+    /// Where a clamp hole starts for a read that went through <see cref="QueryStoreReplicaRouting.ComputeCutoff"/> (#9352). The
+    /// look-back is what that cutoff already put between the raw watermark and the hole start (<c>raw - cutoff.HoleFrom</c>, zero
+    /// when the read used none). It applies to <see cref="HoleFloor"/>'s answer, so a read with a look-back and a read without
+    /// one follow one rule: the hole starts the look-back before what the landed cycle read. Passing the cutoff's own
+    /// <c>HoleFrom</c> to <see cref="HoleFloor"/> never matched the landed raw watermark, so a look-back read kept the overlap.
+    ///
+    /// <para>Callers reach this only when <see cref="AlreadyReported"/> was false. When this raw watermark landed, that means the
+    /// new floor lies past the landed read-through, so the start (read-through minus the look-back) stays below the hole's end, the
+    /// floor. For any other raw watermark the start is the raw watermark minus the look-back, below the floor it clamped to.</para>
+    /// </summary>
+    public DateTime HoleFrom(int serverId, string database, DateTime raw, QueryStoreCutoff cutoff)
+    {
+        ArgumentNullException.ThrowIfNull(cutoff);
+        var lookBack = cutoff.HoleFrom is DateTime from && from < raw ? raw - from : TimeSpan.Zero;
+        return HoleFloor(serverId, database, raw) - lookBack;
+    }
+
     /// <summary>Lands a successful cycle. <paramref name="clampedRaw"/> is the raw watermark that cycle clamped,
     /// or null when it did not clamp (the watermark is fresh again, so a later stale one is a new gap).</summary>
     public void Land(int serverId, string database, DateTime? clampedRaw, DateTime collectionTime)

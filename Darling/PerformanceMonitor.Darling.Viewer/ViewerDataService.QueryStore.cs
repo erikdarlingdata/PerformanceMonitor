@@ -939,12 +939,12 @@ public sealed partial class ViewerDataService
     /// run is clipped to the days wholly inside retention on the store's clock, and is not cut to the days the interval table still holds
     /// whole. A day near the retention edge comes from its rollup as collected, and the same day read from the interval table (the fault
     /// fallback, or a day with no rollup) can lack the rows the purge dropped early.</summary>
-    private async Task<(QueryStoreClosedDayRollup.ServedDays? Served, QueryStoreClosedDayRollup.SourceReason Reason)> ResolveServedDaysAsync(
+    private async Task<(QueryStoreClosedDayRollup.ServedDays? Served, QueryStoreClosedDayRollup.SourceReason Reason, IReadOnlyList<DateOnly> BuiltDays)> ResolveServedDaysAsync(
         Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, int serverId, DateTime readStart, DateTime end, CancellationToken cancellationToken)
     {
         if (_cachedStoreSchemaVersion is not int version || version < QueryStoreClosedDayRollup.Version)
         {
-            return (null, QueryStoreClosedDayRollup.SourceReason.Unavailable);
+            return (null, QueryStoreClosedDayRollup.SourceReason.Unavailable, Array.Empty<DateOnly>());
         }
 
         return await QueryStoreClosedDayRollup.ResolveServedDaysWithReasonAsync(
@@ -1204,13 +1204,11 @@ public sealed partial class ViewerDataService
             /* The built-day lookup itself reads the rollup bookkeeping tables, so a fault in it counts. Once it says no day is served, the
                rest of the read is the interval table alone and a fault there is not the rollups' to retry. */
             rollupsTried = useRollups && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
-            var (served, servedReason) = rollupsTried
+            var (served, servedReason, builtDays) = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, literalEndUtc ?? endUtc, cancellationToken)
-                : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack);
+                : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack, Array.Empty<DateOnly>());
             rollupsTried = served is not null;
-            var source = QueryStoreClosedDayRollup.DescribeSource(
-                plan.ReadStart, literalEndUtc ?? endUtc, served, servedReason,
-                QueryStoreClosedDayRollup.HoldsEdgeDays(connection, served));
+            var source = QueryStoreClosedDayRollup.DescribeSourceFor(connection, plan.ReadStart, literalEndUtc ?? endUtc, served, servedReason, builtDays);
             /* #9283: the window as two arms, each with the floor that holds for its rows (the MCP top read's split, #9276), once the partial
                index the NULL-start arm reads through is built. #9287: a served run's two interval arms take the same split, and the arms with an
                interval start are bounded above by the server's longest interval span plus an hour (QueryStoreTopRollupSplitPrefix). Until the
@@ -2016,13 +2014,11 @@ public sealed partial class ViewerDataService
             /* #9111: whole built days come from the hourly rollup when the bin is a whole number of hours, in this read's snapshot. */
             var bucketMinutes = SlicerBuckets.MinutesFor(startUtc, endUtc);
             rollupsTried = useRollups && bucketMinutes % 60 == 0 && _cachedStoreSchemaVersion is int rollupVersion && rollupVersion >= QueryStoreClosedDayRollup.Version;
-            var (served, servedReason) = rollupsTried
+            var (served, servedReason, builtDays) = rollupsTried
                 ? await ResolveServedDaysAsync(connection, transaction, serverId, plan.ReadStart, endUtc, cancellationToken)
-                : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack);
+                : (null, useRollups ? QueryStoreClosedDayRollup.SourceReason.Unavailable : QueryStoreClosedDayRollup.SourceReason.FellBack, Array.Empty<DateOnly>());
             rollupsTried = served is not null;
-            var source = QueryStoreClosedDayRollup.DescribeSource(
-                plan.ReadStart, endUtc, served, servedReason,
-                QueryStoreClosedDayRollup.HoldsEdgeDays(connection, served));
+            var source = QueryStoreClosedDayRollup.DescribeSourceFor(connection, plan.ReadStart, endUtc, served, servedReason, builtDays);
             await using var command = new Npgsql.NpgsqlCommand(served is null ? QueryStoreSlicerTableSql : QueryStoreSlicerRollupSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
