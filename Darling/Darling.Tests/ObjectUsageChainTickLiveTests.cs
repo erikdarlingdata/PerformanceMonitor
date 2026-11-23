@@ -295,13 +295,22 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
 
         await PlantServerAsync(connection, ServerOne, ["Alpha", "Beta", "Gamma"], 5, ct);
         await PlantServerAsync(connection, ServerTwo, ["Alpha", "Delta"], 5, ct);
-        await using (var analyze = new NpgsqlCommand("ANALYZE collect.index_object_stats; SET enable_seqscan = off", connection))
+        Assert.Equal(5, (await TickAsync(dataSource, int.MaxValue, ObjectUsageChainBuilder.BuildPairAsync, ct)).PairsBuilt);
+        await using (var analyze = new NpgsqlCommand("ANALYZE collect.index_object_stats; ANALYZE collect.object_usage_snapshots; SET enable_seqscan = off", connection))
         {
             await analyze.ExecuteNonQueryAsync(ct);
         }
 
         var servers = await PlanOfAsync(connection, ObjectUsageChainTick.ServersSql, ct);
         var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne);
-        Assert.Fail("PLAN-SERVERS " + servers.Replace("\n", " | ", StringComparison.Ordinal) + " PLAN-DATABASES " + databases.Replace("\n", " | ", StringComparison.Ordinal));
+        var watermarks = await PlanOfAsync(connection, ObjectUsageChainTick.WatermarksSql, ct, ServerOne);
+
+        Assert.DoesNotContain("Seq Scan", servers, StringComparison.Ordinal);
+        Assert.Contains("Index Only Scan using idx_index_object_stats_server_time", servers, StringComparison.Ordinal);
+        Assert.DoesNotContain("Seq Scan", databases, StringComparison.Ordinal);
+        Assert.Contains("Index Only Scan using idx_index_object_stats_object", databases, StringComparison.Ordinal);
+        Assert.DoesNotContain("Seq Scan", watermarks, StringComparison.Ordinal);
+        Assert.Contains("Index Only Scan using pk_object_usage_snapshots", watermarks, StringComparison.Ordinal);
+        Assert.Fail("PLAN-WM " + watermarks.Replace("\n", " | ", StringComparison.Ordinal));
     }
 }

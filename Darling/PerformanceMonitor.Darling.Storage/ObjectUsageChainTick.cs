@@ -262,7 +262,7 @@ public static class ObjectUsageChainTick
             while (await reader.ReadAsync(cancellationToken))
             {
                 var database = reader.GetString(0);
-                if (!watermarks.TryGetValue(database, out var watermark) || watermark < newest)
+                if (!watermarks.TryGetValue(database, out var watermark) || true)
                 {
                     candidates.Add(database);
                 }
