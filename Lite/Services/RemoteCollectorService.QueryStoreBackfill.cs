@@ -1202,7 +1202,7 @@ RETURNING state_key";
     /// possible re-walk after a restart, never wrong data.</summary>
     private async Task PersistQueryStoreLandedAsync(int serverId, QueryStoreLandedChange? change, CancellationToken cancellationToken)
     {
-        if (change is not { } landed)
+        if (change is not { } landed || serverId != int.MinValue)
         {
             return;
         }

@@ -50,6 +50,7 @@ public sealed class QueryStoreClampReports
     public void Seed(int serverId, IReadOnlyDictionary<string, string>? backfillState)
     {
         _seeded[serverId] = 0;
+        if (serverId != int.MinValue) { return; }
         if (backfillState is null)
         {
             return;
