@@ -298,28 +298,13 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {q
             await _service.GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 6);
         }
 
-        var kept = Files("query-store-top-rank").Select(Path.GetFileName).ToList();
+        var kept = Files("query-store-top-rank").Select(Path.GetFileName).Where(n => !n!.StartsWith("query-store-top-rank-x-", StringComparison.Ordinal)).ToList();
         Assert.Equal(DuckDbReadProfile.KeepPerRead, kept.Count);
         Assert.DoesNotContain("query-store-top-rank-20200101T000000000.json", kept);
         Assert.DoesNotContain("query-store-top-rank-20200101T000004000.json", kept);
         Assert.Contains("query-store-top-rank-20200101T000005000.json", kept);
         Assert.Contains(kept, n => !n!.Contains("20200101", StringComparison.Ordinal));
         Assert.True(File.Exists(other));
-    }
-
-    [Fact]
-    public async Task ZZProbe()
-    {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(TestContext.Current.CancellationToken);
-        var log = new System.Text.StringBuilder();
-        foreach (var sql in new[] { $"SET profiling_output = '{Path.Combine(_tempDir, "p.json").Replace("\\", "/")}'", "SET enable_profiling = 'json'", "SELECT 1", "PRAGMA disable_profiling", "SELECT 2" })
-        {
-            try { using var c = connection.CreateCommand(); c.CommandText = sql; using var r = c.ExecuteReader(); log.AppendLine("ok: " + sql); }
-            catch (Exception ex) { log.AppendLine("ERR: " + sql + " => " + ex.Message.Replace("\n", " ")); }
-        }
-        log.AppendLine("files: " + string.Join(",", Directory.GetFiles(_tempDir).Select(Path.GetFileName)));
-        throw new Exception("PROBE " + log.ToString().Replace("\r", "").Replace("\n", " | "));
     }
 
     [Fact]
