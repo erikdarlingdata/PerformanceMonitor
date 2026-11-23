@@ -465,6 +465,27 @@ public sealed class TimescaleAggregateCompressionTests
     }
 
     /// <summary>
+    /// #8570: query_stats_interval_hourly is an hourly target held to the daily compression window, so its staging backlog is the
+    /// daily eligible count. The hourly count would include chunks its policy does not compress yet.
+    /// </summary>
+    [Fact]
+    public void ApplyAggregateCompressionSizes_QueryStatsIntervalHourly_TakesTheDailyCount()
+    {
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
+        var state = new TimescaleSupport.AggregateCompressionState(view, CompressionEnabled: true, JobId: null, CompressAfterSeconds: null,
+            ScheduleIntervalSeconds: null, FixedSchedule: false, PhaseHour: null, PhaseMinute: null, MaterializationBytes: 0, EligibleChunksNow: 0);
+        var rows = new Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>(StringComparer.Ordinal)
+        {
+            [view] = (1000, 7, 3),
+        };
+
+        var (sized, unread) = TimescaleSupport.ApplyAggregateCompressionSizes(new[] { state }, rows);
+
+        Assert.Empty(unread);
+        Assert.Equal((1000L, 3L), (sized.Single().MaterializationBytes, sized.Single().EligibleChunksNow));
+    }
+
+    /// <summary>
     /// THE STAGING (#3581), pinned on a synthetic store: aggregates with a backlog take consecutive nights
     /// largest first; aggregates with nothing eligible take night zero whatever their size; a fresh store —
     /// nothing eligible anywhere — is therefore all night zero with no special case; size ties break on
