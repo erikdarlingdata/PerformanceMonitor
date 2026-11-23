@@ -142,6 +142,33 @@ VALUES ($1, $2, $3, $4, $5, $6, 10, 0, $7)",
 
     [Theory]
     [MemberData(nameof(Families))]
+    public Task EmptyAnswer_CountsASkippedRunAsHealthy_AndAWarningRunAsFailed(string family)
+    {
+        var name = NameFor(family, "skiprun");
+        return RunAsync(name, DateTime.UtcNow.AddDays(-40), async (c, ds, serverId, now, ct) =>
+        {
+            await LogAsync(c, serverId, name, CollectorOf(family), "SUCCESS", now.AddMinutes(-1), null, ct);
+            /* SKIPPED is healthy everywhere else (EnumeratedCollectorDriver.FreshnessSuccessStatuses), so two of them are no failed runs. */
+            await LogAsync(c, serverId, name, CollectorOf(family), "SKIPPED", now.AddMinutes(-20), null, ct);
+            await LogAsync(c, serverId, name, CollectorOf(family), "SKIPPED", now.AddMinutes(-10), null, ct);
+
+            var healthy = JsonNode.Parse(await ReadAsync(family, ds, name))!;
+
+            Assert.Equal("empty", (string?)healthy["status"]);
+            Assert.Null(healthy["hints"]?[CollectionGapNote.HintKey]);
+            Assert.DoesNotContain("did not succeed", (string?)healthy["message"], StringComparison.Ordinal);
+
+            /* A WARNING run partly failed, so it still counts. */
+            await LogAsync(c, serverId, name, CollectorOf(family), "WARNING", now.AddMinutes(-5), null, ct);
+
+            var warned = JsonNode.Parse(await ReadAsync(family, ds, name))!;
+
+            Assert.Equal(1, (long)warned["hints"]![CollectionGapNote.HintKey]!["failed_runs"]!);
+        });
+    }
+
+    [Theory]
+    [MemberData(nameof(Families))]
     public Task OfflineServer_KeepsItsOfflineAnswer(string family)
     {
         var name = NameFor(family, "offline");
