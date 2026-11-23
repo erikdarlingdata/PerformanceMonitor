@@ -177,7 +177,7 @@ FROM collect.store_relation_sizes_latest AS l";
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken).ConfigureAwait(false);
 
             DateTime measuredAt;
             await using (var stamp = new NpgsqlCommand(ReadStampSql, connection, transaction))
