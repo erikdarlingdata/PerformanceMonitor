@@ -136,7 +136,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
     public static Task<string> GetQueryStoreClutter(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24, maximum 168; the plan-churn arm reads whole days and hours from the clutter rollups and raw rows at the edges, and the wait arm reads wait_stats: window_truncated says when either holds less than the window.")] int hours_back = 24,
+        [Description("Hours of history. Default 24, maximum 168; window_truncated says when the plan-churn arm (rollups plus raw rows) or the wait arm holds less than the window.")] int hours_back = 24,
         [Description("Maximum database rows to return, worst first. Default 50. truncated is true when the server had more Query-Store-bearing databases than this; database_count is the whole.")] int limit = DefaultLimit,
         [Description("If true, also computes fleet_median: the discrete median of each headline arm over every enabled non-replica SQL Server target. Default false; see the reading guide for the read-cost detail.")] bool include_fleet_median = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
