@@ -547,15 +547,18 @@ RETURNING s.state_key";
     /// (dimension diversion, positional contract, naive-UTC stamp), on its own store connection.
     /// <paramref name="collectionTime"/> is the slice's BACKDATED ceiling — see QueryStoreBackfill's
     /// horizon contract for why that is safe only inside the raw tier's window.
+    /// <paramref name="inTransaction"/> (#9359) runs after the rows and every side write, on the same connection and inside the
+    /// same transaction, just before the commit. It is not best-effort: a fault rolls the rows back with it.
     /// </summary>
     public async Task<int> WriteBackfillBatchAsync<TRow>(
         ICollectorDefinition<TRow> definition, List<TRow> rows, ServerRuntime server,
-        DateTime collectionTime, CollectorContext context, CancellationToken cancellationToken)
+        DateTime collectionTime, CollectorContext context, CancellationToken cancellationToken,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? inTransaction = null)
     {
         try
         {
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var written = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+            var written = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken, inTransaction);
 
             /* #6254: backfill reads the primary and ships rows with their own old times; the ship guard learns them so a look-back
                read that meets the same row does not write it again. */
