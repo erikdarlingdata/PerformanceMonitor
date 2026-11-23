@@ -44,8 +44,8 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.1.0",
-        "contentHash": "7a4eOI65Mn4dzc9kmRiI+y3EiS80NCMnu/j3ZR9H2dyO3d597eVPVV+ClzSFXnQkA0r8n2iig+Vg/Q/mozh5MQ==",
+        "resolved": "4.1.1.1",
+        "contentHash": "paZNy+g/hXMCsEpWvmOFr14x9gVzIY2JRSzSk+nXpKcnaASxEFBMWE4CNBuI/WwGN1ygTwojRTsPRn3yXuhSYQ==",
         "dependencies": {
           "AWSSDK.Extensions.Numerics": "[4.1.0, 5.0.0)",
           "System.IO.Hashing": "11.0.0"
@@ -80,8 +80,8 @@
       },
       "Azure.Storage.Common": {
         "type": "Transitive",
-        "resolved": "12.29.0",
-        "contentHash": "0VqPcAinzXFJDAELqC+VPFUL6AaU1mmIpDAHarr7DVw3zcJrlo4k3Xc3TCTVBkDgY6YUOjJ00Fd9ZB9En5H2Jg==",
+        "resolved": "12.29.1",
+        "contentHash": "T0CHonZVqUhIze/357Sbbg2ite4YM41rIvf+cEJMas/uRp5YiPGq3MV1E8/nvdWClJrzmmorXv4bg3qu1FuXIg==",
         "dependencies": {
           "Azure.Core": "1.60.0",
           "System.IO.Hashing": "10.0.9"
@@ -413,12 +413,12 @@
       "darling-export": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.S3": "[4.1.0, )",
+          "AWSSDK.S3": "[4.1.2, )",
           "Azure.Identity": "[1.21.0, )",
-          "Azure.Storage.Blobs": "[12.30.1, )",
+          "Azure.Storage.Blobs": "[12.30.2, )",
           "DuckDB.NET.Bindings.Full": "[1.5.6.1, )",
           "DuckDB.NET.Data": "[1.5.6.1, )",
-          "Npgsql": "[10.0.3, )",
+          "Npgsql": "[10.0.4, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.15, )"
         }
       },
@@ -433,7 +433,7 @@
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.140.0, )",
+          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.154.0, )",
           "PerformanceMonitor.Common": "[3.13.0, )"
         }
       },
@@ -456,7 +456,7 @@
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.15, )",
           "ModelContextProtocol": "[2.4.0, )",
-          "Npgsql": "[10.0.3, )",
+          "Npgsql": "[10.0.4, )",
           "PerformanceMonitor.Alerting": "[3.13.0, )",
           "PerformanceMonitor.Analysis": "[3.13.0, )",
           "PerformanceMonitor.Collectors": "[3.13.0, )",
@@ -485,22 +485,22 @@
       },
       "AWSSDK.S3": {
         "type": "CentralTransitive",
-        "requested": "[4.1.0, )",
-        "resolved": "4.1.0",
-        "contentHash": "uV//Txuga5jW6wIE5UXi6RaqAvc0eg76i7vmUDgK2H4yOtrSG4BxF+IdXYOu4sbPG/L6q/k2UbK5L6ptysj9oA==",
+        "requested": "[4.1.2, )",
+        "resolved": "4.1.2",
+        "contentHash": "vGRpeXIxK7uRRHzVIrp2dYDri4wwlerUutG8TG7jHMolb3hX6Zu6VVDZpmwB8AlTIZ9BKLIV+V4Oi4xEsamZsQ==",
         "dependencies": {
-          "AWSSDK.Core": "[4.1.0, 5.0.0)"
+          "AWSSDK.Core": "[4.1.1.1, 5.0.0)"
         }
       },
       "Azure.Storage.Blobs": {
         "type": "CentralTransitive",
-        "requested": "[12.30.1, )",
-        "resolved": "12.30.1",
-        "contentHash": "ywPqtDHLH5MY0Cp/wfLQgqhHOuJmD+bYVJawjXudtaQr9aJB+9orhk8oE6hHPy5s8H5bzq2q/mDkESf8w1rzBg==",
+        "requested": "[12.30.2, )",
+        "resolved": "12.30.2",
+        "contentHash": "7c0H70SRY3Axty6YunsEFqw0k9KYzEgpmi4iRROAM325S2Ou5tyF1VvPw7imyjmopzhSqFx5LvwuE4/CLBDhng==",
         "dependencies": {
           "Apache.Arrow": "22.1.0",
           "Azure.Core": "1.60.0",
-          "Azure.Storage.Common": "12.29.0"
+          "Azure.Storage.Common": "12.29.1"
         }
       },
       "CredentialManagement": {
@@ -555,9 +555,9 @@
       },
       "Microsoft.SqlServer.TransactSql.ScriptDom": {
         "type": "CentralTransitive",
-        "requested": "[180.140.0, )",
-        "resolved": "180.140.0",
-        "contentHash": "qdSHJPR3t2mqLcYQ31E9hBhQfuHo34jOtMEOrCKHBNuV+IShlLfDR8/tDzXR7MeI2ZhlZ+8wCVRMACifoAepAA=="
+        "requested": "[180.154.0, )",
+        "resolved": "180.154.0",
+        "contentHash": "epYZJ+0ZSx/u1KZwF8e8wfqPO3KS67EijVJi+EgveLuQaU3a4GRNP5R6kOUrGBv8K+kDpAtCcGBjn5c9NwWW6A=="
       },
       "ModelContextProtocol": {
         "type": "CentralTransitive",
@@ -572,9 +572,9 @@
       },
       "Npgsql": {
         "type": "CentralTransitive",
-        "requested": "[10.0.3, )",
-        "resolved": "10.0.3",
-        "contentHash": "7nb5YzXuvWWJxB0J8DiyL3we+X4FOctZrt0fIBnucOIaIevFEEwGQVZKtiu9olXdlNAK1eNgqSral6r/jlhI4w==",
+        "requested": "[10.0.4, )",
+        "resolved": "10.0.4",
+        "contentHash": "m2VCpcU9MKD8lLxTn+YaNIRWd+Gz3y/9wIaM+2ifDF24xZ2Kvvjx4CDB2BIgobr1Gj6a/gsdmfz1sQ+kmd7liw==",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "10.0.0"
         }
