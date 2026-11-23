@@ -335,11 +335,28 @@ VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
 
         /* A writer holds the process-wide lock for longer than the host's own 3 s, as another class's archive or checkpoint can
            (#9375). The lookup queues behind it, and with the deadline these hosts run with it waits the hold out. */
-        var held = _duckDb.AcquireWriteLock();
-        var call = Task.Run(() => LongQueriesAsync(host, Listed, "reports"), TestContext.Current.CancellationToken);
-        await Task.Delay(McpDatabaseNameFilter.LookupDeadline + TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
-        Assert.False(call.IsCompleted);
-        held.Dispose();
+        using var acquired = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var writer = Task.Factory.StartNew(() =>
+        {
+            using var held = _duckDb.AcquireWriteLock();
+            acquired.Set();
+            release.Wait();
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        Assert.True(acquired.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+
+        Task<(JsonElement Json, bool IsError)> call;
+        try
+        {
+            call = Task.Run(() => LongQueriesAsync(host, Listed, "reports"), TestContext.Current.CancellationToken);
+            await Task.Delay(McpDatabaseNameFilter.LookupDeadline + TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            /* Released on every path: a held lock would stall every other test in the process. */
+            release.Set();
+            await writer;
+        }
 
         var (refused, isError) = await call;
         Assert.True(isError);
