@@ -21,7 +21,7 @@ public sealed class AnomalyDetectorReadTimingProbe : IDisposable
 
     public void Dispose()
     {
-        File.WriteAllLines(Path.Combine(Path.GetTempPath(), "anomaly-probe2.txt"), _lines);
+        File.WriteAllLines(Path.Combine(Path.GetTempPath(), "anomaly-probe3.txt"), _lines);
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
