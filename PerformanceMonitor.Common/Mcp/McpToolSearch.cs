@@ -31,7 +31,8 @@ public static class McpToolSearch
     /// <summary>The name of the search tool, on both SKUs.</summary>
     public const string ToolName = "find_tools";
 
-    /// <summary>The most results at <c>names</c> and <c>summaries</c>, and the count used when the caller gives none.</summary>
+    /// <summary>The most results at <c>names</c> and <c>summaries</c>. A limit above it is refused. The count used when the caller
+    /// gives none is <see cref="DefaultLimit"/>.</summary>
     public const int MaxLimit = 50;
 
     /// <summary>The count a caller gets when it gives no limit at <c>names</c> or <c>summaries</c>.</summary>
