@@ -246,7 +246,7 @@ public sealed class QueryStoreBackfill
 
             /* Holes before the tail: a recorded outage gap is the history closest to expiring. */
             if (state.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var encoded)
-                && QueryStoreBackfillState.TryDecodeHole(encoded, out var holeFrom, out var holeTo))
+                && QueryStoreBackfillState.TryDecodeNewestHole(encoded, out var holeFrom, out var holeTo))
             {
                 if (holeTo <= floorLimit)
                 {
@@ -488,9 +488,17 @@ public sealed class QueryStoreBackfill
                    ships nothing, so the derived ceiling would re-ask the same chunk forever). The
                    tail marks done in the same breath — the hole owns the rest of the dig, and the
                    scan services holes first. */
-                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor), cancellationToken);
-                if (!isHole)
+                if (isHole)
                 {
+                    await RetireDugHoleRangeAsync(server.ServerId, databaseName, sliceFloor, ceilingUtc, floorUtc, cancellationToken);
+                }
+                else
+                {
+                    var existingState = await _runner.GetCollectorStateAsync(server.ServerId, StateCollectorName, cancellationToken);
+                    await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName,
+                        QueryStoreBackfillState.AddHole(
+                            existingState.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var existingHole) ? existingHole : null, floorUtc, sliceFloor),
+                        cancellationToken);
                     await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
                 }
 
@@ -505,7 +513,7 @@ public sealed class QueryStoreBackfill
                for this range, and cheaper to record than to re-ask every tick. */
             if (isHole)
             {
-                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
+                await RetireDugHoleRangeAsync(server.ServerId, databaseName, floorUtc, ceilingUtc, floorUtc, cancellationToken);
             }
             else
             {
@@ -529,16 +537,7 @@ public sealed class QueryStoreBackfill
                boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
                a bounded window would orphan the unexplored range below it. */
             var shippedTo = boundary ?? sliceFloor;
-            if (shippedTo <= floorUtc)
-            {
-                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
-            }
-            else
-            {
-                /* Shrink the ceiling to the oldest shipped row; the from-side stays at the floor we
-                   actually used (anything below it is horizon-expired either way). */
-                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo), cancellationToken);
-            }
+            await RetireDugHoleRangeAsync(server.ServerId, databaseName, shippedTo > floorUtc ? shippedTo : floorUtc, ceilingUtc, floorUtc, cancellationToken);
         }
         else if (boundary is not null && boundary <= floorUtc)
         {
@@ -550,6 +549,25 @@ public sealed class QueryStoreBackfill
             server.Config.DisplayName, databaseName, written,
             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
             boundary ?? floorUtc, isHole ? "hole" : "tail", ceilingUtc);
+    }
+
+    /// <summary>Takes the range a hole slice just dug out of the database's recorded holes and saves what is left, or
+    /// deletes the key when nothing is (#9352). Reads the value as it is now, so a hole the live collector recorded
+    /// while the slice ran stays. Lite's twin is <c>RetireDugHoleRangeAsync</c>.</summary>
+    private async Task RetireDugHoleRangeAsync(
+        int serverId, string databaseName, DateTime dugFromUtc, DateTime dugToUtc, DateTime floorUtc, CancellationToken cancellationToken)
+    {
+        var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
+        var existing = await _runner.GetCollectorStateAsync(serverId, StateCollectorName, cancellationToken);
+        var remaining = QueryStoreBackfillState.RemoveDugRange(existing.TryGetValue(key, out var encoded) ? encoded : null, dugFromUtc, dugToUtc, floorUtc);
+        if (remaining is null)
+        {
+            await _runner.DeleteCollectorStateKeyAsync(serverId, StateCollectorName, key, cancellationToken);
+        }
+        else
+        {
+            await SaveStateAsync(serverId, key, remaining, cancellationToken);
+        }
     }
 
     private Task SaveStateAsync(int serverId, string key, string value, CancellationToken cancellationToken)

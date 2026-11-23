@@ -52,19 +52,19 @@ public sealed class QueryStoreBackfillTests
         var to = new DateTime(2026, 7, 3, 0, 0, 0, DateTimeKind.Utc);
 
         /* No existing record: the new clamp IS the hole. */
-        Assert.Equal((from, to), QueryStoreBackfillState.MergeHole(null, from, to));
+        Assert.Equal(QueryStoreBackfillState.EncodeHole(from, to), QueryStoreBackfillState.AddHole(null, from, to));
 
-        /* A repeat outage WIDENS the pending hole in both directions — overwriting would lose the
+        /* A repeat outage that overlaps the pending hole WIDENS it in both directions — overwriting would lose the
            unserviced earlier range, a silent hole in a design whose premise is that holes are
            recorded. */
         var earlierWider = QueryStoreBackfillState.EncodeHole(from.AddDays(-1), to.AddHours(-12));
-        Assert.Equal((from.AddDays(-1), to), QueryStoreBackfillState.MergeHole(earlierWider, from, to));
+        Assert.Equal(QueryStoreBackfillState.EncodeHole(from.AddDays(-1), to), QueryStoreBackfillState.AddHole(earlierWider, from, to));
 
         var laterWider = QueryStoreBackfillState.EncodeHole(from.AddHours(12), to.AddDays(1));
-        Assert.Equal((from, to.AddDays(1)), QueryStoreBackfillState.MergeHole(laterWider, from, to));
+        Assert.Equal(QueryStoreBackfillState.EncodeHole(from, to.AddDays(1)), QueryStoreBackfillState.AddHole(laterWider, from, to));
 
         /* Garbage in the state row falls back to the fresh clamp, never a throw. */
-        Assert.Equal((from, to), QueryStoreBackfillState.MergeHole("garbage", from, to));
+        Assert.Equal(QueryStoreBackfillState.EncodeHole(from, to), QueryStoreBackfillState.AddHole("garbage", from, to));
     }
 
     /// <summary>
