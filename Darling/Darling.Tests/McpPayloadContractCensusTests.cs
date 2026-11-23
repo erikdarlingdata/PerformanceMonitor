@@ -592,39 +592,42 @@ public sealed class McpPayloadContractCensusTests
         Assert.False(McpHelpers.IsRefusalEnvelope(null));
         Assert.False(McpHelpers.IsRefusalEnvelope(""));
 
-        /* Every validator, past its bound, IS Refusal(its parameter, its sentence) — and the sentence is the
-           pre-#3739 text, so the fragments the tool tests pin survive inside message. */
-        AssertRefusal(McpHelpers.ValidateHoursBack(0), "hours_back", "Invalid hours_back value '0'. Must be a positive integer (1-168).");
-        AssertRefusal(McpHelpers.ValidateHoursBack(169), "hours_back", "hours_back value '169' exceeds maximum of 168 hours (7 days). Use a smaller value.");
-        AssertRefusal(McpHelpers.ValidateDaysBack(0, 60), "days_back", "Invalid days_back value '0'. Must be a positive integer (1-60).");
-        AssertRefusal(McpHelpers.ValidateTop(0), "limit", "Invalid limit value '0'. Must be a positive integer (1-1000).");
-        AssertRefusal(McpHelpers.ValidateTop(1001, "top"), "top", "top value '1001' exceeds maximum of 1000. Use a smaller value.");
-        AssertRefusal(McpHelpers.ValidateWindow(0, null, out _), "hours_back", "Invalid hours_back value '0'. Must be a positive integer (1-168).");
-        AssertRefusal(McpHelpers.ValidateWindow(4, "last tuesday", out _), "as_of", "Invalid as_of value 'last tuesday'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', '2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.");
-        AssertRefusal(McpHelpers.ValidateUncappedWindow(-24, null, out _), "hours_back", "Invalid hours_back value '-24'. Must be a positive integer. A negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
-        AssertRefusal(McpHelpers.ResolveAsOf("2099-01-01T00:00:00Z", out _), "as_of", "as_of value '2099-01-01T00:00:00Z' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).");
-        AssertRefusal(McpHelpers.ParseSummaryDate("01/02/2026", out _), "summary_date", "Invalid summary_date value '01/02/2026'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings, including 07/09/2026, are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
-        AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source", "Invalid source value 'perfmon'. Accepted values: dmv, xe. Omit it for all.");
-        AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms", "Invalid min_duration_ms value '-1'. A duration floor cannot be negative. Use 0 to admit every row, or omit it entirely.");
+        /* Every validator, past its bound, IS Refusal(its parameter, its sentence). */
+        AssertRefusal(McpHelpers.ValidateHoursBack(0), "hours_back");
+        AssertRefusal(McpHelpers.ValidateHoursBack(169), "hours_back");
+        AssertRefusal(McpHelpers.ValidateDaysBack(0, 60), "days_back");
+        AssertRefusal(McpHelpers.ValidateTop(0), "limit");
+        AssertRefusal(McpHelpers.ValidateTop(1001, "top"), "top");
+        AssertRefusal(McpHelpers.ValidateWindow(0, null, out _), "hours_back");
+        AssertRefusal(McpHelpers.ValidateWindow(4, "last tuesday", out _), "as_of");
+        AssertRefusal(McpHelpers.ValidateUncappedWindow(-24, null, out _), "hours_back");
+        AssertRefusal(McpHelpers.ResolveAsOf("2099-01-01T00:00:00Z", out _), "as_of");
+        AssertRefusal(McpHelpers.ParseSummaryDate("01/02/2026", out _), "summary_date");
+        AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source");
+        AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms");
 
         /* And the producers outside McpHelpers that the census accepts as shared: the watch-state validator, the
            trend-width resolvers (#3897) — out of range, over the read's cap (naming the width that fits), and a
            width the hourly rollup cannot serve — and the resolver. */
-        AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state", "Unknown state 'garbage'. Legal values: pending, open, carried, closed; omit for open + carried.");
-        AssertRefusal(TrendBuckets.Resolve(24, 0, 1, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), out _), "bucket_minutes", "Invalid bucket_minutes value '0'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
-        AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes", "Invalid bucket_minutes value '1441'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
-        AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes", "bucket_minutes 1 over 24 hours across 6 series is up to 8646 points, over this read's 1000-point cap. Use bucket_minutes 9 or wider, or narrow hours_back (as_of moves the window) for finer points.");
-        AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes", "bucket_minutes 30 cannot be served for this window: it reaches past the raw tier's 4-day retention, so the hourly rollup answers it, and that rollup's points are whole hours. Use a multiple of 60, or a window inside the last 4 days for finer points.");
+        AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state");
+        AssertRefusal(TrendBuckets.Resolve(24, 0, 1, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), out _), "bucket_minutes");
+        AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes");
+        AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes");
+        AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes");
         var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
-        AssertRefusal(miss, "server_name", "Could not resolve server. No monitored server matches 'box-b'. Available servers:\nbox-a");
+        AssertRefusal(miss, "server_name");
     }
 
-    private static void AssertRefusal(string? wire, string parameter, string sentence)
+    private static void AssertRefusal(string? wire, string parameter)
     {
         Assert.NotNull(wire);
-        Assert.Equal(McpHelpers.Refusal(parameter, sentence), wire);
         Assert.True(McpHelpers.IsRefusalEnvelope(wire));
-        Assert.Equal(sentence, McpHelpers.ErrorMessageOf(wire!));
+        /* The envelope is what Refusal builds for exactly this parameter around whatever sentence the validator
+           worded. The sentence itself is not pinned (#9390): each reword of a served sentence only ever edited the
+           literal here, and the tool tests pin the fragments a caller depends on. */
+        var message = McpHelpers.ErrorMessageOf(wire!);
+        Assert.False(string.IsNullOrWhiteSpace(message));
+        Assert.Equal(McpHelpers.Refusal(parameter, message!), wire);
     }
 
     /// <summary>The guarded pass-through idiom, witnessed on the shapes the tree uses and not on its
