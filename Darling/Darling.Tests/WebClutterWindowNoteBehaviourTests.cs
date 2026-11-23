@@ -16,20 +16,24 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8929: the strip on the two Query Store clutter panels at a window that reaches past the raw tier. The service writes the sentence for
-/// an MCP caller ("covers effective_hours_back, not hours_back", naming <c>query_store_stats</c>). The shipped <c>pages/server-tabs.js</c>,
-/// <c>util.js</c> and <c>plain-text.js</c> run under Node (<c>web-clutter-window-note-harness.mjs</c>) with a stub fetch that answers the
-/// read with that sentence and the scenario's <c>effective_hours_back</c>. The page says the span the reply states, in hours or days, and
-/// names no field and no store table. Node is skipped when it is not installed.
+/// #8929, #9382: the strip on the two Query Store clutter panels at a window that reaches past what the arms hold. The window block carries a span per
+/// arm (<c>plan_churn_effective_hours_back</c> and <c>wait_effective_hours_back</c>, null when that arm reaches the window start), and the shipped
+/// <c>pages/server-tabs.js</c>, <c>util.js</c> and <c>plain-text.js</c> run under Node (<c>web-clutter-window-note-harness.mjs</c>) with a stub
+/// fetch that answers the read with such a block. The Clutter panel (plan churn) says plan churn's span, the Overhead panel (QDS waits) says the wait
+/// arm's, a panel whose arm is not cut draws no strip, and neither names a field or a store table. Node is skipped when it is not installed.
 /// </summary>
 public sealed class WebClutterWindowNoteBehaviourTests
 {
-    private static string[] NoticesOf(string effective, string title)
+    private const string Clutter = "Query Store Clutter";
+    private const string Overhead = "Query Store Overhead (per server)";
+
+    private static string[] NoticesOf(string planChurn, string wait, string title)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-clutter-window-note-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
-        psi.ArgumentList.Add(effective);
+        psi.ArgumentList.Add(planChurn);
+        psi.ArgumentList.Add(wait);
 
         Process proc;
         try
@@ -49,10 +53,10 @@ public sealed class WebClutterWindowNoteBehaviourTests
             if (!proc.WaitForExit(60000))
             {
                 proc.Kill(entireProcessTree: true);
-                Assert.Fail("the clutter window note harness did not finish in 60 s for " + effective);
+                Assert.Fail("the clutter window note harness did not finish in 60 s for " + planChurn + " / " + wait);
             }
 
-            Assert.True(proc.ExitCode == 0, "the clutter window note harness failed for " + effective + ": " + error.Result);
+            Assert.True(proc.ExitCode == 0, "the clutter window note harness failed for " + planChurn + " / " + wait + ": " + error.Result);
             using var doc = JsonDocument.Parse(output);
             Assert.Empty(doc.RootElement.GetProperty("rejections").EnumerateArray());
             var panels = doc.RootElement.GetProperty("panels").EnumerateArray()
@@ -62,24 +66,52 @@ public sealed class WebClutterWindowNoteBehaviourTests
         }
     }
 
-    [Theory]
-    [InlineData("Query Store Clutter")]
-    [InlineData("Query Store Overhead (per server)")]
-    public void ThePanelsStrip_NamesTheSpanTheReplyStates_NotTheFieldName(string title)
+    private static void AssertWholeSentenceWithNoFieldOrTable(string notice)
     {
-        var notice = Assert.Single(NoticesOf("72", title));
-
-        Assert.Contains("covers the last 3 days, not the whole time range", notice);
-        Assert.DoesNotContain("_hours_back", notice);
         Assert.DoesNotContain("hours_back", notice);
+        Assert.DoesNotContain("wait_stats", notice);
         Assert.DoesNotContain("query_store_stats", notice);
-        Assert.Contains("raw query statistics", notice);
+        Assert.DoesNotContain("effective", notice);
+        Assert.DoesNotContain("(", notice);
+        Assert.EndsWith(".", notice);
+    }
+
+    [Fact]
+    public void PlanChurnCutOnly_TheClutterPanelSaysItsSpan_AndTheOverheadPanelSaysNothing()
+    {
+        var notice = Assert.Single(NoticesOf("72", "null", Clutter));
+
+        Assert.Equal("Plan churn covers the last 3 days, not the whole time range.", notice);
+        AssertWholeSentenceWithNoFieldOrTable(notice);
+        Assert.Empty(NoticesOf("72", "null", Overhead));
+    }
+
+    [Fact]
+    public void WaitArmCutOnly_TheOverheadPanelSaysItsSpan_AndTheClutterPanelSaysNothing()
+    {
+        var notice = Assert.Single(NoticesOf("null", "2", Overhead));
+
+        Assert.Equal("The QDS wait table covers the last 2 hours, not the whole time range.", notice);
+        AssertWholeSentenceWithNoFieldOrTable(notice);
+        Assert.Empty(NoticesOf("null", "2", Clutter));
+    }
+
+    [Fact]
+    public void BothArmsCut_EachPanelSaysItsOwnArmsSpan()
+    {
+        var clutter = Assert.Single(NoticesOf("72", "2", Clutter));
+        var overhead = Assert.Single(NoticesOf("72", "2", Overhead));
+
+        Assert.Equal("Plan churn covers the last 3 days, not the whole time range.", clutter);
+        Assert.Equal("The QDS wait table covers the last 2 hours, not the whole time range.", overhead);
+        AssertWholeSentenceWithNoFieldOrTable(clutter);
+        AssertWholeSentenceWithNoFieldOrTable(overhead);
     }
 
     [Fact]
     public void ASpanUnderTwoDays_IsSaidInHours()
     {
-        var notice = Assert.Single(NoticesOf("30", "Query Store Clutter"));
+        var notice = Assert.Single(NoticesOf("30", "null", Clutter));
 
         Assert.Contains("covers the last 30 hours, not the whole time range", notice);
     }
@@ -92,7 +124,7 @@ public sealed class WebClutterWindowNoteBehaviourTests
     [InlineData("24", "the last 24 hours")]
     public void TheSpanText_SwitchesToDaysAtTwoDays_AndSaysOneInTheSingular(string effective, string span)
     {
-        var notice = Assert.Single(NoticesOf(effective, "Query Store Clutter"));
+        var notice = Assert.Single(NoticesOf(effective, "null", Clutter));
 
         Assert.Contains("covers " + span + ", not the whole time range", notice);
         Assert.DoesNotContain("1 hours", notice);
@@ -104,25 +136,18 @@ public sealed class WebClutterWindowNoteBehaviourTests
     [InlineData("-5")]
     [InlineData("null")]
     [InlineData("true")]
-    [InlineData("\"72\"")]
-    public void AValueThatIsNoPositiveNumber_SaysNoSpan_AndStillNamesNoField(string effective)
+    [InlineData("none")]
+    public void AnArmValueThatIsNoPositiveNumber_DrawsNoStrip(string value)
     {
-        var notice = Assert.Single(NoticesOf(effective, "Query Store Clutter"));
-
-        if (effective == "\"72\"")
-            Assert.Contains("covers the last 3 days", notice);
-        else
-            Assert.DoesNotContain("the last ", notice);
-        Assert.DoesNotContain("hours_back", notice);
-        Assert.DoesNotContain("query_store_stats", notice);
+        Assert.Empty(NoticesOf(value, "null", Clutter));
+        Assert.Empty(NoticesOf("null", value, Overhead));
     }
 
     [Fact]
-    public void AReplyWithNoSpan_StillNamesNoFieldOrTable()
+    public void ANumberSentAsText_IsStillRead()
     {
-        var notice = Assert.Single(NoticesOf("none", "Query Store Clutter"));
+        var notice = Assert.Single(NoticesOf("\"72\"", "null", Clutter));
 
-        Assert.DoesNotContain("hours_back", notice);
-        Assert.DoesNotContain("query_store_stats", notice);
+        Assert.Contains("covers the last 3 days", notice);
     }
 }

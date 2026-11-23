@@ -748,6 +748,8 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "databases",
           floorKey: "window",
+          /* #9382: the window block carries a span per arm. This panel's plan churn is the arm that can be cut here, so a cut wait arm draws nothing. */
+          armSpan: { key: "plan_churn_effective_hours_back", subject: "Plan churn" },
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
           /* #7538, #7651: the read leaves out databases the server dropped; the strip names them. */
@@ -764,6 +766,7 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "qs_overhead.wait_stats.included",
           floorKey: "window",
+          armSpan: { key: "wait_effective_hours_back", subject: "The QDS wait table" },
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           /* #7729: a wait with no delta in the window is left out, so the empty sentence prints when none has one. */
           orderRows: qsWaitsWithDelta,

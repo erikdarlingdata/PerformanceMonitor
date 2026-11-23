@@ -821,10 +821,13 @@ public static class DarlingQueryStoreClutterReader
     /// rollups from the start of the route (<see cref="ResolveClutterRouteAsync"/>) and raw <c>query_store_stats</c> outside it. So it is the
     /// earlier of the route's start and the oldest raw row (<see cref="RawWindowFloor.GetAsync"/>), and the oldest raw row alone when no
     /// rollup is served. A start before the window's own means the arm covers the whole window. Null when neither source holds the window.
-    /// Several servers answer the latest of their starts: the least any one of them covers.
+    /// Several servers answer the latest of their starts: the least any one of them covers. <paramref name="rawFloorSeconds"/> is the deadline of
+    /// the raw floor probe: the MCP read's by default, the Viewer's interactive one from the Viewer. The route read keeps the deadline
+    /// <see cref="ResolveClutterRouteAsync"/> sets for every clutter read.
     /// </summary>
     public static async Task<DateTime?> GetPlanChurnCoverageStartAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc,
+        int rawFloorSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -832,7 +835,7 @@ public static class DarlingQueryStoreClutterReader
         DateTime? start = null;
         foreach (var serverId in serverIds.Distinct())
         {
-            var raw = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+            var raw = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc, rawFloorSeconds, cancellationToken);
             DateTime? own = (raw, route) switch
             {
                 (null, null) => null,

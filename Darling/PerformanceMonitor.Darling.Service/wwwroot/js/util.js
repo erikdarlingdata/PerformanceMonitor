@@ -709,7 +709,10 @@ function floorSpanLead(source, desc) {
  * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
  * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
  * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
- * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
+ * `floorKey`, and the fields are read from there instead of from the top level. A panel over one arm of a read whose arms can be cut at
+ * different points (#9382: the Query Store clutter read's plan churn and wait arms) names it in `armSpan` ({ key, subject }): the strip says
+ * "<subject> covers <that arm's span>, not the whole time range." from the arm's own `key` in the floor block, and a panel whose arm is not
+ * cut (the key is null) draws no strip, whatever the other arm's note says. The note is text, never markup (R4).
  */
 export function windowFloorStrip(data, desc) {
   if (!desc || desc.windowNote === false) return null;
@@ -717,6 +720,10 @@ export function windowFloorStrip(data, desc) {
   if (desc.viz !== "table" && desc.viz !== "stat" && !chart) return null;
   if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
   const source = desc.floorKey ? getPath(data, desc.floorKey) : data;
+  if (source && source.window_truncated === true && desc.armSpan && typeof desc.armSpan.key === "string" && typeof desc.armSpan.subject === "string") {
+    const armSpan = effectiveSpanText(source[desc.armSpan.key]);
+    return armSpan ? noticeStrip(desc.armSpan.subject + " covers " + armSpan + ", not the whole time range.") : null;
+  }
   if (source && source.window_truncated === true) {
     const note = source.truncation_note;
     if (typeof note !== "string" || !note.trim()) return null;
