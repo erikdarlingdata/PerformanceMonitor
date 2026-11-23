@@ -93,8 +93,7 @@ public sealed class SetLocalOutsideTransactionLiveTests
             await PgMigrations.MigrateAsync(connection, ct);
 
             var expected = (PgMigrations.MigrationCommandTimeoutSeconds - 20) + "s";
-            var probe = "
-DO $$ BEGIN IF current_setting('lock_timeout') <> '" + expected + "' THEN "
+            var probe = "\nDO $$ BEGIN IF current_setting('lock_timeout') <> '" + expected + "' THEN "
                 + "RAISE EXCEPTION 'lock_timeout is %, expected " + expected + "', current_setting('lock_timeout'); END IF; END $$;";
             var blocks = new[]
             {
