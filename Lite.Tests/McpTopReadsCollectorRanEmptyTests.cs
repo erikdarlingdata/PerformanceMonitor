@@ -129,6 +129,29 @@ public sealed class McpTopReadsCollectorRanEmptyTests : IClassFixture<SharedDuck
     }
 
     /// <summary>
+    /// #9341: the runs in the window stored rows, yet the ranking is empty (the intervals they hold started before the window, or are
+    /// not visible). "Found no Query Store intervals to store" is false then: the answer names the rows collected.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreTop_RunsStoredRowsButTheRankingIsEmpty_SaysRowsWereCollected()
+    {
+        var now = DateTime.UtcNow;
+        await SeedRunAsync("query_store", now.AddMinutes(-40), "SUCCESS", 22);
+        await SeedRunAsync("query_store", now.AddMinutes(-10), "SUCCESS", 233);
+
+        foreach (var database in new string?[] { null, "TestDb" })
+        {
+            var root = JsonDocument.Parse(await McpQueryTools.GetQueryStoreTop(
+                new LocalDataService(_duckDb), _serverManager, "TestServer", hours_back: 1, database_name: database)).RootElement;
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.Equal(2, root.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            Assert.Equal(255, root.GetProperty("hints").GetProperty("rows_collected_in_window").GetInt64());
+            Assert.DoesNotContain("found no", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// #7442: an as_of window that ENDS before the first row the store kept, with the collector running and finding nothing inside it, counts
     /// its runs. The row probe finds no row in the window and the all-time oldest row sits after it, so the old note said "the store holds no
     /// collection of query_stats ... collection may have stopped" beside <c>successful_runs_in_window</c>. The note now measures from the first run.

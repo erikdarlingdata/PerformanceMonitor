@@ -66,6 +66,9 @@ object_inventory,collected,yes,
 object_references_daily,derived,derived,per-day names Query Store statements referenced
 object_references_daily_built,internal,no,which days are built
 object_references_daily_databases,derived,derived,statements looked at per database per day
+object_usage_deltas,derived,derived,per-snapshot index counts that get_object_usage reads
+object_usage_runs,derived,derived,spans over which each index was present
+object_usage_snapshots,derived,derived,per-snapshot facts that get_object_usage reads
 oversized_plan_backlog,internal,no,queue of oversized plans
 oversized_plan_backlog_drops,internal,no,plans dropped from the queue
 perfmon_interval_baseline,derived,derived,rollup view

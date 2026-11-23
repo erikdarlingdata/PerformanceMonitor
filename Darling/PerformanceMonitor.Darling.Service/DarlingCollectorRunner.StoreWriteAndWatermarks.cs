@@ -628,7 +628,7 @@ public sealed partial class DarlingCollectorRunner
            at procedure_stats that is not the catalog's ProcedureStatsCollector (an import or backfill) writes its totals too. */
         var totalsBatch = string.Equals(definition.TargetTable, ProcedureStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
 
-        /* #9357: a procedure_stats batch also adds its non-restart row count to the procedure hour ledger (V299), tallied and written exactly
+        /* #9357: a procedure_stats batch also adds its non-restart row count to the procedure hour ledger (V300), tallied and written exactly
            as the query_stats ledger above is: the writer's tally of the value sent into sample_interval_seconds, one upsert on the COPY's own
            transaction. Chosen by the table this COPY writes, so an import or backfill aimed at procedure_stats is counted too, or fails loudly. */
         var procedureLedgerBatch = totalsBatch; /* the same table test, so the transaction the totals already open is the ledger's too */

@@ -116,7 +116,7 @@ public sealed class ReleaseWalkFilterAndCompareTests
         /* SafeQueryAsync answers a failed read with an empty list, and the empty grid then says "No SQL Agent jobs are
            running." about a read that never answered. The load catches the failure itself and says the read failed. */
         Assert.DoesNotContain("SafeQueryAsync(() => _dataService.GetRunningJobsAsync", source, StringComparison.Ordinal);
-        Assert.Contains("RunningJobsReadFailedText(ex)", source, StringComparison.Ordinal);
+        Assert.Contains("RunningJobsReadFailedText(", source, StringComparison.Ordinal);
     }
 
     [Fact]

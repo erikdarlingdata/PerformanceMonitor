@@ -533,9 +533,18 @@ public sealed class McpHostService : BackgroundService
     /// its order, from <c>PerformanceMonitor.Common</c>, so the two SKUs cannot answer differently. Lite's write and
     /// investigation gates are not filters: an unserved tool is absent from the served collection. Registered through this one method so a test can start a server with the REAL list.
     /// </summary>
-    internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) => filters
+    internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) =>
+        AddCallToolFiltersWithLookupDeadline(filters, McpDatabaseNameFilter.LookupDeadline);
+
+    /// <summary>
+    /// The same list with the <c>database_name</c> lookup given <paramref name="lookupDeadline"/> (#9375). The host always passes
+    /// <see cref="McpDatabaseNameFilter.LookupDeadline"/>. A test that reads the store beside classes holding the process-wide
+    /// DuckDB lock for seconds passes a longer one, so a lookup queued behind such a hold is waited out instead of expiring and
+    /// letting the call run as given. Named apart from <see cref="AddCallToolFilters"/> because a test finds that one by name.
+    /// </summary>
+    internal static void AddCallToolFiltersWithLookupDeadline(IMcpRequestFilterBuilder filters, TimeSpan lookupDeadline) => filters
         .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
-        .AddCallToolFilter(McpDatabaseNameFilter.Using(McpDatabaseNames.CandidatesAsync))
+        .AddCallToolFilter(McpDatabaseNameFilter.Using(McpDatabaseNames.CandidatesAsync, lookupDeadline))
         .AddCallToolFilter(McpDataDetailFilter.Instance)
         .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
 

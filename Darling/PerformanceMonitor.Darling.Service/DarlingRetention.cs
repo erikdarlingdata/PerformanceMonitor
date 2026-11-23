@@ -637,6 +637,16 @@ public static class DarlingRetention
                 }
             }
 
+            /* #9349: the object usage chain tables are derived from index_object_stats and follow ITS horizon, the one the loop above
+               resolved for it (a per-collector override included), so a derived row never outlives the raw rows it was computed from.
+               The closed rows of collect.object_usage_runs go in the same call (a plain table, so by the time-sliced DELETE). */
+            var objectUsageChain = await PurgeObjectUsageChainAsync(
+                postgres, timescaleAvailable, retentionDaysFor, utcNow, logger, cancellationToken, walPacer);
+            tablesPurged += objectUsageChain.TablesPurged;
+            totalRowsDeleted += objectUsageChain.RowsDeleted;
+            totalChunksDropped += objectUsageChain.ChunksDropped;
+            tablesFailed += objectUsageChain.TablesFailed;
+
             /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
                of each distinct query text / plan XML; the fact rows carry only a digest. They must be
                bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
@@ -1423,7 +1433,7 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
-            /* collect.procedure_stats_hour_ledger (#9357, V299): the same ledger for procedure_stats, pruned the same way and at the same
+            /* collect.procedure_stats_hour_ledger (#9357, V300): the same ledger for procedure_stats, pruned the same way and at the same
                horizon (the procedure hourly rollup keeps TimescaleSupport.HourlyRetentionSpan too), single-shot and failure-isolated. */
             var procedureHourLedgerDeleted = await PurgeOneAsync(
                 postgres, ProcedureStatsHourLedger.LedgerTable,
@@ -1791,6 +1801,193 @@ public static class DarlingRetention
         => customRetentionDays is int days
             ? $"Manual purge (purge_now, custom retention {CountText.Plural(days, "day")})"
             : "Manual purge (purge_now)";
+
+    /// <summary>
+    /// The retention horizon of the object usage chain tables (#9349): the one <see cref="PurgeWithPacerAsync"/> resolves for
+    /// <c>index_object_stats</c>, from the same per-collector retention and the same clamp, so the chain never keeps a day the raw table
+    /// has dropped. A store whose collector set has no <c>index_object_stats</c> schedule gets the clamp floor, which keeps no derived day
+    /// beyond a day the source could not have either.
+    /// </summary>
+    internal static int ObjectUsageChainRetentionDays(Func<string, int>? retentionDaysFor)
+    {
+        var source = ObjectUsageChain.SourceCollector;
+        var configured = retentionDaysFor?.Invoke(source)
+            ?? (CollectorScheduleDefaults.All.TryGetValue(source, out var schedule) ? schedule.RetentionDays : 1);
+        return EffectivePurgeRetentionDays(source, configured);
+    }
+
+    /// <summary>
+    /// Purges <c>collect.object_usage_snapshots</c> and <c>collect.object_usage_deltas</c> at <see cref="ObjectUsageChainRetentionDays"/> (#9349):
+    /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
+    /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V300)
+    /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass. The closed rows of
+    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than both the horizon and the oldest raw chunk still stored) are deleted in the same call, and so are the
+    /// open runs of a pair with no raw row left; the open runs of a live pair never are.
+    /// </summary>
+    internal static async Task<(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesFailed)> PurgeObjectUsageChainAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, Func<string, int>? retentionDaysFor, DateTime utcNow, ILogger? logger,
+        CancellationToken cancellationToken, RetentionWalPacer? walPacer = null)
+    {
+        var retentionDays = ObjectUsageChainRetentionDays(retentionDaysFor);
+        var tablesPurged = 0;
+        var rowsDeleted = 0;
+        var chunksDropped = 0;
+        var tablesFailed = 0;
+        foreach (var bare in ObjectUsageChain.PerSnapshotTables)
+        {
+            var table = "collect." + bare;
+            if (timescaleAvailable)
+            {
+                var (outcome, dropped) = await DropChunksOneAsync(postgres, table, retentionDays, logger, cancellationToken);
+                if (outcome == DropChunksOutcome.Dropped)
+                {
+                    tablesPurged++;
+                    chunksDropped += dropped;
+                    continue;
+                }
+
+                if (outcome == DropChunksOutcome.GaveWay)
+                {
+                    continue;
+                }
+
+                /* drop_chunks failed (warned): the table is most likely still plain, so the DELETE below keeps its horizon. */
+            }
+
+            var deleted = await PurgeOneAsync(
+                postgres, table, TimeSlicedDeleteSql(table, ObjectUsageChain.TimeColumn),
+                utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+            if (deleted is null)
+            {
+                tablesFailed++;
+            }
+            else
+            {
+                tablesPurged++;
+                rowsDeleted += deleted.Value;
+            }
+        }
+
+        /* The runs table is plain: a run is not a per-snapshot row, so it has no chunk to drop. A closed run (last_time set) goes once its last
+           snapshot is older than the horizon AND older than the oldest raw chunk still stored. The second bound is load-bearing: drop_chunks keeps
+           a raw chunk until ALL of its range is past the horizon, so a chunk that straddles the horizon keeps raw rows past it, and the full fold
+           still reads them. How far past depends on that chunk's own width, and a table narrowed from 24 h to 6 h keeps its older 24 h chunks, so
+           no single interval gives the bound. The oldest surviving range_start does, whatever the interval history and whether or not the raw drop
+           ran earlier in this pass: a closed run that ended before every surviving raw row covers none of them. A run purged earlier would leave
+           those rows with no run, an answer with no fallback. The statement is sliced on last_time. */
+        var horizon = utcNow.AddDays(-retentionDays);
+        var oldestRawChunkStart = await ReadOldestRawChunkStartAsync(postgres, timescaleAvailable, logger, cancellationToken);
+        var runsCutoff = oldestRawChunkStart is DateTime chunkStart ? (chunkStart < horizon ? chunkStart : horizon) : horizon - RunsFallbackMargin;
+        var runsDeleted = await PurgeOneAsync(
+            postgres, ObjectUsageChain.RunsTable, TimeSlicedDeleteSql(ObjectUsageChain.RunsTable, "last_time", "last_time IS NOT NULL"),
+            runsCutoff, logger, cancellationToken, pacer: walPacer);
+        if (runsDeleted is null)
+        {
+            tablesFailed++;
+        }
+        else
+        {
+            tablesPurged++;
+            rowsDeleted += runsDeleted.Value;
+        }
+
+        /* A run still open (last_time NULL) means the index is present through the pair's newest snapshot, so it stays while the pair has
+           raw rows. A pair collected no longer has none left once its raw chunks are dropped, and nothing closes its runs: they go here. */
+        var deadPairRunsDeleted = await PurgeOneAsync(
+            postgres, ObjectUsageChain.RunsTable, OpenRunsOfDeadPairsDeleteSql,
+            utcNow.AddDays(-retentionDays), logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+        if (deadPairRunsDeleted is null)
+        {
+            tablesFailed++;
+        }
+        else
+        {
+            /* Counted like the runs purge above: the pass takes every table the spent budget kept from starting back out of the count
+               (TablesNotReached, one per paced statement), so a paced statement that is not counted here makes the count too low. */
+            tablesPurged++;
+            rowsDeleted += deadPairRunsDeleted.Value;
+        }
+
+        return (tablesPurged, rowsDeleted, chunksDropped, tablesFailed);
+    }
+
+    /// <summary>
+    /// The open runs (<c>last_time</c> NULL) of every (server, database) pair that has no <c>index_object_stats</c> row left (#9349). <c>$1</c> is the
+    /// raw horizon: a run first seen after it belongs to a pair whose raw rows the horizon cannot have dropped, so it is never looked at. Each pair is
+    /// probed once, on the prefix of <c>idx_index_object_stats_object</c> (<c>server_id, database_name</c>): a live pair stops at its first row and a
+    /// dead pair has no row to find, so the probe costs one index descent per pair and not one per run. The probe is a <c>LATERAL</c> with <c>LIMIT 1</c> on purpose:
+    /// written as <c>NOT EXISTS</c> the planner chose a hash anti join that read every raw row of the table.
+    /// </summary>
+    internal const string OpenRunsOfDeadPairsDeleteSql = @"
+WITH open_pairs AS
+(
+    SELECT DISTINCT
+        r.server_id,
+        r.database_name
+    FROM collect.object_usage_runs AS r
+    WHERE r.last_time IS NULL
+    AND   r.first_time < $1
+),
+dead_pairs AS
+(
+    SELECT
+        p.server_id,
+        p.database_name
+    FROM open_pairs AS p
+    LEFT JOIN LATERAL
+    (
+        SELECT
+            1 AS present
+        FROM collect.index_object_stats AS s
+        WHERE s.server_id = p.server_id
+        AND   s.database_name = p.database_name
+        LIMIT 1
+    ) AS probe
+      ON true
+    WHERE probe.present IS NULL
+)
+DELETE FROM collect.object_usage_runs AS r
+USING dead_pairs AS d
+WHERE r.last_time IS NULL
+AND   r.server_id = d.server_id
+AND   r.database_name = d.database_name";
+
+    /// <summary>How long past the raw horizon a closed run is kept when the oldest raw chunk cannot be read (no TimescaleDB, no hypertable, no chunk, or the read failed): TimescaleDB's default chunk width, the safe side (a run kept longer never gives a wrong answer).</summary>
+    internal static readonly TimeSpan RunsFallbackMargin = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// The <c>range_start</c> of the oldest chunk <c>collect.index_object_stats</c> still has (#9349), as naive UTC, read from
+    /// <c>timescaledb_information.chunks</c>: no raw row is older than it. Null where the store has no TimescaleDB, the table is no hypertable or has no
+    /// chunk, or the read fails (warned); the caller then keeps closed runs <see cref="RunsFallbackMargin"/> past the raw horizon.
+    /// </summary>
+    internal static async Task<DateTime?> ReadOldestRawChunkStartAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (!timescaleAvailable)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC every stored timestamp follows. */
+            using var command = new NpgsqlCommand(@"
+SELECT
+    min(c.range_start) AT TIME ZONE 'UTC'
+FROM timescaledb_information.chunks AS c
+WHERE c.hypertable_schema = 'collect'
+AND   c.hypertable_name = $1", connection) { CommandTimeout = DeleteTimeoutSeconds };
+            command.Parameters.AddWithValue(ObjectUsageChain.SourceCollector);
+            return await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Retention purge could not read the oldest chunk of {Table}; its object usage runs are kept {Days} days past the raw horizon instead.",
+                ObjectUsageChain.SourceCollector, RunsFallbackMargin.TotalDays);
+            return null;
+        }
+    }
 
     /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time

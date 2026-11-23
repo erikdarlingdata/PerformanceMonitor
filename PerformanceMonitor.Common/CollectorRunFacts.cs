@@ -31,12 +31,16 @@ namespace PerformanceMonitor.Common;
 /// <param name="FirstSuccessInWindowUtc">The earliest successful run inside the read's window (#7442), or null when the store
 /// did not ask or there is none. A run in the window does not show when collection began: this is the instant a window note
 /// measures coverage from, the way an empty answer's floor does when rows exist.</param>
+/// <param name="RowsCollectedInWindow">The sum of <c>rows_collected</c> over those runs (#9341), or null when the store did not ask or
+/// no run recorded a count. Above zero, the collector stored rows in the window, so an empty ranking is not "the collector found
+/// nothing".</param>
 public sealed record CollectorRunFacts(
     long SuccessfulRuns,
     long? SuccessfulRunsInWindow,
     DateTime? LastSuccessUtc,
     long? LastSuccessRows,
-    DateTime? FirstSuccessInWindowUtc = null)
+    DateTime? FirstSuccessInWindowUtc = null,
+    long? RowsCollectedInWindow = null)
 {
     /// <summary>The count <see cref="SuccessfulRuns"/> stops at: the reads only need "none, one, or two or more".</summary>
     public const int RunsCap = 2;
@@ -104,14 +108,25 @@ public sealed record CollectorRunFacts(
     /// a SUCCESS with zero rows when nothing did, so successful runs and no rows is a measurement: we looked, and nothing ran.
     /// <paramref name="found"/> is the noun phrase for what it looked for ("executed statements"). <paramref name="scope"/>
     /// names a database the caller filtered to: the runs may have stored rows for other databases, so the sentence then claims
-    /// only the chosen one. <paramref name="requireDeltaBaseline"/> is for a collector whose FIRST run stores nothing by design
+    /// only the chosen one. <paramref name="storedRowsExplanation"/> (#9341) is the caller's own reason for an empty ranking when the
+    /// runs in the window stored rows (<see cref="RowsCollectedInWindow"/>), such as an interval-placed window. <paramref name="requireDeltaBaseline"/> is for a collector whose FIRST run stores nothing by design
     /// (it has nothing to difference against), so one run in the window is not yet a measurement.
     /// </summary>
-    public string? RanFoundNothing(string collectorName, int hoursBack, string found, string? scope = null, bool requireDeltaBaseline = false)
+    public string? RanFoundNothing(string collectorName, int hoursBack, string found, string? scope = null, bool requireDeltaBaseline = false,
+        string? storedRowsExplanation = null)
     {
         if (SuccessfulRunsInWindow is not > 0 || (requireDeltaBaseline && !HasDeltaBaseline))
         {
             return null;
+        }
+
+        /* #9341: the runs stored rows, so the collector did find something. An empty ranking over them is a filter or a window
+           placement, never "found no X to store". The caller's explanation says which one, when it knows. */
+        if (RowsCollectedInWindow is > 0)
+        {
+            var storedAll = scope is null ? "" : " across all databases";
+            return string.Create(CultureInfo.InvariantCulture,
+                $"{collectorName} ran {CountText.Plural(SuccessfulRunsInWindow ?? 0, "time")} in the last {CountText.Plural(hoursBack, "hour")} and stored {CountText.Plural(RowsCollectedInWindow ?? 0, "row")}{storedAll}, but none of them match this request. {storedRowsExplanation ?? "Check the filters, or try a wider window."}");
         }
 
         var verdict = scope is null ? $"found no {found} to store" : $"stored no {found} for {scope}";

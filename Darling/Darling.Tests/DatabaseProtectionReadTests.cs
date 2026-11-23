@@ -194,6 +194,79 @@ public sealed class DatabaseProtectionBandsTests
 
     /* ── #8865: each replica judged on its own error log ── */
 
+    /* #9376: master cannot take a log backup and nothing writes to model, so their log fact is never overdue, whatever the recovery model. */
+    private static DatabaseProtectionFact NoLogBackup(string name, string recovery = "FULL") => Healthy() with
+    {
+        DatabaseName = name, RecoveryModelDesc = recovery, LastLogBackupTime = null, LogBackupState = "none_in_window",
+    };
+
+    [Theory]
+    [InlineData("model")]
+    [InlineData("master")]
+    public void ASystemDatabasesMissingLogBackup_IsNotExpected_AndNotOverdue(string name)
+    {
+        var band = DatabaseProtectionBands.Evaluate(NoLogBackup(name), Now, Limits);
+
+        Assert.Equal(DatabaseProtectionBands.NotExpected, band.LogBackup.State);
+        Assert.False(band.LogBackup.Overdue);
+        Assert.Equal(DatabaseProtectionBands.DetailSystemDatabase, band.LogBackup.Detail);
+        Assert.False(band.AnyOverdue);
+    }
+
+    [Fact]
+    public void ASystemDatabasesStaleLogBackup_IsNotOverdueEither()
+    {
+        var band = DatabaseProtectionBands.Evaluate(Healthy() with { DatabaseName = "model", LastLogBackupTime = Now.AddDays(-30) }, Now, Limits);
+
+        Assert.False(band.LogBackup.Overdue);
+        Assert.Equal(DatabaseProtectionBands.NotExpected, band.LogBackup.State);
+    }
+
+    [Theory]
+    [InlineData("model")]
+    [InlineData("master")]
+    public void ASystemDatabasesFullBackupAndCheckDb_AreStillJudged(string name)
+    {
+        var band = DatabaseProtectionBands.Evaluate(
+            NoLogBackup(name) with { LastFullBackupTime = Now.AddDays(-8), LastGoodCheckDbTime = Now.AddDays(-15) }, Now, Limits);
+
+        Assert.True(band.FullBackup.Overdue);
+        Assert.True(band.CheckDb.Overdue);
+        Assert.False(band.LogBackup.Overdue);
+    }
+
+    [Theory]
+    [InlineData("msdb")]
+    [InlineData("Model_Archive")]
+    [InlineData("model2")]
+    [InlineData("tempmodel")]
+    [InlineData("Model")]
+    [InlineData("MODEL")]
+    [InlineData("Master")]
+    [InlineData("MASTER")]
+    public void MsdbAndUserDatabases_AreStillJudgedOnTheirLogBackup(string name)
+    {
+        var band = DatabaseProtectionBands.Evaluate(NoLogBackup(name), Now, Limits);
+
+        Assert.True(band.LogBackup.Overdue);
+        Assert.Equal(DatabaseProtectionBands.NoneInWindow, band.LogBackup.State);
+        Assert.Null(band.LogBackup.Detail);
+    }
+
+    [Fact]
+    public void TheOverdueFactsAndSummary_LeaveAModelWithNoLogBackupOut_AndKeepAUserDatabaseIn()
+    {
+        var facts = new[] { NoLogBackup("model"), NoLogBackup("master"), NoLogBackup("Sales") };
+
+        var overdue = DatabaseProtectionBands.OverdueFacts(facts, Now);
+        var summary = DatabaseProtectionBands.Summarize(facts.Select(f => (Fact: f, Band: DatabaseProtectionBands.Evaluate(f, Now, Limits))).ToList());
+
+        var one = Assert.Single(overdue);
+        Assert.Equal(("Sales", DatabaseProtectionBands.KindLogBackup), (one.Database, one.Kind));
+        Assert.Equal(["Sales"], summary.OverdueLogBackup);
+        Assert.Equal(1, summary.OverdueDatabases);
+    }
+
     private static DatabaseProtectionFact Logged(string? role = "PRIMARY") => Healthy() with
     {
         ReplicaRole = role, ErrorLogState = "read", ErrorLogBackfillComplete = true,

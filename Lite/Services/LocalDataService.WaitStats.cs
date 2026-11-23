@@ -588,7 +588,7 @@ SELECT
     CAST(SUM(delta_wait_time_ms) AS BIGINT) AS accumulated_wait_ms,
     CAST(SUM(delta_waiting_tasks) AS BIGINT) AS accumulated_waits,
     CAST(COUNT(*) AS BIGINT) AS observed_intervals,
-    MAX(collection_time) AS newest_collection_time
+    MAX(collection_time) FILTER (WHERE delta_wait_time_ms > 0 OR delta_waiting_tasks > 0) AS newest_collection_time
 FROM v_wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')

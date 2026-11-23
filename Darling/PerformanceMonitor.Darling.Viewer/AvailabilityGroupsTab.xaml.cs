@@ -98,9 +98,10 @@ public partial class AvailabilityGroupsTab : UserControl
         }
 
         _loading = true;
+        var timer = new ViewerLoadTimer();
         try
         {
-            var groups = await _dataService.GetAvailabilityGroupsAsync();
+            var groups = await ViewerServerTab.Timed(timer, "availability groups read", _dataService.GetAvailabilityGroupsAsync());
 
             /* Same rows as the last render — skip reconciling and re-binding 40+ cards entirely, rather than
                walking them to discover that nothing would change on screen (#4238). */
@@ -118,7 +119,8 @@ public partial class AvailabilityGroupsTab : UserControl
         catch (Exception ex)
         {
             /* A failed read must not blank a tab that was showing good data a moment ago; report and leave it. */
-            StatusChanged?.Invoke($"Availability Groups failed to load: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Availability Groups", timer, ex));
         }
         finally
         {

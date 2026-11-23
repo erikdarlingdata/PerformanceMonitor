@@ -1260,7 +1260,7 @@ internal static class ComposePanelRunner
     /// <see cref="ReadFallback.LedgerUncovered"/> with no log line), any fault and any timeout return null, and the panel reads raw.
     /// A store before V164 has no ledger table, and it is found by its schema version, not by the guard's fault: right after the
     /// savepoint, and before the guard's statement timeout and SQL, the run reads the version (<see cref="QueryStoreWideSchemaVersionSql"/>,
-    /// the Query Store route's own probe). Below the source's ledger rung (<see cref="IntervalRollupCountGuard.RungVersionFor"/>, V164 for query_stats and V299 for procedure_stats) the guard never runs; the read is
+    /// the Query Store route's own probe). Below the source's ledger rung (<see cref="IntervalRollupCountGuard.RungVersionFor"/>, V164 for query_stats and V300 for procedure_stats) the guard never runs; the read is
     /// noted <see cref="ReadFallback.GateFailed"/> with no log line, for a state the store's migration ends. An undefined table on a
     /// store at the rung is a real fault and takes the normal path below: one Warning. The guard's <c>$3</c> is bound
     /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict

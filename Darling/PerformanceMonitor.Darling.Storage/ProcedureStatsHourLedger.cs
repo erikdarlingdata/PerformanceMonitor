@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// A restart row (0) is not counted and a row with a NULL interval is, as in the rollup's own
 /// <c>WHERE sample_interval_seconds IS DISTINCT FROM 0</c>. An hour with no counted rows has no ledger row.</para>
 ///
-/// <para><b>Where counting starts.</b> The ledger holds nothing for rows written before the store reached V299. The one-row
+/// <para><b>Where counting starts.</b> The ledger holds nothing for rows written before the store reached V300. The one-row
 /// state table's <c>counted_since</c> is the first whole hour from which every row is counted: the rung sets it to the next
 /// whole hour after it ran, and a reader treats a window that starts before it as uncounted and stays on raw. An existing store
 /// therefore takes the route only once the ledger covers the whole window (a 24 hour window, a day after the upgrade).</para>
@@ -45,10 +45,10 @@ public static class ProcedureStatsHourLedger
     /// checks the store's schema version against this before it names them, and a store below the rung reads raw with no
     /// fault to log. <c>ProcedureStatsHourLedgerTests</c> pins it to the version the rung is registered under.
     /// </summary>
-    public const int RungVersion = 299;
+    public const int RungVersion = 300;
 
     /// <summary>
-    /// Both tables and the state row, as the V299 rung runs them: the same shape as <see cref="QueryStatsHourLedger.CreateSql"/>.
+    /// Both tables and the state row, as the V300 rung runs them: the same shape as <see cref="QueryStatsHourLedger.CreateSql"/>.
     /// Idempotent. The rung embeds this text, so editing it edits a shipped rung: add a new rung instead.
     /// </summary>
     public const string CreateSql = @"

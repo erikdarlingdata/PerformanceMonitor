@@ -192,12 +192,12 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
 
     /// <summary>
     /// #9357: the runner runs the guard for the candidate's own source. A procedure_stats candidate reads the procedure ledger: a covered,
-    /// empty window gives a verdict for that source, an uncovered one notes LedgerUncovered, and a store below V299 (its two tables gone)
+    /// empty window gives a verdict for that source, an uncovered one notes LedgerUncovered, and a store below V300 (its two tables gone)
     /// notes GateFailed from the schema version with no guard run and no log line, while a query_stats candidate on the same store still
     /// gets its verdict, because that source's rung is V164.
     /// </summary>
     [Fact]
-    public async Task AProcedureStatsCandidate_ReadsTheProcedureLedger_AndAStoreBelowV299_FailsTheGateQuietly_WhileQueryStatsStillGetsItsVerdict()
+    public async Task AProcedureStatsCandidate_ReadsTheProcedureLedger_AndAStoreBelowV300_FailsTheGateQuietly_WhileQueryStatsStillGetsItsVerdict()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await CreateScratchAsync(ct);
@@ -241,7 +241,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
                 await uncovered.RollbackAsync(ct);
             }
 
-            /* A store before V299: no procedure ledger tables and the schema version says so. */
+            /* A store before V300: no procedure ledger tables and the schema version says so. */
             await ExecuteAsync(connection, $"DROP TABLE {ProcedureStatsHourLedger.StateTable}", ct);
             await ExecuteAsync(connection, $"DROP TABLE {ProcedureStatsHourLedger.LedgerTable}", ct);
             await ExecuteAsync(connection, $"DELETE FROM darling_schema_version WHERE version >= {ProcedureStatsHourLedger.RungVersion}", ct);

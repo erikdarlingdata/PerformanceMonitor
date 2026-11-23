@@ -415,6 +415,14 @@ public static partial class TimescaleSupport
             return CollectionLogSegmentBy;
         }
 
+        foreach (var objectUsageTable in ObjectUsageChain.PerSnapshotTables)
+        {
+            if (bare.Equals(objectUsageTable, StringComparison.Ordinal))
+            {
+                return ObjectUsageChain.CompressionSegmentBy;
+            }
+        }
+
         if (bare.Equals(AttentionEventsTable, StringComparison.Ordinal))
         {
             return AttentionEventsSegmentBy;

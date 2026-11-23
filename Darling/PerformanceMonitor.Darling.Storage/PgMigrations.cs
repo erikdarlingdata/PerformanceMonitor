@@ -656,14 +656,14 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
     /// <summary>
-    /// V299 (#9357): <c>collect.procedure_stats_hour_ledger</c> and its one-row state table, V164's ledger for
+    /// V300 (#9357): <c>collect.procedure_stats_hour_ledger</c> and its one-row state table, V164's ledger for
     /// <c>collect.procedure_stats</c>. The hourly-plus-raw-edges read of a procedure cell compares this ledger with
     /// <c>collect.procedure_stats_interval_hourly</c> instead of counting raw. The text and the counted population are on
     /// <see cref="ProcedureStatsHourLedger"/>, which the rung embeds. Both tables are empty when created, and the rung inserts only
     /// the state row (<c>counted_since</c>, the next whole hour), so an existing store takes the route only once the ledger covers the
-    /// window. No GRANT and no provisioning change, as for V164. The number may move: another open change also claims V299.
+    /// window. No GRANT and no provisioning change, as for V164. The rung is V300 because #9350 took V299.
     /// </summary>
-    private const string V299Sql = ProcedureStatsHourLedger.CreateSql;
+    private const string V300Sql = ProcedureStatsHourLedger.CreateSql;
 
     /// <summary>
     /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
@@ -3578,6 +3578,19 @@ END $$;";
     /// </summary>
     private static readonly string V298Sql = PayloadDimensionSeen.RungSql(MigrationCommandTimeoutSeconds - 20);
 
+    /// <summary>
+    /// V299 (#9349): the persisted object usage chain. <c>collect.object_usage_snapshots</c> (one row per snapshot of a database: the chain step's facts),
+    /// <c>collect.object_usage_deltas</c> (one row per index the step contributed to or moved) and <c>collect.object_usage_runs</c> (index presence and
+    /// identity), as <see cref="ObjectUsageChain.CreateSql"/> has them. Created empty, so no data moves and the rung scans nothing. Every statement is
+    /// idempotent. Plain tables here on every store: the service turns the two per-snapshot tables into compressed hypertables on a TimescaleDB store after
+    /// the extension exists (<see cref="TimescaleSupport.EnsureObjectUsageHypertablesAsync"/>), and the retention pass purges them at the horizon of
+    /// <c>index_object_stats</c>, which they derive from. No GRANT: the <c>collect</c> schema's blanket SELECT covers them.
+    ///
+    /// <para><b>An older build against this store.</b> It does not know the tables: it neither reads, fills nor purges them, and every read it makes names
+    /// its own columns. Nothing it reads changes.</para>
+    /// </summary>
+    private const string V299Sql = ObjectUsageChain.CreateSql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3989,9 +4002,12 @@ END $$;";
            refresh no longer rewrites a text or plan row. Per dimension: the table, the insert trigger, the backfill, the two constraints and the
            index, then the drop of the dimension's own last_seen index. */
         new Migration(298, "payload-dimension-seen", V298Sql),
-        /* V299 (#9357): the procedure_stats hour ledger and its state row, V164's pair for the procedure rollup's count guard. An older build
+        /* V299 (#9349): the persisted object usage chain, three tables created empty (snapshots, deltas, runs). The two per-snapshot tables become compressed
+           hypertables on a TimescaleDB store at service start, and are purged with index_object_stats. */
+        new Migration(ObjectUsageChain.Version, "object-usage-chain", V299Sql),
+        /* V300 (#9357): the procedure_stats hour ledger and its state row, V164's pair for the procedure rollup's count guard. An older build
            ignores both tables. */
-        new Migration(299, "procedure-stats-hour-ledger", V299Sql),
+        new Migration(ProcedureStatsHourLedger.RungVersion, "procedure-stats-hour-ledger", V300Sql),
     };
 
     /// <summary>
