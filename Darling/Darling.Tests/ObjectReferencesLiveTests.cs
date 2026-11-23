@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -349,6 +350,155 @@ public sealed class ObjectReferencesLiveTests
         using var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
         var read = RowsReadFrom(plan.RootElement[0].GetProperty("Plan"), "object_references_daily");
         Assert.True(read <= 2_100 + 100, $"the summary read touched {read:N0} rows of 36,900 kept; it wants 2,100");
+    }
+
+    [Fact]
+    public async Task TheRetentionPurge_KeepsEachDatabasesNewestList_AndDropsOnlyADroppedDatabases()
+    {
+        /* #8784 follow-up: a view must never read "Not used in window" because another database's capture failed for a few days. The
+           purge keeps each database's newest list however old, and drops a list only once the server's newest database_states capture
+           no longer names its database and the list is past the 3-day retention. */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Server, ct);
+
+        var now = LiveClock.Now();
+
+        /* Reports's capture stopped 10 days ago, well past the old 3-day cutoff; its 12-day-old capture was replaced by it. */
+        await PlantDependencyAsync(connection, "vReport", "V", Db, "dbo", "vCustomer", now.AddDays(-10), ct, database: "Reports");
+        await PlantDependencyAsync(connection, "vReportOld", "V", Db, "dbo", "vCustomer", now.AddDays(-12), ct, database: "Reports");
+
+        /* Gone was dropped: the newest state capture does not name it. Detached is gone from it too, but its list is inside the 3 days. */
+        await PlantDependencyAsync(connection, "vGone", "V", Db, "dbo", "vGoneTarget", now.AddDays(-10), ct, database: "Gone");
+        await PlantDependencyAsync(connection, "vDetached", "V", Db, "dbo", "vDetachedTarget", now.AddDays(-2), ct, database: "Detached");
+
+        /* A server with no database_states rows (that collector off, or Azure SQL Database) keeps its lists: that errs toward used. */
+        var otherServer = ServerId ^ 1;
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO collect.object_dependencies (collection_id, collection_time, server_id, server_name, database_name, referencing_schema, referencing_name, referencing_type, referenced_server, referenced_database, referenced_schema, referenced_name, is_bound, is_caller_dependent, is_ambiguous) VALUES ($1,$2,$3,'other-sql',$4,'dbo','vOther','V',NULL,NULL,'dbo','t',true,false,false)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddDays(-10)), otherServer, "Old");
+
+        /* An older state capture still names Gone; only the newest counts. */
+        foreach (var (at, databases) in new[] { (now.AddHours(-2), new[] { Db, "Reports", "Gone" }), (now.AddHours(-1), new[] { Db, "Reports" }) })
+        {
+            foreach (var database in databases)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,$4,$5,5,'ONLINE',false)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, Server, database);
+            }
+        }
+
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, NullLogger.Instance, ct);
+
+        async Task<long> Rows(string where) =>
+            await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.object_dependencies WHERE {where}", ct);
+        Assert.Equal(1L, await Rows($"server_id = {ServerId} AND database_name = 'Reports' AND referencing_name = 'vReport'"));
+        Assert.Equal(0L, await Rows($"server_id = {ServerId} AND database_name = 'Reports' AND referencing_name = 'vReportOld'"));
+        Assert.Equal(0L, await Rows($"server_id = {ServerId} AND database_name = 'Gone'"));
+        Assert.Equal(1L, await Rows($"server_id = {ServerId} AND database_name = 'Detached'"));
+        Assert.Equal(1L, await Rows($"server_id = {otherServer}"));
+
+        /* And the cross-database reference from the 10-day-old list still reaches vCustomer, so it reads as used. */
+        var inbound = await DarlingObjectUsageReader.ReadInboundDependenciesAsync(dataSource, ServerId, Db, ct);
+        var edge = Assert.Single(inbound, e => e.ReferencedName == "vCustomer");
+        Assert.Equal("Reports", edge.ReferencingDatabase);
+        Assert.Equal("vReport", edge.ReferencingName);
+        Assert.DoesNotContain(inbound, e => e.ReferencedName == "vGoneTarget");
+    }
+
+    [Fact]
+    public async Task TheRetentionPurge_KeepsEveryListOnAServerWhoseNewestCaptureNamesNoUserDatabase()
+    {
+        /* #8784 follow-up: a collection login that loses VIEW ANY DATABASE sees only master, tempdb and the databases it owns, so the
+           newest database_states capture names no user database. Every list on that server is past the 3-day cutoff and its database is
+           "not named", but dropping them all would be the lost-grant case the purge exists to survive. */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var now = LiveClock.Now();
+        var blind = ServerId ^ 2;
+        foreach (var database in new[] { "Sales", "Reports" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.object_dependencies (collection_id, collection_time, server_id, server_name, database_name, referencing_schema, referencing_name, referencing_type, referenced_server, referenced_database, referenced_schema, referenced_name, is_bound, is_caller_dependent, is_ambiguous) VALUES ($1,$2,$3,'blind-sql',$4,'dbo','vList','V',NULL,NULL,'dbo','t',true,false,false)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddDays(-10)), blind, database);
+        }
+
+        /* The server's newest capture, after both lists: only master (1) and tempdb (2). An older capture that named the user databases does not count. */
+        foreach (var (at, databases) in new[]
+        {
+            (now.AddDays(-12), new[] { (1, "master"), (2, "tempdb"), (5, "Sales"), (6, "Reports") }),
+            (now.AddHours(-1), new[] { (1, "master"), (2, "tempdb") }),
+        })
+        {
+            foreach (var (id, name) in databases)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,'blind-sql',$4,$5,'ONLINE',false)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), blind, name, id);
+            }
+        }
+
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, NullLogger.Instance, ct);
+
+        Assert.Equal(2L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.object_dependencies WHERE server_id = {blind}", ct));
+    }
+
+    [Fact]
+    public async Task TheRetentionPurge_DrainsEveryExpiredDayOfAReplacedList_AndNeverStopsOnAKeptOne()
+    {
+        /* #8784 follow-up: the slice statement deletes one day per execution until a slice deletes nothing. A database whose only list is
+           old (kept) must not anchor the oldest slice and stop the drain before another database's older, replaced lists are gone. */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var now = LiveClock.Now();
+
+        /* Archive's single list is the oldest row in the table and is its newest: kept. Reports has captures 10, 8 and 6 days old:
+           the first two are replaced and go (two slices), the 6-day one is the newest and stays. Sales is current. */
+        await PlantDependencyAsync(connection, "vArchive", "V", Db, "dbo", "t", now.AddDays(-20), ct, database: "Archive");
+        foreach (var days in new[] { 10, 8, 6 })
+        {
+            await PlantDependencyAsync(connection, $"vReports{days}", "V", Db, "dbo", "t", now.AddDays(-days), ct, database: "Reports");
+        }
+        await PlantDependencyAsync(connection, "vSales", "V", Db, "dbo", "t", now.AddHours(-1), ct);
+
+        /* The newest state capture names all three databases, so the dropped-database step has nothing to remove. */
+        foreach (var (id, name) in new[] { (5, Db), (6, "Reports"), (7, "Archive") })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,$4,$5,$6,'ONLINE',false)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddHours(-1)), ServerId, Server, name, id);
+        }
+
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, NullLogger.Instance, ct);
+
+        async Task<long> Rows(string name) =>
+            await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.object_dependencies WHERE referencing_name = '{name}'", ct);
+        Assert.Equal(1L, await Rows("vArchive"));
+        Assert.Equal(0L, await Rows("vReports10"));
+        Assert.Equal(0L, await Rows("vReports8"));
+        Assert.Equal(1L, await Rows("vReports6"));
+        Assert.Equal(1L, await Rows("vSales"));
     }
 
     /// <summary>The rows the plan's scans of <paramref name="relation"/> produced or filtered out, over all their loops.</summary>
