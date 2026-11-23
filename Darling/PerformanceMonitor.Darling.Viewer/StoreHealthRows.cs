@@ -494,6 +494,15 @@ internal static class StoreHealthRows
         return $"{sized}, from the held measurement taken {age} ago";
     }
 
+    /// <summary>#9374: the slow-load line's note for the first open's read of the store's last measured sizes: how many relations it sized and
+    /// that the sizes are the store's last measurement, with its age at <paramref name="nowUtc"/>. The live read after it says "measured live".</summary>
+    internal static string LastSizesNote(int relations, DateTime measuredAtUtc, DateTime nowUtc)
+    {
+        var seconds = (long)Math.Max(0, (nowUtc - measuredAtUtc).TotalSeconds);
+        var age = seconds < 60 ? $"{seconds} s" : seconds < 3600 ? $"{seconds / 60} min {seconds % 60} s" : $"{seconds / 3600} h {seconds % 3600 / 60} min";
+        return $"sized {CountText.Plural(relations, "relation")}, from the store's last measurement taken {age} ago";
+    }
+
     /// <summary>The measured result in plain words: the verdict, then the page counts, with the time the read took.</summary>
     internal static string MeasureText(string table, StoreTableMeasureResult result, TimeSpan elapsed)
     {

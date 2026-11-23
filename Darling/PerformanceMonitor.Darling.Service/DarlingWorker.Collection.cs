@@ -230,6 +230,15 @@ public sealed partial class DarlingWorker
            host reads through). Never before this point: no pass runs during a migration. */
         StoreHealthWarmGate.Shared.MarkStoreReady();
 
+        /* #9374: the newest measured relation sizes, kept in the store for the Viewer's first open. The worker's own cache takes the pass and
+           writes it, on the store's size cadence. Drained at shutdown with the other background startup work. */
+        var relationSizesWriter = StoreRelationSizesWriter.RunAsync(
+            postgres,
+            DarlingStoreTableHealthCache.For(postgres),
+            () => DarlingConfig.ClampStoreHealthSizesInterval(config.StoreHealthSizesIntervalMinutes),
+            _logger,
+            stoppingToken);
+
         /* #5097: the slow-read writer, drained at shutdown. Failure-isolated inside; it never ends before shutdown. */
         var slowReadWriter = _slowReads is null ? Task.CompletedTask : _slowReads.RunAsync(postgres, _logger, stoppingToken);
 
@@ -2048,6 +2057,9 @@ public sealed partial class DarlingWorker
         {
             /* Expected on shutdown. */
         }
+
+        /* And the relation sizes writer (#9374): it ends at shutdown and never throws. */
+        await relationSizesWriter;
 
         /* And the slow-read writer (#5097): a record still queued at shutdown is dropped. */
         try

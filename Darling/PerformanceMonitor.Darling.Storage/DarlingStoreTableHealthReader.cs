@@ -1486,6 +1486,23 @@ WHERE s.name IN ('autovacuum', 'autovacuum_max_workers', 'autovacuum_naptime', '
         }
     }
 
+    /// <summary>The same read, sized from <paramref name="sizes"/> (#9374) instead of a size pass of its own: the Viewer's first open hands in the
+    /// last measured sizes the store holds (<see cref="StoreRelationSizesStore.ReadLastSizesAsync(NpgsqlDataSource, CancellationToken)"/>), so the read does no size work. A relation
+    /// the map does not hold reads as empty, and one dropped since is not listed.</summary>
+    public static async Task<List<StoreTableHealthRow>> GetAsync(
+        NpgsqlDataSource postgres, DateTime asOfUtc, RelationSizePass sizes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sizes);
+        try
+        {
+            return await ReadTablesAsync(postgres, asOfUtc, cancellationToken, sizes);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
     /// <summary>The relations the per-index read sizes (#9170): every member relation (the heap each index hangs under) and every index on one.</summary>
     internal static string IndexRelationsSql(bool timescale) => $@"
 WITH {BuildMembersCtes(timescale)}
@@ -1544,10 +1561,43 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     internal static readonly TimeSpan SizePassLifetime = TimeSpan.FromSeconds(15);
 
     /// <summary>The main pass: per relation its oid, the heap its index hangs under (0 for a heap) and its main-fork size.</summary>
-    private sealed record MainSizePass(long[] Oids, long[] Parents, long[] Main);
+    private sealed record MainSizePass(long[] Oids, long[] Parents, long[] Main)
+    {
+        /// <summary>The relation list this pass sized (#9374), so a main pass and an extras pass are only combined when they sized the same list.</summary>
+        public long[]? Listed { get; init; }
+    }
 
     /// <summary>The extras pass: per relation its oid, the size of its other forks (indexes only) and its TOAST total (heaps only).</summary>
-    private sealed record ExtraSizePass(long[] Oids, long[] OtherForks, long[] Toast);
+    private sealed record ExtraSizePass(long[] Oids, long[] OtherForks, long[] Toast)
+    {
+        /// <summary>The relation list this pass sized (#9374).</summary>
+        public long[]? Listed { get; init; }
+    }
+
+    /// <summary>What one relation list's main pass and extras pass sized together (#9374): per relation its oid, the heap its index hangs under
+    /// (0 for a heap), its main-fork size, the size of its other forks (indexes only) and its TOAST total (heaps only). The store write and the
+    /// reads that are handed their sizes take this shape.</summary>
+    public sealed record RelationSizePass(long[] Oids, long[] Parents, long[] Main, long[] OtherForks, long[] Toast);
+
+    /// <summary>The combined pass of one list: the extras are matched to the main rows by oid, and a relation the extras did not size has no
+    /// other forks and no TOAST.</summary>
+    private static RelationSizePass Combine(MainSizePass main, ExtraSizePass extras)
+    {
+        var otherForks = new Dictionary<long, long>(extras.Oids.Length);
+        var toast = new Dictionary<long, long>(extras.Oids.Length);
+        for (var i = 0; i < extras.Oids.Length; i++)
+        {
+            otherForks[extras.Oids[i]] = extras.OtherForks[i];
+            toast[extras.Oids[i]] = extras.Toast[i];
+        }
+
+        return new RelationSizePass(
+            main.Oids,
+            main.Parents,
+            main.Main,
+            main.Oids.Select(o => otherForks.GetValueOrDefault(o)).ToArray(),
+            main.Oids.Select(o => toast.GetValueOrDefault(o)).ToArray());
+    }
 
     /// <summary>One data source's held list and passes, and how many relations each pass on it has sized (what a test counts).
     /// The relation list is read once for the main pass and the extras pass, which each hold their own result so that a failure
@@ -1565,6 +1615,31 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         public long MainRelationsSized;
         public long ExtraRelationsSized;
         public Exception? ExtrasFault;
+
+        private readonly object _pairLock = new();
+        private MainSizePass? _pendingMain;
+        private ExtraSizePass? _pendingExtras;
+
+        /// <summary>The newest combined pass that finished on this data source and when it did (#9374), so the service writes the sizes a read just
+        /// took instead of taking them again.</summary>
+        public MeasuredSizePass? Last;
+
+        /// <summary>Notes a finished main or extras pass. The combined pass is recorded (as <see cref="Last"/>) only when both halves of the same
+        /// relation list have finished: a failed half never gets here, so it records nothing.</summary>
+        public void Finished(MainSizePass? main, ExtraSizePass? extras)
+        {
+            lock (_pairLock)
+            {
+                _pendingMain = main ?? _pendingMain;
+                _pendingExtras = extras ?? _pendingExtras;
+                if (_pendingMain is { } m && _pendingExtras is { } e && m.Listed is not null && ReferenceEquals(m.Listed, e.Listed))
+                {
+                    Last = new MeasuredSizePass(Combine(m, e), DateTime.UtcNow);
+                    _pendingMain = null;
+                    _pendingExtras = null;
+                }
+            }
+        }
     }
 
     /// <summary>Which read of a size pass holds a store connection (what a test seam reports).</summary>
@@ -1702,6 +1777,11 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
     private static SizePassSlot SlotFor(NpgsqlDataSource postgres) => SizePasses.GetValue(postgres, static _ => new SizePassSlot(SizePassLifetime));
 
+    /// <summary>The newest combined size pass that finished on <paramref name="postgres"/> (#9374), with the time it finished, or null when none has.
+    /// It is recorded when both the main pass and the extras pass of one relation list have finished, so the service writes it to the store without a
+    /// second pass. A failed extras pass records nothing.</summary>
+    public static MeasuredSizePass? LastSizePassOn(NpgsqlDataSource postgres) => SlotFor(postgres).Last;
+
     /// <summary>How many relations the main size passes on <paramref name="postgres"/> have stat'ed so far. A test reads it to see
     /// which reads shared a pass.</summary>
     internal static long MainRelationsSizedOn(NpgsqlDataSource postgres) => SlotFor(postgres).MainRelationsSized;
@@ -1813,8 +1893,12 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         var pass = new MainSizePass(
             parts.SelectMany(p => p.Oids).ToArray(),
             parts.SelectMany(p => p.Parents).ToArray(),
-            parts.SelectMany(p => p.Main).ToArray());
+            parts.SelectMany(p => p.Main).ToArray())
+        {
+            Listed = oids,
+        };
         Interlocked.Add(ref slot.MainRelationsSized, oids.Length);
+        slot.Finished(pass, null);
         return pass;
     }
 
@@ -1831,8 +1915,12 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         var pass = new ExtraSizePass(
             parts.SelectMany(p => p.Oids).ToArray(),
             parts.SelectMany(p => p.OtherForks).ToArray(),
-            parts.SelectMany(p => p.Toast).ToArray());
+            parts.SelectMany(p => p.Toast).ToArray())
+        {
+            Listed = oids,
+        };
         Interlocked.Add(ref slot.ExtraRelationsSized, oids.Length);
+        slot.Finished(null, pass);
         return pass;
     }
 
@@ -1906,6 +1994,12 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     /// index bytes are the sum of its indexes' forks, which is what <c>pg_indexes_size</c> returns for it. The extras are matched
     /// to the main rows by oid: a relation the extras pass did not size (it was listed after the main pass's list) has no other
     /// forks and no TOAST, the same as one created after a pass.</summary>
+    private static void AddTableSizeParameters(NpgsqlCommand command, RelationSizePass given)
+        => AddTableSizeParameters(
+            command,
+            new MainSizePass(given.Oids, given.Parents, given.Main),
+            new ExtraSizePass(given.Oids, given.OtherForks, given.Toast));
+
     private static void AddTableSizeParameters(NpgsqlCommand command, MainSizePass main, ExtraSizePass extras)
     {
         var otherForks = new Dictionary<long, long>(extras.Oids.Length);
@@ -1935,7 +2029,7 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     }
 
     private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(
-        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken, RelationSizePass? given = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
@@ -1943,13 +2037,26 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
         var read = new List<(StoreTableHealthRow Row, TailRelation[] TailRelations)>();
         // Both passes start together: the per-table read needs the other forks and the TOAST totals as well as the main sizes.
-        var mainPass = GetMainSizePassAsync(postgres, timescale, cancellationToken);
-        var extraPass = GetExtraSizePassAsync(postgres, timescale, cancellationToken);
-        await Task.WhenAll(mainPass, extraPass);
+        // A caller that hands in its sizes (#9374) starts neither.
+        var mainPass = given is null ? GetMainSizePassAsync(postgres, timescale, cancellationToken) : null;
+        var extraPass = given is null ? GetExtraSizePassAsync(postgres, timescale, cancellationToken) : null;
+        if (mainPass is not null && extraPass is not null)
+        {
+            await Task.WhenAll(mainPass, extraPass);
+        }
+
         await using (var command = postgres.CreateCommand(BuildSql(timescale, serverVersion, presized: true)))
         {
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            AddTableSizeParameters(command, await mainPass, await extraPass);
+            if (given is not null)
+            {
+                AddTableSizeParameters(command, given);
+            }
+            else
+            {
+                AddTableSizeParameters(command, await mainPass!, await extraPass!);
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -2123,16 +2230,41 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         }
     }
 
-    private static async Task<List<StoreIndexHealthRow>> ReadIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    /// <summary>The same read, sized from <paramref name="sizes"/> (#9374), as <see cref="GetAsync(NpgsqlDataSource, DateTime, RelationSizePass, CancellationToken)"/>.</summary>
+    public static async Task<List<StoreIndexHealthRow>> GetIndexesAsync(NpgsqlDataSource postgres, RelationSizePass sizes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sizes);
+        try
+        {
+            return await ReadIndexesAsync(postgres, cancellationToken, sizes);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreIndexHealthRow>> ReadIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken, RelationSizePass? given = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var (timescale, _) = await ProbeAsync(postgres, cancellationToken);
         var rows = new List<StoreIndexHealthRow>();
-        var sizes = await GetMainSizePassAsync(postgres, timescale, cancellationToken);
+        long[] sizeOids;
+        long[] sizeMain;
+        if (given is not null)
+        {
+            (sizeOids, sizeMain) = (given.Oids, given.Main);
+        }
+        else
+        {
+            var main = await GetMainSizePassAsync(postgres, timescale, cancellationToken);
+            (sizeOids, sizeMain) = (main.Oids, main.Main);
+        }
+
         await using var command = postgres.CreateCommand(BuildIndexSql(timescale, presized: true));
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        AddSizeParameters(command, sizes.Oids, sizes.Main);
+        AddSizeParameters(command, sizeOids, sizeMain);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

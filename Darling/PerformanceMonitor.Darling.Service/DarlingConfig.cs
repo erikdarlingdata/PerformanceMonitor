@@ -318,6 +318,25 @@ public sealed class DarlingConfig
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
 
     /// <summary>
+    /// #9374: how many minutes pass between the service's measurements of the size of every relation the Store Health reads size (the
+    /// tables and indexes of the store, chunks included). Each measurement is written to the store (<c>collect.store_relation_sizes_latest</c>),
+    /// so the Viewer's Store Health tab can show the last sizes at once when it opens. The default, 60, is the cadence of the store's own
+    /// size telemetry (<c>collect.store_metrics</c>, hourly). A pass takes several seconds on a store with thousands of chunks, so a short cadence
+    /// costs the store that much work each time. Clamped to [5,1440]; a nonsense value (0 or less) reads as the default.
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next restart.</para>
+    /// </summary>
+    [JsonPropertyName("storeHealthSizesIntervalMinutes")]
+    public int StoreHealthSizesIntervalMinutes { get; set; } = DefaultStoreHealthSizesIntervalMinutes;
+
+    /// <summary>The default of <see cref="StoreHealthSizesIntervalMinutes"/>.</summary>
+    public const int DefaultStoreHealthSizesIntervalMinutes = 60;
+
+    /// <summary><see cref="StoreHealthSizesIntervalMinutes"/> as the service uses it: a value of 0 or less is the default, anything else is held to [5,1440].</summary>
+    public static TimeSpan ClampStoreHealthSizesInterval(int minutes) =>
+        TimeSpan.FromMinutes(minutes <= 0 ? DefaultStoreHealthSizesIntervalMinutes : Math.Clamp(minutes, 5, 1440));
+
+    /// <summary>
     /// #8146: the <c>max_events_limit</c> every deadlock, blocked-process and long-query session is created with. The
     /// engine's own default is 1000, and a session over it silently evicts its oldest events; a larger limit holds more
     /// between collections, at the cost of a larger ring buffer in the server's memory (<c>max_memory</c> stays 4096 KB,
