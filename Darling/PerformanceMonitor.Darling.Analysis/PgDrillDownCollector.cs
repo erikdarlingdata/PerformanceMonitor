@@ -96,7 +96,6 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
         TopDeadlocksSql,
         TopBlockingChainsSql,
         ReconstructedChainsSql,
-        ReconstructedChainsSkippingSeparateSql,
         LockModeBreakdownSql,
         ConfigIssuesSql,
         RcsiWaitsSql,
