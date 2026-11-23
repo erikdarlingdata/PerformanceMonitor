@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -24,11 +25,49 @@ namespace PerformanceMonitor.Collectors;
 /// faulted lands nothing, so the next one reports again and widens the hole, as it did before. A landed cycle
 /// vouches for the range up to its collection time, so a later clamp whose floor lies past that time
 /// (an outage longer than the catch-up window) is a new gap and is reported even for the same raw value.
-/// In memory only: a restart reports once more.</para>
+/// A restart would forget all of it, so each landed entry is also kept in the host's state store (#9359):
+/// <see cref="Land"/> hands back the one write or delete that keeps the stored copy current, and
+/// <see cref="Seed"/> reads it back before a server's first clamp decision. Without it the first clamp after a
+/// restart opened a hole from the raw watermark of an idle database, which the backfill then dug for nothing.</para>
 /// </summary>
 public sealed class QueryStoreClampReports
 {
     private readonly ConcurrentDictionary<(int ServerId, string Database), (DateTime Raw, DateTime ReadThrough)> _landed = new();
+
+    /// <summary>The databases whose entry the state store holds (written by this process or read by <see cref="Seed"/>), so a
+    /// database that never clamps costs no delete, and one that stops clamping costs exactly one.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), byte> _stored = new();
+
+    private readonly ConcurrentDictionary<int, byte> _seeded = new();
+
+    /// <summary>True once <see cref="Seed"/> has run for the server, whatever the store held.</summary>
+    public bool IsSeeded(int serverId) => _seeded.ContainsKey(serverId);
+
+    /// <summary>
+    /// Loads the entries a previous process stored for the server (#9359), from its backfill state rows. Call it before the
+    /// server's first clamp decision. A malformed value is no entry, and an entry already landed in this process wins.
+    /// </summary>
+    public void Seed(int serverId, IReadOnlyDictionary<string, string>? backfillState)
+    {
+        _seeded[serverId] = 0;
+        if (backfillState is null)
+        {
+            return;
+        }
+
+        foreach (var entry in backfillState)
+        {
+            if (!entry.Key.StartsWith(QueryStoreBackfillState.LandedKeyPrefix, StringComparison.Ordinal)
+                || !QueryStoreBackfillState.TryDecodeLanded(entry.Value, out var raw, out var readThrough))
+            {
+                continue;
+            }
+
+            var database = entry.Key.Substring(QueryStoreBackfillState.LandedKeyPrefix.Length);
+            _landed.TryAdd((serverId, database), (raw, readThrough));
+            _stored[(serverId, database)] = 0;
+        }
+    }
 
     /// <summary>True when a landed cycle already reported this raw watermark and read every range the new floor
     /// would skip: no new warning and no new hole.</summary>
@@ -68,16 +107,24 @@ public sealed class QueryStoreClampReports
     }
 
     /// <summary>Lands a successful cycle. <paramref name="clampedRaw"/> is the raw watermark that cycle clamped,
-    /// or null when it did not clamp (the watermark is fresh again, so a later stale one is a new gap).</summary>
-    public void Land(int serverId, string database, DateTime? clampedRaw, DateTime collectionTime)
+    /// or null when it did not clamp (the watermark is fresh again, so a later stale one is a new gap).
+    /// Returns the change to make to the state store (#9359): the new value for a clamped cycle, a delete for the first
+    /// cycle that no longer clamps after one was stored, and null otherwise, so a database that does not clamp is never written.</summary>
+    public QueryStoreLandedChange? Land(int serverId, string database, DateTime? clampedRaw, DateTime collectionTime)
     {
+        var key = QueryStoreBackfillState.LandedKeyPrefix + database;
         if (clampedRaw is DateTime raw)
         {
             _landed[(serverId, database)] = (raw, collectionTime);
+            _stored[(serverId, database)] = 0;
+            return new QueryStoreLandedChange(key, QueryStoreBackfillState.EncodeLanded(raw, collectionTime));
         }
-        else
-        {
-            _landed.TryRemove((serverId, database), out _);
-        }
+
+        _landed.TryRemove((serverId, database), out _);
+        return _stored.TryRemove((serverId, database), out _) ? new QueryStoreLandedChange(key, null) : null;
     }
 }
+
+/// <summary>One change to a database's stored clamp entry (#9359): <see cref="Value"/> is the text to upsert under
+/// <see cref="Key"/>, or null to delete the key.</summary>
+public readonly record struct QueryStoreLandedChange(string Key, string? Value);

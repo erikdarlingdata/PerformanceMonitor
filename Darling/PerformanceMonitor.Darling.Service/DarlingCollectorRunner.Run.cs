@@ -576,6 +576,9 @@ public sealed partial class DarlingCollectorRunner
            which is the conservative behavior. */
         if (string.Equals(definition.Name, "query_store", StringComparison.Ordinal))
         {
+            /* #9359: the clamp memory a previous process stored, before any clamp decision of this server. */
+            await SeedQueryStoreClampReportsAsync(server.ServerId, cancellationToken);
+
             var openIntervalState = await GetCollectorStateAsync(
                 server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
 
@@ -1360,7 +1363,8 @@ public sealed partial class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
-                        _queryStoreClampReports.Land(server.ServerId, databaseName, stagedClampRaw, collectionTime);
+                        await PersistQueryStoreLandedAsync(
+                            server.ServerId, _queryStoreClampReports.Land(server.ServerId, databaseName, stagedClampRaw, collectionTime), cancellationToken);
 
                         /* #5514: the flush returned, so the staged batch is in the store and the cache may
                            advance past it. Never earlier: a watermark ahead of committed rows skips them. */
@@ -1701,6 +1705,9 @@ public sealed partial class DarlingCollectorRunner
                 /* #9088: the raw watermark each database's cycle clamped, staged at decision time and landed in
                    _queryStoreClampReports from onItemComplete, after the read and flush succeeded. */
                 var stagedClampRaws = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+
+                /* #9359: the stored clamp entry changes the landed items call for, written after the driver returns. */
+                var landedClampChanges = new List<QueryStoreLandedChange>();
 
                 /* #6254: per-item state of this run: the raw stored watermark (a fallback recomputes its cutoff from it), what the read
                    saw before the ship guard filtered it, and the holes a read cut by the row cap or byte budget leaves. */
@@ -2053,8 +2060,12 @@ public sealed partial class DarlingCollectorRunner
                                 OnQueryStoreItemSucceeded(server.ServerId, item);
                             }
 
-                            _queryStoreClampReports.Land(
-                                server.ServerId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime);
+                            if (_queryStoreClampReports.Land(
+                                    server.ServerId, item, stagedClampRaws.Remove(item, out var landedClampRaw) ? landedClampRaw : null, collectionTime)
+                                is { } landedClampChange)
+                            {
+                                landedClampChanges.Add(landedClampChange);
+                            }
 
                             if (stagedDatabaseWatermarks.Remove(item, out var stagedWatermark))
                             {
@@ -2189,6 +2200,13 @@ public sealed partial class DarlingCollectorRunner
                        non-null too. */
                     perItemBudget: definition.PerItemWallClockBudget,
                     passBudget: passBudget);
+
+                /* #9359: the stored clamp entry changes the landed items call for. onItemComplete cannot await, so they are written once
+                   the driver returns. */
+                foreach (var landedClampChange in landedClampChanges)
+                {
+                    await PersistQueryStoreLandedAsync(server.ServerId, landedClampChange, cancellationToken);
+                }
 
                 /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
                    loop above treats its own (#2623) - and for the first time. Until this the driver handed

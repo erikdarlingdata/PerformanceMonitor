@@ -47,6 +47,11 @@ public sealed class QueryStoreStatePruneLivePostgresTests
     private static string Qsowm(string database) => QueryStoreOpenIntervalState.WatermarkKeyPrefix + database;
     private static string Done(string database) => QueryStoreBackfillState.DoneKeyPrefix + database;
     private static string Hole(string database) => QueryStoreBackfillState.HoleKeyPrefix + database;
+    private static string Landed(string database) => QueryStoreBackfillState.LandedKeyPrefix + database;
+
+    private static string EncodedLanded() => QueryStoreBackfillState.EncodeLanded(
+        new DateTime(2026, 8, 10, 0, 0, 0, DateTimeKind.Utc),
+        new DateTime(2026, 8, 11, 8, 0, 0, DateTimeKind.Utc));
 
     private static string EncodedHole() => QueryStoreBackfillState.EncodeHole(
         new DateTime(2026, 8, 10, 0, 0, 0, DateTimeKind.Utc),
@@ -104,6 +109,10 @@ public sealed class QueryStoreStatePruneLivePostgresTests
             await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Hole("Live"), EncodedHole());
             await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Hole("Dropped"), EncodedHole());
 
+            /* #9359: the stored clamp entry is per database too, so a dropped database must not leave one behind. */
+            await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Landed("Live"), EncodedLanded());
+            await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Landed("Dropped"), EncodedLanded());
+
             /* A key under the SAME owner that is not database-keyed. The prefix filter is what protects it;
                a prune written as "every key of this collector" would take it. */
             await StateAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, "unrelated-bookkeeping", "keep me");
@@ -121,6 +130,7 @@ public sealed class QueryStoreStatePruneLivePostgresTests
             Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Dropped")));
             Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Done("Dropped")));
             Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Hole("Dropped")));
+            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Landed("Dropped")));
 
             /* Retired even though a LIVE database's name is a prefix of it. */
             Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("AppArchive")));
@@ -134,6 +144,8 @@ public sealed class QueryStoreStatePruneLivePostgresTests
                 await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Done("Live")));
             Assert.Equal(EncodedHole(),
                 await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Hole("Live")));
+            Assert.Equal(EncodedLanded(),
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Landed("Live")));
 
             /* Kept, and this is the assertion the change exists for: present in sys.databases, absent from
                every enumeration query_store runs. Pruning it costs re-including the open interval for a
@@ -159,10 +171,10 @@ public sealed class QueryStoreStatePruneLivePostgresTests
             Assert.DoesNotContain("Parked", logger.Joined, StringComparison.Ordinal);
 
             /* Idempotent — it runs on every query_store cycle of every server, so a second pass over a clean
-               store must touch nothing. Seven survivors: qsowm for Live, Parked and App; done and hole for
+               store must touch nothing. Eight survivors: qsowm for Live, Parked and App; done, hole and landed for
                Live; the non-database-keyed bookkeeping row; and the other collector's key. */
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
-            Assert.Equal(7, await CountAsync(connection, ct, LiveServerId));
+            Assert.Equal(8, await CountAsync(connection, ct, LiveServerId));
 
             bodySucceeded = true;
         }

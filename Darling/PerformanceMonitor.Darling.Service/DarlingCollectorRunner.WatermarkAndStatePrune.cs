@@ -134,6 +134,49 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         }
     }
 
+    /// <summary>Loads the clamp entries a previous process stored for the server (#9359), once per server, before the cycle's
+    /// first clamp decision. A failed read returns no rows, which is the memory-only behaviour: one possible re-walk after a restart.</summary>
+    private async Task SeedQueryStoreClampReportsAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (_queryStoreClampReports.IsSeeded(serverId))
+        {
+            return;
+        }
+
+        _queryStoreClampReports.Seed(
+            serverId, await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken));
+    }
+
+    /// <summary>Keeps a database's stored clamp entry current (#9359): the upsert for a clamped landed cycle, the delete for the
+    /// first one that no longer clamps. Best-effort like <see cref="RecordQueryStoreBackfillHoleAsync"/>: a failed write costs one
+    /// possible re-walk after a restart, never wrong data.</summary>
+    private async Task PersistQueryStoreLandedAsync(int serverId, QueryStoreLandedChange? change, CancellationToken cancellationToken)
+    {
+        if (change is not { } landed)
+        {
+            return;
+        }
+
+        try
+        {
+            if (landed.Value is null)
+            {
+                await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, landed.Key, cancellationToken);
+            }
+            else
+            {
+                await SaveCollectorStateAsync(
+                    serverId, QueryStoreBackfillState.StateCollectorName,
+                    new Dictionary<string, string>(StringComparer.Ordinal) { [landed.Key] = landed.Value },
+                    cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Storing the query_store clamp entry {Key} failed; a restart may re-walk the database once", landed.Key);
+        }
+    }
+
     /// <summary>
     /// Deletes ONE collector_state key — the backfill worker's retirement path for a serviced or
     /// expired hole record (#2022). Best-effort like its siblings: a failed delete leaves the row,

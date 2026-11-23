@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -115,5 +116,119 @@ public sealed class QueryStoreClampReportsTests
 
         reports.Land(1, "Sales", null, T0.AddMinutes(5));
         Assert.Equal(Raw, reports.HoleFloor(1, "Sales", Raw));
+    }
+
+    /* ---- #9359: the entry survives a restart ---- */
+
+    private static Dictionary<string, string> StoredBy(QueryStoreLandedChange? change) =>
+        change is { Value: not null } write
+            ? new Dictionary<string, string> { [write.Key] = write.Value }
+            : new Dictionary<string, string>();
+
+    [Fact]
+    public void ARestartedHost_SeededFromTheStoredEntry_OpensNoHoleForAnIdleDatabaseOnTime()
+    {
+        var before = new QueryStoreClampReports();
+        var stored = StoredBy(before.Land(1, "Sales", Raw, T0));
+
+        /* The process restarts: a fresh instance knows nothing until it is seeded from the rows the first one stored. */
+        var after = new QueryStoreClampReports();
+        Assert.False(after.AlreadyReported(1, "Sales", Raw, T0.AddMinutes(5) - WatermarkPolicy.MaxCatchup));
+        Assert.False(after.IsSeeded(1));
+
+        after.Seed(1, stored);
+
+        var next = T0.AddMinutes(5);
+        Assert.True(after.IsSeeded(1));
+        Assert.True(after.AlreadyReported(1, "Sales", Raw, next - WatermarkPolicy.MaxCatchup));
+    }
+
+    [Fact]
+    public void ARestartedHost_SeededFromTheStoredEntry_OpensARealGapAtWhatTheLastCycleRead()
+    {
+        var before = new QueryStoreClampReports();
+        var stored = StoredBy(before.Land(1, "Sales", Raw, T0));
+
+        var after = new QueryStoreClampReports();
+        after.Seed(1, stored);
+
+        /* The service was down for two days: the new floor lies past what the last cycle read, so the gap is real and its hole
+           starts at the stored read-through, not at the raw watermark. */
+        var later = T0.AddDays(2);
+        Assert.False(after.AlreadyReported(1, "Sales", Raw, later - WatermarkPolicy.MaxCatchup));
+        Assert.Equal(T0, after.HoleFloor(1, "Sales", Raw));
+    }
+
+    [Fact]
+    public void AClampedCycle_WritesItsEntryEachTime_WithTheReadThroughMovingForward()
+    {
+        var reports = new QueryStoreClampReports();
+
+        var first = reports.Land(1, "Sales", Raw, T0);
+        var second = reports.Land(1, "Sales", Raw, T0.AddMinutes(1));
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(first!.Value.Key, second!.Value.Key);
+        Assert.True(QueryStoreBackfillState.TryDecodeLanded(second.Value.Value, out var raw, out var readThrough));
+        Assert.Equal(Raw, raw);
+        Assert.Equal(T0.AddMinutes(1), readThrough);
+    }
+
+    [Fact]
+    public void ACycleThatStopsClamping_DeletesTheStoredEntryOnce_ThenWritesNothingOnLaterCycles()
+    {
+        var reports = new QueryStoreClampReports();
+        Assert.NotNull(reports.Land(1, "Sales", Raw, T0));
+
+        var firstFresh = reports.Land(1, "Sales", null, T0.AddMinutes(1));
+        Assert.NotNull(firstFresh);
+        Assert.Null(firstFresh!.Value.Value);
+
+        Assert.Null(reports.Land(1, "Sales", null, T0.AddMinutes(2)));
+        Assert.Null(reports.Land(1, "Sales", null, T0.AddMinutes(3)));
+    }
+
+    [Fact]
+    public void ADatabaseThatNeverClamps_IsNeverWrittenOrDeleted()
+    {
+        var reports = new QueryStoreClampReports();
+
+        Assert.Null(reports.Land(1, "Sales", null, T0));
+        Assert.Null(reports.Land(1, "Sales", null, T0.AddMinutes(1)));
+    }
+
+    [Fact]
+    public void AnEntryReadFromTheStore_IsDeletedByTheFirstCycleThatNoLongerClamps()
+    {
+        var before = new QueryStoreClampReports();
+        var stored = StoredBy(before.Land(1, "Sales", Raw, T0));
+
+        /* After a restart this process never wrote the key, but the store holds it: the first fresh cycle must still retire it. */
+        var after = new QueryStoreClampReports();
+        after.Seed(1, stored);
+
+        var retired = after.Land(1, "Sales", null, T0.AddHours(1));
+        Assert.NotNull(retired);
+        Assert.Null(retired!.Value.Value);
+        Assert.Null(after.Land(1, "Sales", null, T0.AddHours(2)));
+    }
+
+    [Fact]
+    public void AMalformedStoredEntry_IsNoEntry_AndAnEntryOfAnotherServerIsNotUsed()
+    {
+        var reports = new QueryStoreClampReports();
+        reports.Seed(1, new Dictionary<string, string>
+        {
+            [QueryStoreBackfillState.LandedKeyPrefix + "Sales"] = "not|a|time",
+            [QueryStoreBackfillState.LandedKeyPrefix + "Orders"] = QueryStoreBackfillState.EncodeLanded(Raw, T0),
+            [QueryStoreBackfillState.HoleKeyPrefix + "Sales"] = QueryStoreBackfillState.EncodeHole(Raw, T0),
+        });
+
+        Assert.True(reports.IsSeeded(1));
+        Assert.False(reports.AlreadyReported(1, "Sales", Raw, T0.AddHours(-1)));
+        Assert.True(reports.AlreadyReported(1, "Orders", Raw, T0.AddHours(-1)));
+        Assert.False(reports.AlreadyReported(2, "Orders", Raw, T0.AddHours(-1)));
+        Assert.False(reports.IsSeeded(2));
     }
 }

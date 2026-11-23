@@ -39,6 +39,10 @@ public static class QueryStoreBackfillState
     /// <summary>State key prefix for a recorded clamp hole (value: <see cref="EncodeHole"/>).</summary>
     public const string HoleKeyPrefix = "hole:";
 
+    /// <summary>State key prefix for the last clamped read a database landed (#9359, value: <see cref="EncodeLanded"/>). It
+    /// carries the in-memory clamp memory across a restart, so an idle database's first clamp after one opens no hole.</summary>
+    public const string LandedKeyPrefix = "landed:";
+
     /// <summary>
     /// The widest window a single backfill slice may hand the per-database query (#2102) — matched
     /// to <see cref="WatermarkPolicy.MaxCatchup"/> so NO path, live or backfill, ever windows wider
@@ -155,6 +159,23 @@ public static class QueryStoreBackfillState
     /// JSON, so the state row stays greppable and the codec dependency-free.</summary>
     public static string EncodeHole(DateTime fromUtc, DateTime toUtc)
         => fromUtc.ToString("o", CultureInfo.InvariantCulture) + "|" + toUtc.ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>Encodes a landed clamped read as <c>raw|readThrough</c> in the same round-trip format as <see cref="EncodeHole"/> (#9359).</summary>
+    public static string EncodeLanded(DateTime rawUtc, DateTime readThroughUtc)
+        => rawUtc.ToString("o", CultureInfo.InvariantCulture) + "|" + readThroughUtc.ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>Decodes <see cref="EncodeLanded"/>; false on any malformed value, which reads as "no entry": the first clamp after
+    /// a restart then reports as it did before the memory was stored (#9359).</summary>
+    public static bool TryDecodeLanded(string? encoded, out DateTime rawUtc, out DateTime readThroughUtc)
+    {
+        rawUtc = default;
+        readThroughUtc = default;
+
+        var split = encoded?.Split('|');
+        return split is { Length: 2 }
+            && DateTime.TryParseExact(split[0], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out rawUtc)
+            && DateTime.TryParseExact(split[1], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out readThroughUtc);
+    }
 
     /// <summary>Decodes <see cref="EncodeHole"/>; false on any malformed value, which the scan
     /// treats as "no hole recorded" — the conservative direction (the tail logic still runs).</summary>
