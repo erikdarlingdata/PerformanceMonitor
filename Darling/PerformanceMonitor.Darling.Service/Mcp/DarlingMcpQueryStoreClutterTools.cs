@@ -243,7 +243,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                plan-churn arm reads whole days and hours from the clutter rollups and raw rows at the edges (#9148, #9173), so its coverage
                starts where its route's rollups do, or at raw's oldest row: GetPlanChurnCoverageStartAsync. The wait arm reads wait_stats
                and has its own floor. The read-cost and config arms read tables with longer retention. */
-            var planChurnStart = await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(postgres, serverIds, requestedStart, now, cancellationToken);
+            var planChurnStart = await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(postgres, serverIds, requestedStart, now, cancellationToken: cancellationToken);
             var waitFloor = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.WaitStats, resolved.ServerId, requestedStart, now, McpCommandDeadlines.ReadSeconds, cancellationToken);
             /* A start before the requested one means the arm covers the window whole; the shared helper never reports a served start earlier
                than the one asked for. */

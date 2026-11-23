@@ -819,8 +819,8 @@ public static class DarlingQueryStoreClutterReader
     /// <see cref="ResolveClutterRouteAsync"/> sets for every clutter read.
     /// </summary>
     public static async Task<DateTime?> GetPlanChurnCoverageStartAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
-        int rawFloorSeconds = StorageCommandDeadlines.McpReadSeconds)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc,
+        int rawFloorSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 

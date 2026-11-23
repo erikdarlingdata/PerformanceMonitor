@@ -527,7 +527,7 @@ ON CONFLICT (server_id, day_utc) DO UPDATE SET built_at = EXCLUDED.built_at, clu
         var now = E.AddMinutes(-30);
         var asOf = DateTime.SpecifyKind(now, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
         var fleet = new[] { A };
-        Assert.True(await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(store.Postgres, fleet, now.AddHours(-144), now, ct) is { } coverage && coverage < rawFloor,
+        Assert.True(await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(store.Postgres, fleet, now.AddHours(-144), now, cancellationToken: ct) is { } coverage && coverage < rawFloor,
             "plan churn coverage does not start before raw's oldest row, so the rollups are not read");
 
         var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(store.Postgres, "rollup-9111", hours_back: 144, as_of: asOf);

@@ -194,7 +194,7 @@ public partial class ViewerDataService
         }
 
         var start = await DarlingQueryStoreClutterReader.GetPlanChurnCoverageStartAsync(
-            _dataSource, [serverId], startUtc, endUtc, cancellationToken, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+            _dataSource, [serverId], startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         return RawWindowFloor.IsTruncated(start, startUtc) ? start : null;
     }
 
