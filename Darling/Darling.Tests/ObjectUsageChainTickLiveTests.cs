@@ -243,6 +243,16 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
             await command.ExecuteNonQueryAsync(ct);
         }
 
+        /* Alpha still has a raw row, so its open runs stay (an open run of a pair with no raw row is purged: ObjectUsageChainRunRetentionLiveTests). */
+        await using (var raw = new NpgsqlCommand(
+            "INSERT INTO collect.index_object_stats (collection_id, collection_time, server_id, server_name, database_name) VALUES (934950, $1, $2, 'tick-test', 'Alpha')", connection))
+        {
+            raw.Parameters.AddWithValue(DateTime.SpecifyKind(now.AddDays(-1), DateTimeKind.Unspecified));
+            raw.Parameters.AddWithValue(ServerOne);
+            await raw.ExecuteNonQueryAsync(ct);
+        }
+
+        /* No hypertable here, so a closed run is kept the default seven days past the horizon: run 1 is past that, run 2 is not. */
         await Run(1, now.AddDays(-horizon - 40), now.AddDays(-horizon - 20));
         await Run(2, now.AddDays(-horizon - 5), now.AddDays(-horizon - 1));
         await Run(3, now.AddDays(-horizon - 40), null);
@@ -262,7 +272,7 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
             }
         }
 
-        Assert.Equal(new[] { 3, 4, 5 }, kept.ToArray());
+        Assert.Equal(new[] { 2, 3, 4, 5 }, kept.ToArray());
     }
 
     /// <summary>EXPLAIN (ANALYZE, BUFFERS) of one planner statement with its server id, on a store with sequential scans switched off so a missing index shows as an error text.</summary>
