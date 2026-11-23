@@ -58,9 +58,15 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="PerformanceMonitorDarling">
 
+        <!-- #9358: the zh-Hant satellite of Microsoft.SqlServer.TransactSql.ScriptDom (here and in viewer\) is not packaged. Its
+             version resource says language 0x7C04 (31748): WiX copies that into File.Language, ICE03 rejects it, and a File
+             element has no attribute to override it. The file holds only ScriptDom's Traditional Chinese message text, and the
+             one parser call (QueryTextReferenceScanner) drops the parse errors, so no message is ever shown. The release zip
+             still carries it. ICE03 still runs on every other file. -->
         <!-- darling.json is never in this tree: install-darling.ps1 writes it. -->
         <Files Include="$(PayloadDir)\**">
           <Exclude Files="$(PayloadDir)\viewer\**" />
+          <Exclude Files="$(PayloadDir)\zh-Hant\Microsoft.SqlServer.TransactSql.ScriptDom.resources.dll" />
           <Exclude Files="$(PayloadDir)\PerformanceMonitor.Darling.Service.exe" />
           <Exclude Files="$(PayloadDir)\darling.json" />
         </Files>
@@ -88,6 +94,7 @@
 
         <Directory Id="ViewerDir" Name="viewer">
           <Files Include="$(PayloadDir)\viewer\**">
+            <Exclude Files="$(PayloadDir)\viewer\zh-Hant\Microsoft.SqlServer.TransactSql.ScriptDom.resources.dll" />
             <Exclude Files="$(PayloadDir)\viewer\PerformanceMonitor.Darling.Viewer.exe" />
           </Files>
           <Component Id="DarlingViewer" Guid="*">

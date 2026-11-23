@@ -796,6 +796,9 @@ public sealed partial class DarlingCollectorRunner
     /// with no new Query Store rows reports its gap once, not every cycle. In memory: a restart reports once more.</summary>
     private readonly QueryStoreClampReports _queryStoreClampReports = new();
 
+    /// <summary>Lets a test land a clamp report the way a cycle does, because the outage that makes a clamp a new gap outlasts a test (#9352).</summary>
+    internal QueryStoreClampReports QueryStoreClampReportsForTests => _queryStoreClampReports;
+
     private int ConsecutiveQueryStoreItemFailures(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryGetValue((serverId, database), out var count) ? count : 0;
 

@@ -308,6 +308,8 @@ public partial class ServerTab : UserControl
             if (IsVisible && _refreshPendingWhileHidden)
             {
                 _refreshPendingWhileHidden = false;
+                /* #9366: coming back to this server tab is the pick its pending read answers. */
+                StampFirstLoadPick();
                 _ = RefreshAllDataAsync();
             }
         };
@@ -596,6 +598,10 @@ public partial class ServerTab : UserControl
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
             && e.Source != CpuSubTabControl && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
+
+        /* #9366: the selection just changed, so this is the pick the first-load line times from. Before the drill-down return
+           below, whose own load goes through the same first-load line. */
+        StampFirstLoadPick();
 
         UpdateCompareDropdownState();
 

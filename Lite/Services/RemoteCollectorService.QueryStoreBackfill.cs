@@ -175,6 +175,9 @@ public partial class RemoteCollectorService
     /// with no new Query Store rows reports its gap once, not every cycle. In memory: a restart reports once more.</summary>
     private readonly QueryStoreClampReports _queryStoreClampReports = new();
 
+    /// <summary>Lets a test land a clamp report the way a cycle does, because the outage that makes a clamp a new gap outlasts a test (#9352).</summary>
+    internal QueryStoreClampReports QueryStoreClampReportsForTests => _queryStoreClampReports;
+
     private int ConsecutiveQueryStoreItemFailures(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryGetValue((serverId, database), out var count) ? count : 0;
 
@@ -312,7 +315,7 @@ public partial class RemoteCollectorService
 
             /* Holes before the tail: a recorded outage gap is the history closest to expiring. */
             if (state.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var encoded)
-                && QueryStoreBackfillState.TryDecodeHole(encoded, out var holeFrom, out var holeTo))
+                && QueryStoreBackfillState.TryDecodeNewestHole(encoded, out var holeFrom, out var holeTo))
             {
                 if (holeTo <= floorLimit)
                 {
@@ -487,16 +490,19 @@ public partial class RemoteCollectorService
                    ships nothing, so the derived ceiling would re-ask the same chunk forever). The
                    tail marks done in the same breath — the hole owns the rest of the dig, and the
                    scan services holes first. */
-                var advance = new Dictionary<string, string>(StringComparer.Ordinal)
+                if (isHole)
                 {
-                    [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor)
-                };
-                if (!isHole)
-                {
-                    advance[QueryStoreBackfillState.DoneKeyPrefix + databaseName] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                    await RetireDugHoleRangeAsync(serverId, databaseName, sliceFloor, ceilingUtc, floorUtc, cancellationToken);
                 }
-
-                await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, advance, cancellationToken);
+                else
+                {
+                    await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName,
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = await AddedHoleValueAsync(serverId, databaseName, floorUtc, sliceFloor, cancellationToken),
+                            [QueryStoreBackfillState.DoneKeyPrefix + databaseName] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+                        }, cancellationToken);
+                }
 
                 _logger?.LogInformation(
                     "query_store backfill on '{Server}' [{Database}]: quiet chunk {Floor:o}..{Ceiling:o}, continuing below ({Range}).",
@@ -506,7 +512,7 @@ public partial class RemoteCollectorService
 
             if (isHole)
             {
-                await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
+                await RetireDugHoleRangeAsync(serverId, databaseName, floorUtc, ceilingUtc, floorUtc, cancellationToken);
             }
             else
             {
@@ -534,6 +540,7 @@ public partial class RemoteCollectorService
         {
             await duckConnection.OpenAsync(cancellationToken);
             written = WriteBatch(duckConnection, definition, rows, serverId, context.ServerName, ceilingUtc, context);
+            written -= RemoveStoredBackfillCopies(duckConnection, serverId, databaseName, ceilingUtc);
         }
 
         /* #6254: backfill rows feed the ship guard, so a later look-back read that meets the same key with the same or an
@@ -550,18 +557,7 @@ public partial class RemoteCollectorService
                boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
                a bounded window would orphan the unexplored range below it. */
             var shippedTo = boundary ?? sliceFloor;
-            if (shippedTo <= floorUtc)
-            {
-                await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
-            }
-            else
-            {
-                await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName,
-                    new Dictionary<string, string>(StringComparer.Ordinal)
-                    {
-                        [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo)
-                    }, cancellationToken);
-            }
+            await RetireDugHoleRangeAsync(serverId, databaseName, shippedTo > floorUtc ? shippedTo : floorUtc, ceilingUtc, floorUtc, cancellationToken);
         }
         else if (boundary is not null && boundary <= floorUtc)
         {
@@ -577,6 +573,48 @@ public partial class RemoteCollectorService
             server.DisplayName, databaseName, written,
             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
             boundary ?? floorUtc, isHole ? "hole" : "tail", ceilingUtc);
+    }
+
+    /// <summary>
+    /// Removes the rows a backfill slice just wrote that the store already held (#9352). Before the recorded holes were kept
+    /// apart (<see cref="QueryStoreBackfillState.AddHole"/>), a catch-up clamp widened the database's one saved hole, so the
+    /// dig restarted at the clamp point and walked ranges an earlier pass filled and ranges the live collector already stored.
+    /// A slice whose save failed after its write can still be walked again. Two passes whose chunks line up write the same rows under the same stamp
+    /// (exact copies), and passes that do not line up write the same rows under another stamp. Both inflate any total over raw
+    /// rows, and the read side's dedup only hides them.
+    ///
+    /// <para>A row of the slice (stamped <paramref name="stamp"/>) goes when a row with a LOWER <c>collection_id</c> is equal to it
+    /// in the dedup key and every measurement, <c>collection_time</c> aside: the copy that was stored first stays. Only rows equal
+    /// in the measurements are removed, so a row whose interval has since gained executions is kept as the newer state.
+    /// Returns the rows removed. This is the guard at the write.</para>
+    /// </summary>
+    internal static int RemoveStoredBackfillCopies(
+        DuckDB.NET.Data.DuckDBConnection connection, int serverId, string databaseName, DateTime stamp)
+    {
+        var columns = new List<string>();
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT column_name FROM information_schema.columns WHERE table_schema = 'main' AND table_name = 'query_store_stats' ORDER BY ordinal_position";
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                columns.Add(reader.GetString(0));
+            }
+        }
+
+        var key = QueryStoreSliceRepairService.KeyColumnsFor(columns);
+        var same = QueryStoreSliceRepairService.DistinctSliceColumns(columns, key)
+            .Where(c => !string.Equals(c, "collection_time", StringComparison.OrdinalIgnoreCase))
+            .Select(c => $"o.{c} IS NOT DISTINCT FROM t.{c}");
+
+        using var delete = connection.CreateCommand();
+        delete.CommandText =
+            "DELETE FROM query_store_stats AS t WHERE t.server_id = $1 AND t.database_name = $2 AND t.collection_time = $3 " +
+            $"AND EXISTS (SELECT 1 FROM query_store_stats AS o WHERE o.collection_id < t.collection_id AND {string.Join(" AND ", same)})";
+        delete.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+        delete.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+        delete.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = stamp });
+        return delete.ExecuteNonQuery();
     }
 
     /// <summary>Binds a CollectorQuery's parameters onto a SqlCommand — Lite's slice commands share
@@ -1108,9 +1146,48 @@ RETURNING state_key";
         }
     }
 
+    /// <summary>The hole value after <paramref name="fromUtc"/>..<paramref name="toUtc"/> joins the holes the database
+    /// has recorded now (#9352). The tail's conversion to a hole reads the current value, since a clamp may have
+    /// recorded a hole while the slice ran.</summary>
+    private async Task<string> AddedHoleValueAsync(
+        int serverId, string databaseName, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
+    {
+        var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
+        return QueryStoreBackfillState.AddHole(
+            existing.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var encoded) ? encoded : null, fromUtc, toUtc);
+    }
+
+    /// <summary>Takes the range a hole slice just dug out of the database's recorded holes and saves what is left, or
+    /// deletes the key when nothing is (#9352). Reads the value as it is now, so a hole the live collector recorded
+    /// while the slice ran stays.</summary>
+    private async Task RetireDugHoleRangeAsync(
+        int serverId, string databaseName, DateTime dugFromUtc, DateTime dugToUtc, DateTime floorUtc, CancellationToken cancellationToken)
+    {
+        var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
+        var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
+        if (!existing.TryGetValue(key, out var encoded))
+        {
+            /* A state read that fails returns no rows, and the slice's own hole key was there when the scan found it. Writing
+               nothing leaves the hole as it was, where deleting it would lose the backfill opportunity. */
+            return;
+        }
+
+        var remaining = QueryStoreBackfillState.RemoveDugRange(encoded, dugFromUtc, dugToUtc, floorUtc);
+        if (remaining is null)
+        {
+            await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, key, cancellationToken);
+        }
+        else
+        {
+            await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName,
+                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = remaining }, cancellationToken);
+        }
+    }
+
     /// <summary>Records a clamp-opened Query Store hole for the backfill worker (#2058), under the
-    /// WORKER's collector_state name — merged wider with any pending hole so a repeat outage cannot
-    /// overwrite an unserviced one. Best-effort: a lost record is a lost backfill opportunity,
+    /// WORKER's collector_state name — added to the database's pending holes and merged only with one it
+    /// overlaps, so a repeat outage cannot overwrite an unserviced one and cannot send the dig back over
+    /// a range it already filled (#9352). Best-effort: a lost record is a lost backfill opportunity,
     /// never wrong data — the clamp WARNING already disclosed the hole. Darling's twin lives in
     /// DarlingCollectorRunner.</summary>
     private async Task RecordQueryStoreBackfillHoleAsync(
@@ -1120,10 +1197,10 @@ RETURNING state_key";
         {
             var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
             var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-            var merged = QueryStoreBackfillState.MergeHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
+            var added = QueryStoreBackfillState.AddHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
             await SaveCollectorStateAsync(
                 serverId, QueryStoreBackfillState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = QueryStoreBackfillState.EncodeHole(merged.FromUtc, merged.ToUtc) },
+                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = added },
                 cancellationToken);
         }
         catch (Exception ex)

@@ -516,7 +516,8 @@ public partial class RemoteCollectorService
                                 && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
-                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
+                                await RecordQueryStoreBackfillHoleAsync(
+                                    serverId, databaseName, _queryStoreClampReports.HoleFloor(serverId, databaseName, context.Watermark.Value), azureClampedFloor, dbToken);
                             }
                         }
                     }
@@ -997,7 +998,8 @@ public partial class RemoteCollectorService
                         if (clamped.HasValue
                             && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
-                            await RecordQueryStoreBackfillHoleAsync(serverId, item, cutoff.HoleFrom ?? raw!.Value, cutoff.HoleTo ?? clamped.Value, ct);
+                            await RecordQueryStoreBackfillHoleAsync(
+                                serverId, item, _queryStoreClampReports.HoleFrom(serverId, item, raw!.Value, cutoff), cutoff.HoleTo ?? clamped.Value, ct);
                         }
                     }
 
