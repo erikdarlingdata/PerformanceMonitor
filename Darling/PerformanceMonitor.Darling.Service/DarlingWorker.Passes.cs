@@ -1260,6 +1260,24 @@ public sealed partial class DarlingWorker
             _logger.LogWarning("Job outcome daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
         }
 
+        /* #9349: the persisted object usage chain get_object_usage reads: each pair's new index_object_stats snapshots are folded forward in
+           the builder's own transactions. It reads index_object_stats, not the Query Store tables, so it has no dependence on the passes above;
+           bounded by its step cap and MaxTickDuration, with its own catch so a failure leaves their work standing. Never on a request path. */
+        try
+        {
+            var chain = await ObjectUsageChainTick.RunTickAsync(_postgres!, _logger, stoppingToken);
+            if (chain.Steps > 0 || chain.Failed > 0 || chain.Deferred)
+            {
+                _logger.LogInformation(
+                    "Object usage chain: {Steps} snapshot(s) folded over {Pairs} pair(s), {Failed} failed{Deferred}",
+                    chain.Steps, chain.PairsBuilt, chain.Failed, chain.Deferred ? "; the rest follows on the next tick" : string.Empty);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Object usage chain could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+
         /* #9111: the closed-day rollups the Query Store grid and its slicer read whole UTC days from. It reads the interval table the
            daily summary above reads and writes its own three tables, so it has its own catch and a failure leaves the passes above standing. */
         await RunQueryStoreClosedDayTickAsync(stoppingToken);

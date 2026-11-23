@@ -962,6 +962,11 @@ DROP TABLE IF EXISTS collect.query_text_dim_seen;
 DROP TABLE IF EXISTS collect.query_plan_dim_seen;
 CREATE INDEX IF NOT EXISTS idx_query_text_dim_last_seen ON collect.query_text_dim (last_seen);
 CREATE INDEX IF NOT EXISTS idx_query_plan_dim_last_seen ON collect.query_plan_dim (last_seen);"),
+        // V299 (#9349): the object usage chain's three tables. The three together are the probe's newest sentinel. The rewind drops all three, so a re-run of V299 creates them
+        // empty and the chain builder folds the snapshots again. Safe on a store that never had them.
+        new(299, "hasObjectUsageChain", @"DROP TABLE IF EXISTS collect.object_usage_snapshots;
+DROP TABLE IF EXISTS collect.object_usage_deltas;
+DROP TABLE IF EXISTS collect.object_usage_runs;"),
     ];
 
     /// <summary>

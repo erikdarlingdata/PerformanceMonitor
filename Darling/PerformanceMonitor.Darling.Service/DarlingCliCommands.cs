@@ -628,6 +628,7 @@ public static partial class DarlingCliCommands
         || IsRemoveAlertSourceVerb(arg)
         || IsListAlertSourcesVerb(arg)
         || IsExportInvestigationsVerb(arg)
+        || IsObjectUsageCompareVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
@@ -731,6 +732,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --list-alert-sources [--config <path>]           List the sources: name, created, last alert sent and alerts not yet delivered. Never shows a password." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --export-investigations <file> [--since <date>] [--until <date>] [--server <name>] [--verdict right|partly|wrong] [--force] [--config <path>]   Write the investigation cases that have feedback, one JSON object per line: the alert, the brief and evidence the agent was given, its report and the recorded verdict and note. Collected text is masked at mcp.dataDetail, as get_investigation_reports masks it. Test your own agent on them." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --object-usage-compare <server> <database> [days] [--config <path>]   Read one database's object usage both ways, from the stored chain and from every snapshot, and print 'identical' with both timings or each difference. Reads only; exits 3 when the answers differ and 4 when the chain cannot answer the window." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +

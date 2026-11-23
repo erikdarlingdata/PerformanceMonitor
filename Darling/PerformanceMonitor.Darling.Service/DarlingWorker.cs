@@ -386,6 +386,11 @@ public sealed partial class DarlingWorker : BackgroundService
         new("collection_log hypertable", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             async (connection, logger, ct) => await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct) ? 1 : 0),
 
+        /* #9349: the two per-snapshot object usage chain tables are outside the collector catalog too. Hypertable, compression settings and policy,
+           the same width and age as index_object_stats, the ALTER only when the settings differ. */
+        new("object usage chain hypertables", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await TimescaleSupport.EnsureObjectUsageHypertablesAsync(connection, logger, ct) ? 1 : 0),
+
         /* #9216: attention_events is a hypertable (#8967) in the catalog but off the compression grid, so the sweep above never
            reaches it either. Its settings and policy, the ALTER only when the settings differ and with a bounded lock wait. */
         new("attention_events compression", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
