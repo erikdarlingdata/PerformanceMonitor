@@ -2280,7 +2280,7 @@ public sealed partial class DarlingWorker
         {
             /* Shutdown (a body-internal await observed the token) — quiet and expected. */
         }
-        catch (ObjectDisposedException) when (stoppingToken.IsCancellationRequested)
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
         {
             /* #9392: a dependency the host disposed while this body was still using it, once the service is stopping. */
         }

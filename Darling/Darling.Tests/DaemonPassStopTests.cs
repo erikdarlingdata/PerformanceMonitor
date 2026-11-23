@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -37,6 +38,50 @@ public class DaemonPassStopTests
 
         Assert.False(goOn);
         Assert.Equal(0, Faults(log));
+    }
+
+    [Fact]
+    public async Task AWrappedDisposedObject_WhileTheServiceIsStopping_EndsTheLoop_AndLogsNothingAtWarning()
+    {
+        var log = new CapturingTestLogger();
+        using var stopping = new CancellationTokenSource();
+        stopping.Cancel();
+
+        var goOn = await DarlingWorker.RunDaemonPassAsync(
+            log, () => throw new NpgsqlException("wrapper", new ObjectDisposedException("NpgsqlDataSource")),
+            "External alert pass failed", stopping.Token);
+
+        Assert.False(goOn);
+        Assert.Equal(0, Faults(log));
+    }
+
+    [Fact]
+    public async Task APostmasterShutdown_WhileTheServiceIsStopping_EndsTheLoop_AndLogsNothingAtWarning()
+    {
+        var log = new CapturingTestLogger();
+        using var stopping = new CancellationTokenSource();
+        stopping.Cancel();
+
+        var goOn = await DarlingWorker.RunDaemonPassAsync(
+            log, () => throw new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", "57P01"),
+            "External alert pass failed", stopping.Token);
+
+        Assert.False(goOn);
+        Assert.Equal(0, Faults(log));
+    }
+
+    [Fact]
+    public async Task AWrappedDisposedObject_WhileTheServiceIsNotStopping_IsStillLoggedAsAWarning_AndTheLoopGoesOn()
+    {
+        var log = new CapturingTestLogger();
+        using var running = new CancellationTokenSource();
+
+        var goOn = await DarlingWorker.RunDaemonPassAsync(
+            log, () => throw new NpgsqlException("wrapper", new ObjectDisposedException("NpgsqlDataSource")),
+            "External alert pass failed", running.Token);
+
+        Assert.True(goOn);
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
     }
 
     [Fact]

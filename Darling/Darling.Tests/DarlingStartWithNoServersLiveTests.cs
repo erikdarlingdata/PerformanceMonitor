@@ -374,8 +374,10 @@ public sealed class DarlingStartWithNoServersLiveTests
 
     /* A store the test borrows can carry settings of its own that the service rightly warns about (pg_stat_statements.track_utility on
        a plain cluster), and states of its own that depend on the time of day. Those say nothing about the server list, so they are the
-       two kinds left out, each by its fixed prefix.
-       The second is the TimescaleDB compression clearance warning ("TimescaleDB: compression of <table> last ran ..."). The test's
+       two kinds left out, each by its fixed text.
+       The second is ONE of the TimescaleDB compression warnings, the no-clearance one ("TimescaleDB: compression of <table> last ran
+       ... which is a minute an hourly refresh ALSO starts on ..."). The running warning, the overrun warning and the percent-of-clearance
+       warning stay faults: only the no-clearance sentence is one a clone's catch-up run can produce. The test's
        store is a clone of a template whose compression job came due while the template sat idle, so the clone's scheduler runs that
        job the moment it starts, on whatever minute of the hour that is. At a minute an hourly refresh also starts on (the clearance
        there is zero) the service reports the run as it reports any run on that minute: a warning about the store's schedule, which
@@ -383,7 +385,12 @@ public sealed class DarlingStartWithNoServersLiveTests
     private static IEnumerable<(LogLevel Level, string Message)> Faults(IEnumerable<(LogLevel Level, string Message)> entries) =>
         entries.Where(e => e.Level >= LogLevel.Warning
             && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal)
-            && !e.Message.StartsWith("TimescaleDB: compression of ", StringComparison.Ordinal));
+            && !IsNoClearanceWarning(e.Message));
+
+    /// <summary>The no-clearance compression warning, matched by the fixed parts of its template and not the filled values.</summary>
+    private static bool IsNoClearanceWarning(string message) =>
+        message.StartsWith("TimescaleDB: compression of ", StringComparison.Ordinal)
+        && message.Contains("which is a minute an hourly refresh ALSO starts on", StringComparison.Ordinal);
 
     private static IEnumerable<(LogLevel Level, string Message)> Faults(RecordingLogger logger) => Faults(logger.Entries);
 
@@ -409,8 +416,32 @@ public sealed class DarlingStartWithNoServersLiveTests
 
         Assert.Contains(
             logger.Entries, e => e.Level == LogLevel.Warning
-                && e.Message.StartsWith("TimescaleDB: compression of ", StringComparison.Ordinal));
+                && IsNoClearanceWarning(e.Message));
         Assert.Empty(Faults(logger));
+    }
+
+    /// <summary>
+    /// The filter leaves out only the no-clearance sentence. A run that overran a refresh minute with clearance to spare is a real
+    /// finding about the store and must still count as a fault, as must any other compression warning.
+    /// </summary>
+    [Fact]
+    public void ACompressionOverrun_OnAMinuteWithClearance_IsStillAFault()
+    {
+        var minute = Enumerable.Range(0, 60).First(m =>
+            TimescaleSupport.CompressionMinuteClearanceSeconds(m) > 0);
+        var clearance = TimescaleSupport.CompressionMinuteClearanceSeconds(minute);
+        var started = new DateTime(2026, 11, 8, 4, minute, 0, DateTimeKind.Utc);
+        var reading = new CompressionActivity(
+            TimescaleSupport.CollectionLogTable, "Scheduled", started, TimeSpan.FromSeconds(clearance + 30), 0L);
+        var logger = new RecordingLogger();
+
+        TimescaleSupport.LogCompressionActivity([reading], started.AddHours(1), logger);
+
+        Assert.Contains(
+            logger.Entries, e => e.Level == LogLevel.Warning
+                && e.Message.StartsWith("TimescaleDB: compression of ", StringComparison.Ordinal)
+                && !IsNoClearanceWarning(e.Message));
+        Assert.NotEmpty(Faults(logger));
     }
 
     internal sealed class RecordingLogger : ILogger<DarlingWorker>

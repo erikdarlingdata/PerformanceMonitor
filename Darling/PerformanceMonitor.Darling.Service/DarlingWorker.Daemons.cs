@@ -1136,9 +1136,13 @@ public sealed partial class DarlingWorker
         }
     }
 
-    /// <summary>#9392: a cancellation, or a disposed object, that surfaces once the service token has been cancelled is the service stopping, not a fault.</summary>
+    /// <summary>
+    /// #9392: what a stop leaves behind once the service token has been cancelled is not a fault. It is the one rule the
+    /// analysis passes already use: a cancellation, a disposed object (bare or wrapped one level, as Npgsql throws it), or
+    /// the server going away (SQLSTATE 57P01, 57P02 or 57P03).
+    /// </summary>
     internal static bool IsStopping(Exception ex, CancellationToken stoppingToken) =>
-        stoppingToken.IsCancellationRequested && ex is OperationCanceledException or ObjectDisposedException;
+        AnalysisShutdown.IsExpectedAbandon(ex, stoppingToken);
 
     /// <summary>
     /// The command plane's poll loop (Stage 2), run concurrently with the collection sweep on its own
@@ -1173,7 +1177,7 @@ public sealed partial class DarlingWorker
             {
                 return;
             }
-            catch (ObjectDisposedException) when (stoppingToken.IsCancellationRequested)
+            catch (Exception ex) when (IsStopping(ex, stoppingToken))
             {
                 return;
             }
