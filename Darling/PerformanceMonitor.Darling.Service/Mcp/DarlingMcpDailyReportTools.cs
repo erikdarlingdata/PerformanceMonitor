@@ -10,7 +10,6 @@ using System;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -106,7 +105,13 @@ public sealed class DarlingMcpDailyReportTools
                 node["message"] = "No servers are registered yet, so the report has nothing to cover.";
             }
 
-            return node.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+            /* #9398: the servers array alone ran past the shared response budget on a busy day (many failed Agent jobs and alerts), with
+               no budget keys to say so. The servers are already worst first, so the cut drops the healthiest. summary and text were built
+               from the whole report above and still count every server. One entry over the budget by itself is still answered whole. */
+            return McpResponseBudget.CapArray(
+                node, "servers", "worst first", "server entries",
+                _ => "The summary and text above still count every server.", McpResponseBudget.DefaultBytes,
+                "budget_truncated", "budget_note", null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
