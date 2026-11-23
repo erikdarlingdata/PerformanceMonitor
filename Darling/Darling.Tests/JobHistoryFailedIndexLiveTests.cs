@@ -137,7 +137,7 @@ ORDER BY g DESC, s;";
             }
 
             var withIndex = await RowsAsync(connection, end, ct);
-            Assert.True(await ReadUsesIndexAsync(connection, end, ct), "the failed jobs read did not use the failed outcome index: " + LastPlan.Replace("\r", " ").Replace("\n", " ")[..Math.Min(2500, LastPlan.Length)]);
+            Assert.True(await ReadUsesIndexAsync(connection, end, ct), "the failed jobs read did not use the failed outcome index: " + LastPlan.Replace("\r", " ").Replace("\n", " ")[..Math.Min(20000, LastPlan.Length)]);
             Assert.NotEmpty(withIndex);
             Assert.All(withIndex, r => Assert.StartsWith("message", r.Split('|')[4], StringComparison.Ordinal));
 
