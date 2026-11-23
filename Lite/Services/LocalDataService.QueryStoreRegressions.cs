@@ -109,6 +109,11 @@ public partial class LocalDataService
     /// </summary>
     public const int BaselineLookbackDays = 7;
 
+    /// <summary>Test seam (#9362): how many separate coverage probes this service has run. The empty answer of
+    /// get_query_store_regressions reads the facts from the regressions statement, so it makes none with no database filter and
+    /// one (the server-wide question) with one.</summary>
+    internal int QueryStoreRegressionCoverageProbes { get; private set; }
+
     /// <summary>
     /// The queries whose Query Store performance got WORSE over [now - <paramref name="hoursBack"/>, now]
     /// compared with a fixed <see cref="BaselineLookbackDays"/>-day baseline ending at the window's start: Regular cost
@@ -117,6 +122,17 @@ public partial class LocalDataService
     /// and take at most <c>maxRows / FailureShareDivisor</c> slots (more only when the cost rows leave room).
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
+        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
+        IReadOnlyList<string>? excludedDatabases = null, DateTime? dataStartUtc = null) =>
+        (await GetQueryStoreRegressionsWithCoverageAsync(serverId, hoursBack, maxRows, databaseNames, asOfUtc, excludedDatabases, dataStartUtc)).Rows;
+
+    /// <summary>
+    /// #9362: <see cref="GetQueryStoreRegressionsAsync"/> plus the two coverage facts of
+    /// <see cref="GetQueryStoreRegressionCoverageAsync"/>, answered by the same statement from the same deduped rows (narrowed to
+    /// <paramref name="databaseNames"/> when given, as the probe is, and not by <paramref name="excludedDatabases"/>, which the
+    /// probe does not take). The empty answer reads them here instead of making a second pass over the archive.
+    /// </summary>
+    public async Task<(List<QueryStoreRegressionRow> Rows, bool HasBaseline, bool HasRecent)> GetQueryStoreRegressionsWithCoverageAsync(
         int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
         IReadOnlyList<string>? excludedDatabases = null, DateTime? dataStartUtc = null)
     {
@@ -136,7 +152,7 @@ public partial class LocalDataService
         /* #7256: a window that starts after the newest archived row reads the hot table alone. */
         return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", baselineStartTime, ReadAsync, CancellationToken.None);
 
-        async Task<List<QueryStoreRegressionRow>> ReadAsync(string relation)
+        async Task<(List<QueryStoreRegressionRow> Rows, bool HasBaseline, bool HasRecent)> ReadAsync(string relation)
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -163,7 +179,100 @@ public partial class LocalDataService
         var baseEmpty = (startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime)) > TimeSpan.Zero ? "FALSE" : "TRUE";
         var limit = "CAST($" + limitIndex + " AS INTEGER)";
 
-        command.CommandText = @"
+        command.CommandText = RegressionsSql(dbClause, baselineParamIndex, excludeClause, baseHours, recentHours, baseEmpty, limit);
+
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
+        command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        foreach (var excluded in excludeValues)
+            command.Parameters.Add(new DuckDBParameter { Value = excluded });
+
+        var rows = new List<QueryStoreRegressionRow>();
+        var textKeys = new List<(long? Id, DateTime? Time)>();
+        var hasBaseline = false;
+        var hasRecent = false;
+        using (var reader = await command.ExecuteReaderAsync())
+        {
+        while (await reader.ReadAsync())
+        {
+            /* #9362: the coverage facts ride on every row, whatever the page holds. A NULL page_ord is the one row an empty page leaves. */
+            hasBaseline = reader.GetBoolean(40);
+            hasRecent = reader.GetBoolean(41);
+            if (reader.IsDBNull(39))
+                continue;
+
+            textKeys.Add((reader.IsDBNull(14) ? null : reader.GetInt64(14), reader.IsDBNull(16) ? null : reader.GetDateTime(16)));
+            var isCost = reader.GetBoolean(17);
+            var isTimeouts = reader.GetBoolean(18);
+            var isErrors = reader.GetBoolean(19);
+            var reasons = new List<string>(3);
+            if (isCost) reasons.Add("cost");
+            if (isTimeouts) reasons.Add("timeouts");
+            if (isErrors) reasons.Add("errors");
+            rows.Add(new QueryStoreRegressionRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                QueryId = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                BaselineDurationMs = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                RecentDurationMs = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                DurationRegressionPercent = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
+                BaselineCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                RecentCpuMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                CpuRegressionPercent = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
+                AdditionalDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                BaselineExecCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                RecentExecCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+                BaselinePlanCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
+                RecentPlanCount = reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetValue(12)),
+                Severity = reader.IsDBNull(13) ? "" : reader.GetString(13),
+                QueryTextSample = "",
+                LastExecutionTime = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+                RegressionReason = string.Join(",", reasons),
+                Aborted = ReadRunGroup(reader, 20, 32 + 2, 32 + 3),
+                Exception = ReadRunGroup(reader, 26, 32 + 4, 32 + 5),
+                BaselineRegularPerHour = reader.IsDBNull(32) ? null : ToDouble(reader.GetValue(32)),
+                RecentRegularPerHour = reader.IsDBNull(33) ? null : ToDouble(reader.GetValue(33)),
+                TotalCount = reader.IsDBNull(38) ? 0 : Convert.ToInt64(reader.GetValue(38)),
+            });
+        }
+        }
+
+        /* #5381: the text sample, read by key for the returned rows only. */
+        var texts = await ReadQueryStoreTextByRowAsync(
+            connection, serverId,
+            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)), relation);
+        for (var i = 0; i < rows.Count; i++)
+        {
+            string? text = null;
+            if (textKeys[i].Id.HasValue && textKeys[i].Time.HasValue)
+            {
+                texts.TryGetValue((textKeys[i].Id!.Value, textKeys[i].Time!.Value), out text);
+                /* The latest row carried no text: the old MAX skipped NULLs, so take any text the query has in the window. */
+                text ??= await ReadQueryStoreWindowTextAsync(connection, serverId, rows[i].DatabaseName, rows[i].QueryId, startTime, endTime);
+            }
+
+            rows[i].QueryTextSample = text ?? "";
+        }
+
+        return (rows, hasBaseline, hasRecent);
+        }
+    }
+
+    /// <summary>
+    /// #9362: the regressions statement. The page is a CTE, so the one statement also answers the coverage facts the empty
+    /// answer needs (<c>has_baseline</c>, <c>has_recent</c>, folded from the same deduped set), and each page row carries
+    /// <c>page_ord</c> so the reader can tell it from the one all-NULL row an empty page leaves behind. <c>internal</c>: the
+    /// tests run it beside the statement it replaced.
+    /// </summary>
+    internal static string RegressionsSql(
+        string dbClause, int baselineParamIndex, string excludeClause, string baseHours, string recentHours, string baseEmpty, string limit)
+    {
+        return @"
 WITH latest AS (
     /* LOAD-BEARING (correctness, not just perf) - #1841. Keep the LATEST cumulative snapshot per
        interval before aggregating; see the file header for why this read is the most exposed to it. Every outcome is
@@ -270,19 +379,23 @@ recent_performance AS (
    query's kept recent rows; it is read afterwards, by key, for the rows this statement returns, from the latest kept
    row of each query: a query_id has one text for life in Query Store, so that is the same text. */
 recent_winner AS (
-    SELECT database_name, query_id, collection_id, collection_time
+    /* #9362: the newest kept row of each query in one aggregate instead of a ROW_NUMBER window. The struct key orders by
+       collection_time then collection_id, the order the window had (both descending), and both columns are NOT NULL. */
+    SELECT
+        database_name,
+        query_id,
+        newest.collection_id AS collection_id,
+        newest.collection_time AS collection_time
     FROM
     (
         SELECT
             database_name,
             query_id,
-            collection_id,
-            collection_time,
-            ROW_NUMBER() OVER (PARTITION BY database_name, query_id ORDER BY collection_time DESC, collection_id DESC) AS wr
+            arg_max({'collection_id': collection_id, 'collection_time': collection_time}, (collection_time, collection_id)) AS newest
         FROM deduped_recent
         WHERE rn = 1
+        GROUP BY database_name, query_id
     ) x
-    WHERE wr = 1
 ),
 /* #6268: a query is a candidate when it has recent Regular runs, or recent Aborted or Exception runs reaching the minimum. */
 candidates AS (
@@ -384,7 +497,8 @@ slots AS (
         GREATEST(LEAST(MAX(failure_total), " + limit + @" // " + QueryStoreRegressionRules.FailureShareDivisor + @"),
                  LEAST(MAX(failure_total), " + limit + @" - MAX(cost_total))) AS failure_slots
     FROM ranked
-)
+),
+page AS (
 SELECT
     r.database_name,
     r.query_id,
@@ -431,7 +545,15 @@ SELECT
     r.base_exception_execs / " + baseHours + @" AS baseline_exception_per_hour,
     r.recent_exception_execs / " + recentHours + @" AS recent_exception_per_hour,
     /* #6128: the rows that passed the flags, before the cap, in the same statement. */
-    r.total_count
+    r.total_count,
+    ROW_NUMBER() OVER
+    (
+        ORDER BY r.is_cost DESC,
+                 CASE WHEN r.is_cost THEN COALESCE(r.additional_duration_ms, 0) END DESC,
+                 r.recent_aborted_execs + r.recent_exception_execs DESC,
+                 r.database_name,
+                 r.query_id
+    ) AS page_ord
 FROM ranked AS r
 CROSS JOIN slots AS s
 LEFT JOIN recent_winner AS w
@@ -444,80 +566,22 @@ ORDER BY r.is_cost DESC,
          r.recent_aborted_execs + r.recent_exception_execs DESC,
          r.database_name,
          r.query_id
-LIMIT " + limit;
-
-        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        foreach (var db in dbValues)
-            command.Parameters.Add(new DuckDBParameter { Value = db });
-        command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
-        command.Parameters.Add(new DuckDBParameter { Value = maxRows });
-        foreach (var excluded in excludeValues)
-            command.Parameters.Add(new DuckDBParameter { Value = excluded });
-
-        var rows = new List<QueryStoreRegressionRow>();
-        var textKeys = new List<(long? Id, DateTime? Time)>();
-        using (var reader = await command.ExecuteReaderAsync())
-        {
-        while (await reader.ReadAsync())
-        {
-            textKeys.Add((reader.IsDBNull(14) ? null : reader.GetInt64(14), reader.IsDBNull(16) ? null : reader.GetDateTime(16)));
-            var isCost = reader.GetBoolean(17);
-            var isTimeouts = reader.GetBoolean(18);
-            var isErrors = reader.GetBoolean(19);
-            var reasons = new List<string>(3);
-            if (isCost) reasons.Add("cost");
-            if (isTimeouts) reasons.Add("timeouts");
-            if (isErrors) reasons.Add("errors");
-            rows.Add(new QueryStoreRegressionRow
-            {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                QueryId = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                BaselineDurationMs = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                RecentDurationMs = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                DurationRegressionPercent = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
-                BaselineCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                RecentCpuMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                CpuRegressionPercent = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
-                AdditionalDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                BaselineExecCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
-                RecentExecCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
-                BaselinePlanCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
-                RecentPlanCount = reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetValue(12)),
-                Severity = reader.IsDBNull(13) ? "" : reader.GetString(13),
-                QueryTextSample = "",
-                LastExecutionTime = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
-                RegressionReason = string.Join(",", reasons),
-                Aborted = ReadRunGroup(reader, 20, 32 + 2, 32 + 3),
-                Exception = ReadRunGroup(reader, 26, 32 + 4, 32 + 5),
-                BaselineRegularPerHour = reader.IsDBNull(32) ? null : ToDouble(reader.GetValue(32)),
-                RecentRegularPerHour = reader.IsDBNull(33) ? null : ToDouble(reader.GetValue(33)),
-                TotalCount = reader.IsDBNull(38) ? 0 : Convert.ToInt64(reader.GetValue(38)),
-            });
-        }
-        }
-
-        /* #5381: the text sample, read by key for the returned rows only. */
-        var texts = await ReadQueryStoreTextByRowAsync(
-            connection, serverId,
-            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)), relation);
-        for (var i = 0; i < rows.Count; i++)
-        {
-            string? text = null;
-            if (textKeys[i].Id.HasValue && textKeys[i].Time.HasValue)
-            {
-                texts.TryGetValue((textKeys[i].Id!.Value, textKeys[i].Time!.Value), out text);
-                /* The latest row carried no text: the old MAX skipped NULLs, so take any text the query has in the window. */
-                text ??= await ReadQueryStoreWindowTextAsync(connection, serverId, rows[i].DatabaseName, rows[i].QueryId, startTime, endTime);
-            }
-
-            rows[i].QueryTextSample = text ?? "";
-        }
-
-        return rows;
-        }
+LIMIT " + limit + @"
+),
+/* #9362: the coverage facts the empty answer needs, folded from the same `latest` (same span, partition, order, server and
+   database clause as GetQueryStoreRegressionCoverageAsync, bound before the dropped-database exclusion as the probe is), so
+   an empty read costs no second pass over the archive. */
+coverage AS (
+    SELECT
+        COALESCE(BOOL_OR(last_execution_time >= $" + baselineParamIndex + @" AND last_execution_time < $2), FALSE) AS has_baseline,
+        COALESCE(BOOL_OR(last_execution_time >= $2), FALSE) AS has_recent
+    FROM latest
+    WHERE rn = 1
+)
+SELECT p.*, c.has_baseline, c.has_recent
+FROM coverage AS c
+LEFT JOIN page AS p ON TRUE
+ORDER BY p.page_ord";
     }
 
     private static QueryStoreRunGroup ReadRunGroup(System.Data.Common.DbDataReader reader, int first, int baselinePerHour, int recentPerHour) => new()
@@ -548,6 +612,7 @@ LIMIT " + limit;
     public async Task<(bool HasBaseline, bool HasRecent)> GetQueryStoreRegressionCoverageAsync(
         int serverId, int hoursBack = 24, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
     {
+        QueryStoreRegressionCoverageProbes++;
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
 
