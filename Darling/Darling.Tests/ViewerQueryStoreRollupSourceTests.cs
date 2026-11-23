@@ -153,6 +153,24 @@ public sealed class ViewerQueryStoreRollupSourceTests
         Assert.Equal("no rollup for this day", LabelOf(source, 21));
     }
 
+    /* #9363: the builder skips only a thinned day that was never built, and a built day keeps its rollup, so a built day at the retention edge
+       that the read still took from the interval table is "built but outside the longest run", and only an unbuilt one is "never built". */
+    [Fact]
+    public void ABuiltDayAtTheRetentionEdge_IsNotCalledNeverBuilt_AndAnUnbuiltOneIs()
+    {
+        Assert.True(QueryStoreClosedDayRollup.MayBeThinned(D(14), Now, 10), "the day is not at the retention edge, so the test proves nothing");
+
+        var built = Enumerable.Range(15, 5).Select(D).Append(D(14)).ToList();
+        var withEdgeBuilt = QueryStoreClosedDayRollup.DescribeSource(
+            Now.AddDays(-10), Now, Run(15, 20), QueryStoreClosedDayRollup.SourceReason.Served, false, Now, 10, built);
+        Assert.Equal("built but outside the longest run", LabelOf(withEdgeBuilt, 14));
+        Assert.Equal("no rollup for this day", LabelOf(withEdgeBuilt, 20));
+
+        var edgeNotBuilt = QueryStoreClosedDayRollup.DescribeSource(
+            Now.AddDays(-10), Now, Run(15, 20), QueryStoreClosedDayRollup.SourceReason.Served, false, Now, 10, Enumerable.Range(15, 5).Select(D).ToList());
+        Assert.Equal("never built at the retention edge", LabelOf(edgeNotBuilt, 14));
+    }
+
     [Fact]
     public void ARollupFreeRead_LabelsItsWholeClosedDays_WithTheWholeReadsReason()
     {

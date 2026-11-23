@@ -936,4 +936,34 @@ INSERT INTO collect.query_store_interval_wide SELECT * FROM late_rows;", store.C
         Assert.Contains($"20 days from rollups ({DateOnly.FromDateTime(start):yyyy-MM-dd} to {missing.AddDays(-1):yyyy-MM-dd})", source.Describe(), StringComparison.Ordinal);
         Assert.Contains($"{missing:yyyy-MM-dd} no rollup for this day", source.Describe(), StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #9363: the Viewer's grid and slicer reads pass the built days through to the source they describe. A built day outside the longest run
+    /// says so on both reads, which a call site that dropped the built days would print as "no rollup for this day".
+    /// </summary>
+    [Fact]
+    public async Task TheGridAndSlicerReads_NameABuiltDayOutsideTheRun_FromTheBuiltDaysTheyResolved()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9363 call site live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeedAsync(ct);
+        await TickAsync(store, KeepEverything, ct);
+
+        var missing = DateOnly.FromDateTime(DataEnd.AddDays(-10));
+        await ExecuteAsync(store.Connection, "DELETE FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct,
+            ("server_id", ServerId), ("day", missing));
+
+        var start = DataEnd.AddDays(-30);
+        var grid = await store.Viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, start, DataEnd, Top, null, literalEndUtc: null, tags: null, ct);
+        var slicer = await store.Viewer.GetQueryStoreSlicerWithReachAsync(ServerId, start, DataEnd, null, ct);
+        Assert.True(grid.Plan is { UseTable: true, Source: not null }, "the grid read did not take the interval-table route");
+        Assert.True(slicer.Plan is { UseTable: true, Source: not null }, "the slicer read did not take the interval-table route");
+
+        foreach (var source in new[] { grid.Plan!.Value.Source!, slicer.Plan!.Value.Source! })
+        {
+            var notes = source.IntervalNotes!.ToDictionary(n => n.Day, n => n.Label);
+            Assert.Equal("no rollup for this day", notes[missing]);
+            Assert.Equal("built but outside the longest run", notes[missing.AddDays(1)]);
+        }
+    }
 }
