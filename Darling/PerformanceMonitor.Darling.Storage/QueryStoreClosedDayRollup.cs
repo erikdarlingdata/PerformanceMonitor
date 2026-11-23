@@ -426,7 +426,7 @@ WHERE server_id = $1
 
     /// <summary>#9287: whether the day's clutter rows come from its newest build: its row exists, is not removed, and says so. Read before
     /// <see cref="ClaimDaySql"/> moves <c>built_at</c>. #9384: or the hourly fold stamped the day (<see cref="QueryStoreClutterDayFold"/>), whose
-    /// rows are the day's too. $1 server_id, $2 day.</summary>
+    /// rows are the day's too. A marked stamp does not count: a late row inserts one for a day nothing folded, so it says nothing about the day's rows. $1 server_id, $2 day.</summary>
     public const string HasClutterFromBuildSql = @"
 SELECT EXISTS
 (
@@ -443,6 +443,7 @@ OR EXISTS
     FROM collect.query_store_clutter_day_built AS c
     WHERE c.server_id = $1
       AND c.day_utc = $2
+      AND NOT c.rebuild_needed
 );";
 
     /// <summary>Records how many interval rows the build read. $1 server_id, $2 day, $3 source_rows.</summary>
