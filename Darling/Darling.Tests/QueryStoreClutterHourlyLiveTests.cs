@@ -337,6 +337,34 @@ VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'S
         Assert.True(closed!.Value.DayEnd > open!.Value.DayEnd || closed.Value.DayEnd >= E, "the day rows did not grow to take the closed day");
     }
 
+    /// <summary>
+    /// #9384: a stamp older than the newest of its day's hours (an older build rebuilt an hour and marks no day) is folded again on the next
+    /// tick, and not on the one after it. The day's rows are damaged first, so only a real fold puts them back.
+    /// </summary>
+    [Fact]
+    public async Task ADayStampedBeforeOneOfItsHoursWasRebuilt_IsFoldedAgainOnTheNextTick_AndThenLeftAlone()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        await TickAsync(store, FoldNow, ct);
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+
+        await ExecuteAsync(store, "UPDATE collect.query_store_clutter_hour_built SET built_at = built_at + interval '1 minute' WHERE server_id = @server_id AND hour_utc = @hour", ct,
+            ("server_id", A), ("hour", E.AddDays(-1).AddHours(5)));
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", day));
+        Assert.NotEqual(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+
+        var folded = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(1, folded.ClutterDaysFolded);
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+
+        var left = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(0, left.ClutterDaysFolded);
+    }
+
     private static async Task ExecuteAsync(QueryStoreClosedDayRollupLiveTests.Store store, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = new NpgsqlCommand(sql, store.Connection);
