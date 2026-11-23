@@ -417,18 +417,6 @@ public sealed class ManagedConfFileTests
         Assert.Contains("checkpoint_timeout = '15min'", body, StringComparison.Ordinal);
     }
 
-    /// <summary>#9400: v19's background-writer pair is one of the builders <see cref="ManagedConfFile.RenderBody"/>
-    /// calls, so the managed body itself carries both settings, and no <c>bgwriter_delay</c>.</summary>
-    [Fact]
-    public void RenderBody_ContainsTheBackgroundWriterSettings()
-    {
-        var body = ManagedConfFile.RenderBody(SampleInputs());
-
-        Assert.Contains("bgwriter_lru_maxpages = '1000'", body, StringComparison.Ordinal);
-        Assert.Contains("bgwriter_lru_multiplier = '4.0'", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("bgwriter_delay", body, StringComparison.Ordinal);
-    }
-
     /// <summary>v17's <c>log_line_prefix</c> is one of the builders <see cref="ManagedConfFile.RenderBody"/>
     /// calls, so the managed body itself carries it — not just the legacy v1-v17 appenders
     /// <c>EnsureConfAppended</c> runs against a self-hosted conf.</summary>
@@ -500,6 +488,87 @@ public sealed class ManagedConfFileTests
         };
         var pinnedBody = ManagedConfFile.RenderBody(inputs with { OperatorPinned = pinned });
         Assert.DoesNotContain("log_lock_waits", pinnedBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>#9400: the background writer pair is rendered exactly once each, as 1000 and 4.0, in the managed body and in
+    /// the full file text a start writes, with no <c>bgwriter_delay</c>. A store that migrates off the legacy blocks gets the
+    /// pair through the managed-only keys, and a line the operator already assigns above the include is left out, one key
+    /// at a time.</summary>
+    [Fact]
+    public void RenderBody_ContainsTheBackgroundWriterPair_ExactlyOnce_AndLeavesAnOperatorsLineAlone()
+    {
+        var inputs = SampleInputs();
+        foreach (var text in new[] { ManagedConfFile.RenderBody(inputs), ManagedConfFile.Render(inputs) })
+        {
+            var maxPages = text.Split('\n').Where(l => l.StartsWith("bgwriter_lru_maxpages", StringComparison.Ordinal)).ToList();
+            Assert.Single(maxPages);
+            Assert.Equal("bgwriter_lru_maxpages = '1000'", maxPages[0]);
+
+            var multiplier = text.Split('\n').Where(l => l.StartsWith("bgwriter_lru_multiplier", StringComparison.Ordinal)).ToList();
+            Assert.Single(multiplier);
+            Assert.Equal("bgwriter_lru_multiplier = '4.0'", multiplier[0]);
+
+            Assert.DoesNotContain("bgwriter_delay", text, StringComparison.Ordinal);
+        }
+
+        Assert.Equal("1000", ManagedConfFile.ManagedOnlyKeys["bgwriter_lru_maxpages"]);
+        Assert.Equal("4.0", ManagedConfFile.ManagedOnlyKeys["bgwriter_lru_multiplier"]);
+
+        foreach (var (key, other) in new[] { ("bgwriter_lru_maxpages", "bgwriter_lru_multiplier"), ("bgwriter_lru_multiplier", "bgwriter_lru_maxpages") })
+        {
+            var pinned = new Dictionary<string, ManagedConfFile.OperatorPinnedLine>
+            {
+                [key] = new(5, "7"),
+            };
+            var pinnedBody = ManagedConfFile.RenderBody(inputs with { OperatorPinned = pinned });
+            Assert.DoesNotContain(key, pinnedBody, StringComparison.Ordinal);
+            Assert.Contains(other, pinnedBody, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #9400, the same shape as the #7370 page-cost test: a store migrated before the background writer pair became managed
+    /// keeps the operator's own line (the stock commented line uncommented and edited in place) above the include, and the
+    /// start leaves that key out of <c>darling-managed.conf</c> rather than override it. The other key is still managed.
+    /// </summary>
+    [Theory]
+    [InlineData("bgwriter_lru_maxpages", "400", "bgwriter_lru_multiplier")]
+    [InlineData("bgwriter_lru_multiplier", "3.0", "bgwriter_lru_maxpages")]
+    public void WriteManagedConfFile_OperatorBackgroundWriterLineAboveTheInclude_StaysInForce_AndTheKeyIsLeftOut(
+        string key, string operatorValue, string otherKey)
+    {
+        var dir = Directory.CreateTempSubdirectory("darling-9400-pinned-");
+        try
+        {
+            var confPath = Path.Combine(dir.FullName, "postgresql.conf");
+            File.WriteAllText(confPath, "# base conf\n");
+            var logger = new CapturingTestLogger();
+            var cluster = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 55432, DataDirectory = dir.FullName }, logger);
+
+            var first = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
+            Assert.True(first.Written);
+            Assert.True(ManagedFileValues(dir.FullName).ContainsKey(key));
+            Assert.NotEqual(operatorValue, EffectiveValue(dir.FullName, key));
+
+            File.WriteAllText(confPath, $"#{key} = 2\n{key} = {operatorValue}\n" + File.ReadAllText(confPath));
+            var second = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
+
+            Assert.True(second.Written);
+            var values = ManagedFileValues(dir.FullName);
+            Assert.False(values.ContainsKey(key));
+            Assert.True(values.ContainsKey(otherKey));
+            Assert.Equal(operatorValue, EffectiveValue(dir.FullName, key));
+            Assert.Contains(
+                logger.Lines,
+                line => line.Contains(key, StringComparison.Ordinal)
+                    && line.Contains("line 2", StringComparison.Ordinal)
+                    && line.Contains("stays in force", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
     }
 
     /// <summary>A file the previous version wrote (the same body without the page-cost line, with a header hash
@@ -754,11 +823,6 @@ public sealed class ManagedConfFileTests
         if (marker == DarlingManagedPostgres.ConfMarkerV18)
         {
             return DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList);
-        }
-
-        if (marker == DarlingManagedPostgres.ConfMarkerV19)
-        {
-            return DarlingManagedPostgres.BuildBackgroundWriterConfAppend();
         }
 
         throw new InvalidOperationException(

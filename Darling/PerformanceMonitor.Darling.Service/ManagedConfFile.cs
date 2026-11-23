@@ -189,7 +189,7 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v19 blocks set today, in the
+    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v18 blocks set today, in the
     /// order each key is FIRST introduced (v1 before v2 before v3 ...), holding the value each key has LAST —
     /// exactly what PostgreSQL itself would read from those eighteen blocks appended in order to one file. Every
     /// value is single-quoted and escaped (<c>DarlingManagedPostgres.EscapeConfValue</c>): PostgreSQL accepts a
@@ -257,9 +257,6 @@ internal static class ManagedConfFile
            that already names auto_explain renders identically on every start. */
         blocks.Append(DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList));
 
-        /* v19 (#9400): a fixed background writer pair, appended in the same order as the legacy blocks above. */
-        blocks.Append(DarlingManagedPostgres.BuildBackgroundWriterConfAppend());
-
         /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
         blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());
 
@@ -268,6 +265,9 @@ internal static class ManagedConfFile
 
         /* Lock-wait logging (#9267): same shape, no legacy block and no marker. */
         blocks.Append(DarlingManagedPostgres.BuildLogLockWaitsConfAppend());
+
+        /* Background writer (#9400): same shape, no legacy block and no marker. */
+        blocks.Append(DarlingManagedPostgres.BuildBackgroundWriterConfAppend());
 
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
@@ -372,6 +372,8 @@ internal static class ManagedConfFile
             [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
             [DarlingManagedPostgres.TelemetryLevelSetting] = DarlingManagedPostgres.TelemetryLevelValue,
             [DarlingManagedPostgres.LogLockWaitsSetting] = DarlingManagedPostgres.LogLockWaitsValue,
+            [DarlingManagedPostgres.BackgroundWriterMaxPagesSetting] = DarlingManagedPostgres.BackgroundWriterMaxPagesValue,
+            [DarlingManagedPostgres.BackgroundWriterMultiplierSetting] = DarlingManagedPostgres.BackgroundWriterMultiplierValue,
         };
 
     /// <summary>

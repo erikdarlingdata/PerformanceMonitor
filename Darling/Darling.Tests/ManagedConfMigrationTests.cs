@@ -85,45 +85,8 @@ public sealed class ManagedConfMigrationTests
     }
 
     [Fact]
-    public void ClassifyLines_UntouchedV19Block_IsAllOurs()
-    {
-        var lines = ClassifyLines(DarlingManagedPostgres.BuildBackgroundWriterConfAppend());
-
-        var owned = lines.Where(l => l.Key is not null).ToArray();
-        Assert.Equal(2, owned.Length);
-        Assert.All(owned, l =>
-        {
-            Assert.Equal(ConfLineClassification.Ours, l.Classification);
-            Assert.Equal(DarlingManagedPostgres.ConfMarkerV19, l.BlockMarker);
-        });
-    }
-
-    [Fact]
-    public void ClassifyLines_EditedV19MaxPages_IsHandEdit_RebuildMismatch()
-    {
-        var edited = DarlingManagedPostgres.BuildBackgroundWriterConfAppend().Replace(
-            "bgwriter_lru_maxpages = 1000", "bgwriter_lru_maxpages = 500", System.StringComparison.Ordinal);
-
-        var maxPages = FindByText(ClassifyLines(edited), "bgwriter_lru_maxpages");
-
-        Assert.Equal(ConfLineClassification.HandEdit, maxPages.Classification);
-        Assert.Equal(HandEditReason.RebuildMismatch, maxPages.Reason);
-    }
-
-    [Fact]
-    public void ClassifyLines_AnotherKeyInsideV19Block_IsHandEdit_FormMismatch()
-    {
-        var edited = DarlingManagedPostgres.BuildBackgroundWriterConfAppend() + "bgwriter_delay = 100ms\n";
-
-        var delay = FindByText(ClassifyLines(edited), "bgwriter_delay");
-
-        Assert.Equal(ConfLineClassification.HandEdit, delay.Classification);
-        Assert.Equal(HandEditReason.FormMismatch, delay.Reason);
-    }
-
-    [Fact]
-    public void CoveredMarkers_IncludesV19_LastInAppendOrder()
-        => Assert.Equal(DarlingManagedPostgres.ConfMarkerV19, CoveredMarkers[^1]);
+    public void CoveredMarkers_IncludesV18_LastInAppendOrder()
+        => Assert.Equal(DarlingManagedPostgres.ConfMarkerV18, CoveredMarkers[^1]);
 
     [Fact]
     public void ClassifyLines_EditedV18LogMinDuration_IsHandEdit_RebuildMismatch()

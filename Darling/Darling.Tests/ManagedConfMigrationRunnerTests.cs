@@ -144,6 +144,55 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(ManagedConfFile.ShouldReplaceManagedConf(written, ManagedConfFile.Render(inputs)));
     }
 
+    /// <summary>#9400, the same shape as the page-cost pin above: a store still on the legacy blocks reports every legacy key
+    /// before the migration but neither background writer key (no legacy block wrote them). The after-snapshot reports both from
+    /// the managed file, as the text written (<c>4.0</c>, which <c>current_setting</c> would show as <c>4</c>). Step A
+    /// verifies, the file it wrote carries both lines, and the next start leaves the file alone.</summary>
+    [Fact]
+    public async Task RunStepA_LegacyStoreWithoutBackgroundWriterKeys_ConvergesInOneStart()
+    {
+        WriteConf("# base conf\n");
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+        Assert.Equal("1000", derived["bgwriter_lru_maxpages"]);
+        Assert.Equal("4.0", derived["bgwriter_lru_multiplier"]);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (kvp.Key is not ("bgwriter_lru_maxpages" or "bgwriter_lru_multiplier"))
+            {
+                beforeRows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        var afterRows = new List<FileSettingRow>(beforeRows)
+        {
+            Applied("bgwriter_lru_maxpages", "1000", ManagedConfFile.FileName),
+            Applied("bgwriter_lru_multiplier", "4.0", ManagedConfFile.FileName),
+        };
+        var calls = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Empty(outcome.MismatchedKeys);
+        var written = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.Contains("bgwriter_lru_maxpages = '1000'", written, StringComparison.Ordinal);
+        Assert.Contains("bgwriter_lru_multiplier = '4.0'", written, StringComparison.Ordinal);
+        Assert.False(ManagedConfFile.IsHandEdited(written));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(written, ManagedConfFile.Render(inputs)));
+
+        /* A value other than the managed one is still a mismatch: the allowed addition is exactly 4.0. */
+        Assert.False(ManagedConfFileSettings.Compare(
+            beforeRows,
+            new List<FileSettingRow>(beforeRows) { Applied("bgwriter_lru_multiplier", "4", ManagedConfFile.FileName) },
+            ManagedConfFile.ManagedOnlyKeys).Match);
+    }
+
     /// <summary>Pin: only the page-cost addition is accepted. If the after-snapshot also gains any other key the
     /// before did not have, Step A still fails and restores.</summary>
     [Fact]

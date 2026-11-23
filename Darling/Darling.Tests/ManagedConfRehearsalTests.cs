@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// <list type="bullet">
 /// <item><b>managed keys 38 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
 /// <see cref="DarlingManagedPostgres.ParseConfText"/> reads back from calling every <c>Build*ConfAppend</c> in
-/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 38 keys. The two newest are the v19 background-writer pair (#9400), which no legacy block in this fixture carries.
+/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 38 keys.
 /// One extra key is <c>min_wal_size</c>: v12's WAL-sizing block
 /// (<see cref="DarlingManagedPostgres.BuildWalSizingConfAppend"/>) writes both <c>max_wal_size</c> AND
 /// <c>min_wal_size</c>, and nothing later in the v1-v14 order overwrites the second one, so it survives the
@@ -43,9 +43,9 @@ namespace Darling.Tests;
 /// last extra key is <c>log_line_prefix</c>: v17
 /// (<see cref="DarlingManagedPostgres.BuildLogLinePrefixConfAppend"/>) is appended in
 /// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key
-/// either. The newest three keys are <c>random_page_cost</c>, <c>timescaledb.telemetry_level</c> and <c>log_lock_waits</c> (#9267): the planner
-/// page-cost block (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>), the lock-wait block (<see cref="DarlingManagedPostgres.BuildLogLockWaitsConfAppend"/>) and the telemetry block
-/// (<see cref="DarlingManagedPostgres.BuildTelemetryLevelConfAppend"/>) have no legacy block, so the fixture's
+/// either. The newest five keys are <c>random_page_cost</c>, <c>timescaledb.telemetry_level</c>, <c>log_lock_waits</c> (#9267) and the background writer pair <c>bgwriter_lru_maxpages</c> and <c>bgwriter_lru_multiplier</c> (#9400): the planner
+/// page-cost block (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>), the lock-wait block (<see cref="DarlingManagedPostgres.BuildLogLockWaitsConfAppend"/>) , the telemetry block
+/// (<see cref="DarlingManagedPostgres.BuildTelemetryLevelConfAppend"/>) and the background writer block (<see cref="DarlingManagedPostgres.BuildBackgroundWriterConfAppend"/>) have no legacy block, so the fixture's
 /// stock conf never carries them and each adds a managed key but no removed line.</item>
 /// <item><b>lines removed 69.</b> The initdb stock conf, v1-v14
 /// each appended once except v8 four times, the three hand edits — this fixture reproduces, so the shapes
@@ -116,7 +116,7 @@ public sealed class ManagedConfRehearsalTests
         throw new FileNotFoundException($"Could not locate '{relativePath}' walking up from '{AppContext.BaseDirectory}'.");
     }
 
-    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/36 rather than the
+    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/38 rather than the
     /// design's 48/23): lines removed, managed keys in the map handed to <c>Rewrite</c>, and operator lines
     /// moved below the include — the last of which holds exactly at 1, as required.</summary>
     [Fact]
