@@ -312,6 +312,5 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
         Assert.Contains("Index Only Scan using idx_index_object_stats_object", databases, StringComparison.Ordinal);
         Assert.DoesNotContain("Seq Scan", watermarks, StringComparison.Ordinal);
         Assert.Contains("Index Only Scan using pk_object_usage_snapshots", watermarks, StringComparison.Ordinal);
-        Assert.Fail("PLAN-WM " + watermarks.Replace("\n", " | ", StringComparison.Ordinal));
     }
 }

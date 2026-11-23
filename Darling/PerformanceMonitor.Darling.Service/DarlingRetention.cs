@@ -1854,7 +1854,7 @@ public static class DarlingRetention
            means the index is present through the pair's newest snapshot and is never purged. The statement is sliced on last_time. */
         var runsDeleted = await PurgeOneAsync(
             postgres, ObjectUsageChain.RunsTable, TimeSlicedDeleteSql(ObjectUsageChain.RunsTable, "last_time", "last_time IS NOT NULL"),
-            utcNow.AddDays(-retentionDays - 100), logger, cancellationToken, pacer: walPacer);
+            utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
         if (runsDeleted is null)
         {
             tablesFailed++;
