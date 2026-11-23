@@ -272,7 +272,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 
 #### Finding a tool with find_tools
 
-Many clients load every tool definition before the first question. `find_tools` lets the model ask for the few tools a question needs. Pass words in `query`. A tool matches when any word is in its name or its description, and a tool with more of the words in its name comes first. `detail` is `names`, `summaries` (the default) or `full`, which adds the input schema and hints. `limit` is at most 50 results, or 10 at `full`. A larger value is cut to the most and the answer says so.
+Many clients load every tool definition before the first question. `find_tools` lets the model ask for the few tools a question needs. Pass words in `query`. A tool matches when any word is in its name or its description, and a tool with more of the words in its name comes first. `detail` is `names`, `summaries` (the default) or `full`, which adds the input schema and hints. `limit` is at most 50 results, or 10 at `full`. A larger value, or one below 1, is refused.
 
 The search covers only tools that this connection can call. A tool that a token's settings, a write switch or the `/core` path leave out is never named. `find_tools` reads no collected data and no monitored server. Lite and Darling have the same tool.
 

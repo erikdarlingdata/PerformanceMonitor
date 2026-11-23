@@ -288,5 +288,5 @@ public static class McpToolSearchToolText
 
     /// <summary>The <c>limit</c> parameter's description.</summary>
     public const string LimitParameter =
-        "Most tools to return. Default 20 (10 at full). At most 50 (10 at full): a larger value is cut to that and the answer says so.";
+        "Most tools to return. Default 20 (10 at full). At most 50 (10 at full): a larger value, or one below 1, is refused.";
 }
