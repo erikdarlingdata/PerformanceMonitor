@@ -195,7 +195,7 @@ Do the whole procedure twice: once from the last release, and once from the olde
 - **Pass, 10 to 15 minutes later:** work the five checks the script prints against the store.
   1. `MAX(version)` equals the new build's top rung.
   2. `collect.collection_log` has rows for every configured server in the last 15 minutes.
-  3. The collector count is in the mid-30s, not single digits.
+  3. The collector count is about 50 (47 to 52 on 3.13.0), not single digits.
   4. Every non-SUCCESS row since the restart gets read. YIELDED is the lock-timeout guard working. Anything else is a finding.
   5. One table the release added or changed shows new rows.
 
