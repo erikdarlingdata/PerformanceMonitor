@@ -197,8 +197,10 @@ internal sealed class ObjectUsageWindowReplay
         ArgumentNullException.ThrowIfNull(raw);
 
         var objects = new Dictionary<int, Accumulator>();
+        var runIndexes = new HashSet<(int ObjectId, int IndexId)>();
         foreach (var run in runs)
         {
+            runIndexes.Add((run.ObjectId, run.IndexId));
             var end = run.LastTime ?? CoveredTo;
             var first = run.FirstTime > CoveredFrom ? run.FirstTime : CoveredFrom;
             if (!objects.TryGetValue(run.ObjectId, out var acc))
@@ -251,9 +253,11 @@ internal sealed class ObjectUsageWindowReplay
 
             foreach (var row in rows)
             {
-                if (!objects.TryGetValue(row.ObjectId, out var acc))
+                /* Per (object, index), not per object: an object whose clustered index has a run but whose nonclustered index has none would
+                   otherwise pass, and that index's use would be dropped from the answer. */
+                if (!runIndexes.Contains((row.ObjectId, row.IndexId)) || !objects.TryGetValue(row.ObjectId, out var acc))
                 {
-                    fallbackReason = "a raw row names an object with no run";
+                    fallbackReason = "a raw row names an index with no run";
                     return null;
                 }
 

@@ -295,18 +295,10 @@ internal static class DarlingObjectUsageReader
 
     /// <summary>
     /// The window's baseline and the newest raw snapshot of one database. The baseline is the snapshot <see cref="ObjectUsageWindowRead.Sql"/>
-    /// starts from: its baseline CTE verbatim, else the first snapshot at or after the start. $1 server_id, $2 database_name, $3 the window start.
+    /// starts from: <see cref="ObjectUsageWindowRead.BaselineCte"/> itself, else the first snapshot at or after the start. $1 server_id, $2 database_name, $3 the window start.
     /// </summary>
-    internal static readonly string BoundsSql = $"""
-        WITH baseline AS
-        (
-            SELECT max(b.collection_time) AS collection_time
-            FROM v_index_object_stats AS b
-            WHERE b.server_id = $1
-            AND   b.database_name = $2
-            AND   b.collection_time <= $3
-            AND   b.collection_time > $3 - interval '{ObjectUsageWindowRead.BaselineReachDays} days'
-        )
+    internal static readonly string BoundsSql = ObjectUsageWindowRead.BaselineCte + """
+
         SELECT
             (
                 SELECT min(s.collection_time)
@@ -384,27 +376,10 @@ internal static class DarlingObjectUsageReader
             r.index_id
         """;
 
-    /// <summary>The raw rows of the snapshots the replay recomputes: the same 17 columns in the same order as <see cref="ObjectUsageWindowRead.Sql"/>,
+    /// <summary>The raw rows of the snapshots the replay recomputes: <see cref="ObjectUsageWindowRead.Columns"/>, the list <see cref="ObjectUsageWindowRead.Sql"/> selects,
     /// so <see cref="ObjectUsageWindowRead.Map"/> reads them. $1 server_id, $2 database_name, $3 the collection times.</summary>
-    internal const string BoundaryRowsSql = """
-        SELECT
-            s.collection_time,
-            s.sqlserver_start_time,
-            s.answering_server_name,
-            s.object_id,
-            s.index_id,
-            s.schema_name,
-            s.table_name,
-            COALESCE(s.is_indexed_view, false),
-            COALESCE(s.user_seeks, 0),
-            COALESCE(s.user_scans, 0),
-            COALESCE(s.user_lookups, 0),
-            COALESCE(s.user_updates, 0),
-            s.last_user_seek,
-            s.last_user_scan,
-            s.last_user_lookup,
-            s.last_user_update,
-            s.is_memory_optimized
+    internal static readonly string BoundaryRowsSql = "SELECT " + ObjectUsageWindowRead.Columns + """
+
         FROM v_index_object_stats AS s
         WHERE s.server_id = $1
         AND   s.database_name = $2
@@ -425,7 +400,23 @@ internal static class DarlingObjectUsageReader
         NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken,
         ILogger? logger = null)
     {
-        var (result, reason) = await TryReadPersistedAsync(postgres, serverId, databaseName, windowStartUtc, cancellationToken);
+        ObjectUsageWindowResult? result;
+        string? reason;
+        var failedStep = "";
+        try
+        {
+            (result, reason) = await TryReadPersistedAsync(postgres, serverId, databaseName, windowStartUtc, cancellationToken, step => failedStep = step);
+        }
+        catch (Exception ex) when (ex is PostgresException or NpgsqlException && !cancellationToken.IsCancellationRequested)
+        {
+            /* A chain table that cannot be read (dropped, renamed, a permission lost) must not fail the tool: the full fold answers from the raw
+               snapshots alone. The caller's own cancellation is not an error and still propagates. */
+            var sqlState = (ex as PostgresException)?.SqlState ?? "none";
+            reason = $"the {failedStep} statement failed (SQLSTATE {sqlState})";
+            (logger ?? _sharedLogger)?.LogWarning(ex, "get_object_usage reads every snapshot of the window: {Reason}", reason);
+            return await ReadTablesFullAsync(postgres, serverId, databaseName, windowStartUtc, cancellationToken);
+        }
+
         if (result is not null)
         {
             return result;
@@ -437,8 +428,10 @@ internal static class DarlingObjectUsageReader
 
     /// <summary>The persisted path. Null with the reason when the window cannot be answered from the chain.</summary>
     internal static async Task<(ObjectUsageWindowResult? Result, string? Reason)> TryReadPersistedAsync(
-        NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, string databaseName, DateTime windowStartUtc, CancellationToken cancellationToken,
+        Action<string>? onStep = null)
     {
+        onStep?.Invoke("bounds");
         DateTime? baseline = null;
         DateTime? newest = null;
         await using (var command = postgres.CreateCommand(BoundsSql))
@@ -461,6 +454,7 @@ internal static class DarlingObjectUsageReader
         }
 
         var facts = new List<ObjectUsageSnapshotFact>();
+        onStep?.Invoke("facts");
         await using (var command = postgres.CreateCommand(FactsSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -491,6 +485,7 @@ internal static class DarlingObjectUsageReader
 
         var boundaryTimes = replay.Boundaries.Select(b => b.Time).ToArray();
         var deltas = new List<ObjectUsageDeltaTotals>();
+        onStep?.Invoke("deltas");
         await using (var command = postgres.CreateCommand(DeltasSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -512,6 +507,7 @@ internal static class DarlingObjectUsageReader
         }
 
         var runs = new List<ObjectUsageRun>();
+        onStep?.Invoke("runs");
         await using (var command = postgres.CreateCommand(RunsSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -535,6 +531,7 @@ internal static class DarlingObjectUsageReader
         }
 
         var raw = new List<ObjectUsageSample>();
+        onStep?.Invoke("boundary rows");
         await using (var command = postgres.CreateCommand(BoundaryRowsSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
