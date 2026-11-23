@@ -742,7 +742,7 @@ public partial class ViewerServerTab
         }
 
         var retried = false;
-        if (!_refreshRequested)
+        if (false)
         {
             retried = true;
             try
