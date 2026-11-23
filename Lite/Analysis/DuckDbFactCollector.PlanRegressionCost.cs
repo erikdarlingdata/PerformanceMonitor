@@ -294,7 +294,7 @@ LIMIT 100";
            primary stay in the window, so the read skips those databases. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 4);
         cmd.CommandText = plan.Apply(cmd.CommandText);
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-cost", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
             candidates.Add(new PlanRegressionCandidate(

@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Database;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
@@ -441,7 +442,7 @@ ORDER BY p.page_ord";
             command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var candidateRows = new List<QueryStoreRow>();
-        using (var reader = await command.ExecuteReaderAsync())
+        using (var reader = await command.ExecuteProfiledReaderAsync("query-store-top-rank"))
         {
         while (await reader.ReadAsync())
         {

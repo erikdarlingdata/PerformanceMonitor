@@ -89,7 +89,7 @@ LIMIT {PlanRegressionFailureRule.ReadLimit}";
         cmd.CommandText = plan.Apply(SecondaryReplicaScope.Apply(PlanRegressionFailureSql, cmd, context, "PLAN_REGRESSION", "database_name", 7));
 
         var rows = new List<PlanRegressionFailureRule.Failure>();
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-failures", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
             rows.Add(new PlanRegressionFailureRule.Failure(

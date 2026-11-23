@@ -12,6 +12,8 @@ Lite writes its logs to `%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs`, one `
 
 Verbosity is the `log_minimum_level` key in `settings.json`. It has no UI. See `Lite/config/settings.sample.json`. The value is one of `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` or `None`. It defaults to `Information`. Lite reads it at startup, so a change needs a restart.
 
+To see where a slow read spends its time, set `duckdb_profile_slow_reads` to `true` in `settings.json`. It is off by default and has no UI. Lite reads it at startup, so a change needs a restart. The analysis anomaly detector, the plan regression reads and the Query Store top read then run with DuckDB profiling on. DuckDB writes one JSON operator profile per statement to the `duckdb-profiles` folder inside the logs folder, named `<read>-<UTC time>.json`. Lite keeps the 20 newest files for each read. The slow-read lines in the log name the files they wrote, and Lite logs the machine's processor count and DuckDB's `threads` and `memory_limit` once at the first profiled read. Profiling adds some time to each profiled read, so turn it off when you are done.
+
 Set it to `Debug` when you need the per-database collection timing lines. They look like `[server] collector [db] => N rows (sql:Nms, duckdb:Nms)`, one per database per collector per cycle. They are below the default because at that rate they bury the collection failures that you usually open the log for. The total that they add up to is in `duration_ms` in `collection_log`, which Lite records at every level.
 
 ### Lite symptoms

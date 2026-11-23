@@ -208,7 +208,7 @@ ORDER BY growth_mb DESC LIMIT 1";
                    to report. Only this growth query is filtered; the contention anomaly stays node-local. */
                 cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name", 5);
 
-                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                using var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-object-growth", context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
                 {
                     var db = reader.GetString(0);
@@ -269,7 +269,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectLockWaitMsDeltaThreshold });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                using var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-object-contention", context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
                 {
                     var db = reader.GetString(0);
@@ -329,7 +329,7 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd.AddDays(-30) });
 
-            var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+            var count = Convert.ToInt64(await cmd.ExecuteProfiledScalarAsync("anomaly-baseline-gate", cancellationToken) ?? 0);
             return count > 0;
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
@@ -397,7 +397,7 @@ ORDER BY local_hour";
             cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
             var tiles = new List<WindowTile>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-cpu-window", context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -529,7 +529,7 @@ FROM per_collection";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
-        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        var peak = await cmd.ExecuteProfiledScalarAsync("anomaly-wait-young-baseline-bar", context.CancellationToken);
         return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
     }
 
@@ -618,7 +618,7 @@ ORDER BY local_hour";
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetBeforeMinutes });
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
-                using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
+                using var rateReader = await rateCmd.ExecuteProfiledReaderAsync("anomaly-wait-rate", context.CancellationToken);
                 while (await rateReader.ReadAsync(context.CancellationToken))
                 {
                     tiles.Add(WindowTiles.ReadTile(rateReader, 0, 1, 2, 4));
@@ -805,7 +805,7 @@ LIMIT 6";
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-                using var contribReader = await contribCmd.ExecuteReaderAsync(context.CancellationToken);
+                using var contribReader = await contribCmd.ExecuteProfiledReaderAsync("anomaly-wait-contribution", context.CancellationToken);
                 while (await contribReader.ReadAsync(context.CancellationToken))
                 {
                     var waitType = contribReader.GetString(0);
@@ -877,7 +877,7 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
                 SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
-                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+                using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-blocking-window", context.CancellationToken))
                 {
                     if (!await reader.ReadAsync(context.CancellationToken)) return;
                     currentBlocking = Convert.ToInt64(reader.GetValue(0));
@@ -1042,7 +1042,7 @@ ORDER BY local_hour";
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
             long windowReads = 0, windowWrites = 0;
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-io-window", context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -1253,7 +1253,7 @@ ORDER BY local_hour";
             cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
             var tiles = new List<WindowTile>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-batch-requests-window", context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -1404,7 +1404,7 @@ ORDER BY local_hour";
             cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
             var tiles = new List<WindowTile>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-sessions-window", context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -1558,7 +1558,7 @@ ORDER BY local_hour";
             cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
             var tiles = new List<WindowTile>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-query-duration-window", context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -1687,7 +1687,7 @@ ORDER BY local_hour";
             cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
             var tiles = new List<WindowTile>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            using (var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-memory-window", context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
