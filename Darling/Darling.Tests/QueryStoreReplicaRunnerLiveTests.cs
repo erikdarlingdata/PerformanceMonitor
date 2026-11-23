@@ -226,9 +226,15 @@ public sealed class QueryStoreReplicaRunnerLiveTests
             Assert.True(await update.ExecuteNonQueryAsync(token) > 0);
         }
 
-        rig.Runner.QueryStoreClampReportsForTests.Land(LiveServerId, Db, watermark, readThrough);
+        /* A second runner over the same store, as after a restart: the first one cached the watermark it saw, and the update above
+           goes around that cache. */
+        var restarted = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var provider = new FakeTargetProvider(target);
+        restarted.TargetProviderOverrideForTests = _ => provider;
+        restarted.QueryStoreReplicaConnectionStringOverrideForTests = _ => ReplicaConnection;
+        restarted.QueryStoreClampReportsForTests.Land(LiveServerId, Db, watermark, readThrough);
         target.Rows.Clear();
-        await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
+        await restarted.RunAsync(QueryStoreCollector.Instance, MakeServer("replica-host"), token);
 
         string? encoded;
         await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
