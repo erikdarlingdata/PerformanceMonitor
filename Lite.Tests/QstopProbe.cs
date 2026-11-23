@@ -129,6 +129,33 @@ public sealed class QstopProbe
                 Line($"LATEST {hours}h keys {keys.Count}: {string.Join(" ", lt)}  TEXT: {string.Join(" ", tt)}");
             }
 
+            var vdir = Path.Combine(dir, "variants");
+            if (Directory.Exists(vdir))
+            {
+                foreach (var f in Directory.GetFiles(vdir, "*.sql").OrderBy(x => x))
+                {
+                    var sql = File.ReadAllText(f);
+                    var vt = new List<string>(); long rc = 0;
+                    for (var i = 0; i < 4; i++)
+                    {
+                        var sw = Stopwatch.StartNew();
+                        using var c = await data.OpenConnectionAsync();
+                        using var cmd = c.CreateCommand();
+                        cmd.CommandText = sql;
+                        cmd.Parameters.Add(new DuckDBParameter { Value = 1 });
+                        cmd.Parameters.Add(new DuckDBParameter { Value = now.AddHours(-168) });
+                        cmd.Parameters.Add(new DuckDBParameter { Value = now });
+                        var h = 17L; rc = 0;
+                        using var r = await cmd.ExecuteReaderAsync();
+                        while (await r.ReadAsync()) { rc++; for (var k = 0; k < r.FieldCount; k++) h = h * 31 + (r.IsDBNull(k) ? 7 : r.GetValue(k).ToString()!.GetHashCode()); }
+                        vt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                        if (i == 0) Line($"VARIANT {Path.GetFileName(f)} rows {rc}");
+                    }
+                    Line($"VARIANT {Path.GetFileName(f)}: {string.Join(" ", vt)}");
+                }
+                return;
+            }
+
             var src = FindSource();
             foreach (var hours in new[] { 24, 168 })
             {
