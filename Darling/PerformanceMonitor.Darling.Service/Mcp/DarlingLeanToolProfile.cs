@@ -41,17 +41,22 @@ internal static class DarlingLeanToolProfile
     internal const string FindToolsName = "find_tools";
 
     /// <summary>The tools <c>/lean</c>'s <c>tools/list</c> offers, before the intersection with what the caller is served.</summary>
-    internal static readonly IReadOnlySet<string> ListedTools =
-        new HashSet<string>(DarlingCoreToolProfile.EntryTools.Append(FindToolsName).Append(CallToolName), StringComparer.Ordinal);
+    internal static readonly IReadOnlySet<string> ListedTools = new HashSet<string>(ListedToolNames(), StringComparer.Ordinal);
+
+    private static string[] ListedToolNames() => [.. DarlingCoreToolProfile.EntryTools, FindToolsName, CallToolName];
 
     internal static bool IsLeanPath(PathString path) => path.StartsWithSegments("/lean");
 
     /// <summary>The note a <c>/lean</c> session's instructions lead with.</summary>
-    internal const string LeanNote =
-        "## This is the /lean endpoint\n\nIt lists a few tools: " + "list_servers, get_fleet_overview, analyze_server, get_tool_guide, find_tools and call_tool" +
+    internal static readonly string LeanNote =
+        "## This is the /lean endpoint\n\nIt lists a few tools: " + NamesInSentence(ListedToolNames()) +
         ". Use find_tools to find any other tool by what it does. Use call_tool with the tool's name and its arguments to run a read tool. " +
         "call_tool runs read tools only. A tool that writes is not run here: use the / endpoint for writes. " +
         "The tool count below describes the full set.";
+
+    /// <summary>"a, b and c": the names as a sentence, so the note is built from the listed tools and cannot drift from them.</summary>
+    private static string NamesInSentence(string[] names) =>
+        names.Length < 2 ? string.Join("", names) : string.Join(", ", names[..^1]) + " and " + names[^1];
 
     internal static string LeanInstructions(string? fullInstructions) =>
         string.IsNullOrEmpty(fullInstructions) ? LeanNote : LeanNote + "\n\n" + fullInstructions;
@@ -167,7 +172,7 @@ internal static class DarlingLeanToolProfile
 [McpServerToolType]
 public sealed class DarlingMcpLeanTools
 {
-    [McpServerTool(Name = "call_tool"), Description("Runs one read tool by name, with its arguments, as if it had been called directly. Find the tool and its arguments with find_tools. It runs read tools only: a tool that writes must be called on the full path.")]
+    [McpServerTool(Name = "call_tool"), Description("Runs one read tool by name, with its arguments, as if it had been called directly. Find the tool and its arguments with find_tools. It runs read tools only: a tool that writes must be called on the full path. Where a tool takes a store argument, put it inside arguments: call_tool has no store of its own.")]
     public static string CallTool(
         [Description("The name of the tool to run.")] string name,
         [Description("The tool's arguments, as a JSON object. Omit for a tool that takes none.")] JsonElement? arguments = null) =>
