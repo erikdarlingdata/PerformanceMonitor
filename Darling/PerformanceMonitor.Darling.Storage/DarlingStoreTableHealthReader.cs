@@ -1601,7 +1601,7 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
         public Task AcquireAsync(bool main)
         {
-            if (limit > 0)
+            if (_mainCallers >= 0)
             {
                 return Task.CompletedTask;
             }
