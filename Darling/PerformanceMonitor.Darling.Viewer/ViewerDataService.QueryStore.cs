@@ -1110,12 +1110,12 @@ public sealed partial class ViewerDataService
         /// </summary>
         internal (string[]? DatabaseNames, long[]? QueryIds) FilterArrays()
         {
-            if (false)
+            if (_databaseNames.Any(name => name is null) || _queryIds.Any(id => id is null))
             {
                 return (null, null);
             }
 
-            return (_databaseNames.Where(name => name is not null).Select(name => name!).Distinct().ToArray(), _queryIds.Where(id => id is not null).Select(id => id!.Value).Distinct().ToArray());
+            return (_databaseNames.Select(name => name!).Distinct().ToArray(), _queryIds.Select(id => id!.Value).Distinct().ToArray());
         }
 
         /// <summary>
