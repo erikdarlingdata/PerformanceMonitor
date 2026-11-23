@@ -1092,7 +1092,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     }
 
     /// <summary>
-    /// Every read path of Plan Corrections (the sub-tab switch and the full refresh) refreshes its banner after the
+    /// Every read path of Plan Corrections (the sub-tab switch) refreshes its banner after the
     /// grid is bound, handing it the rows the grid read (the cap-aware step needs them). A census over every
     /// ServerTab file, so a read path added later without the call fails here.
     /// </summary>
@@ -1103,10 +1103,9 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         var bound = Positions(refresh, "_planCorrectionFilterMgr!.UpdateData(");
         var banner = Positions(refresh, "await RefreshPlanCorrectionsBannerAsync(");
 
-        Assert.Equal(2, bound.Count);
+        Assert.Single(bound);
         AssertEachFollowsItsBind(bound, banner, "Plan Corrections");
         Assert.Contains("await RefreshPlanCorrectionsBannerAsync(planCorrections, hoursBack, fromDate, toDate);", refresh, StringComparison.Ordinal);
-        Assert.Contains("await RefreshPlanCorrectionsBannerAsync(planCorrectionTask.Result, hoursBack, fromDate, toDate);", refresh, StringComparison.Ordinal);
 
         Assert.Equal(
             AllServerTabCode().Sum(code => Positions(code, "_dataService.GetPlanCorrectionsAsync(").Count),
@@ -1114,7 +1113,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     }
 
     /// <summary>
-    /// Every read path of Memory Pressure Events (the timer's sub-tab refresh and the full refresh) refreshes its
+    /// Every read path of Memory Pressure Events (the sub-tab switch) refreshes its
     /// banner after the chart is drawn. The same census.
     /// </summary>
     [Fact]
@@ -1124,7 +1123,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         var drawn = Positions(memory, "UpdateMemoryPressureEventsChart(");
         var banner = Positions(memory, "await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);");
 
-        Assert.Equal(2, drawn.Count);
+        Assert.Single(drawn);
         AssertEachFollowsItsBind(drawn, banner, "Memory Pressure Events");
 
         Assert.Equal(
@@ -1168,7 +1167,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     }
 
     /// <summary>
-    /// Every read path of the Query Heatmap (the sub-tab switch, the full refresh and the metric picker) refreshes its
+    /// Every read path of the Query Heatmap (the sub-tab switch and the metric picker) refreshes its
     /// banner after the chart is drawn. The same census.
     /// </summary>
     [Fact]
@@ -1179,12 +1178,9 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         /* #4966: each banner call is handed the very result its chart was drawn from, so the notice can name the first
            column that chart draws. */
         Assert.Contains("UpdateQueryHeatmapChart(hmData);", refresh, StringComparison.Ordinal);
-        Assert.Contains("UpdateQueryHeatmapChart(heatmapTask.Result);", refresh, StringComparison.Ordinal);
-        var banner = Positions(refresh, "await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);")
-            .Concat(Positions(refresh, "await RefreshQueryHeatmapBannerAsync(heatmapTask.Result, hoursBack, fromDate, toDate);"))
-            .OrderBy(position => position).ToList();
-        Assert.Equal(2, drawn.Count);
-        AssertEachFollowsItsBind(drawn, banner, "Query Heatmap (sub-tab switch and full refresh)");
+        var banner = Positions(refresh, "await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);");
+        Assert.Single(drawn);
+        AssertEachFollowsItsBind(drawn, banner, "Query Heatmap (sub-tab switch)");
 
         var picker = Body(CodeOf("ServerTab.Charts.cs"), "private async void HeatmapMetric_SelectionChanged(");
         var pickerDrawn = Positions(picker, "UpdateQueryHeatmapChart(result);");
@@ -1265,7 +1261,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     public void MemoryOverviewSummary_ReadsTheNewestSnapshotOnly()
     {
         var refresh = CodeOf("ServerTab.Refresh.cs");
-        Assert.Equal(2, Positions(refresh, "_dataService.GetLatestMemoryStatsAsync(_serverId)").Count);
+        Assert.Single(Positions(refresh, "_dataService.GetLatestMemoryStatsAsync(_serverId)"));
         Assert.DoesNotContain("GetLatestMemoryStatsAsync(_serverId, hoursBack", refresh, StringComparison.Ordinal);
     }
 

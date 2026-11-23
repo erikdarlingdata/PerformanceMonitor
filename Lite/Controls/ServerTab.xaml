@@ -2288,7 +2288,7 @@
                              severity is parsed from deadlock_graph_xml over the SAME deadlock window as the
                              deadlock count (so those reconcile too), via Lite's own DeadlockProcessDetail parse.
                              Appended as the LAST Blocking sub-tab (sub-index 4, after Deadlocks) — nothing else
-                             reindexed; RefreshBlockingAsync's subTabOnly switch gains case 4. -->
+                             reindexed; the sub-tab switch of RefreshBlockingAsync gains case 4. -->
                         <TabItem Header="Blocking Stats">
                             <!-- 2x2 grid (matching the Performance Trends layout): row 0 = blocking Max/Avg |
                                  blocking Total, row 1 = deadlock Max/Avg | deadlock Total, so each plot area
