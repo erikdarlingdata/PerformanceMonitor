@@ -1601,6 +1601,11 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
         public Task AcquireAsync(bool main)
         {
+            if (limit > 0)
+            {
+                return Task.CompletedTask;
+            }
+
             var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_gate)
             {
