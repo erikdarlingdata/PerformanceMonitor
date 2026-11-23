@@ -437,6 +437,30 @@ public sealed class ViewerStoreHealthRefreshTests
         }
     }
 
+    /// <summary>#9364: the slow-load line says how many relations each read sized and whether the read was taken for this open (stamped after the
+    /// call began) or held from earlier (stamped before it, so the line gives its age). The maintenance check carries no such facts and keeps its text.</summary>
+    [Fact]
+    public void ASlowLoad_NamesTheRelationsEachReadSized_AndWhetherTheyWereMeasuredLiveOrHeld()
+    {
+        var lines = new List<string>();
+        RunTab(async (tab, reads) =>
+        {
+            tab.SlowLoadSink = lines.Add;
+            tab.SlowLoadThresholdMs = 0;
+            tab.TablesRead = _ => Task.FromResult(new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>(
+                [TableRow("a"), TableRow("b"), TableRow("c")], DateTime.UtcNow.AddSeconds(1)));
+            tab.IndexesRead = _ => Task.FromResult(new StoreIndexHealth([IndexRow("ix_things")], [], ReadAtUtc: DateTime.UtcNow.AddSeconds(-130)));
+            tab.ReadinessRead = () => Task.FromResult(Readiness());
+
+            await tab.RefreshAsync(force: true);
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Matches(@"store tables read \d+ ms \(sized 3 relations, measured live\)", line);
+        Assert.Matches(@"store indexes read \d+ ms \(sized 1 relation, from the held measurement taken 2 min \d+ s ago\)", line);
+        Assert.Matches(@"store maintenance check \d+ ms(?! \()", line);
+    }
+
     [Fact]
     public void AQuickLoad_WritesNoSlowLoadLine()
     {
