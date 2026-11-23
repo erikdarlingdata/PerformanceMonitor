@@ -255,7 +255,7 @@ internal sealed class ObjectUsageWindowReplay
             {
                 /* Per (object, index), not per object: an object whose clustered index has a run but whose nonclustered index has none would
                    otherwise pass, and that index's use would be dropped from the answer. */
-                if (!runIndexes.Contains((row.ObjectId, row.IndexId)) || !objects.TryGetValue(row.ObjectId, out var acc))
+                if (!objects.TryGetValue(row.ObjectId, out var acc))
                 {
                     fallbackReason = "a raw row names an index with no run";
                     return null;
