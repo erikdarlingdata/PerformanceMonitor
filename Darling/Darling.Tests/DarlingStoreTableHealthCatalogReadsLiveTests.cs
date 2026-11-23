@@ -379,4 +379,162 @@ INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;"
         Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
         Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
     }
+
+    /// <summary>Enough relations that each pass slices onto the most connections it can (800 or more), so two passes that did not share
+    /// a limit would hold twice as many.</summary>
+    private const string ManyRelationsSeedSql = @"
+CREATE SCHEMA zz9364;
+DO $$
+BEGIN
+    FOR i IN 1..500 LOOP
+        EXECUTE format('CREATE TABLE zz9364.t%s (id integer PRIMARY KEY, v text)', i);
+        EXECUTE format('CREATE INDEX t%s_v ON zz9364.t%s (v)', i, i);
+    END LOOP;
+END $$;
+ANALYZE;";
+
+    private static async Task<(ScratchPostgres Scratch, long Listed)> SeedManyRelationsAsync(string baseCs, System.Threading.CancellationToken ct)
+    {
+        var scratch = await ScratchPostgres.CreateAsync(baseCs, ct);
+        if (!scratch.TimescaleEnabled)
+        {
+            await scratch.DisposeAsync();
+            Assert.Skip("TimescaleDB is not enabled on this cluster.");
+        }
+
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await ExecAsync(connection, ManyRelationsSeedSql, ct);
+        var listed = await ListedRelationsAsync(connection, ct);
+        Assert.True(listed >= 800, $"relations listed {listed}");
+        return (scratch, listed);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, System.Threading.CancellationToken ct)
+    {
+        var until = DateTime.UtcNow.AddSeconds(60);
+        while (!condition() && DateTime.UtcNow < until)
+        {
+            await Task.Delay(50, ct);
+        }
+
+        Assert.True(condition(), "the condition was not met within 60 seconds");
+    }
+
+    [Fact]
+    public async Task ACold_TablesRead_AndIndexesRead_StartedTogether_NeverHoldMoreThanTheSizeReadLimit_AndMainGoesFirst()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var (scratch, listed) = await SeedManyRelationsAsync(baseCs!, ct);
+        await using var scratchOwner = scratch;
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        // Every read holds its grant long enough for the others to overlap it, and the grants are recorded in the order they were handed out.
+        var granted = new System.Collections.Concurrent.ConcurrentQueue<DarlingStoreTableHealthReader.SizePassPart>();
+        DarlingStoreTableHealthReader.OnSizePassGrantOn(store, async part =>
+        {
+            granted.Enqueue(part);
+            await Task.Delay(150, ct);
+        });
+
+        var tables = DarlingStoreTableHealthReader.GetAsync(store, ct);
+        var indexes = DarlingStoreTableHealthReader.GetIndexesAsync(store, ct);
+        Assert.NotEmpty(await tables);
+        Assert.NotEmpty(await indexes);
+
+        Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
+        var peak = DarlingStoreTableHealthReader.PeakSizeConnectionsHeldOn(store);
+        Assert.InRange(peak, 1, 4);
+        Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+
+        // The main pass's slices all got the limit before the first slice of the extras pass did.
+        var order = granted.ToArray();
+        var lastMain = Array.FindLastIndex(order, p => p == DarlingStoreTableHealthReader.SizePassPart.Main);
+        var firstExtras = Array.FindIndex(order, p => p == DarlingStoreTableHealthReader.SizePassPart.Extras);
+        Assert.True(lastMain >= 0 && firstExtras >= 0, "both passes took grants");
+        Assert.True(lastMain < firstExtras, "a main slice was granted after an extras slice: " + string.Join(",", order));
+    }
+
+    [Fact]
+    public async Task AFailedExtrasSlice_AndAFailedExtrasPass_LeaveTheSizeReadLimitFree()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var (scratch, listed) = await SeedManyRelationsAsync(baseCs!, ct);
+        await using var scratchOwner = scratch;
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        // One extras slice fails after it holds the limit while the others hold it too: every grant comes back.
+        DarlingStoreTableHealthReader.OnSizePassGrantOn(store, async part =>
+        {
+            await Task.Delay(50, ct);
+            if (part == DarlingStoreTableHealthReader.SizePassPart.Extras)
+            {
+                throw new InvalidOperationException("injected extras slice failure");
+            }
+        });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => DarlingStoreTableHealthReader.GetAsync(store, ct));
+        Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+
+        // The whole extras pass failing before it reads anything leaves the limit free as well.
+        DarlingStoreTableHealthReader.OnSizePassGrantOn(store, null);
+        DarlingStoreTableHealthReader.FailExtrasPassesOn(store, new InvalidOperationException("injected extras failure"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => DarlingStoreTableHealthReader.GetAsync(store, ct));
+        Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+
+        // A later read still runs and holds no more than the limit.
+        DarlingStoreTableHealthReader.FailExtrasPassesOn(store, null);
+        Assert.NotEmpty(await DarlingStoreTableHealthReader.GetAsync(store, ct));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
+        Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+        Assert.InRange(DarlingStoreTableHealthReader.PeakSizeConnectionsHeldOn(store), 1, 4);
+    }
+
+    [Fact]
+    public async Task ACancelledCaller_LeavesTheSharedPassesRunning_AndTheSizeReadLimitFreeWhenTheyEnd()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var (scratch, listed) = await SeedManyRelationsAsync(baseCs!, ct);
+        await using var scratchOwner = scratch;
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var firstMain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        DarlingStoreTableHealthReader.OnSizePassGrantOn(store, async part =>
+        {
+            if (part == DarlingStoreTableHealthReader.SizePassPart.Main)
+            {
+                firstMain.TrySetResult();
+            }
+
+            await Task.Delay(150, ct);
+        });
+
+        using var cancel = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var read = DarlingStoreTableHealthReader.GetAsync(store, cancel.Token);
+        await firstMain.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+        cancel.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
+
+        // The passes are shared work: the cancelled caller's wait ends, the passes run on, and when they end every grant is back.
+        await WaitUntilAsync(() => DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store) == listed, ct);
+        await WaitUntilAsync(() => DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store) == 0, ct);
+        Assert.InRange(DarlingStoreTableHealthReader.PeakSizeConnectionsHeldOn(store), 1, 4);
+
+        // A later read takes the held passes.
+        Assert.NotEmpty(await DarlingStoreTableHealthReader.GetAsync(store, ct));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
+        Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+    }
 }
