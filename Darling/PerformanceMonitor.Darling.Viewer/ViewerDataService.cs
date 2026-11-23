@@ -1646,7 +1646,7 @@ SELECT
     /* V300 (#9357) adds the procedure_stats hour ledger and its state table, plain tables on every store and never dropped. Found by catalog, as the V299 line above is. */
     to_regclass('collect.procedure_stats_hour_ledger') IS NOT NULL AND to_regclass('collect.procedure_stats_hour_ledger_state') IS NOT NULL,
     /* V301 (#9374) adds the last measured relation sizes and the time they were measured, plain tables on every store and never dropped. Found by catalog, as the V300 line above is. */
-    to_regclass('collect.store_relation_sizes_latest') IS NOT NULL AND to_regclass('collect.store_relation_sizes_measured') IS NOT NULL",
+    to_regclass('collect.store_relation_sizes_latest') IS NOT NULL AND to_regclass('collect.store_relation_sizes_measured') IS NOT NULL,
     /* V302 (#8570) adds the partial index of failed Agent job outcomes on job_history, never dropped. Found by catalog, as the V301 line above is. */
     to_regclass('collect.idx_job_history_job_failed') IS NOT NULL";
 
