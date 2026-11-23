@@ -197,10 +197,16 @@ internal sealed class ObjectUsageWindowReplay
         ArgumentNullException.ThrowIfNull(raw);
 
         var objects = new Dictionary<int, Accumulator>();
-        var runIndexes = new HashSet<(int ObjectId, int IndexId)>();
+        var runsByIndex = new Dictionary<(int ObjectId, int IndexId), List<ObjectUsageRun>>();
         foreach (var run in runs)
         {
-            runIndexes.Add((run.ObjectId, run.IndexId));
+            if (!runsByIndex.TryGetValue((run.ObjectId, run.IndexId), out var indexRuns))
+            {
+                indexRuns = [];
+                runsByIndex.Add((run.ObjectId, run.IndexId), indexRuns);
+            }
+
+            indexRuns.Add(run);
             var end = run.LastTime ?? CoveredTo;
             var first = run.FirstTime > CoveredFrom ? run.FirstTime : CoveredFrom;
             if (!objects.TryGetValue(run.ObjectId, out var acc))
@@ -253,9 +259,12 @@ internal sealed class ObjectUsageWindowReplay
 
             foreach (var row in rows)
             {
-                /* Per (object, index), not per object: an object whose clustered index has a run but whose nonclustered index has none would
-                   otherwise pass, and that index's use would be dropped from the answer. */
-                if (!runIndexes.Contains((row.ObjectId, row.IndexId)) || !objects.TryGetValue(row.ObjectId, out var acc))
+                /* Per (object, index), not per object, and by cover, not overlap: an object whose clustered index has a run but whose
+                   nonclustered index has none would otherwise pass, and so would an index whose only run ends before this row's time (it
+                   overlaps the window and does not cover the row), and that use would be dropped from the answer. */
+                if (!runsByIndex.TryGetValue((row.ObjectId, row.IndexId), out var indexRuns)
+                    || !indexRuns.Any(run => run.FirstTime <= time && (run.LastTime is null || run.LastTime >= time))
+                    || !objects.TryGetValue(row.ObjectId, out var acc))
                 {
                     fallbackReason = "a raw row names an index with no run";
                     return null;

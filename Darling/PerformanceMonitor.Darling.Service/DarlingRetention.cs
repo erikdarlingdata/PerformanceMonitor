@@ -1877,7 +1877,7 @@ public static class DarlingRetention
            raw rows. A pair collected no longer has none left once its raw chunks are dropped, and nothing closes its runs: they go here. */
         var deadPairRunsDeleted = await PurgeOneAsync(
             postgres, ObjectUsageChain.RunsTable, OpenRunsOfDeadPairsDeleteSql,
-            utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+            utcNow.AddDays(-retentionDays), logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
         if (deadPairRunsDeleted is null)
         {
             tablesFailed++;

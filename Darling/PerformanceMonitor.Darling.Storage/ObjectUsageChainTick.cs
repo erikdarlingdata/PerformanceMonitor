@@ -37,10 +37,11 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>The backfill reads all history, once per server.</b> A server with no watermark at all (never built: the upgrade, or a new server)
 /// lists its databases over all history, and a server whose raw rows are all older than the window is still found, through the server
-/// registry (<c>collect.servers</c>) for servers with no snapshots row, so a dead database's history is folded once. A backfill that a
-/// bound or a failure stops half way keeps that server on the all-history listing, in the process's memory, until a tick finishes it. After a
-/// service restart in the middle of a backfill the server already has watermarks, so only databases with a raw row in the window are listed
-/// from then on.</para>
+/// registry (<c>collect.servers</c>) for servers with no snapshots row that have at least one raw index row, so a dead database's history is
+/// folded once. A backfill that a bound or a failure stops half way keeps that server on the all-history listing, and in the server list even
+/// when none of its raw rows are in the window (a dead server has a snapshots row after its first step, so the registry listing no longer finds
+/// it), in the process's memory, until a tick finishes it. After a service restart in the middle of a backfill the server already has
+/// watermarks and the memory is gone, so only servers and databases with a raw row in the window are listed from then on.</para>
 ///
 /// <para><b>Every server's databases are listed every tick.</b> A cheaper skip (the newest raw snapshot is not newer than any pair watermark)
 /// would be wrong twice: the collector commits a run one database at a time, so a tick that lands mid-run sees the databases already committed
@@ -80,8 +81,9 @@ public static class ObjectUsageChainTick
     internal const string ClaimUnlockSql = "SELECT pg_advisory_unlock(hashtextextended('object_usage_chain_tick', 0))";
 
     /// <summary>
-    /// Servers with no snapshots row at all: the backfill's candidates whose raw rows may all be older than the listing window. The server
-    /// registry stands in for a listing of all history.
+    /// Servers with no snapshots row at all that have at least one raw index row: the backfill's candidates whose raw rows may all be older
+    /// than the listing window. The server registry stands in for a listing of all history, and the <c>EXISTS</c> probe (one index entry on
+    /// the server's leading index column) keeps a server that was never collected, or a PostgreSQL target, off the list for good.
     /// </summary>
     internal const string UnbuiltServersSql = """
         SELECT
@@ -94,6 +96,13 @@ public static class ObjectUsageChainTick
             FROM collect.object_usage_snapshots AS u
             WHERE u.server_id = sv.server_id
         )
+        AND   EXISTS
+        (
+            SELECT
+                1
+            FROM collect.index_object_stats AS s
+            WHERE s.server_id = sv.server_id
+        )
         ORDER BY
             sv.server_id
         """;
@@ -103,7 +112,7 @@ public static class ObjectUsageChainTick
     /// the first row is the lowest server's newest entry on <c>idx_index_object_stats_server_time</c>, and each next row is the first entry past
     /// the previous server id. The bound is a plain predicate on the chunk column, so chunks older than the window are excluded.
     /// </summary>
-    internal const string ServersSql = """
+    internal static readonly string ServersSql = $"""
         WITH RECURSIVE servers AS
         (
             (
@@ -111,7 +120,7 @@ public static class ObjectUsageChainTick
                     s.server_id,
                     s.collection_time
                 FROM collect.index_object_stats AS s
-                WHERE s.collection_time >= now() - interval '2 days'
+                WHERE s.collection_time >= now() - interval '{ListingWindowDays} days'
                 ORDER BY
                     s.server_id,
                     s.collection_time DESC
@@ -129,7 +138,7 @@ public static class ObjectUsageChainTick
                     s.collection_time
                 FROM collect.index_object_stats AS s
                 WHERE s.server_id > p.server_id
-                AND   s.collection_time >= now() - interval '2 days'
+                AND   s.collection_time >= now() - interval '{ListingWindowDays} days'
                 ORDER BY
                     s.server_id,
                     s.collection_time DESC
@@ -154,7 +163,7 @@ public static class ObjectUsageChainTick
         """;
 
     /// <summary>One server's database names with a raw row in the newest <see cref="ListingWindowDays"/> days, one index probe per name. $1 server_id.</summary>
-    internal const string DatabasesSql = """
+    internal static readonly string DatabasesSql = $"""
         WITH RECURSIVE databases AS
         (
             (
@@ -163,7 +172,7 @@ public static class ObjectUsageChainTick
                 FROM collect.index_object_stats AS s
                 WHERE s.server_id = $1
                 AND   s.database_name IS NOT NULL
-                AND   s.collection_time >= now() - interval '2 days'
+                AND   s.collection_time >= now() - interval '{ListingWindowDays} days'
                 ORDER BY
                     s.database_name
                 LIMIT 1
@@ -176,7 +185,7 @@ public static class ObjectUsageChainTick
                 FROM collect.index_object_stats AS s
                 WHERE s.server_id = $1
                 AND   s.database_name > d.database_name
-                AND   s.collection_time >= now() - interval '2 days'
+                AND   s.collection_time >= now() - interval '{ListingWindowDays} days'
                 ORDER BY
                     s.database_name
                 LIMIT 1
@@ -299,7 +308,7 @@ public static class ObjectUsageChainTick
         List<(int ServerId, DateTime Newest)> servers;
         try
         {
-            servers = await ReadServersAsync(dataSource, cancellationToken);
+            servers = await ReadServersAsync(dataSource, state.PendingBackfill, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -492,9 +501,10 @@ public static class ObjectUsageChainTick
 
     /// <summary>
     /// The servers to visit, by id: each server with a raw snapshot in the listing window and its newest time, and each server with no
-    /// snapshots row (the backfill) with a time that never makes a pair look built.
+    /// snapshots row (the backfill) and each server whose backfill is unfinished (<paramref name="pendingBackfill"/>) with a time that never
+    /// makes a pair look built.
     /// </summary>
-    private static async Task<List<(int ServerId, DateTime Newest)>> ReadServersAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken)
+    private static async Task<List<(int ServerId, DateTime Newest)>> ReadServersAsync(NpgsqlDataSource dataSource, HashSet<int> pendingBackfill, CancellationToken cancellationToken)
     {
         var servers = new SortedDictionary<int, DateTime>();
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -514,6 +524,13 @@ public static class ObjectUsageChainTick
             {
                 servers.TryAdd(reader.GetInt32(0), DateTime.MaxValue);
             }
+        }
+
+        /* A backfill that a bound or a failure stopped after some steps leaves the server with a snapshots row, so it is on neither list
+           above when its raw rows are all older than the listing window (a dead server). The server stays listed until a tick finishes it. */
+        foreach (var serverId in pendingBackfill)
+        {
+            servers.TryAdd(serverId, DateTime.MaxValue);
         }
 
         return servers.Select(s => (s.Key, s.Value)).ToList();
