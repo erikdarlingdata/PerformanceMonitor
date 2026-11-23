@@ -28,9 +28,17 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>The pre-fix signature is exact, which is what makes this safe to re-run.</b> Two or more rows
 /// sharing the ENTIRE read-side dedup key AND <c>collection_time</c> can only be split slices: since #1907 the
-/// collector emits at most one row per interval per cycle, so a post-fix row can never join such a group. The
-/// collapse is therefore idempotent — a second run finds nothing — and it cannot touch correctly-collected
-/// data even if the operator runs it years later.</para>
+/// collector emits at most one SLICE per interval per cycle, so a post-fix row can never join such a group as
+/// a slice. The collapse is therefore idempotent — a second run finds nothing — and it cannot touch
+/// correctly-collected data even if the operator runs it years later.</para>
+///
+/// <para><b>Copies are not slices (#9352).</b> This store has no unique index on the key and the backfill writes it
+/// with a binary COPY, so a current build can store an EXACT COPY of a row: the same batch written twice, equal in
+/// every column but <c>collection_id</c>. A copy joins the group but is not a slice of the interval, so it must be
+/// dropped, not summed. Rows equal in the key and every measurement (<see cref="IsMeasurement"/>) are reduced to one
+/// row before any sum, so a group of pure copies keeps the original <c>execution_count</c> and a mixed group sums only
+/// its distinct slices. The reduction is also what keeps a re-run safe: summing copies is what doubled the counts the
+/// first time round. Lite's collapse follows the same rule.</para>
 ///
 /// <para><b>Column handling is DERIVED from the collector's own payload, not restated here.</b> The
 /// classification is the same one <c>QueryStoreCollector.BuildPayloadBody</c> applies at collection —
@@ -95,6 +103,60 @@ public static class QueryStoreSliceRepair
             yield return (name, CombineExpression(name, column.Type));
         }
     }
+
+    /// <summary>
+    /// Whether a column is a MEASUREMENT of the interval, something that has to be recombined when two slices merge,
+    /// as opposed to an ATTRIBUTE every slice of one interval carries identically. The same prefix rules
+    /// <see cref="CombineExpression"/> applies, and the same set Lite's collapse treats as measurements, so the two
+    /// products agree on which rows are copies of one another (#9352).
+    /// </summary>
+    internal static bool IsMeasurement(string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        return string.Equals(column, ExecutionCount, StringComparison.Ordinal)
+            || string.Equals(column, LastExecutionTime, StringComparison.Ordinal)
+            || column.StartsWith("avg_", StringComparison.Ordinal)
+            || column.StartsWith("min_", StringComparison.Ordinal)
+            || column.StartsWith("max_", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The inner projection of the collapse: one row per DISTINCT slice of each key group (#9352). Rows equal in the key
+    /// and every measurement are copies of one row and reduce to one, carrying the lowest <c>collection_id</c> of the
+    /// copies and how many rows that was (<c>pm_copies</c>). Attributes are carried through the same
+    /// <see cref="CombineExpression"/> the outer aggregate uses, which is exact because every row of a distinct slice
+    /// carries the same attribute values, and they are left out of the grouping on purpose so the wide text columns are
+    /// never compared. The columns the outer aggregate reads keep their names.
+    /// </summary>
+    private static IEnumerable<(string Name, string Expression)> DistinctSliceProjection()
+    {
+        foreach (var key in KeyColumns)
+        {
+            yield return (key, "s." + key);
+        }
+
+        yield return ("collection_id", "min(s.collection_id)");
+
+        foreach (var column in QueryStoreCollector.Instance.PayloadColumns)
+        {
+            var name = column.Name;
+
+            if (KeyColumns.Contains(name, StringComparer.Ordinal)
+                || string.Equals(name, "collection_id", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            yield return (name, IsMeasurement(name) ? "s." + name : CombineExpression(name, column.Type));
+        }
+    }
+
+    /// <summary>The columns two rows must agree on to be copies of one row: the key and every measurement.</summary>
+    private static IEnumerable<string> DistinctSliceColumns() =>
+        KeyColumns.Concat(QueryStoreCollector.Instance.PayloadColumns
+            .Select(c => c.Name)
+            .Where(n => !KeyColumns.Contains(n, StringComparer.Ordinal) && IsMeasurement(n)));
 
     /// <summary>
     /// The aggregate for one column. Public so the test that pins the classification can assert on the same
@@ -258,15 +320,28 @@ public static class QueryStoreSliceRepair
         var insertList = string.Join(", ", insertColumns);
         var selectBack = string.Join(", ", insertColumns.Select(c => "r." + c));
 
+        var sliceProjection = string.Join(",\n                ", DistinctSliceProjection().Select(c => $"{c.Expression} AS {c.Name}"));
+        var sliceGroup = string.Join(", ", DistinctSliceColumns().Select(c => "s." + c));
+
+        /* #9352: the aggregate sums DISTINCT slices. Exact copies of a row reduce to one in the inner query, and
+           sum(pm_copies) is still the group's row count, which is what decides whether the group has anything to
+           remove: a group of pure copies is rewritten to its one row, so the extra copies are dropped. */
         return $"""
         CREATE TEMP TABLE qs_slice_repair ON COMMIT DROP AS
         SELECT
             {select}
-        FROM collect.{Table} AS s
-        WHERE s.collection_time >= $1
-        AND   s.collection_time <  $2
+        FROM
+        (
+            SELECT
+                {sliceProjection},
+                count(*) AS pm_copies
+            FROM collect.{Table} AS s
+            WHERE s.collection_time >= $1
+            AND   s.collection_time <  $2
+            GROUP BY {sliceGroup}
+        ) AS s
         GROUP BY {string.Join(", ", KeyColumns.Select(k => "s." + k))}
-        HAVING count(*) > 1;
+        HAVING sum(s.pm_copies) > 1;
 
         DELETE FROM collect.{Table} AS t
         USING qs_slice_repair AS r

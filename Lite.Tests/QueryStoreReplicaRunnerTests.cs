@@ -254,6 +254,32 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task AReplicaClampThatIsANewGapAfterALandedCycle_OpensItsHoleAtWhatTheCycleRead_MinusTheLookBack()
+    {
+        var f = await BuildAsync(replica: "replica-host");
+        var now = Truncate(DateTime.UtcNow);
+        f.ReplicaRows = [Row(queryId: 1, lastExecution: now.AddMinutes(-30))];
+        await RunAsync(f);
+
+        /* The stored watermark W is 3 hours old, and an earlier cycle that clamped it landed after reading up to 90 minutes ago. The
+           new floor (collection time - 1 hour) lies past that, so this clamp is a new gap (#9352). */
+        var watermark = now.AddHours(-3);
+        var readThrough = now.AddMinutes(-90);
+        await SetWatermarkAsync(f, watermark);
+        f.Service.QueryStoreClampReportsForTests.Land(f.ServerId, Sales, watermark, readThrough);
+        f.ReplicaRows = [Row(queryId: 1, lastExecution: now.AddMinutes(-30))];
+        await RunAsync(f);
+
+        /* The hole starts the look-back (20 minutes here) before what the landed cycle read. Starting it at W - L overlapped the hole
+           the earlier clamp recorded, and merging the two sent the dig back over a range it had filled. */
+        var cutoff = f.ReplicaItemCutoffs[1]!.Value;
+        var hole = await ReadHoleAsync(f, Sales);
+        Assert.NotNull(hole);
+        Assert.Equal(readThrough.AddMinutes(-20), hole!.Value.From);
+        Assert.Equal(cutoff, hole.Value.To);
+    }
+
+    [Fact]
     public async Task AReplicaReadCutByTheRowCap_RecordsTheLookBackWindowAsAHole_AndTheNextReadStartsAtTheWatermark()
     {
         var f = await BuildAsync(replica: "replica-host");

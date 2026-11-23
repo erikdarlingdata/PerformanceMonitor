@@ -67,6 +67,9 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
             $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}; " +
             $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.AttemptTable}";
         drop.ExecuteNonQuery();
+
+        /* #9352: the marker and the attempts also live in a file beside the store, which ResetData does not know either. */
+        File.Delete(QueryStoreSliceRepairState.PathFor(_duckDb.DatabasePath));
     }
 
     public void Dispose()

@@ -1044,7 +1044,7 @@ public sealed partial class DarlingCollectorRunner
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
                                 await RecordQueryStoreBackfillHoleAsync(
-                                    server.ServerId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
+                                    server.ServerId, databaseName, _queryStoreClampReports.HoleFloor(server.ServerId, databaseName, context.Watermark.Value), azureClampedFloor, dbToken);
                             }
                         }
                     }
@@ -1743,10 +1743,11 @@ public sealed partial class DarlingCollectorRunner
                    database. Only query_store reaches this lambda today; the name guard
                    keeps a future enumeration collector from inheriting backfill state
                    it has no worker for. */
-                if (cut.HoleFrom is DateTime holeFrom && cut.HoleTo is DateTime holeTo
+                if (cut.HoleFrom is DateTime && cut.HoleTo is DateTime holeTo
                     && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                 {
-                    await RecordQueryStoreBackfillHoleAsync(server.ServerId, item, holeFrom, holeTo, ct);
+                    await RecordQueryStoreBackfillHoleAsync(
+                        server.ServerId, item, _queryStoreClampReports.HoleFrom(server.ServerId, item, raw!.Value, cut), holeTo, ct);
                 }
             }
 
