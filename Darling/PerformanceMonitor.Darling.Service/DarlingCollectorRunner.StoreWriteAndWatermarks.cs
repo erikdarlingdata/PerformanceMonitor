@@ -631,7 +631,7 @@ public sealed partial class DarlingCollectorRunner
         /* #9357: a procedure_stats batch also adds its non-restart row count to the procedure hour ledger (V299), tallied and written exactly
            as the query_stats ledger above is: the writer's tally of the value sent into sample_interval_seconds, one upsert on the COPY's own
            transaction. Chosen by the table this COPY writes, so an import or backfill aimed at procedure_stats is counted too, or fails loudly. */
-        var procedureLedgerBatch = totalsBatch;
+        var procedureLedgerBatch = totalsBatch; /* the same table test, so the transaction the totals already open is the ledger's too */
         if (procedureLedgerBatch)
         {
             writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
@@ -680,7 +680,7 @@ public sealed partial class DarlingCollectorRunner
                transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
                its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
                upsert can never be left without the transaction its atomicity with the COPY depends on. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || procedureLedgerBatch || totalsBatch || watermarkBatch
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch || watermarkBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -760,7 +760,12 @@ public sealed partial class DarlingCollectorRunner
                     /* #4605: every row must have written the interval as an integer for the tally to be the batch's
                        count. A definition that moved the column to another overload would leave rows untallied, and an
                        undercounted ledger is silent: fail the batch here instead, before the COPY completes. */
-                    if (ledgerBatch || procedureLedgerBatch)
+                    if (ledgerBatch)
+                    {
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
+                    }
+
+                    if (procedureLedgerBatch)
                     {
                         QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
                     }

@@ -87,7 +87,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(44, PgTableTuning.Statements.Count);   /* 12 CREATE INDEX (#9223 added the query_store_stats server, hash and time index, #9171 added the database_states cover, #4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover, #8570 the procedure name index, #9172 the cpu window cover) + 6 DROP INDEX (the sixth drops the narrow database_states index once the cover is valid) + 26 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables, #9111 the four closed-day rollup tables) */
+        Assert.Equal(45, PgTableTuning.Statements.Count);   /* #9357 added the procedure_stats hour ledger's fillfactor, 12 CREATE INDEX (#9223 added the query_store_stats server, hash and time index, #9171 added the database_states cover, #4972 added the legacy-row partial index, #4605 the two restart-row ones, #7147 the plain-store wait_stats daily-summary cover, #8570 the procedure name index, #9172 the cpu window cover) + 6 DROP INDEX (the sixth drops the narrow database_states index once the cover is valid) + 26 ALTER TABLE (#8790 added the five queue-table settings, #8966 the twelve DELETE-churn tables, #9111 the four closed-day rollup tables) */
     }
 
     /// <summary>
