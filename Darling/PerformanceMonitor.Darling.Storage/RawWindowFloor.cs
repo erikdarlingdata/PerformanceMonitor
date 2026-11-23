@@ -50,7 +50,10 @@ public static class RawWindowFloor
     {
         QueryStats,
         ProcedureStats,
-        QueryStoreStats
+        QueryStoreStats,
+
+        /// <summary>#9382: <c>wait_stats</c>, the table <c>get_query_store_clutter</c>'s wait arm reads, so that arm has a floor of its own.</summary>
+        WaitStats
     }
 
     private static string TableName(Table table) => table switch
@@ -58,6 +61,7 @@ public static class RawWindowFloor
         Table.QueryStats => "query_stats",
         Table.ProcedureStats => "procedure_stats",
         Table.QueryStoreStats => "query_store_stats",
+        Table.WaitStats => "wait_stats",
         _ => throw new ArgumentOutOfRangeException(nameof(table), table, "unknown raw window floor table")
     };
 

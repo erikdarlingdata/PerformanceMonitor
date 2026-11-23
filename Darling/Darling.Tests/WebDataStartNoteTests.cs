@@ -797,8 +797,8 @@ public sealed class WebDataStartNoteTests
 
         var notices = Strings(r, "notices");
         Assert.Equal(2, notices.Length);
-        Assert.Contains(notices, n => n.StartsWith("Query Store Clutter", StringComparison.Ordinal) && n.EndsWith("nested: the raw tier starts later", StringComparison.Ordinal));
-        Assert.Contains(notices, n => n.StartsWith("Query Store Overhead", StringComparison.Ordinal) && n.EndsWith("nested: the raw tier starts later", StringComparison.Ordinal));
+        Assert.Contains(notices, n => n.StartsWith("Query Store Clutter", StringComparison.Ordinal) && n.EndsWith("Plan churn covers the last 4 days, not the whole time range.", StringComparison.Ordinal));
+        Assert.Contains(notices, n => n.StartsWith("Query Store Overhead", StringComparison.Ordinal) && n.EndsWith("The QDS wait table covers the last 3 days, not the whole time range.", StringComparison.Ordinal));
         Assert.DoesNotContain(notices, n => n.StartsWith("Query Store Memory Clerk", StringComparison.Ordinal));
     }
 

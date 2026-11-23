@@ -809,6 +809,42 @@ public static class DarlingQueryStoreClutterReader
         return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, asOfUtc, omittedDatabases, logger, cancellationToken);
     }
 
+    /// <summary>
+    /// #9382: where the plan-churn arm's coverage of a window starts, from what <see cref="GetPlanChurnAsync"/> reads for it: the clutter
+    /// rollups from the start of the route (<see cref="ResolveClutterRouteAsync"/>) and raw <c>query_store_stats</c> outside it. So it is the
+    /// earlier of the route's start and the oldest raw row (<see cref="RawWindowFloor.GetAsync"/>), and the oldest raw row alone when no
+    /// rollup is served. A start before the window's own means the arm covers the whole window. Null when neither source holds the window.
+    /// Several servers answer the latest of their starts: the least any one of them covers. <paramref name="rawFloorSeconds"/> is the deadline of
+    /// the raw floor probe: the MCP read's by default, the Viewer's interactive one from the Viewer. The route read keeps the deadline
+    /// <see cref="ResolveClutterRouteAsync"/> sets for every clutter read.
+    /// </summary>
+    public static async Task<DateTime?> GetPlanChurnCoverageStartAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc,
+        int rawFloorSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var route = await ResolveClutterRouteAsync(postgres, serverIds, startUtc, endUtc, cancellationToken);
+        DateTime? start = null;
+        foreach (var serverId in serverIds.Distinct())
+        {
+            var raw = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc, rawFloorSeconds, cancellationToken);
+            DateTime? own = (raw, route) switch
+            {
+                (null, null) => null,
+                ({ } r, null) => r,
+                (null, { } t) => t.Start,
+                ({ } r, { } t) => r < t.Start ? r : t.Start,
+            };
+            if (own is { } o && (start is null || o > start))
+            {
+                start = o;
+            }
+        }
+
+        return start;
+    }
+
     private static async Task<Dictionary<(int ServerId, string Database), int>> ReadChurnCollectionsAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
         ClutterRoute? closedDays, CancellationToken cancellationToken)
