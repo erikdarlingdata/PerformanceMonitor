@@ -26,7 +26,8 @@ namespace PerformanceMonitor.Collectors;
 /// vouches for the range up to its collection time, so a later clamp whose floor lies past that time
 /// (an outage longer than the catch-up window) is a new gap and is reported even for the same raw value.
 /// A restart would forget all of it, so each landed entry is also kept in the host's state store (#9359):
-/// <see cref="Land"/> hands back the one write or delete that keeps the stored copy current, and
+/// <see cref="Land"/> hands back the one write or delete that keeps the stored copy current (a delete repeats until
+/// <see cref="Confirm"/> reports the write succeeded), and
 /// <see cref="Seed"/> reads it back before a server's first clamp decision. Without it the first clamp after a
 /// restart opened a hole from the raw watermark of an idle database, which the backfill then dug for nothing.</para>
 /// </summary>
@@ -35,7 +36,7 @@ public sealed class QueryStoreClampReports
     private readonly ConcurrentDictionary<(int ServerId, string Database), (DateTime Raw, DateTime ReadThrough)> _landed = new();
 
     /// <summary>The databases whose entry the state store holds (written by this process or read by <see cref="Seed"/>), so a
-    /// database that never clamps costs no delete, and one that stops clamping costs exactly one.</summary>
+    /// database that never clamps costs no delete, and one that stops clamping costs one that is repeated only until it lands.</summary>
     private readonly ConcurrentDictionary<(int ServerId, string Database), byte> _stored = new();
 
     private readonly ConcurrentDictionary<int, byte> _seeded = new();
@@ -120,8 +121,28 @@ public sealed class QueryStoreClampReports
             return new QueryStoreLandedChange(key, QueryStoreBackfillState.EncodeLanded(raw, collectionTime));
         }
 
+        /* The stored entry stays marked until Confirm says the delete landed: writes are best effort, so a failed delete must come
+           back on the next cycle that does not clamp, or the row would sit in the store until something else retires it. */
         _landed.TryRemove((serverId, database), out _);
-        return _stored.TryRemove((serverId, database), out _) ? new QueryStoreLandedChange(key, null) : null;
+        return _stored.ContainsKey((serverId, database)) ? new QueryStoreLandedChange(key, null) : null;
+    }
+
+    /// <summary>Records that the store write for these changes succeeded (#9359). A confirmed delete clears the database's stored
+    /// mark, so <see cref="Land"/> stops returning it. A write that failed is never confirmed, so its delete is returned again.
+    /// A database that clamped again since the delete was returned keeps its mark, because its upsert replaced the row.</summary>
+    public void Confirm(int serverId, IEnumerable<QueryStoreLandedChange> changes)
+    {
+        foreach (var change in changes)
+        {
+            if (change.Value is null && change.Key.StartsWith(QueryStoreBackfillState.LandedKeyPrefix, StringComparison.Ordinal))
+            {
+                var database = change.Key.Substring(QueryStoreBackfillState.LandedKeyPrefix.Length);
+                if (!_landed.ContainsKey((serverId, database)))
+                {
+                    _stored.TryRemove((serverId, database), out _);
+                }
+            }
+        }
     }
 }
 

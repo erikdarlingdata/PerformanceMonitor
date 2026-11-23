@@ -813,6 +813,9 @@ public sealed partial class DarlingCollectorRunner
             string? azureLastStarted = null;
             string? azureStoppedAfter = null;
 
+            /* #9359: the stored clamp entry changes the landed databases call for, written once after the loop. */
+            var azureLandedChanges = new List<QueryStoreLandedChange>();
+
             foreach (var databaseName in databases)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1363,8 +1366,10 @@ public sealed partial class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
-                        await PersistQueryStoreLandedAsync(
-                            server.ServerId, _queryStoreClampReports.Land(server.ServerId, databaseName, stagedClampRaw, collectionTime), cancellationToken);
+                        if (_queryStoreClampReports.Land(server.ServerId, databaseName, stagedClampRaw, collectionTime) is { } azureLandedChange)
+                        {
+                            azureLandedChanges.Add(azureLandedChange);
+                        }
 
                         /* #5514: the flush returned, so the staged batch is in the store and the cache may
                            advance past it. Never earlier: a watermark ahead of committed rows skips them. */
@@ -1529,6 +1534,8 @@ public sealed partial class DarlingCollectorRunner
             }
 
             context.CurrentDatabaseName = null;
+
+            await PersistQueryStoreLandedAsync(server.ServerId, azureLandedChanges, cancellationToken);
 
             /* #3153: retire per-database state for databases this sweep did not enumerate, using the list
                it just swept. AFTER the loop on purpose - the enumeration is what makes the list
@@ -2202,11 +2209,8 @@ public sealed partial class DarlingCollectorRunner
                     passBudget: passBudget);
 
                 /* #9359: the stored clamp entry changes the landed items call for. onItemComplete cannot await, so they are written once
-                   the driver returns. */
-                foreach (var landedClampChange in landedClampChanges)
-                {
-                    await PersistQueryStoreLandedAsync(server.ServerId, landedClampChange, cancellationToken);
-                }
+                   the driver returns, in one write for the server. */
+                await PersistQueryStoreLandedAsync(server.ServerId, landedClampChanges, cancellationToken);
 
                 /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
                    loop above treats its own (#2623) - and for the first time. Until this the driver handed

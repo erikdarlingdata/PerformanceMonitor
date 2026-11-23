@@ -531,6 +531,59 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         Assert.Null(await ReadStateAsync(f, landedKey));
     }
 
+    [Fact]
+    public async Task EveryClampingDatabaseOfTheServer_StoresItsEntry_AndEveryOneThatStopsHasItRetired()
+    {
+        var f = await BuildAsync(replica: null);
+        f.Databases.Add(Orders);
+        f.PrimaryRowsByDb[Sales] = [Row(queryId: 1, lastExecution: DateTime.UtcNow.AddMinutes(-30))];
+        f.PrimaryRowsByDb[Orders] = [Row(queryId: 10, lastExecution: DateTime.UtcNow.AddMinutes(-30))];
+        await RunAsync(f);
+        f.PrimaryRowsByDb[Sales] = [];
+        f.PrimaryRowsByDb[Orders] = [];
+        await SetWatermarkAsync(f, Truncate(DateTime.UtcNow - WatermarkPolicy.MaxCatchup - TimeSpan.FromMinutes(30)));
+
+        await RunAsync(f);
+
+        Assert.NotNull(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Sales));
+        Assert.NotNull(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Orders));
+
+        /* New rows arrive for both. The first cycle still reads the stale watermark and keeps both entries; the next clamps
+           nothing and retires both in its one write. */
+        f.PrimaryRowsByDb[Sales] = [Row(queryId: 2, lastExecution: DateTime.UtcNow.AddMinutes(-20))];
+        f.PrimaryRowsByDb[Orders] = [Row(queryId: 20, lastExecution: DateTime.UtcNow.AddMinutes(-20))];
+        await RunAsync(f);
+        await RunAsync(f);
+
+        Assert.Null(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Sales));
+        Assert.Null(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Orders));
+    }
+
+    [Fact]
+    public async Task AFailedDeleteOfTheStoredEntry_IsReturnedAgainNextCycle_AndOnceItLandsNothingMoreIs()
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30));
+        await RunAsync(f);
+        var landedKey = QueryStoreBackfillState.LandedKeyPrefix + Sales;
+        Assert.NotNull(await ReadStateAsync(f, landedKey));
+        var reports = f.Service.QueryStoreClampReportsForTests;
+
+        /* The first cycle that stops clamping asks for a delete, and the write fails (a cancelled token fails it before it opens). */
+        var failed = reports.Land(f.ServerId, Sales, null, DateTime.UtcNow);
+        Assert.NotNull(failed);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await f.Service.PersistQueryStoreLandedAsync(f.ServerId, [failed!.Value], cancelled.Token);
+        Assert.NotNull(await ReadStateAsync(f, landedKey));
+
+        /* The next cycle asks again, the write lands, and the cycle after that has nothing to delete. */
+        var again = reports.Land(f.ServerId, Sales, null, DateTime.UtcNow);
+        Assert.NotNull(again);
+        await f.Service.PersistQueryStoreLandedAsync(f.ServerId, [again!.Value], CancellationToken.None);
+        Assert.Null(await ReadStateAsync(f, landedKey));
+        Assert.Null(reports.Land(f.ServerId, Sales, null, DateTime.UtcNow));
+    }
+
     private static DateTime Truncate(DateTime value) =>
         new(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
 

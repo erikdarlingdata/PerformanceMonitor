@@ -1163,24 +1163,71 @@ RETURNING state_key";
     private async Task RetireDugHoleRangeAsync(
         int serverId, string databaseName, DateTime dugFromUtc, DateTime dugToUtc, DateTime floorUtc, CancellationToken cancellationToken)
     {
-        var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
-        var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-        if (!existing.TryGetValue(key, out var encoded))
-        {
-            /* A state read that fails returns no rows, and the slice's own hole key was there when the scan found it. Writing
-               nothing leaves the hole as it was, where deleting it would lose the backfill opportunity. */
-            return;
-        }
+        await UpdateHoleStateAsync(
+            serverId, QueryStoreBackfillState.HoleKeyPrefix + databaseName,
+            encoded =>
+            {
+                if (encoded is null)
+                {
+                    /* A state read that fails finds no row, and the slice's own hole key was there when the scan found it. Writing
+                       nothing leaves the hole as it was, where deleting it would lose the backfill opportunity. */
+                    return (null, false);
+                }
 
-        var remaining = QueryStoreBackfillState.RemoveDugRange(encoded, dugFromUtc, dugToUtc, floorUtc);
-        if (remaining is null)
+                var remaining = QueryStoreBackfillState.RemoveDugRange(encoded, dugFromUtc, dugToUtc, floorUtc);
+                return remaining is null ? (null, true) : (remaining, false);
+            },
+            cancellationToken);
+    }
+
+    /// <summary>Reads a database's hole key, lets <paramref name="next"/> decide what it becomes, and writes that, all under ONE
+    /// write lock hold (#9359). The slice's retirement and the live collector's hole recorder both change this key, and a read
+    /// under one lock hold with the write under another let one of them overwrite what the other had just stored: the recorder
+    /// put a serviced range back, or the slice dropped a hole recorded while it ran. <paramref name="next"/> returns the value to
+    /// write, or a delete, or neither (null and false). Best-effort like the other collector_state writes.</summary>
+    private async Task UpdateHoleStateAsync(
+        int serverId, string key, Func<string?, (string? Value, bool Delete)> next, CancellationToken cancellationToken)
+    {
+        try
         {
-            await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, key, cancellationToken);
+            using var writeLock = _duckDb.AcquireWriteLock();
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+
+            string? current;
+            using (var read = conn.CreateCommand())
+            {
+                read.CommandText = "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3";
+                read.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                read.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
+                read.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = key });
+                current = await read.ExecuteScalarAsync(cancellationToken) as string;
+            }
+
+            var (value, delete) = next(current);
+            if (value is null && !delete)
+            {
+                return;
+            }
+
+            using var write = conn.CreateCommand();
+            write.CommandText = delete
+                ? "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3"
+                : "INSERT OR REPLACE INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1, $2, $3, $4, $5)";
+            write.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            write.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
+            write.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = key });
+            if (!delete)
+            {
+                write.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value });
+                write.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+            }
+
+            await write.ExecuteNonQueryAsync(cancellationToken);
         }
-        else
+        catch (Exception ex)
         {
-            await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = remaining }, cancellationToken);
+            _logger?.LogDebug(ex, "Updating query_store backfill state {Key} failed; next tick re-derives", key);
         }
     }
 
@@ -1197,33 +1244,46 @@ RETURNING state_key";
             serverId, await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken));
     }
 
-    /// <summary>Keeps a database's stored clamp entry current (#9359): the upsert for a clamped landed cycle, the delete for the
-    /// first one that no longer clamps. Best-effort like <see cref="RecordQueryStoreBackfillHoleAsync"/>: a failed write costs one
-    /// possible re-walk after a restart, never wrong data.</summary>
-    private async Task PersistQueryStoreLandedAsync(int serverId, QueryStoreLandedChange? change, CancellationToken cancellationToken)
+    /// <summary>Keeps the stored clamp entries current (#9359): the upsert for each clamped landed cycle and the delete for each first
+    /// one that no longer clamps, all of a server's cycle under ONE write lock hold, so the cycle takes the DuckDB write lock once
+    /// however many databases clamp. Best-effort like <see cref="RecordQueryStoreBackfillHoleAsync"/>: a failed write costs one
+    /// possible re-walk after a restart, never wrong data, and its deletes are not confirmed, so the next cycle that does not clamp
+    /// returns them again.</summary>
+    internal async Task PersistQueryStoreLandedAsync(int serverId, IReadOnlyList<QueryStoreLandedChange> changes, CancellationToken cancellationToken)
     {
-        if (change is not { } landed)
+        if (changes.Count == 0)
         {
             return;
         }
 
         try
         {
-            if (landed.Value is null)
+            using var writeLock = _duckDb.AcquireWriteLock();
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            foreach (var landed in changes)
             {
-                await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, landed.Key, cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = landed.Value is null
+                    ? "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3"
+                    : "INSERT OR REPLACE INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1, $2, $3, $4, $5)";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = landed.Key });
+                if (landed.Value is not null)
+                {
+                    cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = landed.Value });
+                    cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+                }
+
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
-            else
-            {
-                await SaveCollectorStateAsync(
-                    serverId, QueryStoreBackfillState.StateCollectorName,
-                    new Dictionary<string, string>(StringComparer.Ordinal) { [landed.Key] = landed.Value },
-                    cancellationToken);
-            }
+
+            _queryStoreClampReports.Confirm(serverId, changes);
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "Storing the query_store clamp entry {Key} failed; a restart may re-walk the database once", landed.Key);
+            _logger?.LogDebug(ex, "Storing the query_store clamp entries for server {ServerId} failed; a restart may re-walk a database once", serverId);
         }
     }
 
@@ -1238,12 +1298,11 @@ RETURNING state_key";
     {
         try
         {
-            var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
-            var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-            var added = QueryStoreBackfillState.AddHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
-            await SaveCollectorStateAsync(
-                serverId, QueryStoreBackfillState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = added },
+            /* #9359: read, merge and save under one write lock hold (UpdateHoleStateAsync), so a slice retiring a dug range cannot
+               land between this read and this save and have its progress put back. */
+            await UpdateHoleStateAsync(
+                serverId, QueryStoreBackfillState.HoleKeyPrefix + databaseName,
+                encoded => (QueryStoreBackfillState.AddHole(encoded, fromUtc, toUtc), false),
                 cancellationToken);
         }
         catch (Exception ex)

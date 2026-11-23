@@ -353,6 +353,80 @@ public sealed class QueryStoreReplicaRunnerLiveTests
     }
 
     /// <summary>
+    /// #9359: a delete of the stored entry whose write fails is returned again by the next cycle that does not clamp, and once a
+    /// delete lands nothing more is returned. The failing write goes to a store nobody listens on, so it fails for certain.
+    /// </summary>
+    [Fact]
+    public async Task AFailedDeleteOfTheStoredEntry_IsReturnedAgainNextCycle_AndOnceItLandsNothingMoreIs()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+        var landedKey = QueryStoreBackfillState.LandedKeyPrefix + Db;
+        var raw = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=darling;Database=darlingtest;Timeout=2;Command Timeout=2");
+        var failing = new DarlingCollectorRunner(unreachable, new CollectorDeltaCalculator(), rig.Log);
+        failing.QueryStoreClampReportsForTests.Land(LiveServerId, Db, raw, DateTime.UtcNow);
+        var failed = failing.QueryStoreClampReportsForTests.Land(LiveServerId, Db, null, DateTime.UtcNow);
+        Assert.NotNull(failed);
+        await failing.PersistQueryStoreLandedAsync(LiveServerId, [failed!.Value], token);
+        Assert.NotNull(failing.QueryStoreClampReportsForTests.Land(LiveServerId, Db, null, DateTime.UtcNow));
+
+        /* The same sequence on the live store: the entry is written, retired by the first cycle that stops clamping, and then
+           asked for no more. */
+        var runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var reports = runner.QueryStoreClampReportsForTests;
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, [reports.Land(LiveServerId, Db, raw, DateTime.UtcNow)!.Value], token);
+        Assert.NotNull(await ReadBackfillStateAsync(rig, landedKey, token));
+
+        var delete = reports.Land(LiveServerId, Db, null, DateTime.UtcNow);
+        Assert.NotNull(delete);
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, [delete!.Value], token);
+        Assert.Null(await ReadBackfillStateAsync(rig, landedKey, token));
+        Assert.Null(reports.Land(LiveServerId, Db, null, DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// #9359: every clamping database of a server stores its entry in one write, and the first cycle that stops clamping retires the
+    /// entries of several databases in one write too, upserts and deletes together.
+    /// </summary>
+    [Fact]
+    public async Task SeveralDatabasesLandedInOneCycle_AreStoredAndRetiredInOneWrite()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+        var runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log);
+        var reports = runner.QueryStoreClampReportsForTests;
+        var raw = WholeSeconds(DateTime.UtcNow.AddHours(-3));
+        var key = (string name) => QueryStoreBackfillState.LandedKeyPrefix + name;
+
+        var landed = new List<QueryStoreLandedChange>
+        {
+            reports.Land(LiveServerId, "alpha", raw, DateTime.UtcNow)!.Value,
+            reports.Land(LiveServerId, "beta", raw, DateTime.UtcNow)!.Value,
+        };
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, landed, token);
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("alpha"), token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("beta"), token));
+
+        /* Alpha stops clamping while a third database starts: one call carries the delete and the upsert. */
+        var mixed = new List<QueryStoreLandedChange>
+        {
+            reports.Land(LiveServerId, "alpha", null, DateTime.UtcNow)!.Value,
+            reports.Land(LiveServerId, "gamma", raw, DateTime.UtcNow)!.Value,
+        };
+        await runner.PersistQueryStoreLandedAsync(LiveServerId, mixed, token);
+        Assert.Null(await ReadBackfillStateAsync(rig, key("alpha"), token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("beta"), token));
+        Assert.NotNull(await ReadBackfillStateAsync(rig, key("gamma"), token));
+        Assert.Null(reports.Land(LiveServerId, "alpha", null, DateTime.UtcNow));
+    }
+
+    /// <summary>
     /// #9359: a real gap after a restart still opens its hole, at what the stored entry says the last cycle read.
     /// </summary>
     [Fact]

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -231,5 +232,58 @@ public sealed class QueryStoreBackfillSliceAtomicLiveTests
 
         Assert.Equal(3, await RawRowsAsync(connection, ct));
         Assert.Null(await StateAsync(connection, QueryStoreBackfillState.DoneKeyPrefix + Database, ct));
+    }
+
+    /// <summary>
+    /// A hole the live collector records while a hole slice is between its read and its commit. The slice's progress must survive
+    /// and the new hole must be merged after it. Before the recorder read its key FOR UPDATE it merged into the value from before the
+    /// slice, and its save put the serviced range back for the backfill to walk, and copy, again.
+    /// </summary>
+    [Fact]
+    public async Task AHoleRecordedWhileASliceIsBetweenItsReadAndItsCommit_MergesAfterTheSlice_AndTheServicedRangeStaysGone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var floor = At(10, 0);
+        var ceiling = At(10, 12);
+        var shippedTo = At(10, 4);
+        var (scratch, connection) = await CreateStoreAsync(ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var holeKey = QueryStoreBackfillState.HoleKeyPrefix + Database;
+        await SetStateAsync(connection, holeKey, QueryStoreBackfillState.EncodeHole(floor, ceiling), ct);
+
+        var (backfill, rows, context) = Build(postgres, floor, shippedTo);
+        var recorder = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        Task? recording = null;
+        var newFrom = At(11, 0);
+        var newTo = At(11, 2);
+        backfill.AfterSliceStateForTests = async () =>
+        {
+            recording = recorder.RecordQueryStoreBackfillHoleAsync(Server, Database, newFrom, newTo, ct);
+
+            /* Wait until the recorder is held up on the row the slice has locked, so it has either read the pre-slice value and is
+               waiting to save it, or is waiting to read. Either way it reaches the store before the commit and finishes after it. */
+            for (var attempt = 0; attempt < 200; attempt++)
+            {
+                if (await ScalarAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'", ct) > 0)
+                {
+                    return;
+                }
+
+                await Task.Delay(50, ct);
+            }
+
+            Assert.Fail("the recorder never waited on the slice's lock");
+        };
+
+        await backfill.StoreSliceAsync(RuntimeFor(), Database, floor, ceiling, floor, isHole: true, rows, context, ct);
+        Assert.NotNull(recording);
+        await recording!;
+
+        Assert.Equal(2, await RawRowsAsync(connection, ct));
+        Assert.True(QueryStoreBackfillState.TryDecodeHoles(await StateAsync(connection, holeKey, ct), out var holes));
+        Assert.Equal(new[] { (floor, shippedTo), (newFrom, newTo) }, holes.OrderBy(hole => hole.FromUtc).ToArray());
     }
 }

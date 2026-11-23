@@ -176,7 +176,7 @@ public sealed class QueryStoreClampReportsTests
     }
 
     [Fact]
-    public void ACycleThatStopsClamping_DeletesTheStoredEntryOnce_ThenWritesNothingOnLaterCycles()
+    public void ACycleThatStopsClamping_DeletesTheStoredEntry_ThenWritesNothingOnLaterCyclesOnceItIsConfirmed()
     {
         var reports = new QueryStoreClampReports();
         Assert.NotNull(reports.Land(1, "Sales", Raw, T0));
@@ -184,9 +184,45 @@ public sealed class QueryStoreClampReportsTests
         var firstFresh = reports.Land(1, "Sales", null, T0.AddMinutes(1));
         Assert.NotNull(firstFresh);
         Assert.Null(firstFresh!.Value.Value);
+        reports.Confirm(1, [firstFresh.Value]);
 
         Assert.Null(reports.Land(1, "Sales", null, T0.AddMinutes(2)));
         Assert.Null(reports.Land(1, "Sales", null, T0.AddMinutes(3)));
+    }
+
+    [Fact]
+    public void ADeleteThatWasNeverConfirmed_IsReturnedAgainOnEveryCycleUntilItIs()
+    {
+        var reports = new QueryStoreClampReports();
+        Assert.NotNull(reports.Land(1, "Sales", Raw, T0));
+
+        /* The write failed (writes are best effort), so nobody confirmed it: the row is still in the store and must be retired. */
+        var failed = reports.Land(1, "Sales", null, T0.AddMinutes(1));
+        var again = reports.Land(1, "Sales", null, T0.AddMinutes(2));
+        Assert.NotNull(failed);
+        Assert.Null(failed!.Value.Value);
+        Assert.NotNull(again);
+        Assert.Equal(failed.Value.Key, again!.Value.Key);
+
+        reports.Confirm(1, [again.Value]);
+        Assert.Null(reports.Land(1, "Sales", null, T0.AddMinutes(3)));
+    }
+
+    [Fact]
+    public void ADatabaseThatClampsAgain_KeepsItsStoredMark_WhateverBecomesOfAnEarlierDelete()
+    {
+        var reports = new QueryStoreClampReports();
+        Assert.NotNull(reports.Land(1, "Sales", Raw, T0));
+        var delete = reports.Land(1, "Sales", null, T0.AddMinutes(1));
+        Assert.NotNull(delete);
+
+        /* The database clamps again, so its upsert replaced the row. A late confirmation of the older delete must not forget it. */
+        Assert.NotNull(reports.Land(1, "Sales", Raw, T0.AddMinutes(2)));
+        reports.Confirm(1, [delete!.Value]);
+
+        var retired = reports.Land(1, "Sales", null, T0.AddMinutes(3));
+        Assert.NotNull(retired);
+        Assert.Null(retired!.Value.Value);
     }
 
     [Fact]
@@ -211,6 +247,7 @@ public sealed class QueryStoreClampReportsTests
         var retired = after.Land(1, "Sales", null, T0.AddHours(1));
         Assert.NotNull(retired);
         Assert.Null(retired!.Value.Value);
+        after.Confirm(1, [retired.Value]);
         Assert.Null(after.Land(1, "Sales", null, T0.AddHours(2)));
     }
 

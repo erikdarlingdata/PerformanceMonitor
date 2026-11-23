@@ -534,6 +534,10 @@ public sealed class QueryStoreBackfill
     /// fail the slice between its rows and its state. Null in production, where it changes nothing.</summary>
     internal Func<Task>? BeforeSliceStateForTests { get; set; }
 
+    /// <summary>Test-only seam (#9359): runs after a hole slice has read, locked and changed its hole key and before the transaction
+    /// commits, so a test can land a live hole record in that window. Null in production, where it changes nothing.</summary>
+    internal Func<Task>? AfterSliceStateForTests { get; set; }
+
     /// <summary>The write half of a slice: stores its rows and then its state (the hole's remainder or the done mark), in ONE
     /// transaction (#9359). Split from <see cref="RunSliceAsync"/> so the read against the monitored server is the only part a
     /// test cannot reach.</summary>
@@ -567,6 +571,11 @@ public sealed class QueryStoreBackfill
 
                 await RetireDugHoleRangeAsync(
                     TransactionState(server.ServerId, (NpgsqlConnection)connection, (NpgsqlTransaction)transaction), databaseName, shippedTo > floorUtc ? shippedTo : floorUtc, ceilingUtc, floorUtc, token);
+
+                if (AfterSliceStateForTests is { } afterState)
+                {
+                    await afterState();
+                }
             };
         }
         else if (boundary is not null && boundary <= floorUtc)
@@ -633,8 +642,9 @@ public sealed class QueryStoreBackfill
         (key, token) => _runner.DeleteCollectorStateKeyAsync(serverId, StateCollectorName, key, token));
 
     /// <summary>The same three operations on the slice write's own connection and transaction. Unlike the pooled statements these
-    /// are not best-effort: a fault throws, which rolls the slice's rows back with it. The read locks the key's row so a hole the
-    /// live collector records during the commit window merges after this transaction, not under it.</summary>
+    /// are not best-effort: a fault throws, which rolls the slice's rows back with it. The read locks the key's row, and the live
+    /// collector's hole recorder reads the same row FOR UPDATE (<c>RecordQueryStoreBackfillHoleAsync</c>), so a hole it records
+    /// during the commit window merges after this transaction and not under it.</summary>
     private static SliceStateAccess TransactionState(int serverId, NpgsqlConnection connection, NpgsqlTransaction transaction) => new(
         async (key, token) =>
         {

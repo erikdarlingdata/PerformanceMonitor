@@ -360,6 +360,9 @@ public partial class RemoteCollectorService
             using var duckConnection = _duckDb.CreateConnection();
             await duckConnection.OpenAsync(cancellationToken);
 
+            /* #9359: the stored clamp entry changes the landed databases call for, written once after the loop. */
+            var azureLandedChanges = new List<QueryStoreLandedChange>();
+
             foreach (var databaseName in databases)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -603,8 +606,10 @@ public partial class RemoteCollectorService
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(serverId, databaseName);
-                        await PersistQueryStoreLandedAsync(
-                            serverId, _queryStoreClampReports.Land(serverId, databaseName, stagedClampRaw, collectionTime), cancellationToken);
+                        if (_queryStoreClampReports.Land(serverId, databaseName, stagedClampRaw, collectionTime) is { } azureLandedChange)
+                        {
+                            azureLandedChanges.Add(azureLandedChange);
+                        }
 
                         /* #2312: read and flush both landed — the staged open-interval stamp may too. */
                         if (stagedOpenIntervalStamp is not null)
@@ -721,6 +726,8 @@ public partial class RemoteCollectorService
             }
 
             context.CurrentDatabaseName = null;
+
+            await PersistQueryStoreLandedAsync(serverId, azureLandedChanges, cancellationToken);
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
@@ -1337,10 +1344,7 @@ public partial class RemoteCollectorService
                    enumeration already left; EVERY item lost rethrows the first failure so RunCollectorAsync
                    classifies the cycle from the real exception (PERMISSIONS / transient / ERROR). Mirrors
                    Darling's runner. */
-                foreach (var landedClampChange in landedClampChanges)
-                {
-                    await PersistQueryStoreLandedAsync(serverId, landedClampChange, cancellationToken);
-                }
+                await PersistQueryStoreLandedAsync(serverId, landedClampChanges, cancellationToken);
 
                 telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, driverResult.PartialFailureNote);
 
