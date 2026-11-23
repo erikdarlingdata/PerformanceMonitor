@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "${CHART_DIR}/../../.." && pwd)"
 COMPOSE="${REPO_ROOT}/Darling/compose/docker-compose.yml"
 SS="${RELEASE}-performancemonitor-darling-store"
 
-# The six -c pairs of a compose file's store command, without the leading `postgres`, as a JSON list.
+# The twelve -c pairs of a compose file's store command, without the leading `postgres`, as a JSON list.
 compose_store_args() {
   yq -o=json -I=0 '.services.store.command | .[1:]' "$1"
 }
@@ -20,7 +20,7 @@ chart_store_args() {
 t store_args_match_compose
 render
 assert_eq "$(chart_store_args)" "$(compose_store_args "${COMPOSE}")" "store args vs compose"
-assert_eq "$(chart_store_args | yq 'length')" "12" "twelve args (six -c pairs)"
+assert_eq "$(chart_store_args | yq 'length')" "24" "twenty-four args (twelve -c pairs)"
 
 t parity_guard_catches_drift
 drifted="$(mktemp)"
