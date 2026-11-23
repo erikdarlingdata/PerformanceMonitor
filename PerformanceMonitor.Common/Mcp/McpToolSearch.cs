@@ -208,7 +208,7 @@ public static class McpToolSearch
         return sentence.Length <= MaxSummaryCharacters ? sentence : McpHelpers.Truncate(sentence, MaxSummaryCharacters) ?? sentence;
     }
 
-    private static object FullEntry(Candidate c, bool hasGuideTool)
+    private static Dictionary<string, object?> FullEntry(Candidate c, bool hasGuideTool)
     {
         var entry = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
