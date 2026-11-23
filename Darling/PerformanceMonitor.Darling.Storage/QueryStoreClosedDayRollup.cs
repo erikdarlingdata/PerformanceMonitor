@@ -252,7 +252,7 @@ ALTER TABLE collect.query_store_closed_day_built ADD COLUMN IF NOT EXISTS clutte
 
     /// <summary>#9287: the same day as <see cref="FirstWholeDay"/>, on the store's clock, for a statement. $n is the store's now as a
     /// timestamp and $m the retention days.</summary>
-    private static string FirstWholeDaySql(string now, string retentionDays) =>
+    internal static string FirstWholeDaySql(string now, string retentionDays) =>
         $"(({now} - make_interval(days => {retentionDays})) + interval '1 day' - interval '1 microsecond')::date";
 
     /// <summary>
@@ -410,6 +410,13 @@ FROM
 ) AS c
 GROUP BY c.server_id, c.database_name;";
 
+    /// <summary>#9384: removes the day's hourly-fold stamp (<see cref="QueryStoreClutterDayFold"/>). A day the grid builds or removes takes its
+    /// stamp from the grid row, and the day is no longer served on the fold's say. $1 server_id, $2 day.</summary>
+    public const string DeleteClutterDayStampSql = @"
+DELETE FROM collect.query_store_clutter_day_built
+WHERE server_id = $1
+  AND day_utc = $2;";
+
     /// <summary>#9148: says the day's clutter rows come from this build. $1 server_id, $2 day.</summary>
     public const string RecordClutterBuiltSql = @"
 UPDATE collect.query_store_closed_day_built
@@ -418,7 +425,8 @@ WHERE server_id = $1
   AND day_utc = $2;";
 
     /// <summary>#9287: whether the day's clutter rows come from its newest build: its row exists, is not removed, and says so. Read before
-    /// <see cref="ClaimDaySql"/> moves <c>built_at</c>. $1 server_id, $2 day.</summary>
+    /// <see cref="ClaimDaySql"/> moves <c>built_at</c>. #9384: or the hourly fold stamped the day (<see cref="QueryStoreClutterDayFold"/>), whose
+    /// rows are the day's too. A marked stamp does not count: a late row inserts one for a day nothing folded, so it says nothing about the day's rows. $1 server_id, $2 day.</summary>
     public const string HasClutterFromBuildSql = @"
 SELECT EXISTS
 (
@@ -428,6 +436,14 @@ SELECT EXISTS
       AND b.day_utc = $2
       AND NOT b.removed
       AND b.clutter_built_at = b.built_at
+)
+OR EXISTS
+(
+    SELECT 1
+    FROM collect.query_store_clutter_day_built AS c
+    WHERE c.server_id = $1
+      AND c.day_utc = $2
+      AND NOT c.rebuild_needed
 );";
 
     /// <summary>Records how many interval rows the build read. $1 server_id, $2 day, $3 source_rows.</summary>
@@ -531,6 +547,13 @@ WHERE NOT b.rebuild_needed
             if (hasHourly && lateHour)
             {
                 marked |= await QueryStoreClutterHourly.TryMarkLateHourAsync(connection, transaction, serverId, collectionTime, nowUtc, commandTimeoutSeconds, cancellationToken);
+            }
+
+            /* #9384: the clutter day is built from its hours soon after midnight, so a late row for a closed hour marks the hour's day too.
+               The service migrates the store before any collector write, so the stamp table is there and this does not probe for it. */
+            if (lateHour)
+            {
+                marked |= await QueryStoreClutterDayFold.TryMarkLateDayAsync(connection, transaction, serverId, collectionTime, nowUtc, commandTimeoutSeconds, cancellationToken);
             }
 
             await transaction.ReleaseAsync(LateCollectionDaySavepointName, cancellationToken);
@@ -684,7 +707,7 @@ ORDER BY b.day_utc;";
     /// #9148: <see cref="ServedDaysSql"/> for the clutter rollups: the same days, less any whose clutter rows do not come from the day's
     /// newest build (a day built before <see cref="ClutterVersion"/>, or rebuilt by a build that does not fill the clutter tables).
     /// </summary>
-    public static readonly string ServedClutterDaysSql = $@"
+    private static readonly string ServedGridClutterDaysSelect = $@"
 SELECT b.day_utc
 FROM collect.query_store_closed_day_built AS b
 WHERE b.server_id = $1
@@ -695,15 +718,36 @@ WHERE b.server_id = $1
   AND NOT b.removed
   AND b.clutter_built_at = b.built_at
   AND (SELECT max(n.built_at) FROM collect.query_store_closed_day_built AS n WHERE n.server_id = $1 AND NOT n.removed)
-      >= (now() AT TIME ZONE 'UTC') - $4
-ORDER BY b.day_utc;";
+      >= (now() AT TIME ZONE 'UTC') - $4";
+
+    /// <summary>#9148: the clutter days the grid built, in order, as <see cref="ServedClutterDaysSql"/> says.</summary>
+    public static readonly string ServedClutterDaysSql = ServedGridClutterDaysSelect + @"
+ORDER BY day_utc;";
+
+    /// <summary>
+    /// #9384: <see cref="ServedClutterDaysSql"/> and the days the hourly fold stamped and no late row has marked since
+    /// (<see cref="QueryStoreClutterDayFold"/>), on a store at <see cref="QueryStoreClutterDayFold.Version"/> or above. A folded day needs no grid
+    /// build, so it is not held to the grid's newest build. The day heartbeat check <c>ResolveAsync</c> makes after the days are read is the one
+    /// that says a service that marks late rows is running.
+    /// </summary>
+    public static readonly string ServedClutterDaysWithFoldedSql = ServedGridClutterDaysSelect + $@"
+UNION
+SELECT c.day_utc
+FROM collect.query_store_clutter_day_built AS c
+WHERE c.server_id = $1
+  AND c.day_utc >= $2
+  AND c.day_utc < $3
+  AND c.day_utc >= {FirstWholeDaySql("COALESCE($6, now() AT TIME ZONE 'UTC')", "$5")}
+  AND NOT c.rebuild_needed
+ORDER BY day_utc;";
 
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateOnly Day);
 
     /// <summary>What one tick did.</summary>
     public readonly record struct TickResult(
-        int Built, int Failed, long DaysRemoved, int Deferred, int HoursBuilt = 0, int HoursFailed = 0, long HoursRemoved = 0, int HoursDeferred = 0);
+        int Built, int Failed, long DaysRemoved, int Deferred, int HoursBuilt = 0, int HoursFailed = 0, long HoursRemoved = 0, int HoursDeferred = 0,
+        int ClutterDaysFolded = 0);
 
     /// <summary>The whole built UTC days a read takes from the rollups: <c>[Start, End)</c>, both at midnight.</summary>
     public readonly record struct ServedDays(DateTime Start, DateTime End);
@@ -744,11 +788,13 @@ ORDER BY b.day_utc;";
 
     /// <summary>
     /// #9148: <see cref="ResolveServedDaysAsync"/> for the clutter rollups (<see cref="ServedClutterDaysSql"/>), on a store at
-    /// <see cref="ClutterVersion"/> or above. The run is of whole days inside <c>[readStart, end)</c>.
+    /// <see cref="ClutterVersion"/> or above. The run is of whole days inside <c>[readStart, end)</c>. #9384: <paramref name="foldedDays"/> adds the days
+    /// the hourly fold built (<see cref="ServedClutterDaysWithFoldedSql"/>), on a store that has its stamp table.
     /// </summary>
     public static async Task<ServedDays?> ResolveServedClutterDaysAsync(
-        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
-        (await ResolveAsync(ServedClutterDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken)).Served;
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        bool foldedDays = false) =>
+        (await ResolveAsync(foldedDays ? ServedClutterDaysWithFoldedSql : ServedClutterDaysSql, connection, transaction, serverId, readStart, end, commandTimeoutSeconds, cancellationToken)).Served;
 
     private static async Task<(ServedDays? Served, SourceReason Reason, IReadOnlyList<DateOnly> BuiltDays)> ResolveAsync(
         string servedSql, NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds, CancellationToken cancellationToken)
@@ -1275,8 +1321,8 @@ WHERE b.server_id = f.server_id
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateOnly day, CancellationToken cancellationToken, bool keepClutter = false)
     {
         foreach (var sql in keepClutter
-            ? new[] { DeleteGridDaySql, DeleteSlicerDaySql }
-            : new[] { DeleteGridDaySql, DeleteSlicerDaySql, DeleteClutterPlanDaySql, DeleteClutterCollectionsDaySql })
+            ? new[] { DeleteGridDaySql, DeleteSlicerDaySql, DeleteClutterDayStampSql }
+            : new[] { DeleteGridDaySql, DeleteSlicerDaySql, DeleteClutterPlanDaySql, DeleteClutterCollectionsDaySql, DeleteClutterDayStampSql })
         {
             await using var delete = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -1413,15 +1459,33 @@ WHERE b.server_id = f.server_id
         /* #9173: the hourly clutter step first: an hour costs little and is what a 24-hour read waits on, and it stops at its own share of the
            tick so a backlog of hours leaves the daily builds their time. It has its own catch, so a failure leaves the day work standing. */
         QueryStoreClutterHourly.TickResult hours = default;
+        QueryStoreClutterDayFold.TickResult folded = default;
         if (rawRetentionDays is { } rawDays)
         {
+            var hoursRan = false;
             try
             {
                 hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken);
+                hoursRan = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogWarning(ex, "Query Store hourly clutter rollups could not run; the next tick retries: {Message}", ex.Message);
+            }
+
+            /* #9384: then the clutter days the hours now complete, so a day closes soon after midnight and not at the grid's close. Its own catch too.
+               It runs only after the hourly step ran: that step also removes the empty hour stamps that raw never held (#9383), and a day folded
+               from stamps it has not yet removed would be stamped as folded and served as empty clutter. */
+            if (hoursRan)
+            {
+                try
+                {
+                    folded = await QueryStoreClutterDayFold.RunAsync(connection, nowUtc, retentionDays, logger, elapsed, cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Query Store clutter days from hours could not run; the next tick retries: {Message}", ex.Message);
+                }
             }
         }
 
@@ -1456,6 +1520,6 @@ WHERE b.server_id = f.server_id
         var deferred = plan.Count - started;
         logger.LogInformation("Query Store closed-day rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} day(s), unstamped {Unstamped} empty clutter day(s), {ElapsedMs} ms",
             built, failed, deferred, removed, unstamped, (long)elapsed().TotalMilliseconds);
-        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred);
+        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred, folded.Built);
     }
 }

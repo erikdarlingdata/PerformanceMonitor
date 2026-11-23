@@ -145,6 +145,17 @@ FROM
             }
         }
 
+        var folded = new List<(int Server, DateTime Day)>();
+        await using (var hide = new NpgsqlCommand(
+            "UPDATE collect.query_store_clutter_day_built SET rebuild_needed = true WHERE NOT rebuild_needed RETURNING server_id, day_utc", store.Connection))
+        await using (var reader = await hide.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                folded.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+            }
+        }
+
         var days = new List<(int Server, DateTime Day)>();
         await using (var clear = new NpgsqlCommand(
             "UPDATE collect.query_store_closed_day_built SET clutter_built_at = NULL WHERE clutter_built_at = built_at RETURNING server_id, day_utc", store.Connection))
@@ -169,6 +180,12 @@ FROM
             restoreHours.Parameters.Add(new NpgsqlParameter("h", NpgsqlDbType.Array | NpgsqlDbType.Timestamp) { Value = hours.Select(x => x.Hour).ToArray() });
             await restoreHours.ExecuteNonQueryAsync(ct);
 
+            await using var restoreFolded = new NpgsqlCommand(
+                "UPDATE collect.query_store_clutter_day_built AS b SET rebuild_needed = false FROM unnest(@s::int[], @d::date[]) AS u(s, d) WHERE b.server_id = u.s AND b.day_utc = u.d", store.Connection);
+            restoreFolded.Parameters.Add(new NpgsqlParameter("s", NpgsqlDbType.Array | NpgsqlDbType.Integer) { Value = folded.Select(x => x.Server).ToArray() });
+            restoreFolded.Parameters.Add(new NpgsqlParameter("d", NpgsqlDbType.Array | NpgsqlDbType.Date) { Value = folded.Select(x => x.Day).ToArray() });
+            await restoreFolded.ExecuteNonQueryAsync(ct);
+
             await using var restoreDays = new NpgsqlCommand(
                 "UPDATE collect.query_store_closed_day_built AS b SET clutter_built_at = b.built_at FROM unnest(@s::int[], @d::date[]) AS u(s, d) WHERE b.server_id = u.s AND b.day_utc = u.d", store.Connection);
             restoreDays.Parameters.Add(new NpgsqlParameter("s", NpgsqlDbType.Array | NpgsqlDbType.Integer) { Value = days.Select(x => x.Server).ToArray() });
@@ -182,6 +199,221 @@ FROM
 
     private static Task<long> CountAsync(QueryStoreClosedDayRollupLiveTests.Store store, string sql, CancellationToken ct, params (string Name, object Value)[] parameters) =>
         QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection, sql, ct, parameters);
+
+    private static bool CoversDay(DarlingQueryStoreClutterReader.ClutterRoute? route, DateTime day) =>
+        route is { } r && r.DayStart <= day && day.AddDays(1) <= r.DayEnd;
+
+    /// <summary>The newest instant before TickNow that has a whole day of closed hours and is before the grid's close of that day: the grid has built
+    /// no day yet, so any clutter day the route serves was built from its hours (#9384).</summary>
+    private static DateTime FoldNow => E.AddHours(2);
+
+    private static readonly Window ThreeDaysToMidnight = new("three days to the midnight", E.AddDays(-3), E, null, true);
+
+    private const string FoldDiffSql = @"
+SELECT (SELECT count(*) FROM (
+          (SELECT database_name, query_id, plan_id, first_seen, last_seen FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day
+           EXCEPT
+           SELECT database_name, query_id, plan_id, MIN(first_seen), MAX(last_seen) FROM collect.query_store_clutter_plan_hourly
+           WHERE server_id = @server_id AND hour_utc >= @day::timestamp AND hour_utc < @day::timestamp + interval '1 day' GROUP BY database_name, query_id, plan_id)
+          UNION ALL
+          (SELECT database_name, query_id, plan_id, MIN(first_seen), MAX(last_seen) FROM collect.query_store_clutter_plan_hourly
+           WHERE server_id = @server_id AND hour_utc >= @day::timestamp AND hour_utc < @day::timestamp + interval '1 day' GROUP BY database_name, query_id, plan_id
+           EXCEPT
+           SELECT database_name, query_id, plan_id, first_seen, last_seen FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day)) AS p)
+     + (SELECT count(*) FROM (
+          (SELECT database_name, collections FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day
+           EXCEPT
+           SELECT database_name, SUM(collections) FROM collect.query_store_clutter_collections_hourly
+           WHERE server_id = @server_id AND hour_utc >= @day::timestamp AND hour_utc < @day::timestamp + interval '1 day' GROUP BY database_name)
+          UNION ALL
+          (SELECT database_name, SUM(collections) FROM collect.query_store_clutter_collections_hourly
+           WHERE server_id = @server_id AND hour_utc >= @day::timestamp AND hour_utc < @day::timestamp + interval '1 day' GROUP BY database_name
+           EXCEPT
+           SELECT database_name, collections FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day)) AS c);";
+
+    [Fact]
+    public async Task ADayWhoseHoursAreAllBuiltAndUnmarked_IsBuiltAsAClutterDayAfterMidnight_FromItsHours_AndTheRouteServesItFromTheDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = E.AddDays(-1);
+        var fleet = new[] { A };
+
+        Assert.Null(await RouteAsync(store, fleet, ThreeDaysToMidnight, ct));
+        var before = Lines(await ReadAsync(store, fleet, ThreeDaysToMidnight, ct));
+
+        var tick = await TickAsync(store, FoldNow, ct);
+        Assert.True(tick.ClutterDaysFolded > 0, "the tick folded no clutter day");
+
+        /* The grid has built nothing yet (its close is more than a day after midnight), so the day is served from the fold alone. */
+        Assert.Equal(0L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day AND clutter_built_at = built_at", ct, ("server_id", A), ("day", DateOnly.FromDateTime(day))));
+        Assert.Equal(1L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day AND NOT rebuild_needed", ct, ("server_id", A), ("day", DateOnly.FromDateTime(day))));
+        Assert.True(await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", DateOnly.FromDateTime(day))) > 0);
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", DateOnly.FromDateTime(day))));
+
+        Assert.True(CoversDay(await RouteAsync(store, fleet, ThreeDaysToMidnight, ct), day), "the route does not serve the folded day from the day rows");
+        Assert.Equal(before, Lines(await ReadAsync(store, fleet, ThreeDaysToMidnight, ct)));
+        Assert.Equal(before, Lines(await ReadRawAsync(store, fleet, ThreeDaysToMidnight, ct)));
+    }
+
+    [Fact]
+    public async Task ALateRowMarksItsHourAndItsClutterDay_AndBothRebuildToIncludeIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var fleet = new[] { A };
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        await TickAsync(store, FoldNow, ct);
+        Assert.True(CoversDay(await RouteAsync(store, fleet, ThreeDaysToMidnight, ct), E.AddDays(-1)), "the day is not served before the late row");
+
+        var lateAt = E.AddHours(-12).AddMinutes(33);
+        var lateHour = QueryStoreClutterHourly.FloorHour(lateAt);
+        await using (var tx = await store.Connection.BeginTransactionAsync(ct))
+        {
+            await using (var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, last_execution_time)
+VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'SELECT 1', 1, 1, 1, @at)", store.Connection, tx))
+            {
+                insert.Parameters.AddWithValue("at", lateAt);
+                insert.Parameters.AddWithValue("server_id", A);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.True(await QueryStoreClosedDayRollup.TryMarkLateCollectionDayAsync(store.Connection, tx, A, lateAt, FoldNow, 30, null, ct));
+            await tx.CommitAsync(ct);
+        }
+
+        Assert.Equal(1L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND rebuild_needed AND hour_utc = @hour", ct, ("server_id", A), ("hour", lateHour)));
+        Assert.Equal(1L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND rebuild_needed AND day_utc = @day", ct, ("server_id", A), ("day", day)));
+
+        /* The marked day is read from the hours and raw: the reply has the row, and it is the raw reply. */
+        var raw = Lines(await ReadRawAsync(store, fleet, ThreeDaysToMidnight, ct));
+        Assert.False(CoversDay(await RouteAsync(store, fleet, ThreeDaysToMidnight, ct), E.AddDays(-1)), "the read still takes the marked day from the day rows");
+        Assert.Equal(raw, Lines(await ReadAsync(store, fleet, ThreeDaysToMidnight, ct)));
+
+        var tick = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.True(tick.HoursBuilt >= 1);
+        Assert.True(tick.ClutterDaysFolded >= 1, "the marked day was not folded again");
+        Assert.Equal(0L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND rebuild_needed", ct, ("server_id", A)));
+        Assert.Equal(1L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day AND plan_id = 77780", ct, ("server_id", A), ("day", day)));
+        Assert.True(CoversDay(await RouteAsync(store, fleet, ThreeDaysToMidnight, ct), E.AddDays(-1)), "the rebuilt day is not served");
+        Assert.Equal(raw, Lines(await ReadAsync(store, fleet, ThreeDaysToMidnight, ct)));
+    }
+
+    [Fact]
+    public async Task ThePlanChurnAnswer_IsTheSameBeforeAndAfterADayCloses_AndTheHourlyTailShrinksToTheOpenDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var fleet = new[] { A };
+        var day = E.AddDays(-1);
+
+        /* Hours first, with the day still open: a day that has not been folded is marked, so the route has the day as hours. */
+        await TickAsync(store, FoldNow, ct);
+        await ExecuteAsync(store, "UPDATE collect.query_store_clutter_day_built SET rebuild_needed = true WHERE day_utc = @day", ct, ("day", DateOnly.FromDateTime(day)));
+        var open = await RouteAsync(store, fleet, ThreeDaysToMidnight, ct);
+        Assert.False(CoversDay(open, day));
+        Assert.True(CoversHour(open, day.AddHours(5)), "the open day is not served from its hours");
+        var answerOpen = Lines(await ReadAsync(store, fleet, ThreeDaysToMidnight, ct));
+
+        var tick = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.True(tick.ClutterDaysFolded >= 1);
+        var closed = await RouteAsync(store, fleet, ThreeDaysToMidnight, ct);
+        Assert.True(CoversDay(closed, day), "the closed day is not served from the day rows");
+        Assert.Equal(answerOpen, Lines(await ReadAsync(store, fleet, ThreeDaysToMidnight, ct)));
+        Assert.True(closed!.Value.DayEnd > open!.Value.DayEnd || closed.Value.DayEnd >= E, "the day rows did not grow to take the closed day");
+    }
+
+    /// <summary>
+    /// #9384: a stamp older than the newest of its day's hours (an older build rebuilt an hour and marks no day) is folded again on the next
+    /// tick, and not on the one after it. The day's rows are damaged first, so only a real fold puts them back.
+    /// </summary>
+    [Fact]
+    public async Task ADayStampedBeforeOneOfItsHoursWasRebuilt_IsFoldedAgainOnTheNextTick_AndThenLeftAlone()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        await TickAsync(store, FoldNow, ct);
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+
+        await ExecuteAsync(store, "UPDATE collect.query_store_clutter_hour_built SET built_at = built_at + interval '1 minute' WHERE server_id = @server_id AND hour_utc = @hour", ct,
+            ("server_id", A), ("hour", E.AddDays(-1).AddHours(5)));
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", day));
+        Assert.NotEqual(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+
+        var folded = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(1, folded.ClutterDaysFolded);
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+
+        var left = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(0, left.ClutterDaysFolded);
+    }
+
+    /// <summary>
+    /// #9384: a tick whose hourly step failed folds no clutter day, and the next tick that the hourly step survives folds it. The hourly step also
+    /// removes the empty hour stamps that raw never held, so a fold after a failed step could stamp a day made of stamps the step had left. The
+    /// day's stamp is removed first, with all 24 hours built and unmarked, so only a fold stamps it. The hourly step is made to fail by a trigger
+    /// on its prune, which the fold never deletes from.
+    /// </summary>
+    [Fact]
+    public async Task ATickWhoseHourlyStepFailed_FoldsNoClutterDay_AndTheNextTickFoldsIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        var dayArgs = new (string Name, object Value)[] { ("server_id", A), ("day", day) };
+        const string FoldStamps = "SELECT count(*) FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day";
+
+        await TickAsync(store, FoldNow, ct);
+        Assert.Equal(1L, await CountAsync(store, FoldStamps, ct, dayArgs));
+        Assert.Equal(24L, await CountAsync(store,
+            "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE server_id = @server_id AND hour_utc >= @day::timestamp AND hour_utc < @day::timestamp + interval '1 day' AND NOT rebuild_needed", ct, dayArgs));
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+
+        await ExecuteAsync(store, @"
+CREATE FUNCTION collect.fail_hourly_prune() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the hourly prune is made to fail'; END $$;
+CREATE TRIGGER fail_hourly_prune BEFORE DELETE ON collect.query_store_clutter_plan_hourly FOR EACH STATEMENT EXECUTE FUNCTION collect.fail_hourly_prune();", ct);
+        var failed = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(0, failed.ClutterDaysFolded);
+        Assert.Equal(0L, await CountAsync(store, FoldStamps, ct, dayArgs));
+
+        await ExecuteAsync(store, "DROP TRIGGER fail_hourly_prune ON collect.query_store_clutter_plan_hourly; DROP FUNCTION collect.fail_hourly_prune();", ct);
+        var next = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(1, next.ClutterDaysFolded);
+        Assert.Equal(1L, await CountAsync(store, FoldStamps, ct, dayArgs));
+        Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+    }
+
+    private static async Task ExecuteAsync(QueryStoreClosedDayRollupLiveTests.Store store, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    {
+        await using var command = new NpgsqlCommand(sql, store.Connection);
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+
+        await command.ExecuteNonQueryAsync(ct);
+    }
 
     [Fact]
     public async Task TheRoutedReply_EqualsTheRawReply_AtADayAndAWeek_AndAroundHourAndDayBoundaries_ForOneServerAndTwo()

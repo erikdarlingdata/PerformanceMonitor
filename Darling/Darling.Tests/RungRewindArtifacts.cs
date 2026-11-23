@@ -978,6 +978,9 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // V302 (#8570): the partial index of failed Agent job outcomes on collect.job_history. It is the probe's newest sentinel. The rewind drops it, so a re-run of V302
         // creates it again. Safe on a store that never had it.
         new(302, "hasJobHistoryFailedIndex", @"DROP INDEX IF EXISTS collect.idx_job_history_job_failed;"),
+        // V303 (#9384): the clutter-day stamp table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V303 creates it empty. Safe on a store
+        // that never had it.
+        new(303, "hasClutterDayBuilt", @"DROP TABLE IF EXISTS collect.query_store_clutter_day_built;"),
     ];
 
     /// <summary>
