@@ -622,13 +622,19 @@ public static class DarlingQueryStoreClutterReader
         }
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        bool hasFold;
         await using (var probe = new NpgsqlCommand(
-            "SELECT to_regclass('collect.query_store_clutter_collections_daily') IS NOT NULL", connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+            "SELECT to_regclass('collect.query_store_clutter_collections_daily') IS NOT NULL, to_regclass('collect.query_store_clutter_day_built') IS NOT NULL", connection)
+            { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+        await using (var probed = await probe.ExecuteReaderAsync(cancellationToken))
         {
-            if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken))!)
+            await probed.ReadAsync(cancellationToken);
+            if (!probed.GetBoolean(0))
             {
                 return null;
             }
+
+            hasFold = probed.GetBoolean(1);
         }
 
         var readStart = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified).AddTicks(1);
@@ -637,7 +643,7 @@ public static class DarlingQueryStoreClutterReader
         foreach (var serverId in serverIds.Distinct())
         {
             var served = await QueryStoreClosedDayRollup.ResolveServedClutterDaysAsync(
-                connection, null, serverId, readStart, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+                connection, null, serverId, readStart, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken, hasFold);
             if (served is not { } run)
             {
                 return null;
@@ -667,15 +673,16 @@ public static class DarlingQueryStoreClutterReader
         }
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        bool hasDaily, hasHourly;
+        bool hasDaily, hasHourly, hasFold;
         await using (var probe = new NpgsqlCommand(
-            "SELECT to_regclass('collect.query_store_clutter_collections_daily') IS NOT NULL, to_regclass('collect.query_store_clutter_collections_hourly') IS NOT NULL",
+            "SELECT to_regclass('collect.query_store_clutter_collections_daily') IS NOT NULL, to_regclass('collect.query_store_clutter_collections_hourly') IS NOT NULL, to_regclass('collect.query_store_clutter_day_built') IS NOT NULL",
             connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
         await using (var probed = await probe.ExecuteReaderAsync(cancellationToken))
         {
             await probed.ReadAsync(cancellationToken);
             hasDaily = probed.GetBoolean(0);
             hasHourly = probed.GetBoolean(1);
+            hasFold = probed.GetBoolean(2);
         }
 
         if (!hasDaily)
@@ -692,7 +699,7 @@ public static class DarlingQueryStoreClutterReader
         foreach (var serverId in serverIds.Distinct())
         {
             var days = await QueryStoreClosedDayRollup.ResolveServedClutterDaysAsync(
-                connection, null, serverId, readStart, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+                connection, null, serverId, readStart, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken, hasFold);
 
             await using var floorCommand = new NpgsqlCommand(RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats), connection)
             {

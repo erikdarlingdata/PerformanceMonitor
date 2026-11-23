@@ -134,6 +134,17 @@ FROM
     private static async Task<List<DarlingQueryStoreClutterReader.PlanChurnRow>> ReadRawAsync(
         QueryStoreClosedDayRollupLiveTests.Store store, int[] servers, Window w, CancellationToken ct)
     {
+        var folded = new List<(int Server, DateTime Day)>();
+        await using (var hide = new NpgsqlCommand(
+            "UPDATE collect.query_store_clutter_day_built SET rebuild_needed = true WHERE NOT rebuild_needed RETURNING server_id, day_utc", store.Connection))
+        await using (var reader = await hide.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                folded.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+            }
+        }
+
         var stamped = new List<(int Server, DateTime Day)>();
         await using (var clear = new NpgsqlCommand(
             "UPDATE collect.query_store_closed_day_built SET clutter_built_at = NULL WHERE clutter_built_at = built_at RETURNING server_id, day_utc", store.Connection))
@@ -152,6 +163,12 @@ FROM
         }
         finally
         {
+            await using var restoreFolded = new NpgsqlCommand(
+                "UPDATE collect.query_store_clutter_day_built AS b SET rebuild_needed = false FROM unnest(@s::int[], @d::date[]) AS u(s, d) WHERE b.server_id = u.s AND b.day_utc = u.d", store.Connection);
+            restoreFolded.Parameters.Add(new NpgsqlParameter("s", NpgsqlDbType.Array | NpgsqlDbType.Integer) { Value = folded.Select(x => x.Server).ToArray() });
+            restoreFolded.Parameters.Add(new NpgsqlParameter("d", NpgsqlDbType.Array | NpgsqlDbType.Date) { Value = folded.Select(x => x.Day).ToArray() });
+            await restoreFolded.ExecuteNonQueryAsync(ct);
+
             await using var restore = new NpgsqlCommand(
                 "UPDATE collect.query_store_closed_day_built AS b SET clutter_built_at = b.built_at FROM unnest(@s::int[], @d::date[]) AS u(s, d) WHERE b.server_id = u.s AND b.day_utc = u.d", store.Connection);
             restore.Parameters.Add(new NpgsqlParameter("s", NpgsqlDbType.Array | NpgsqlDbType.Integer) { Value = stamped.Select(x => x.Server).ToArray() });
