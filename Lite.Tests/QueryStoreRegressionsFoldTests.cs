@@ -361,7 +361,7 @@ VALUES ($1, $2, $3, $4, 'db_a', 4, $5, 'Regular', 2000, 90000, 90000, 100, 777, 
         Assert.Equal("empty", clear.Status);
         Assert.Contains("all-clear", clear.Message, StringComparison.Ordinal);
 
-        var noBaseline = await AskAsync(service, 24 * 12, null, null);
+        var noBaseline = await AskAsync(service, 48, null, AsOf(8));
         Assert.Equal("unavailable", noBaseline.Status);
         Assert.Contains("no baseline", noBaseline.Message, StringComparison.Ordinal);
 
